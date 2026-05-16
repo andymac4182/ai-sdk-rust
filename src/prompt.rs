@@ -50,6 +50,46 @@ impl fmt::Display for InvalidDataContentError {
 
 impl std::error::Error for InvalidDataContentError {}
 
+/// Error returned when a UI message cannot be converted to a model message.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MessageConversionError {
+    original_message: JsonValue,
+    message: String,
+}
+
+impl MessageConversionError {
+    /// Creates a message-conversion error with the original UI message context.
+    pub fn new(original_message: impl Into<JsonValue>, message: impl Into<String>) -> Self {
+        Self {
+            original_message: original_message.into(),
+            message: message.into(),
+        }
+    }
+
+    /// Returns the original UI message that failed conversion.
+    pub fn original_message(&self) -> &JsonValue {
+        &self.original_message
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into its retained original message and message text.
+    pub fn into_parts(self) -> (JsonValue, String) {
+        (self.original_message, self.message)
+    }
+}
+
+impl fmt::Display for MessageConversionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for MessageConversionError {}
+
 /// Error returned when a prompt message role is not supported.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InvalidMessageRoleError {
@@ -126,7 +166,7 @@ mod tests {
 
     use crate::json::JsonValue;
 
-    use super::{InvalidDataContentError, InvalidMessageRoleError};
+    use super::{InvalidDataContentError, InvalidMessageRoleError, MessageConversionError};
 
     #[test]
     fn invalid_data_content_error_matches_upstream_default_message() {
@@ -173,6 +213,40 @@ mod tests {
             (
                 JsonValue::String("data:text/plain,hello".to_string()),
                 "Invalid data URL format in content data:text/plain,hello".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn message_conversion_error_retains_original_message_and_message_text() {
+        let original_message = json!({
+            "role": "unknown",
+            "parts": [{ "type": "text", "text": "unknown role message" }]
+        });
+        let error =
+            MessageConversionError::new(original_message.clone(), "Unsupported role: unknown");
+
+        assert_eq!(error.original_message(), &original_message);
+        assert_eq!(error.message(), "Unsupported role: unknown");
+        assert_eq!(error.to_string(), error.message());
+    }
+
+    #[test]
+    fn message_conversion_error_supports_parts_conversion() {
+        let original_message = json!({
+            "role": "assistant",
+            "parts": [{ "type": "custom", "kind": "example.part" }]
+        });
+        let error = MessageConversionError::new(
+            original_message.clone(),
+            "Unsupported custom UI message part",
+        );
+
+        assert_eq!(
+            error.into_parts(),
+            (
+                original_message,
+                "Unsupported custom UI message part".to_string()
             )
         );
     }

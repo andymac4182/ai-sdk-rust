@@ -90,7 +90,7 @@ pub use language_model_middleware::{
     LanguageModelTransformParamsOptions, LanguageModelWrapGenerateOptions,
     LanguageModelWrapStreamOptions,
 };
-pub use prompt::{InvalidDataContentError, InvalidMessageRoleError};
+pub use prompt::{InvalidDataContentError, InvalidMessageRoleError, MessageConversionError};
 pub use provider::{
     ApiCallError, EmptyResponseBodyError, InvalidArgumentError, InvalidPromptError,
     InvalidResponseDataError, JsonParseError, LoadApiKeyError, LoadSettingError, ModelType,
