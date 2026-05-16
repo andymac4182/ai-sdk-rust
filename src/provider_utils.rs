@@ -503,6 +503,71 @@ impl JsonResponseHandlerOptions {
     }
 }
 
+/// Inputs for the binary response handler.
+///
+/// This is the Rust-native data boundary for upstream
+/// `createBinaryResponseHandler`, keeping response body reading independent
+/// from any concrete HTTP client while preserving API-call error context.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BinaryResponseHandlerOptions {
+    /// URL that produced the response.
+    pub url: String,
+
+    /// Request body values associated with the provider call.
+    pub request_body_values: JsonValue,
+
+    /// HTTP status code from the response.
+    pub status_code: u16,
+
+    /// Headers extracted from the HTTP response.
+    #[serde(default)]
+    pub response_headers: Headers,
+
+    /// Raw binary response body bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body: Option<Vec<u8>>,
+}
+
+impl BinaryResponseHandlerOptions {
+    /// Creates binary response handler options with a readable response body.
+    pub fn new(
+        url: impl Into<String>,
+        request_body_values: impl Into<JsonValue>,
+        status_code: u16,
+        response_body: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self {
+            url: url.into(),
+            request_body_values: request_body_values.into(),
+            status_code,
+            response_headers: Headers::new(),
+            response_body: Some(response_body.into()),
+        }
+    }
+
+    /// Creates binary response handler options without a response body.
+    pub fn empty(
+        url: impl Into<String>,
+        request_body_values: impl Into<JsonValue>,
+        status_code: u16,
+    ) -> Self {
+        Self {
+            url: url.into(),
+            request_body_values: request_body_values.into(),
+            status_code,
+            response_headers: Headers::new(),
+            response_body: None,
+        }
+    }
+
+    /// Adds response headers extracted from the response.
+    pub fn with_response_headers(mut self, response_headers: Headers) -> Self {
+        self.response_headers = response_headers;
+        self
+    }
+}
+
 struct MediaTypeSignature {
     media_type: &'static str,
     bytes_prefix: &'static [Option<u8>],
@@ -2133,6 +2198,35 @@ fn invalid_json_response_error(
         .with_response_body(response_body)
 }
 
+/// Returns a successful binary response body.
+///
+/// This mirrors upstream `createBinaryResponseHandler`: the returned handler
+/// result contains the response bytes and headers. A missing response body
+/// becomes an [`ApiCallError`] with the upstream `Response body is empty`
+/// message and original response context.
+pub fn create_binary_response_handler(
+    options: BinaryResponseHandlerOptions,
+) -> Result<ResponseHandlerResult<Vec<u8>>, Box<ApiCallError>> {
+    let BinaryResponseHandlerOptions {
+        url,
+        request_body_values,
+        status_code,
+        response_headers,
+        response_body,
+    } = options;
+
+    match response_body {
+        Some(response_body) => {
+            Ok(ResponseHandlerResult::new(response_body).with_response_headers(response_headers))
+        }
+        None => Err(Box::new(
+            ApiCallError::new("Response body is empty", url, request_body_values)
+                .with_status_code(status_code)
+                .with_response_headers(response_headers),
+        )),
+    }
+}
+
 /// Combines optional HTTP header maps, with later maps overriding earlier ones.
 ///
 /// This mirrors upstream `@ai-sdk/provider-utils` `combineHeaders`: missing
@@ -2461,25 +2555,26 @@ mod tests {
     use url::Url;
 
     use super::{
-        Arrayable, Base64DecodeError, DEFAULT_MAX_DOWNLOAD_SIZE, DownloadError,
-        InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
+        Arrayable, Base64DecodeError, BinaryResponseHandlerOptions, DEFAULT_MAX_DOWNLOAD_SIZE,
+        DownloadError, InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
         JsonResponseHandlerOptions, LoadApiKeyOptions, LoadOptionalSettingOptions,
         LoadSettingOptions, ParseJsonError, ParseJsonResult, ReasoningLevel, ResponseHandlerResult,
         StatusCodeErrorResponseHandlerOptions, Tool, ToolExecutionError, ToolExecutionOptions,
         ValidateTypesResult, add_additional_properties_to_json_schema, as_array, combine_headers,
         convert_base64_to_bytes, convert_bytes_to_base64, convert_image_model_file_to_data_uri,
-        convert_inline_file_data_to_bytes, convert_to_base64, create_json_response_handler,
-        create_status_code_error_response_handler, create_tool_name_mapping, detect_media_type,
-        extract_response_headers, filter_nullable, get_top_level_media_type,
-        inject_json_instruction, inject_json_instruction_into_messages, is_custom_reasoning,
-        is_full_media_type, is_non_nullable, is_parsable_json, is_provider_reference,
-        is_url_supported, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
-        load_setting, load_setting_with_env, map_reasoning_to_provider_budget,
-        map_reasoning_to_provider_effort, media_type_to_extension, normalize_headers, parse_json,
-        parse_provider_options, prepare_tools, read_response_with_size_limit,
-        remove_undefined_entries, resolve_full_media_type, resolve_provider_reference,
-        safe_parse_json, safe_validate_types, strip_file_extension, validate_download_url,
-        validate_types, with_user_agent_suffix, without_trailing_slash,
+        convert_inline_file_data_to_bytes, convert_to_base64, create_binary_response_handler,
+        create_json_response_handler, create_status_code_error_response_handler,
+        create_tool_name_mapping, detect_media_type, extract_response_headers, filter_nullable,
+        get_top_level_media_type, inject_json_instruction, inject_json_instruction_into_messages,
+        is_custom_reasoning, is_full_media_type, is_non_nullable, is_parsable_json,
+        is_provider_reference, is_url_supported, load_api_key, load_api_key_with_env,
+        load_optional_setting_with_env, load_setting, load_setting_with_env,
+        map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
+        media_type_to_extension, normalize_headers, parse_json, parse_provider_options,
+        prepare_tools, read_response_with_size_limit, remove_undefined_entries,
+        resolve_full_media_type, resolve_provider_reference, safe_parse_json, safe_validate_types,
+        strip_file_extension, validate_download_url, validate_types, with_user_agent_suffix,
+        without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -4266,6 +4361,112 @@ mod tests {
         assert_eq!(result.value(), &json!("ok"));
         assert_eq!(result.raw_value(), None);
         assert_eq!(result.response_headers(), None);
+    }
+
+    #[test]
+    fn binary_response_handler_options_use_camel_case_json() {
+        let options = BinaryResponseHandlerOptions::new(
+            "https://api.example.com/files",
+            json!({ "file": "test" }),
+            200,
+            vec![1, 2, 3, 4],
+        )
+        .with_response_headers(BTreeMap::from([(
+            "content-type".to_string(),
+            "application/octet-stream".to_string(),
+        )]));
+
+        let serialized = serde_json::to_value(&options).expect("options serialize");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "url": "https://api.example.com/files",
+                "requestBodyValues": { "file": "test" },
+                "statusCode": 200,
+                "responseHeaders": {
+                    "content-type": "application/octet-stream"
+                },
+                "responseBody": [1, 2, 3, 4]
+            })
+        );
+
+        let deserialized: BinaryResponseHandlerOptions =
+            serde_json::from_value(serialized).expect("options deserialize");
+
+        assert_eq!(deserialized, options);
+    }
+
+    #[test]
+    fn binary_response_handler_options_deserialize_missing_body() {
+        let options: BinaryResponseHandlerOptions = serde_json::from_value(json!({
+            "url": "https://api.example.com/files",
+            "requestBodyValues": {},
+            "statusCode": 204,
+            "responseHeaders": {}
+        }))
+        .expect("options deserialize");
+
+        assert_eq!(options.response_body, None);
+        assert_eq!(options.response_headers, BTreeMap::new());
+    }
+
+    #[test]
+    fn create_binary_response_handler_returns_bytes_and_headers() {
+        let response_headers = BTreeMap::from([(
+            "content-type".to_string(),
+            "application/octet-stream".to_string(),
+        )]);
+        let options = BinaryResponseHandlerOptions::new(
+            "https://api.example.com/files",
+            json!({ "file": "test" }),
+            200,
+            vec![1, 2, 3, 4],
+        )
+        .with_response_headers(response_headers.clone());
+
+        let result = create_binary_response_handler(options).expect("binary response is handled");
+
+        assert_eq!(result.value(), &vec![1, 2, 3, 4]);
+        assert_eq!(result.response_headers(), Some(&response_headers));
+        assert_eq!(result.raw_value(), None);
+    }
+
+    #[test]
+    fn create_binary_response_handler_preserves_empty_byte_body() {
+        let options = BinaryResponseHandlerOptions::new(
+            "https://api.example.com/files",
+            json!({}),
+            200,
+            Vec::<u8>::new(),
+        );
+
+        let result =
+            create_binary_response_handler(options).expect("empty binary body is still readable");
+
+        assert_eq!(result.value(), &Vec::<u8>::new());
+    }
+
+    #[test]
+    fn create_binary_response_handler_returns_api_call_error_for_missing_body() {
+        let response_headers =
+            BTreeMap::from([("x-request-id".to_string(), "req_500".to_string())]);
+        let options = BinaryResponseHandlerOptions::empty(
+            "https://api.example.com/files",
+            json!({ "file": "test" }),
+            500,
+        )
+        .with_response_headers(response_headers.clone());
+
+        let error = create_binary_response_handler(options).expect_err("missing body is rejected");
+
+        assert_eq!(error.message(), "Response body is empty");
+        assert_eq!(error.url(), "https://api.example.com/files");
+        assert_eq!(error.request_body_values(), &json!({ "file": "test" }));
+        assert_eq!(error.status_code(), Some(500));
+        assert_eq!(error.response_headers(), Some(&response_headers));
+        assert_eq!(error.response_body(), None);
+        assert!(error.is_retryable());
     }
 
     #[test]
