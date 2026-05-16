@@ -3,7 +3,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::json::JsonObject;
+use crate::json::{JsonObject, JsonValue};
 
 /// The upstream provider model categories used when reporting missing models.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -141,6 +141,81 @@ impl fmt::Display for UnsupportedFunctionalityError {
 
 impl std::error::Error for UnsupportedFunctionalityError {}
 
+/// Error returned when an embedding model call contains too many values.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TooManyEmbeddingValuesForCallError {
+    provider: String,
+    model_id: String,
+    max_embeddings_per_call: usize,
+    values: Vec<JsonValue>,
+}
+
+impl TooManyEmbeddingValuesForCallError {
+    /// Creates an error for an embedding call that exceeded the provider limit.
+    pub fn new<V, I>(
+        provider: impl Into<String>,
+        model_id: impl Into<String>,
+        max_embeddings_per_call: usize,
+        values: I,
+    ) -> Self
+    where
+        V: Into<JsonValue>,
+        I: IntoIterator<Item = V>,
+    {
+        Self {
+            provider: provider.into(),
+            model_id: model_id.into(),
+            max_embeddings_per_call,
+            values: values.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Returns the provider name associated with the embedding model.
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    /// Returns the provider-specific embedding model id.
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    /// Returns the maximum values the model supports in one embedding call.
+    pub fn max_embeddings_per_call(&self) -> usize {
+        self.max_embeddings_per_call
+    }
+
+    /// Returns the values that exceeded the provider limit.
+    pub fn values(&self) -> &[JsonValue] {
+        &self.values
+    }
+
+    /// Returns the number of values that exceeded the provider limit.
+    pub fn value_count(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Converts this error into the values that exceeded the provider limit.
+    pub fn into_values(self) -> Vec<JsonValue> {
+        self.values
+    }
+}
+
+impl fmt::Display for TooManyEmbeddingValuesForCallError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Too many values for a single embedding call. The {} model \"{}\" can only embed up to {} values per call, but {} values were provided.",
+            self.provider,
+            self.model_id,
+            self.max_embeddings_per_call,
+            self.values.len()
+        )
+    }
+}
+
+impl std::error::Error for TooManyEmbeddingValuesForCallError {}
+
 /// Additional provider-specific options passed through to a model provider.
 ///
 /// The outer map is keyed by provider name and the inner object contains
@@ -155,7 +230,10 @@ pub type ProviderMetadata = BTreeMap<String, JsonObject>;
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelType, NoSuchModelError, ProviderOptions, UnsupportedFunctionalityError};
+    use super::{
+        ModelType, NoSuchModelError, ProviderOptions, TooManyEmbeddingValuesForCallError,
+        UnsupportedFunctionalityError,
+    };
     use serde_json::json;
 
     #[test]
@@ -230,6 +308,33 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "Unsupported image mime type: image/avif, expected one of: image/jpeg, image/png."
+        );
+    }
+
+    #[test]
+    fn too_many_embedding_values_error_matches_upstream_message_and_context() {
+        let error = TooManyEmbeddingValuesForCallError::new(
+            "openai",
+            "text-embedding-3-small",
+            2,
+            ["first", "second", "third"],
+        );
+
+        assert_eq!(error.provider(), "openai");
+        assert_eq!(error.model_id(), "text-embedding-3-small");
+        assert_eq!(error.max_embeddings_per_call(), 2);
+        assert_eq!(error.value_count(), 3);
+        assert_eq!(
+            error.values(),
+            &[json!("first"), json!("second"), json!("third")]
+        );
+        assert_eq!(
+            error.to_string(),
+            "Too many values for a single embedding call. The openai model \"text-embedding-3-small\" can only embed up to 2 values per call, but 3 values were provided."
+        );
+        assert_eq!(
+            error.into_values(),
+            vec![json!("first"), json!("second"), json!("third")]
         );
     }
 
