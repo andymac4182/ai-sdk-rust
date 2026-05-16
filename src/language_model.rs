@@ -14,7 +14,8 @@ use crate::warning::Warning;
 /// Supported URL regular-expression patterns by media type for a language model.
 ///
 /// Upstream uses JavaScript `RegExp` values. The Rust boundary stores their
-/// regular-expression source strings without choosing a regex engine dependency.
+/// regular-expression source strings and compiles them only where matching is
+/// needed.
 pub type LanguageModelSupportedUrls = BTreeMap<String, Vec<String>>;
 
 /// A provider-v4 language model.

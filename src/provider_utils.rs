@@ -17,8 +17,8 @@ use crate::image_model::ImageModelFile;
 use crate::json::{JsonObject, JsonSchema, JsonValue};
 use crate::language_model::{
     LanguageModelFilePart, LanguageModelFunctionTool, LanguageModelMessage, LanguageModelPrompt,
-    LanguageModelReasoningEffort, LanguageModelSystemMessage, LanguageModelTool,
-    LanguageModelToolInputExample,
+    LanguageModelReasoningEffort, LanguageModelSupportedUrls, LanguageModelSystemMessage,
+    LanguageModelTool, LanguageModelToolInputExample,
 };
 use crate::provider::{
     InvalidArgumentError, JsonParseError, LoadApiKeyError, LoadSettingError, ProviderOptions,
@@ -1626,6 +1626,49 @@ pub fn resolve_full_media_type(
         })
 }
 
+/// Returns whether a URL is natively supported by a model for a media type.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils` `isUrlSupported`: media type
+/// keys and the checked URL are matched case-insensitively by lowercasing before
+/// regex evaluation, `*` and `*/*` match all media types, and top-level-only
+/// media types such as `image` only match the corresponding `image/*` key.
+pub fn is_url_supported(
+    media_type: &str,
+    url: &str,
+    supported_urls: &LanguageModelSupportedUrls,
+) -> bool {
+    let media_type = media_type.to_lowercase();
+    let url = url.to_lowercase();
+    let is_top_level_only = !media_type.contains('/');
+
+    supported_urls
+        .iter()
+        .flat_map(|(supported_media_type, patterns)| {
+            let supported_media_type = supported_media_type.to_lowercase();
+            let media_type_prefix = if supported_media_type == "*" || supported_media_type == "*/*"
+            {
+                String::new()
+            } else {
+                supported_media_type.replacen('*', "", 1)
+            };
+
+            let media_type_matches = if media_type_prefix.is_empty() {
+                true
+            } else if is_top_level_only {
+                format!("{media_type}/") == media_type_prefix
+            } else {
+                media_type.starts_with(&media_type_prefix)
+            };
+
+            media_type_matches.then_some(patterns).into_iter().flatten()
+        })
+        .any(|pattern| {
+            regex::Regex::new(pattern)
+                .map(|regex| regex.is_match(&url))
+                .unwrap_or(false)
+        })
+}
+
 /// Converts an image model file into a URL or data URI string.
 ///
 /// This mirrors upstream `@ai-sdk/provider-utils`
@@ -2077,7 +2120,7 @@ mod tests {
         convert_inline_file_data_to_bytes, convert_to_base64, create_tool_name_mapping,
         detect_media_type, filter_nullable, get_top_level_media_type, inject_json_instruction,
         inject_json_instruction_into_messages, is_custom_reasoning, is_full_media_type,
-        is_non_nullable, is_parsable_json, is_provider_reference, load_api_key,
+        is_non_nullable, is_parsable_json, is_provider_reference, is_url_supported, load_api_key,
         load_api_key_with_env, load_optional_setting_with_env, load_setting, load_setting_with_env,
         map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
         media_type_to_extension, normalize_headers, parse_json, parse_provider_options,
@@ -3276,6 +3319,104 @@ mod tests {
         assert!(!is_full_media_type("image/*"));
         assert!(!is_full_media_type("image/"));
         assert!(!is_full_media_type("/"));
+    }
+
+    #[test]
+    fn is_url_supported_matches_media_type_and_url_patterns() {
+        let supported_urls = BTreeMap::from([
+            (
+                "text/plain".to_string(),
+                vec![r"^https://docs\.example\.com/.+\.txt$".to_string()],
+            ),
+            (
+                "image/png".to_string(),
+                vec![r"^https://images\.example\.com/.+".to_string()],
+            ),
+        ]);
+
+        assert!(is_url_supported(
+            "text/plain",
+            "https://docs.example.com/readme.txt",
+            &supported_urls
+        ));
+        assert!(!is_url_supported(
+            "text/plain",
+            "https://docs.example.com/readme.md",
+            &supported_urls
+        ));
+        assert!(!is_url_supported(
+            "image/png",
+            "https://docs.example.com/readme.txt",
+            &supported_urls
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_matches_wildcards_and_top_level_media_types() {
+        let supported_urls = BTreeMap::from([
+            (
+                "image/*".to_string(),
+                vec![r"^https://cdn\.example\.com/images/".to_string()],
+            ),
+            (
+                "*/*".to_string(),
+                vec![r"^https://public\.example\.com/".to_string()],
+            ),
+        ]);
+
+        assert!(is_url_supported(
+            "image/png",
+            "https://cdn.example.com/images/cat.png",
+            &supported_urls
+        ));
+        assert!(is_url_supported(
+            "image",
+            "https://cdn.example.com/images/cat.png",
+            &supported_urls
+        ));
+        assert!(is_url_supported(
+            "video/mp4",
+            "https://public.example.com/video.mp4",
+            &supported_urls
+        ));
+        assert!(!is_url_supported(
+            "audio",
+            "https://cdn.example.com/images/cat.png",
+            &supported_urls
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_lowercases_media_type_keys_and_urls_before_matching() {
+        let supported_urls = BTreeMap::from([(
+            "TEXT/PLAIN".to_string(),
+            vec![r"^https://example\.com/path$".to_string()],
+        )]);
+
+        assert!(is_url_supported(
+            "text/plain",
+            "https://EXAMPLE.com/PATH",
+            &supported_urls
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_ignores_invalid_regex_sources() {
+        let supported_urls = BTreeMap::from([(
+            "*".to_string(),
+            vec!["[".to_string(), r"^https://example\.com$".to_string()],
+        )]);
+
+        assert!(is_url_supported(
+            "text/plain",
+            "https://example.com",
+            &supported_urls
+        ));
+        assert!(!is_url_supported(
+            "text/plain",
+            "https://another.example.com",
+            &supported_urls
+        ));
     }
 
     #[test]
