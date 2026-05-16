@@ -96,7 +96,7 @@ pub use provider_utils::{
     Arrayable, Base64DecodeError, DownloadError, InjectJsonInstructionIntoMessagesOptions,
     InlineFileDataBytesError, LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions,
     ParseJsonError, ParseJsonResult, ReasoningLevel, Tool, ToolExecuteFunction, ToolExecuteFuture,
-    ToolExecutionError, ToolExecutionOptions, ToolNameMapping,
+    ToolExecutionError, ToolExecutionOptions, ToolNameMapping, ValidateTypesResult,
     add_additional_properties_to_json_schema, as_array, combine_headers, convert_base64_to_bytes,
     convert_bytes_to_base64, convert_image_model_file_to_data_uri,
     convert_inline_file_data_to_bytes, convert_to_base64, create_tool_name_mapping,
@@ -106,7 +106,8 @@ pub use provider_utils::{
     load_setting, map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
     media_type_to_extension, normalize_headers, parse_json, prepare_tools,
     remove_undefined_entries, resolve_full_media_type, resolve_provider_reference, safe_parse_json,
-    strip_file_extension, validate_download_url, with_user_agent_suffix, without_trailing_slash,
+    safe_validate_types, strip_file_extension, validate_download_url, validate_types,
+    with_user_agent_suffix, without_trailing_slash,
 };
 pub use reranking_model::{
     RerankingModel, RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,

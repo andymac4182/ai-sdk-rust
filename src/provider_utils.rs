@@ -21,8 +21,8 @@ use crate::language_model::{
     LanguageModelToolInputExample,
 };
 use crate::provider::{
-    JsonParseError, LoadApiKeyError, LoadSettingError, ProviderOptions, TypeValidationError,
-    UnsupportedFunctionalityError,
+    JsonParseError, LoadApiKeyError, LoadSettingError, ProviderOptions, TypeValidationContext,
+    TypeValidationError, UnsupportedFunctionalityError,
 };
 use crate::warning::Warning;
 
@@ -144,6 +144,73 @@ impl fmt::Display for DownloadError {
 }
 
 impl std::error::Error for DownloadError {}
+
+/// Result returned by safe type validation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ValidateTypesResult<T = JsonValue> {
+    /// Type validation succeeded.
+    Success {
+        /// Validated or transformed value.
+        value: T,
+
+        /// Raw JSON value before validation.
+        raw_value: JsonValue,
+    },
+
+    /// Type validation failed without panicking.
+    Failure {
+        /// Wrapped type-validation error.
+        error: TypeValidationError,
+
+        /// Raw JSON value that failed validation.
+        raw_value: JsonValue,
+    },
+}
+
+impl<T> ValidateTypesResult<T> {
+    /// Creates a successful type-validation result.
+    pub fn success(value: T, raw_value: JsonValue) -> Self {
+        Self::Success { value, raw_value }
+    }
+
+    /// Creates a failed type-validation result.
+    pub fn failure(error: TypeValidationError, raw_value: JsonValue) -> Self {
+        Self::Failure { error, raw_value }
+    }
+
+    /// Returns whether type validation succeeded.
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Success { .. })
+    }
+
+    /// Returns whether type validation failed.
+    pub fn is_failure(&self) -> bool {
+        matches!(self, Self::Failure { .. })
+    }
+
+    /// Returns the validated or transformed value on success.
+    pub fn value(&self) -> Option<&T> {
+        match self {
+            Self::Success { value, .. } => Some(value),
+            Self::Failure { .. } => None,
+        }
+    }
+
+    /// Returns the raw JSON value before validation.
+    pub fn raw_value(&self) -> &JsonValue {
+        match self {
+            Self::Success { raw_value, .. } | Self::Failure { raw_value, .. } => raw_value,
+        }
+    }
+
+    /// Returns the type-validation error on failure.
+    pub fn error(&self) -> Option<&TypeValidationError> {
+        match self {
+            Self::Success { .. } => None,
+            Self::Failure { error, .. } => Some(error),
+        }
+    }
+}
 
 /// Error returned by safe JSON parsing.
 #[derive(Clone, Debug, PartialEq)]
@@ -1145,6 +1212,50 @@ pub fn is_provider_reference(data: &JsonValue) -> bool {
         .is_some_and(|object| !object.contains_key("type"))
 }
 
+/// Validates a JSON value with a caller-supplied type validator.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils` `validateTypes`: validation
+/// failures are wrapped in the provider-level [`TypeValidationError`] with the
+/// original JSON value and optional validation context.
+pub fn validate_types<T, F, E>(
+    value: JsonValue,
+    validate: F,
+    context: Option<TypeValidationContext>,
+) -> Result<T, TypeValidationError>
+where
+    F: FnOnce(&JsonValue) -> Result<T, E>,
+    E: fmt::Display,
+{
+    match safe_validate_types(value, validate, context) {
+        ValidateTypesResult::Success { value, .. } => Ok(value),
+        ValidateTypesResult::Failure { error, .. } => Err(error),
+    }
+}
+
+/// Safely validates a JSON value with a caller-supplied type validator.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils` `safeValidateTypes`: success
+/// returns both the validated value and the original raw value, while
+/// validation failures return a [`TypeValidationError`] and preserve the raw
+/// value.
+pub fn safe_validate_types<T, F, E>(
+    value: JsonValue,
+    validate: F,
+    context: Option<TypeValidationContext>,
+) -> ValidateTypesResult<T>
+where
+    F: FnOnce(&JsonValue) -> Result<T, E>,
+    E: fmt::Display,
+{
+    match validate(&value) {
+        Ok(validated_value) => ValidateTypesResult::success(validated_value, value),
+        Err(error) => {
+            let validation_error = TypeValidationError::new(value.clone(), error, context);
+            ValidateTypesResult::failure(validation_error, value)
+        }
+    }
+}
+
 /// Parses a JSON string into a JSON value.
 ///
 /// This mirrors the no-schema overload of upstream `@ai-sdk/provider-utils`
@@ -1923,7 +2034,7 @@ mod tests {
     };
     use crate::{
         FileData, FileDataContent, ImageModelFile, JsonObject, JsonValue, ProviderReference,
-        TypeValidationError, Warning,
+        TypeValidationContext, TypeValidationError, Warning,
     };
     use serde_json::json;
     use url::Url;
@@ -1932,18 +2043,19 @@ mod tests {
         Arrayable, Base64DecodeError, DownloadError, InjectJsonInstructionIntoMessagesOptions,
         InlineFileDataBytesError, LoadApiKeyOptions, LoadOptionalSettingOptions,
         LoadSettingOptions, ParseJsonError, ParseJsonResult, ReasoningLevel, Tool,
-        ToolExecutionError, ToolExecutionOptions, add_additional_properties_to_json_schema,
-        as_array, combine_headers, convert_base64_to_bytes, convert_bytes_to_base64,
-        convert_image_model_file_to_data_uri, convert_inline_file_data_to_bytes, convert_to_base64,
-        create_tool_name_mapping, detect_media_type, filter_nullable, get_top_level_media_type,
-        inject_json_instruction, inject_json_instruction_into_messages, is_custom_reasoning,
-        is_full_media_type, is_non_nullable, is_parsable_json, is_provider_reference, load_api_key,
+        ToolExecutionError, ToolExecutionOptions, ValidateTypesResult,
+        add_additional_properties_to_json_schema, as_array, combine_headers,
+        convert_base64_to_bytes, convert_bytes_to_base64, convert_image_model_file_to_data_uri,
+        convert_inline_file_data_to_bytes, convert_to_base64, create_tool_name_mapping,
+        detect_media_type, filter_nullable, get_top_level_media_type, inject_json_instruction,
+        inject_json_instruction_into_messages, is_custom_reasoning, is_full_media_type,
+        is_non_nullable, is_parsable_json, is_provider_reference, load_api_key,
         load_api_key_with_env, load_optional_setting_with_env, load_setting, load_setting_with_env,
         map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
         media_type_to_extension, normalize_headers, parse_json, prepare_tools,
         remove_undefined_entries, resolve_full_media_type, resolve_provider_reference,
-        safe_parse_json, strip_file_extension, validate_download_url, with_user_agent_suffix,
-        without_trailing_slash,
+        safe_parse_json, safe_validate_types, strip_file_extension, validate_download_url,
+        validate_types, with_user_agent_suffix, without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -1972,6 +2084,29 @@ mod tests {
 
     fn object_schema_json() -> String {
         serde_json::to_string(&object_schema()).expect("schema serializes")
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct Person {
+        name: String,
+        age: u64,
+    }
+
+    fn validate_person(value: &JsonValue) -> Result<Person, &'static str> {
+        let object = value.as_object().ok_or("Invalid input")?;
+        let name = object
+            .get("name")
+            .and_then(JsonValue::as_str)
+            .ok_or("Invalid input")?;
+        let age = object
+            .get("age")
+            .and_then(JsonValue::as_u64)
+            .ok_or("Invalid input")?;
+
+        Ok(Person {
+            name: name.to_string(),
+            age,
+        })
     }
 
     fn expected_schema_instruction(prompt: &str) -> String {
@@ -2688,6 +2823,85 @@ mod tests {
         assert!(!is_provider_reference(&json!("some-string")));
         assert!(!is_provider_reference(&json!(42)));
         assert!(!is_provider_reference(&json!([1, 2, 3])));
+    }
+
+    #[test]
+    fn validate_types_returns_validated_values() {
+        let value = json!({ "name": "John", "age": 30 });
+
+        let person = validate_types(value, validate_person, None).expect("person validates");
+
+        assert_eq!(
+            person,
+            Person {
+                name: "John".to_string(),
+                age: 30,
+            }
+        );
+    }
+
+    #[test]
+    fn validate_types_wraps_validation_errors_with_context() {
+        let value = json!({ "name": "John", "age": "30" });
+        let context = TypeValidationContext::new()
+            .with_field("person.age")
+            .with_entity_name("person")
+            .with_entity_id("user-1");
+
+        let error = validate_types(value.clone(), validate_person, Some(context.clone()))
+            .expect_err("invalid person should fail validation");
+
+        assert_eq!(error.value(), &value);
+        assert_eq!(error.context(), Some(&context));
+        assert_eq!(error.cause_message(), "Invalid input");
+        assert!(
+            error
+                .message()
+                .starts_with("Type validation failed for person.age (person, id: \"user-1\"):")
+        );
+    }
+
+    #[test]
+    fn safe_validate_types_preserves_raw_value_after_transformation() {
+        let value = json!({ "count": "42" });
+
+        let parsed = safe_validate_types(
+            value.clone(),
+            |value| {
+                let count = value
+                    .get("count")
+                    .and_then(JsonValue::as_str)
+                    .and_then(|count| count.parse::<u64>().ok())
+                    .ok_or("Expected numeric string")?;
+
+                Ok::<_, &'static str>(json!({ "count": count }))
+            },
+            None,
+        );
+
+        assert_eq!(
+            parsed,
+            ValidateTypesResult::success(json!({ "count": 42 }), value.clone())
+        );
+        assert!(parsed.is_success());
+        assert!(!parsed.is_failure());
+        assert_eq!(parsed.value(), Some(&json!({ "count": 42 })));
+        assert_eq!(parsed.raw_value(), &value);
+        assert!(parsed.error().is_none());
+    }
+
+    #[test]
+    fn safe_validate_types_returns_error_and_raw_value_on_failure() {
+        let value = json!({ "name": "John", "age": "30" });
+        let parsed = safe_validate_types(value.clone(), validate_person, None);
+
+        assert!(parsed.is_failure());
+        assert!(parsed.value().is_none());
+        assert_eq!(parsed.raw_value(), &value);
+
+        let error = parsed.error().expect("validation error is returned");
+        assert_eq!(error.value(), &value);
+        assert_eq!(error.cause_message(), "Invalid input");
     }
 
     #[test]

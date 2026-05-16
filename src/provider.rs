@@ -474,7 +474,7 @@ impl TypeValidationContext {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TypeValidationError {
     value: JsonValue,
-    context: Option<TypeValidationContext>,
+    context: Option<Box<TypeValidationContext>>,
     cause_message: String,
     message: String,
 }
@@ -505,7 +505,7 @@ impl TypeValidationError {
 
         Self {
             value,
-            context,
+            context: context.map(Box::new),
             message: format!(
                 "{context_prefix}: Value: {rendered_value}.\nError message: {cause_message}"
             ),
@@ -520,7 +520,7 @@ impl TypeValidationError {
 
     /// Returns optional context about the value being validated.
     pub fn context(&self) -> Option<&TypeValidationContext> {
-        self.context.as_ref()
+        self.context.as_deref()
     }
 
     /// Returns the human-readable validation cause message.
@@ -535,7 +535,11 @@ impl TypeValidationError {
 
     /// Converts this error into the failed value, cause message, and optional validation context.
     pub fn into_parts(self) -> (JsonValue, String, Option<TypeValidationContext>) {
-        (self.value, self.cause_message, self.context)
+        (
+            self.value,
+            self.cause_message,
+            self.context.map(|context| *context),
+        )
     }
 }
 
