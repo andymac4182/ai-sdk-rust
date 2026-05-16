@@ -31,6 +31,16 @@ const DEFAULT_JSON_SCHEMA_INSTRUCTION_PREFIX: &str = "JSON schema:";
 const DEFAULT_JSON_SCHEMA_INSTRUCTION_SUFFIX: &str =
     "You MUST answer with a JSON object that matches the JSON schema above.";
 const DEFAULT_JSON_INSTRUCTION_SUFFIX: &str = "You MUST answer with JSON.";
+const FETCH_FAILED_ERROR_MESSAGES: [&str; 2] = ["fetch failed", "failed to fetch"];
+const BUN_NETWORK_ERROR_CODES: [&str; 7] = [
+    "ConnectionRefused",
+    "ConnectionClosed",
+    "FailedToOpenSocket",
+    "ECONNRESET",
+    "ECONNREFUSED",
+    "ETIMEDOUT",
+    "EPIPE",
+];
 
 /// Default maximum response download size used by upstream provider-utils: 2 GiB.
 pub const DEFAULT_MAX_DOWNLOAD_SIZE: usize = 2 * 1024 * 1024 * 1024;
@@ -148,6 +158,111 @@ impl fmt::Display for DownloadError {
 }
 
 impl std::error::Error for DownloadError {}
+
+/// Runtime-independent fetch error information for request error normalization.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchErrorInfo {
+    /// JavaScript-style error name, when the HTTP layer exposes one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+
+    /// Human-readable error message.
+    message: String,
+
+    /// Runtime-specific network error code, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
+
+    /// Message from the wrapped error cause, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cause_message: Option<String>,
+}
+
+impl FetchErrorInfo {
+    /// Creates fetch error information with a message.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            name: None,
+            message: message.into(),
+            code: None,
+            cause_message: None,
+        }
+    }
+
+    /// Sets the JavaScript-style error name.
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Sets the runtime-specific network error code.
+    pub fn with_code(mut self, code: impl Into<String>) -> Self {
+        self.code = Some(code.into());
+        self
+    }
+
+    /// Sets the wrapped cause message.
+    pub fn with_cause_message(mut self, cause_message: impl Into<String>) -> Self {
+        self.cause_message = Some(cause_message.into());
+        self
+    }
+
+    /// Returns the JavaScript-style error name, when available.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Returns the runtime-specific network error code, when available.
+    pub fn code(&self) -> Option<&str> {
+        self.code.as_deref()
+    }
+
+    /// Returns the wrapped cause message, when available.
+    pub fn cause_message(&self) -> Option<&str> {
+        self.cause_message.as_deref()
+    }
+}
+
+/// Result of normalizing a lower-level fetch error.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case", tag = "type")]
+pub enum HandledFetchError {
+    /// The original error should be propagated unchanged.
+    Original {
+        /// Original fetch error information.
+        error: FetchErrorInfo,
+    },
+
+    /// The fetch error should be surfaced as an API-call error.
+    ApiCall {
+        /// Normalized API-call error.
+        error: Box<ApiCallError>,
+    },
+}
+
+impl HandledFetchError {
+    /// Returns the normalized API-call error when one was created.
+    pub fn api_call_error(&self) -> Option<&ApiCallError> {
+        match self {
+            Self::Original { .. } => None,
+            Self::ApiCall { error } => Some(error),
+        }
+    }
+
+    /// Returns the original fetch error when it should be propagated unchanged.
+    pub fn original_error(&self) -> Option<&FetchErrorInfo> {
+        match self {
+            Self::Original { error } => Some(error),
+            Self::ApiCall { .. } => None,
+        }
+    }
+}
 
 /// Result returned by safe type validation.
 #[derive(Clone, Debug, PartialEq)]
@@ -2624,6 +2739,56 @@ pub fn is_abort_error(error_name: &str) -> bool {
     )
 }
 
+/// Normalizes lower-level fetch/network errors for provider API helpers.
+///
+/// This mirrors upstream internal `handleFetchError`: abort-style errors are
+/// returned unchanged, recognized fetch connection failures become retryable
+/// [`ApiCallError`] values, and unknown errors are propagated unchanged.
+pub fn handle_fetch_error(
+    error: FetchErrorInfo,
+    url: impl Into<String>,
+    request_body_values: impl Into<JsonValue>,
+) -> HandledFetchError {
+    if error.name.as_deref().is_some_and(is_abort_error) {
+        return HandledFetchError::Original { error };
+    }
+
+    if error.name.as_deref() == Some("TypeError")
+        && FETCH_FAILED_ERROR_MESSAGES.contains(&error.message.to_lowercase().as_str())
+        && let Some(cause_message) = error.cause_message.as_deref()
+    {
+        return HandledFetchError::ApiCall {
+            error: Box::new(
+                ApiCallError::new(
+                    format!("Cannot connect to API: {cause_message}"),
+                    url,
+                    request_body_values,
+                )
+                .with_is_retryable(true),
+            ),
+        };
+    }
+
+    if error
+        .code
+        .as_deref()
+        .is_some_and(|code| BUN_NETWORK_ERROR_CODES.contains(&code))
+    {
+        return HandledFetchError::ApiCall {
+            error: Box::new(
+                ApiCallError::new(
+                    format!("Cannot connect to API: {}", error.message),
+                    url,
+                    request_body_values,
+                )
+                .with_is_retryable(true),
+            ),
+        };
+    }
+
+    HandledFetchError::Original { error }
+}
+
 /// Options for loading a provider API key from an explicit value or environment variable.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoadApiKeyOptions {
@@ -2869,27 +3034,28 @@ mod tests {
 
     use super::{
         Arrayable, Base64DecodeError, BinaryResponseHandlerOptions, DEFAULT_MAX_DOWNLOAD_SIZE,
-        DownloadError, EventSourceResponseHandlerOptions, InjectJsonInstructionIntoMessagesOptions,
-        InlineFileDataBytesError, JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions,
-        LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError,
-        ParseJsonResult, ReasoningLevel, ResponseHandlerResult,
-        StatusCodeErrorResponseHandlerOptions, Tool, ToolExecutionError, ToolExecutionOptions,
-        ValidateTypesResult, add_additional_properties_to_json_schema, as_array, combine_headers,
+        DownloadError, EventSourceResponseHandlerOptions, FetchErrorInfo, HandledFetchError,
+        InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
+        JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, LoadApiKeyOptions,
+        LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError, ParseJsonResult,
+        ReasoningLevel, ResponseHandlerResult, StatusCodeErrorResponseHandlerOptions, Tool,
+        ToolExecutionError, ToolExecutionOptions, ValidateTypesResult,
+        add_additional_properties_to_json_schema, as_array, combine_headers,
         convert_base64_to_bytes, convert_bytes_to_base64, convert_image_model_file_to_data_uri,
         convert_inline_file_data_to_bytes, convert_to_base64, create_binary_response_handler,
         create_event_source_response_handler, create_json_error_response_handler,
         create_json_response_handler, create_status_code_error_response_handler,
         create_tool_name_mapping, detect_media_type, extract_response_headers, filter_nullable,
-        get_top_level_media_type, inject_json_instruction, inject_json_instruction_into_messages,
-        is_abort_error, is_custom_reasoning, is_full_media_type, is_non_nullable, is_parsable_json,
-        is_provider_reference, is_url_supported, load_api_key, load_api_key_with_env,
-        load_optional_setting_with_env, load_setting, load_setting_with_env,
-        map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
-        media_type_to_extension, normalize_headers, parse_json, parse_json_event_stream,
-        parse_provider_options, prepare_tools, read_response_with_size_limit,
-        remove_undefined_entries, resolve_full_media_type, resolve_provider_reference,
-        safe_parse_json, safe_validate_types, strip_file_extension, validate_download_url,
-        validate_types, with_user_agent_suffix, without_trailing_slash,
+        get_top_level_media_type, handle_fetch_error, inject_json_instruction,
+        inject_json_instruction_into_messages, is_abort_error, is_custom_reasoning,
+        is_full_media_type, is_non_nullable, is_parsable_json, is_provider_reference,
+        is_url_supported, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
+        load_setting, load_setting_with_env, map_reasoning_to_provider_budget,
+        map_reasoning_to_provider_effort, media_type_to_extension, normalize_headers, parse_json,
+        parse_json_event_stream, parse_provider_options, prepare_tools,
+        read_response_with_size_limit, remove_undefined_entries, resolve_full_media_type,
+        resolve_provider_reference, safe_parse_json, safe_validate_types, strip_file_extension,
+        validate_download_url, validate_types, with_user_agent_suffix, without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -5426,6 +5592,171 @@ mod tests {
                 "{error_name:?} should not be treated as an abort error"
             );
         }
+    }
+
+    #[test]
+    fn fetch_error_info_serializes_camel_case_shape() {
+        let error = FetchErrorInfo::new("fetch failed")
+            .with_name("TypeError")
+            .with_code("ECONNRESET")
+            .with_cause_message("socket closed");
+
+        assert_eq!(
+            serde_json::to_value(&error).expect("fetch error info serializes"),
+            json!({
+                "name": "TypeError",
+                "message": "fetch failed",
+                "code": "ECONNRESET",
+                "causeMessage": "socket closed"
+            })
+        );
+
+        let minimal: FetchErrorInfo = serde_json::from_value(json!({
+            "message": "unexpected"
+        }))
+        .expect("minimal fetch error info deserializes");
+
+        assert_eq!(minimal.message(), "unexpected");
+        assert_eq!(minimal.name(), None);
+        assert_eq!(minimal.code(), None);
+        assert_eq!(minimal.cause_message(), None);
+    }
+
+    #[test]
+    fn handled_fetch_error_serializes_tagged_api_call_result() {
+        let result = HandledFetchError::ApiCall {
+            error: Box::new(
+                crate::ApiCallError::new(
+                    "Cannot connect to API: ECONNREFUSED",
+                    "https://api.example.com/v1/chat",
+                    json!({ "prompt": "test" }),
+                )
+                .with_is_retryable(true),
+            ),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&result).expect("handled fetch error serializes"),
+            json!({
+                "type": "api-call",
+                "error": {
+                    "message": "Cannot connect to API: ECONNREFUSED",
+                    "url": "https://api.example.com/v1/chat",
+                    "requestBodyValues": { "prompt": "test" },
+                    "isRetryable": true
+                }
+            })
+        );
+
+        let original: HandledFetchError = serde_json::from_value(json!({
+            "type": "original",
+            "error": {
+                "name": "AbortError",
+                "message": "Aborted"
+            }
+        }))
+        .expect("handled original fetch error deserializes");
+
+        assert_eq!(
+            original.original_error().map(FetchErrorInfo::name),
+            Some(Some("AbortError"))
+        );
+        assert!(original.api_call_error().is_none());
+    }
+
+    #[test]
+    fn handle_fetch_error_returns_abort_errors_unchanged() {
+        let error = FetchErrorInfo::new("Aborted").with_name("AbortError");
+
+        let result =
+            handle_fetch_error(error.clone(), "https://api.example.com/v1/chat", json!({}));
+
+        assert_eq!(result, HandledFetchError::Original { error });
+    }
+
+    #[test]
+    fn handle_fetch_error_wraps_node_fetch_failed_type_errors() {
+        let result = handle_fetch_error(
+            FetchErrorInfo::new("fetch failed")
+                .with_name("TypeError")
+                .with_cause_message("ECONNREFUSED"),
+            "https://api.example.com/v1/chat",
+            json!({ "prompt": "test" }),
+        );
+
+        let HandledFetchError::ApiCall { error } = result else {
+            panic!("fetch failed TypeError should become an API call error");
+        };
+
+        assert_eq!(error.message(), "Cannot connect to API: ECONNREFUSED");
+        assert_eq!(error.url(), "https://api.example.com/v1/chat");
+        assert_eq!(error.request_body_values(), &json!({ "prompt": "test" }));
+        assert!(error.is_retryable());
+        assert_eq!(error.status_code(), None);
+    }
+
+    #[test]
+    fn handle_fetch_error_wraps_browser_failed_to_fetch_type_errors() {
+        let result = handle_fetch_error(
+            FetchErrorInfo::new("Failed to fetch")
+                .with_name("TypeError")
+                .with_cause_message("Network error"),
+            "https://api.example.com/v1/chat",
+            json!({ "prompt": "test" }),
+        );
+
+        let HandledFetchError::ApiCall { error } = result else {
+            panic!("failed to fetch TypeError should become an API call error");
+        };
+
+        assert_eq!(error.message(), "Cannot connect to API: Network error");
+        assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn handle_fetch_error_leaves_fetch_failed_type_errors_without_cause_unchanged() {
+        let error = FetchErrorInfo::new("fetch failed").with_name("TypeError");
+
+        let result =
+            handle_fetch_error(error.clone(), "https://api.example.com/v1/chat", json!({}));
+
+        assert_eq!(result, HandledFetchError::Original { error });
+    }
+
+    #[test]
+    fn handle_fetch_error_wraps_bun_network_errors() {
+        for code in [
+            "ConnectionRefused",
+            "ConnectionClosed",
+            "FailedToOpenSocket",
+            "ECONNRESET",
+            "ECONNREFUSED",
+            "ETIMEDOUT",
+            "EPIPE",
+        ] {
+            let result = handle_fetch_error(
+                FetchErrorInfo::new("socket unavailable").with_code(code),
+                "https://api.example.com/v1/chat",
+                json!({ "prompt": "test" }),
+            );
+
+            let HandledFetchError::ApiCall { error } = result else {
+                panic!("{code} should become an API call error");
+            };
+
+            assert_eq!(error.message(), "Cannot connect to API: socket unavailable");
+            assert!(error.is_retryable());
+        }
+    }
+
+    #[test]
+    fn handle_fetch_error_returns_unknown_errors_unchanged() {
+        let error = FetchErrorInfo::new("Something unexpected");
+
+        let result =
+            handle_fetch_error(error.clone(), "https://api.example.com/v1/chat", json!({}));
+
+        assert_eq!(result, HandledFetchError::Original { error });
     }
 
     #[test]
