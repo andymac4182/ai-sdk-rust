@@ -247,6 +247,46 @@ impl fmt::Display for InvalidArgumentError {
 
 impl std::error::Error for InvalidArgumentError {}
 
+/// Error returned when a provider cannot process a prompt.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InvalidPromptError {
+    prompt: JsonValue,
+    message: String,
+}
+
+impl InvalidPromptError {
+    /// Creates an invalid prompt error with the upstream provider message prefix.
+    pub fn new(prompt: impl Into<JsonValue>, message: impl Into<String>) -> Self {
+        Self {
+            prompt: prompt.into(),
+            message: format!("Invalid prompt: {}", message.into()),
+        }
+    }
+
+    /// Returns the prompt value that could not be processed.
+    pub fn prompt(&self) -> &JsonValue {
+        &self.prompt
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into the prompt value that could not be processed.
+    pub fn into_prompt(self) -> JsonValue {
+        self.prompt
+    }
+}
+
+impl fmt::Display for InvalidPromptError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for InvalidPromptError {}
+
 /// Error returned when provider JSON parsing fails.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JsonParseError {
@@ -531,9 +571,10 @@ pub type ProviderMetadata = BTreeMap<String, JsonObject>;
 #[cfg(test)]
 mod tests {
     use super::{
-        EmptyResponseBodyError, InvalidArgumentError, InvalidResponseDataError, JsonParseError,
-        LoadApiKeyError, LoadSettingError, ModelType, NoContentGeneratedError, NoSuchModelError,
-        ProviderOptions, TooManyEmbeddingValuesForCallError, UnsupportedFunctionalityError,
+        EmptyResponseBodyError, InvalidArgumentError, InvalidPromptError, InvalidResponseDataError,
+        JsonParseError, LoadApiKeyError, LoadSettingError, ModelType, NoContentGeneratedError,
+        NoSuchModelError, ProviderOptions, TooManyEmbeddingValuesForCallError,
+        UnsupportedFunctionalityError,
     };
     use serde_json::json;
 
@@ -644,6 +685,27 @@ mod tests {
             error.into_parts(),
             ("separator".to_string(), message.to_string())
         );
+    }
+
+    #[test]
+    fn invalid_prompt_error_uses_upstream_message_prefix_and_retains_prompt() {
+        let prompt = json!({
+            "prompt": "Hello",
+            "messages": []
+        });
+        let error =
+            InvalidPromptError::new(prompt.clone(), "prompt and messages cannot both be set.");
+
+        assert_eq!(error.prompt(), &prompt);
+        assert_eq!(
+            error.message(),
+            "Invalid prompt: prompt and messages cannot both be set."
+        );
+        assert_eq!(
+            error.to_string(),
+            "Invalid prompt: prompt and messages cannot both be set."
+        );
+        assert_eq!(error.into_prompt(), prompt);
     }
 
     #[test]
