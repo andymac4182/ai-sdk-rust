@@ -185,6 +185,22 @@ fn load_optional_setting_with_env(
     load_env(&options.environment_variable_name).ok()
 }
 
+/// Maps a media type to the file extension used by upstream provider uploads.
+pub fn media_type_to_extension(media_type: &str) -> String {
+    let subtype = media_type
+        .split_once('/')
+        .map_or("", |(_, subtype)| subtype)
+        .to_ascii_lowercase();
+
+    match subtype.as_str() {
+        "mpeg" => "mp3".to_string(),
+        "x-wav" => "wav".to_string(),
+        "opus" => "ogg".to_string(),
+        "mp4" | "x-m4a" => "m4a".to_string(),
+        _ => subtype,
+    }
+}
+
 /// Resolves a provider reference to the provider-specific identifier.
 ///
 /// This mirrors upstream `@ai-sdk/provider-utils` `resolveProviderReference`
@@ -207,7 +223,7 @@ mod tests {
     use super::{
         LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, load_api_key,
         load_api_key_with_env, load_optional_setting_with_env, load_setting, load_setting_with_env,
-        resolve_provider_reference,
+        media_type_to_extension, resolve_provider_reference,
     };
 
     #[test]
@@ -355,6 +371,36 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn media_type_to_extension_maps_common_audio_media_types() {
+        for (media_type, expected_extension) in [
+            ("audio/mpeg", "mp3"),
+            ("audio/mp3", "mp3"),
+            ("audio/wav", "wav"),
+            ("audio/x-wav", "wav"),
+            ("audio/webm", "webm"),
+            ("audio/ogg", "ogg"),
+            ("audio/opus", "ogg"),
+            ("audio/mp4", "m4a"),
+            ("audio/x-m4a", "m4a"),
+            ("audio/flac", "flac"),
+            ("audio/aac", "aac"),
+        ] {
+            assert_eq!(
+                media_type_to_extension(media_type),
+                expected_extension,
+                "{media_type} maps to {expected_extension}"
+            );
+        }
+    }
+
+    #[test]
+    fn media_type_to_extension_lowercases_subtypes_and_handles_invalid_values() {
+        assert_eq!(media_type_to_extension("AUDIO/MPEG"), "mp3");
+        assert_eq!(media_type_to_extension("AUDIO/MP3"), "mp3");
+        assert_eq!(media_type_to_extension("nope"), "");
     }
 
     #[test]
