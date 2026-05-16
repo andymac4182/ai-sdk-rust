@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::provider::{ModelType, NoSuchModelError, Provider};
+use crate::provider::{ModelType, NoSuchModelError, Provider, ProviderWithTranscriptionModel};
 
 /// Configuration for a provider registry.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -187,6 +187,19 @@ impl<P: Provider> ProviderRegistry<P> {
     }
 }
 
+impl<P: ProviderWithTranscriptionModel> ProviderRegistry<P> {
+    /// Returns the transcription model for a registry id shaped as `providerId:modelId`.
+    pub fn transcription_model(
+        &self,
+        id: &str,
+    ) -> Result<P::TranscriptionModel, ProviderRegistryError> {
+        let (provider_id, model_id) = self.split_id(id, ModelType::TranscriptionModel)?;
+        let provider = self.get_provider(provider_id, ModelType::TranscriptionModel)?;
+
+        provider.transcription_model(model_id).map_err(Into::into)
+    }
+}
+
 /// Creates a provider registry with the upstream default separator (`:`).
 pub fn create_provider_registry<I, K, P>(providers: I) -> ProviderRegistry<P>
 where
@@ -351,7 +364,13 @@ mod tests {
         LanguageModelStreamResult, LanguageModelSupportedUrls, LanguageModelText,
         LanguageModelUsage,
     };
-    use crate::provider::{ModelType, NoSuchModelError, Provider, SpecificationVersion};
+    use crate::provider::{
+        ModelType, NoSuchModelError, Provider, ProviderWithTranscriptionModel, SpecificationVersion,
+    };
+    use crate::transcription_model::{
+        TranscriptionModel, TranscriptionModelCallOptions, TranscriptionModelResponse,
+        TranscriptionModelResult,
+    };
     use std::future::{Ready, ready};
     use time::OffsetDateTime;
 
@@ -482,6 +501,35 @@ mod tests {
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
+    struct StaticTranscriptionModel {
+        provider: String,
+        model_id: String,
+    }
+
+    impl TranscriptionModel for StaticTranscriptionModel {
+        type GenerateFuture<'a>
+            = Ready<TranscriptionModelResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            &self.provider
+        }
+
+        fn model_id(&self) -> &str {
+            &self.model_id
+        }
+
+        fn do_generate(&self, _options: TranscriptionModelCallOptions) -> Self::GenerateFuture<'_> {
+            ready(TranscriptionModelResult::new(
+                "hello world",
+                Vec::new(),
+                TranscriptionModelResponse::new(OffsetDateTime::UNIX_EPOCH, self.model_id.clone()),
+            ))
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
     struct StaticProvider {
         id: &'static str,
     }
@@ -512,6 +560,22 @@ mod tests {
             lookup_model(model_id, ModelType::ImageModel).map(|model_id| StaticImageModel {
                 provider: self.id.to_string(),
                 model_id,
+            })
+        }
+    }
+
+    impl ProviderWithTranscriptionModel for StaticProvider {
+        type TranscriptionModel = StaticTranscriptionModel;
+
+        fn transcription_model(
+            &self,
+            model_id: &str,
+        ) -> Result<Self::TranscriptionModel, NoSuchModelError> {
+            lookup_model(model_id, ModelType::TranscriptionModel).map(|model_id| {
+                StaticTranscriptionModel {
+                    provider: self.id.to_string(),
+                    model_id,
+                }
             })
         }
     }
@@ -590,6 +654,21 @@ mod tests {
     }
 
     #[test]
+    fn create_provider_registry_resolves_transcription_model_interface() {
+        let registry = create_provider_registry([("provider", StaticProvider { id: "provider" })]);
+
+        let transcription_model = registry
+            .transcription_model("provider:whisper-1")
+            .expect("transcription model resolves");
+        assert_eq!(
+            transcription_model.specification_version(),
+            SpecificationVersion::V4
+        );
+        assert_eq!(transcription_model.provider(), "provider");
+        assert_eq!(transcription_model.model_id(), "whisper-1");
+    }
+
+    #[test]
     fn create_provider_registry_supports_custom_separator() {
         let registry = create_provider_registry_with_options(
             [("provider", StaticProvider { id: "provider" })],
@@ -641,6 +720,41 @@ mod tests {
         assert_eq!(model_error.model_id(), "missing");
         assert_eq!(model_error.model_type(), ModelType::EmbeddingModel);
         assert_eq!(error.to_string(), "No such embeddingModel: missing");
+    }
+
+    #[test]
+    fn provider_registry_reports_missing_transcription_provider_context() {
+        let registry =
+            create_provider_registry([("anthropic", StaticProvider { id: "anthropic" })]);
+
+        let error = registry
+            .transcription_model("openai:whisper-1")
+            .expect_err("provider lookup fails");
+        let provider_error = error
+            .as_no_such_provider()
+            .expect("error is missing provider");
+
+        assert_eq!(provider_error.model_id(), "openai");
+        assert_eq!(provider_error.model_type(), ModelType::TranscriptionModel);
+        assert_eq!(provider_error.provider_id(), "openai");
+        assert_eq!(
+            error.to_string(),
+            "No such provider: openai (available providers: anthropic)"
+        );
+    }
+
+    #[test]
+    fn provider_registry_reports_missing_transcription_model_context() {
+        let registry = create_provider_registry([("provider", StaticProvider { id: "provider" })]);
+
+        let error = registry
+            .transcription_model("provider:missing")
+            .expect_err("model lookup fails");
+        let model_error = error.as_no_such_model().expect("error is missing model");
+
+        assert_eq!(model_error.model_id(), "missing");
+        assert_eq!(model_error.model_type(), ModelType::TranscriptionModel);
+        assert_eq!(error.to_string(), "No such transcriptionModel: missing");
     }
 
     #[test]
