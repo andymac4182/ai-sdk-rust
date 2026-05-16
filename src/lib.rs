@@ -5,6 +5,7 @@
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod embedding_model;
+pub mod embedding_model_middleware;
 pub mod file_data;
 pub mod files;
 pub mod headers;
@@ -22,6 +23,10 @@ pub mod warning;
 pub use embedding_model::{
     EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelEmbedding, EmbeddingModelResponse,
     EmbeddingModelResult, EmbeddingModelUsage,
+};
+pub use embedding_model_middleware::{
+    EmbeddingModelDoEmbed, EmbeddingModelMiddleware, EmbeddingModelMiddlewareModelOptions,
+    EmbeddingModelTransformParamsOptions, EmbeddingModelWrapEmbedOptions,
 };
 pub use file_data::{
     FileData, FileDataContent, NoSuchProviderReferenceError, ProviderReference,
