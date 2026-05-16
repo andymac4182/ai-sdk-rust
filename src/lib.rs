@@ -10,6 +10,7 @@ pub mod embedding_model_middleware;
 pub mod file_data;
 pub mod files;
 pub mod generate_image;
+pub mod generate_speech;
 pub mod generate_text;
 pub mod headers;
 pub mod image_model;
@@ -55,6 +56,10 @@ pub use generate_image::{
     ExperimentalGenerateImageResult, GenerateImageOptions, GenerateImagePrompt,
     GenerateImagePromptImage, GenerateImagePromptImages, GenerateImageResult,
     experimental_generate_image, generate_image,
+};
+pub use generate_speech::{
+    DefaultGeneratedAudioFile, ExperimentalSpeechResult, GenerateSpeechOptions, GeneratedAudioFile,
+    SpeechResult, experimental_generate_speech, generate_speech,
 };
 pub use generate_text::{
     ActiveTools, CollectToolApprovalsError, CollectedToolApproval, CollectedToolApprovals,
