@@ -503,6 +503,60 @@ impl JsonResponseHandlerOptions {
     }
 }
 
+/// Inputs for the JSON error response handler.
+///
+/// This is the Rust-native data boundary for upstream
+/// `createJsonErrorResponseHandler`, preserving resilient JSON error parsing
+/// without introducing a concrete HTTP client dependency.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsonErrorResponseHandlerOptions {
+    /// URL that produced the error response.
+    pub url: String,
+
+    /// Request body values associated with the failed provider call.
+    pub request_body_values: JsonValue,
+
+    /// HTTP status code from the response.
+    pub status_code: u16,
+
+    /// HTTP status text from the response.
+    pub status_text: String,
+
+    /// Headers extracted from the HTTP response.
+    #[serde(default)]
+    pub response_headers: Headers,
+
+    /// Raw response body text.
+    pub response_body: String,
+}
+
+impl JsonErrorResponseHandlerOptions {
+    /// Creates JSON error response handler options.
+    pub fn new(
+        url: impl Into<String>,
+        request_body_values: impl Into<JsonValue>,
+        status_code: u16,
+        status_text: impl Into<String>,
+        response_body: impl Into<String>,
+    ) -> Self {
+        Self {
+            url: url.into(),
+            request_body_values: request_body_values.into(),
+            status_code,
+            status_text: status_text.into(),
+            response_headers: Headers::new(),
+            response_body: response_body.into(),
+        }
+    }
+
+    /// Adds response headers extracted from the response.
+    pub fn with_response_headers(mut self, response_headers: Headers) -> Self {
+        self.response_headers = response_headers;
+        self
+    }
+}
+
 /// Inputs for the binary response handler.
 ///
 /// This is the Rust-native data boundary for upstream
@@ -2135,6 +2189,97 @@ pub fn create_status_code_error_response_handler(
     ResponseHandlerResult::new(error).with_response_headers(response_headers)
 }
 
+/// Parses a failed JSON response body into an API-call error when possible.
+///
+/// This mirrors upstream `createJsonErrorResponseHandler`: empty bodies and
+/// malformed JSON error payloads fall back to the response status text, while a
+/// valid parsed error payload drives the error message and is preserved as
+/// [`ApiCallError::data`]. The retry override closure returns `Some(bool)` to
+/// replace the upstream status-code default or `None` to keep it.
+pub fn create_json_error_response_handler<T, F, E, M, S, R>(
+    options: JsonErrorResponseHandlerOptions,
+    validate: F,
+    error_to_message: M,
+    is_retryable: R,
+) -> ResponseHandlerResult<ApiCallError>
+where
+    T: Serialize,
+    F: FnOnce(&JsonValue) -> Result<T, E>,
+    E: fmt::Display,
+    M: FnOnce(&T) -> S,
+    S: Into<String>,
+    R: FnOnce(u16, Option<&T>) -> Option<bool>,
+{
+    if options.response_body.trim().is_empty() {
+        let retry_override = is_retryable(options.status_code, None);
+        let message = options.status_text.clone();
+        return json_error_response_result(options, message, None, retry_override);
+    }
+
+    let raw_value = match safe_parse_json(&options.response_body) {
+        ParseJsonResult::Success { raw_value, .. } => raw_value,
+        ParseJsonResult::Failure { .. } => {
+            let retry_override = is_retryable(options.status_code, None);
+            let message = options.status_text.clone();
+            return json_error_response_result(options, message, None, retry_override);
+        }
+    };
+
+    match safe_validate_types(raw_value, validate, None) {
+        ValidateTypesResult::Success {
+            value: parsed_error,
+            ..
+        } => match serde_json::to_value(&parsed_error) {
+            Ok(data) => {
+                let retry_override = is_retryable(options.status_code, Some(&parsed_error));
+                let message = error_to_message(&parsed_error).into();
+                json_error_response_result(options, message, Some(data), retry_override)
+            }
+            Err(_) => {
+                let retry_override = is_retryable(options.status_code, None);
+                let message = options.status_text.clone();
+                json_error_response_result(options, message, None, retry_override)
+            }
+        },
+        ValidateTypesResult::Failure { .. } => {
+            let retry_override = is_retryable(options.status_code, None);
+            let message = options.status_text.clone();
+            json_error_response_result(options, message, None, retry_override)
+        }
+    }
+}
+
+fn json_error_response_result(
+    options: JsonErrorResponseHandlerOptions,
+    message: String,
+    data: Option<JsonValue>,
+    retry_override: Option<bool>,
+) -> ResponseHandlerResult<ApiCallError> {
+    let JsonErrorResponseHandlerOptions {
+        url,
+        request_body_values,
+        status_code,
+        response_headers,
+        response_body,
+        ..
+    } = options;
+
+    let mut error = ApiCallError::new(message, url, request_body_values)
+        .with_status_code(status_code)
+        .with_response_headers(response_headers.clone())
+        .with_response_body(response_body);
+
+    if let Some(data) = data {
+        error = error.with_data(data);
+    }
+
+    if let Some(is_retryable) = retry_override {
+        error = error.with_is_retryable(is_retryable);
+    }
+
+    ResponseHandlerResult::new(error).with_response_headers(response_headers)
+}
+
 /// Parses and validates a successful JSON response body.
 ///
 /// This mirrors upstream `createJsonResponseHandler`: the returned handler
@@ -2557,24 +2702,25 @@ mod tests {
     use super::{
         Arrayable, Base64DecodeError, BinaryResponseHandlerOptions, DEFAULT_MAX_DOWNLOAD_SIZE,
         DownloadError, InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
-        JsonResponseHandlerOptions, LoadApiKeyOptions, LoadOptionalSettingOptions,
-        LoadSettingOptions, ParseJsonError, ParseJsonResult, ReasoningLevel, ResponseHandlerResult,
-        StatusCodeErrorResponseHandlerOptions, Tool, ToolExecutionError, ToolExecutionOptions,
-        ValidateTypesResult, add_additional_properties_to_json_schema, as_array, combine_headers,
+        JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, LoadApiKeyOptions,
+        LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError, ParseJsonResult,
+        ReasoningLevel, ResponseHandlerResult, StatusCodeErrorResponseHandlerOptions, Tool,
+        ToolExecutionError, ToolExecutionOptions, ValidateTypesResult,
+        add_additional_properties_to_json_schema, as_array, combine_headers,
         convert_base64_to_bytes, convert_bytes_to_base64, convert_image_model_file_to_data_uri,
         convert_inline_file_data_to_bytes, convert_to_base64, create_binary_response_handler,
-        create_json_response_handler, create_status_code_error_response_handler,
-        create_tool_name_mapping, detect_media_type, extract_response_headers, filter_nullable,
-        get_top_level_media_type, inject_json_instruction, inject_json_instruction_into_messages,
-        is_custom_reasoning, is_full_media_type, is_non_nullable, is_parsable_json,
-        is_provider_reference, is_url_supported, load_api_key, load_api_key_with_env,
-        load_optional_setting_with_env, load_setting, load_setting_with_env,
-        map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
-        media_type_to_extension, normalize_headers, parse_json, parse_provider_options,
-        prepare_tools, read_response_with_size_limit, remove_undefined_entries,
-        resolve_full_media_type, resolve_provider_reference, safe_parse_json, safe_validate_types,
-        strip_file_extension, validate_download_url, validate_types, with_user_agent_suffix,
-        without_trailing_slash,
+        create_json_error_response_handler, create_json_response_handler,
+        create_status_code_error_response_handler, create_tool_name_mapping, detect_media_type,
+        extract_response_headers, filter_nullable, get_top_level_media_type,
+        inject_json_instruction, inject_json_instruction_into_messages, is_custom_reasoning,
+        is_full_media_type, is_non_nullable, is_parsable_json, is_provider_reference,
+        is_url_supported, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
+        load_setting, load_setting_with_env, map_reasoning_to_provider_budget,
+        map_reasoning_to_provider_effort, media_type_to_extension, normalize_headers, parse_json,
+        parse_provider_options, prepare_tools, read_response_with_size_limit,
+        remove_undefined_entries, resolve_full_media_type, resolve_provider_reference,
+        safe_parse_json, safe_validate_types, strip_file_extension, validate_download_url,
+        validate_types, with_user_agent_suffix, without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -2625,6 +2771,29 @@ mod tests {
         Ok(Person {
             name: name.to_string(),
             age,
+        })
+    }
+
+    #[derive(Debug, Eq, PartialEq, serde::Serialize)]
+    struct ErrorPayload {
+        code: String,
+        message: String,
+    }
+
+    fn validate_error_payload(value: &JsonValue) -> Result<ErrorPayload, &'static str> {
+        let object = value.as_object().ok_or("Invalid error")?;
+        let code = object
+            .get("code")
+            .and_then(JsonValue::as_str)
+            .ok_or("Invalid error")?;
+        let message = object
+            .get("message")
+            .and_then(JsonValue::as_str)
+            .ok_or("Invalid error")?;
+
+        Ok(ErrorPayload {
+            code: code.to_string(),
+            message: message.to_string(),
         })
     }
 
@@ -4466,6 +4635,144 @@ mod tests {
         assert_eq!(error.status_code(), Some(500));
         assert_eq!(error.response_headers(), Some(&response_headers));
         assert_eq!(error.response_body(), None);
+        assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn json_error_response_handler_options_use_camel_case_json() {
+        let options = JsonErrorResponseHandlerOptions::new(
+            "https://api.example.com/models",
+            json!({ "model": "test" }),
+            400,
+            "Bad Request",
+            r#"{"code":"bad_request","message":"Invalid model"}"#,
+        )
+        .with_response_headers(BTreeMap::from([(
+            "x-request-id".to_string(),
+            "req_400".to_string(),
+        )]));
+
+        let serialized = serde_json::to_value(&options).expect("options serialize");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "url": "https://api.example.com/models",
+                "requestBodyValues": { "model": "test" },
+                "statusCode": 400,
+                "statusText": "Bad Request",
+                "responseHeaders": {
+                    "x-request-id": "req_400"
+                },
+                "responseBody": "{\"code\":\"bad_request\",\"message\":\"Invalid model\"}"
+            })
+        );
+
+        let deserialized: JsonErrorResponseHandlerOptions =
+            serde_json::from_value(serialized).expect("options deserialize");
+
+        assert_eq!(deserialized, options);
+    }
+
+    #[test]
+    fn create_json_error_response_handler_uses_parsed_error_data() {
+        let response_headers =
+            BTreeMap::from([("content-type".to_string(), "application/json".to_string())]);
+        let options = JsonErrorResponseHandlerOptions::new(
+            "https://api.example.com/models",
+            json!({ "model": "test" }),
+            400,
+            "Bad Request",
+            r#"{"code":"bad_request","message":"Invalid model"}"#,
+        )
+        .with_response_headers(response_headers.clone());
+
+        let result = create_json_error_response_handler(
+            options,
+            validate_error_payload,
+            |error| format!("{}: {}", error.code, error.message),
+            |status_code, error| {
+                assert_eq!(status_code, 400);
+                assert_eq!(error.map(|error| error.code.as_str()), Some("bad_request"));
+                Some(false)
+            },
+        );
+        let error = result.value();
+
+        assert_eq!(result.response_headers(), Some(&response_headers));
+        assert_eq!(error.message(), "bad_request: Invalid model");
+        assert_eq!(error.url(), "https://api.example.com/models");
+        assert_eq!(error.request_body_values(), &json!({ "model": "test" }));
+        assert_eq!(error.status_code(), Some(400));
+        assert_eq!(error.response_headers(), Some(&response_headers));
+        assert_eq!(
+            error.response_body(),
+            Some("{\"code\":\"bad_request\",\"message\":\"Invalid model\"}")
+        );
+        assert_eq!(
+            error.data(),
+            Some(&json!({ "code": "bad_request", "message": "Invalid model" }))
+        );
+        assert!(!error.is_retryable());
+    }
+
+    #[test]
+    fn create_json_error_response_handler_falls_back_for_empty_body() {
+        let options = JsonErrorResponseHandlerOptions::new(
+            "https://api.example.com/models",
+            json!({ "model": "test" }),
+            400,
+            "Bad Request",
+            " \n\t ",
+        );
+
+        let result = create_json_error_response_handler(
+            options,
+            validate_error_payload,
+            |error| error.message.clone(),
+            |status_code, error: Option<&ErrorPayload>| {
+                assert_eq!(status_code, 400);
+                assert!(error.is_none());
+                Some(true)
+            },
+        );
+        let error = result.value();
+
+        assert_eq!(error.message(), "Bad Request");
+        assert_eq!(error.response_body(), Some(" \n\t "));
+        assert_eq!(error.data(), None);
+        assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn create_json_error_response_handler_falls_back_for_invalid_json() {
+        let response_headers =
+            BTreeMap::from([("content-type".to_string(), "application/json".to_string())]);
+        let options = JsonErrorResponseHandlerOptions::new(
+            "https://api.example.com/models",
+            json!({ "model": "test" }),
+            502,
+            "Bad Gateway",
+            "{not json",
+        )
+        .with_response_headers(response_headers.clone());
+
+        let result = create_json_error_response_handler(
+            options,
+            validate_error_payload,
+            |error| error.message.clone(),
+            |_, error: Option<&ErrorPayload>| {
+                assert!(error.is_none());
+                None
+            },
+        );
+        let error = result.value();
+
+        assert_eq!(result.response_headers(), Some(&response_headers));
+        assert_eq!(error.message(), "Bad Gateway");
+        assert_eq!(error.status_code(), Some(502));
+        assert_eq!(error.response_body(), Some("{not json"));
+        assert_eq!(error.data(), None);
         assert!(error.is_retryable());
     }
 
