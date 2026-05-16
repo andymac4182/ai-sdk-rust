@@ -89,7 +89,7 @@ pub use provider::{
 pub use provider_utils::{
     LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, load_api_key,
     load_optional_setting, load_setting, media_type_to_extension, resolve_provider_reference,
-    strip_file_extension,
+    strip_file_extension, without_trailing_slash,
 };
 pub use reranking_model::{
     RerankingModel, RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,

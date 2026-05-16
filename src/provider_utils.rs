@@ -208,6 +208,11 @@ pub fn strip_file_extension(filename: &str) -> &str {
         .map_or(filename, |first_dot_index| &filename[..first_dot_index])
 }
 
+/// Removes exactly one trailing slash from a URL-like string when present.
+pub fn without_trailing_slash(url: Option<&str>) -> Option<&str> {
+    url.map(|url| url.strip_suffix('/').unwrap_or(url))
+}
+
 /// Resolves a provider reference to the provider-specific identifier.
 ///
 /// This mirrors upstream `@ai-sdk/provider-utils` `resolveProviderReference`
@@ -231,6 +236,7 @@ mod tests {
         LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, load_api_key,
         load_api_key_with_env, load_optional_setting_with_env, load_setting, load_setting_with_env,
         media_type_to_extension, resolve_provider_reference, strip_file_extension,
+        without_trailing_slash,
     };
 
     #[test]
@@ -428,6 +434,35 @@ mod tests {
     #[test]
     fn strip_file_extension_strips_a_trailing_dot() {
         assert_eq!(strip_file_extension("report."), "report");
+    }
+
+    #[test]
+    fn without_trailing_slash_removes_one_trailing_slash() {
+        assert_eq!(
+            without_trailing_slash(Some("https://api.example.com/")),
+            Some("https://api.example.com")
+        );
+    }
+
+    #[test]
+    fn without_trailing_slash_preserves_values_without_trailing_slash() {
+        assert_eq!(
+            without_trailing_slash(Some("https://api.example.com/v1")),
+            Some("https://api.example.com/v1")
+        );
+    }
+
+    #[test]
+    fn without_trailing_slash_preserves_missing_url() {
+        assert_eq!(without_trailing_slash(None), None);
+    }
+
+    #[test]
+    fn without_trailing_slash_only_removes_the_final_slash() {
+        assert_eq!(
+            without_trailing_slash(Some("https://api.example.com//")),
+            Some("https://api.example.com/")
+        );
     }
 
     #[test]
