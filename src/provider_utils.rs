@@ -1,5 +1,6 @@
 use std::env::{self, VarError};
 
+use crate::file_data::{NoSuchProviderReferenceError, ProviderReference};
 use crate::provider::{LoadApiKeyError, LoadSettingError};
 
 /// Options for loading a provider API key from an explicit value or environment variable.
@@ -184,14 +185,29 @@ fn load_optional_setting_with_env(
     load_env(&options.environment_variable_name).ok()
 }
 
+/// Resolves a provider reference to the provider-specific identifier.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils` `resolveProviderReference`
+/// while reusing the crate's shared provider-reference contract.
+pub fn resolve_provider_reference<'a>(
+    reference: &'a ProviderReference,
+    provider: &str,
+) -> Result<&'a str, NoSuchProviderReferenceError> {
+    reference.provider_id(provider)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::env::VarError;
     use std::ffi::OsString;
+
+    use crate::ProviderReference;
 
     use super::{
         LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, load_api_key,
         load_api_key_with_env, load_optional_setting_with_env, load_setting, load_setting_with_env,
+        resolve_provider_reference,
     };
 
     #[test]
@@ -339,5 +355,51 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn resolve_provider_reference_returns_provider_specific_identifier() {
+        let reference = ProviderReference::try_from(BTreeMap::from([
+            ("anthropic".to_string(), "file-xyz".to_string()),
+            ("openai".to_string(), "file-abc".to_string()),
+        ]))
+        .expect("provider reference is valid");
+
+        assert_eq!(
+            resolve_provider_reference(&reference, "openai").expect("openai reference is present"),
+            "file-abc"
+        );
+        assert_eq!(
+            resolve_provider_reference(&reference, "anthropic")
+                .expect("anthropic reference is present"),
+            "file-xyz"
+        );
+    }
+
+    #[test]
+    fn resolve_provider_reference_reports_missing_provider_context() {
+        let reference = ProviderReference::try_from(BTreeMap::from([(
+            "anthropic".to_string(),
+            "file-xyz".to_string(),
+        )]))
+        .expect("provider reference is valid");
+
+        let error = resolve_provider_reference(&reference, "openai")
+            .expect_err("missing provider reference is rejected");
+
+        assert_eq!(error.provider(), "openai");
+        assert_eq!(error.reference(), &reference);
+    }
+
+    #[test]
+    fn resolve_provider_reference_rejects_empty_references() {
+        let reference =
+            ProviderReference::try_from(BTreeMap::new()).expect("empty reference is valid");
+
+        let error = resolve_provider_reference(&reference, "openai")
+            .expect_err("empty reference cannot satisfy provider lookup");
+
+        assert_eq!(error.provider(), "openai");
+        assert_eq!(error.reference(), &reference);
     }
 }
