@@ -369,6 +369,57 @@ impl fmt::Display for InvalidToolApprovalError {
 
 impl std::error::Error for InvalidToolApprovalError {}
 
+/// Error returned when an approval request references an unknown tool call.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolCallNotFoundForApprovalError {
+    tool_call_id: String,
+    approval_id: String,
+    message: String,
+}
+
+impl ToolCallNotFoundForApprovalError {
+    /// Creates a missing-tool-call-for-approval error with the upstream default message.
+    pub fn new(tool_call_id: impl Into<String>, approval_id: impl Into<String>) -> Self {
+        let tool_call_id = tool_call_id.into();
+        let approval_id = approval_id.into();
+        let message = tool_call_not_found_for_approval_default_message(&tool_call_id, &approval_id);
+
+        Self {
+            tool_call_id,
+            approval_id,
+            message,
+        }
+    }
+
+    /// Returns the missing tool call ID.
+    pub fn tool_call_id(&self) -> &str {
+        &self.tool_call_id
+    }
+
+    /// Returns the approval request ID.
+    pub fn approval_id(&self) -> &str {
+        &self.approval_id
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into its parts.
+    pub fn into_parts(self) -> (String, String, String) {
+        (self.tool_call_id, self.approval_id, self.message)
+    }
+}
+
+impl fmt::Display for ToolCallNotFoundForApprovalError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ToolCallNotFoundForApprovalError {}
+
 /// Reasoning content emitted during a high-level generate-text step.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(untagged)]
@@ -1785,6 +1836,13 @@ fn invalid_tool_approval_default_message(approval_id: &str) -> String {
     )
 }
 
+fn tool_call_not_found_for_approval_default_message(
+    tool_call_id: &str,
+    approval_id: &str,
+) -> String {
+    format!("Tool call \"{tool_call_id}\" not found for approval request \"{approval_id}\".")
+}
+
 fn add_step_usage(steps: &[GenerateTextStep]) -> LanguageModelUsage {
     steps
         .iter()
@@ -1828,8 +1886,9 @@ mod tests {
     use super::{
         GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning, GenerateTextResult,
         GenerateTextStep, GenerateTextToolCall, GenerateTextToolResult, InvalidToolApprovalError,
-        InvalidToolInputError, MissingToolResultsError, NoSuchToolError, ToolCallRepairError,
-        ToolCallRepairOriginalError, generate_text,
+        InvalidToolInputError, MissingToolResultsError, NoSuchToolError,
+        ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOriginalError,
+        generate_text,
     };
     use crate::file_data::FileDataContent;
     use crate::language_model::{
@@ -2011,6 +2070,28 @@ mod tests {
             (
                 "approval-1".to_string(),
                 "Tool approval response references unknown approvalId: \"approval-1\". No matching tool-approval-request found in message history."
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn tool_call_not_found_for_approval_error_matches_upstream_default_message() {
+        let error = ToolCallNotFoundForApprovalError::new("tool-call-1", "approval-1");
+
+        assert_eq!(error.tool_call_id(), "tool-call-1");
+        assert_eq!(error.approval_id(), "approval-1");
+        assert_eq!(
+            error.message(),
+            "Tool call \"tool-call-1\" not found for approval request \"approval-1\"."
+        );
+        assert_eq!(error.to_string(), error.message());
+        assert_eq!(
+            error.into_parts(),
+            (
+                "tool-call-1".to_string(),
+                "approval-1".to_string(),
+                "Tool call \"tool-call-1\" not found for approval request \"approval-1\"."
                     .to_string()
             )
         );

@@ -41,7 +41,8 @@ pub use generate_text::{
     GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning, GenerateTextResult,
     GenerateTextStep, GenerateTextTool, GenerateTextToolCall, GenerateTextToolResult,
     InvalidToolApprovalError, InvalidToolInputError, MissingToolResultsError, NoSuchToolError,
-    ToolCallRepairError, ToolCallRepairOriginalError, generate_text,
+    ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOriginalError,
+    generate_text,
 };
 pub use headers::Headers;
 pub use image_model::{
