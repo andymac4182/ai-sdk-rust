@@ -68,7 +68,7 @@ pub use provider::{
     TypeValidationError, UnsupportedFunctionalityError, get_error_message,
 };
 pub use reranking_model::{
-    RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
+    RerankingModel, RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
     RerankingModelResponse, RerankingModelResult,
 };
 pub use skills::{
