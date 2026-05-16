@@ -130,6 +130,184 @@ pub async fn resolve<T>(value: Resolvable<'_, T>) -> T {
     }
 }
 
+enum DelayedPromiseStatus<T, E> {
+    Pending,
+    Resolved(Arc<T>),
+    Rejected(Arc<E>),
+}
+
+struct DelayedPromiseInner<T, E> {
+    status: DelayedPromiseStatus<T, E>,
+    promise_created: bool,
+    promise_result: Option<Result<Arc<T>, Arc<E>>>,
+    wakers: Vec<Waker>,
+}
+
+impl<T, E> DelayedPromiseInner<T, E> {
+    fn new() -> Self {
+        Self {
+            status: DelayedPromiseStatus::Pending,
+            promise_created: false,
+            promise_result: None,
+            wakers: Vec::new(),
+        }
+    }
+
+    fn result_from_status(&self) -> Option<Result<Arc<T>, Arc<E>>> {
+        match &self.status {
+            DelayedPromiseStatus::Pending => None,
+            DelayedPromiseStatus::Resolved(value) => Some(Ok(Arc::clone(value))),
+            DelayedPromiseStatus::Rejected(error) => Some(Err(Arc::clone(error))),
+        }
+    }
+
+    fn wake_pending(&mut self) {
+        for waker in self.wakers.drain(..) {
+            waker.wake();
+        }
+    }
+}
+
+/// Future returned by [`DelayedPromise::promise`].
+pub struct DelayedPromiseFuture<T, E = String> {
+    inner: Arc<Mutex<DelayedPromiseInner<T, E>>>,
+}
+
+impl<T: Clone, E: Clone> Future for DelayedPromiseFuture<T, E> {
+    type Output = Result<T, E>;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("delayed promise state mutex is not poisoned");
+
+        match &inner.promise_result {
+            Some(Ok(value)) => Poll::Ready(Ok((**value).clone())),
+            Some(Err(error)) => Poll::Ready(Err((**error).clone())),
+            None => {
+                if !inner
+                    .wakers
+                    .iter()
+                    .any(|waker| waker.will_wake(context.waker()))
+                {
+                    inner.wakers.push(context.waker().clone());
+                }
+
+                Poll::Pending
+            }
+        }
+    }
+}
+
+/// Lazily created externally resolved future.
+///
+/// This mirrors upstream provider-utils `DelayedPromise`: the future returned by
+/// [`promise`](Self::promise) is only materialized when accessed, so resolving or
+/// rejecting before access stores the latest state without creating pending
+/// async work.
+#[derive(Clone)]
+pub struct DelayedPromise<T, E = String> {
+    inner: Arc<Mutex<DelayedPromiseInner<T, E>>>,
+}
+
+impl<T, E> DelayedPromise<T, E> {
+    /// Creates a pending delayed promise.
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(DelayedPromiseInner::new())),
+        }
+    }
+
+    /// Returns a future for the delayed result, creating it on first access.
+    pub fn promise(&self) -> DelayedPromiseFuture<T, E> {
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("delayed promise state mutex is not poisoned");
+
+        if !inner.promise_created {
+            inner.promise_created = true;
+            inner.promise_result = inner.result_from_status();
+        }
+
+        DelayedPromiseFuture {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
+    /// Resolves the delayed promise.
+    pub fn resolve(&self, value: T) {
+        let value = Arc::new(value);
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("delayed promise state mutex is not poisoned");
+
+        inner.status = DelayedPromiseStatus::Resolved(Arc::clone(&value));
+
+        if inner.promise_created && inner.promise_result.is_none() {
+            inner.promise_result = Some(Ok(value));
+            inner.wake_pending();
+        }
+    }
+
+    /// Rejects the delayed promise.
+    pub fn reject(&self, error: E) {
+        let error = Arc::new(error);
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("delayed promise state mutex is not poisoned");
+
+        inner.status = DelayedPromiseStatus::Rejected(Arc::clone(&error));
+
+        if inner.promise_created && inner.promise_result.is_none() {
+            inner.promise_result = Some(Err(error));
+            inner.wake_pending();
+        }
+    }
+
+    /// Returns whether the latest delayed promise status is resolved.
+    pub fn is_resolved(&self) -> bool {
+        matches!(
+            self.inner
+                .lock()
+                .expect("delayed promise state mutex is not poisoned")
+                .status,
+            DelayedPromiseStatus::Resolved(_)
+        )
+    }
+
+    /// Returns whether the latest delayed promise status is rejected.
+    pub fn is_rejected(&self) -> bool {
+        matches!(
+            self.inner
+                .lock()
+                .expect("delayed promise state mutex is not poisoned")
+                .status,
+            DelayedPromiseStatus::Rejected(_)
+        )
+    }
+
+    /// Returns whether the latest delayed promise status is pending.
+    pub fn is_pending(&self) -> bool {
+        matches!(
+            self.inner
+                .lock()
+                .expect("delayed promise state mutex is not poisoned")
+                .status,
+            DelayedPromiseStatus::Pending
+        )
+    }
+}
+
+impl<T, E> Default for DelayedPromise<T, E> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 struct DelayState {
     completed: bool,
     waker: Option<Waker>,
@@ -5857,9 +6035,9 @@ mod tests {
 
     use super::{
         Arrayable, Base64DecodeError, BinaryResponseHandlerOptions, ConvertToFormDataOptions,
-        DEFAULT_MAX_DOWNLOAD_SIZE, DownloadBlobOptions, DownloadBlobResponse, DownloadError,
-        DownloadedBlob, EventSourceResponseHandlerOptions, FetchErrorInfo, FormData, FormDataEntry,
-        FormDataInputValue, FormDataValue, GetFromApiOptions, HandledFetchError,
+        DEFAULT_MAX_DOWNLOAD_SIZE, DelayedPromise, DownloadBlobOptions, DownloadBlobResponse,
+        DownloadError, DownloadedBlob, EventSourceResponseHandlerOptions, FetchErrorInfo, FormData,
+        FormDataEntry, FormDataInputValue, FormDataValue, GetFromApiOptions, HandledFetchError,
         IdGeneratorOptions, InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
         JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, LoadApiKeyOptions,
         LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError, ParseJsonResult,
@@ -5964,6 +6142,110 @@ mod tests {
         let failure: Resolvable<'_, Result<&str, &str>> =
             Resolvable::function(|| ready(Err("bad")));
         assert_eq!(poll_ready(resolve(failure)), Err("bad"));
+    }
+
+    #[test]
+    fn delayed_promise_starts_pending() {
+        let delayed = DelayedPromise::<String>::new();
+
+        assert!(delayed.is_pending());
+        assert!(!delayed.is_resolved());
+        assert!(!delayed.is_rejected());
+    }
+
+    #[test]
+    fn delayed_promise_resolves_when_accessed_after_resolution() {
+        let delayed = DelayedPromise::<String>::new();
+
+        delayed.resolve("success".to_string());
+
+        assert!(delayed.is_resolved());
+        assert_eq!(poll_ready(delayed.promise()), Ok("success".to_string()));
+    }
+
+    #[test]
+    fn delayed_promise_rejects_when_accessed_after_rejection() {
+        let delayed = DelayedPromise::<String>::new();
+
+        delayed.reject("failure".to_string());
+
+        assert!(delayed.is_rejected());
+        assert_eq!(poll_ready(delayed.promise()), Err("failure".to_string()));
+    }
+
+    #[test]
+    fn delayed_promise_waits_until_resolved_when_accessed_first() {
+        let delayed = DelayedPromise::<String>::new();
+        let mut future = Box::pin(delayed.promise());
+
+        assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
+
+        delayed.resolve("delayed-success".to_string());
+
+        assert_eq!(
+            poll_once(future.as_mut()),
+            Poll::Ready(Ok("delayed-success".to_string()))
+        );
+    }
+
+    #[test]
+    fn delayed_promise_waits_until_rejected_when_accessed_first() {
+        let delayed = DelayedPromise::<String>::new();
+        let mut future = Box::pin(delayed.promise());
+
+        assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
+
+        delayed.reject("delayed-failure".to_string());
+
+        assert_eq!(
+            poll_once(future.as_mut()),
+            Poll::Ready(Err("delayed-failure".to_string()))
+        );
+    }
+
+    #[test]
+    fn delayed_promise_resolves_all_accessed_futures() {
+        let delayed = DelayedPromise::<String>::new();
+        let mut first = Box::pin(delayed.promise());
+        let mut second = Box::pin(delayed.promise());
+
+        assert!(matches!(poll_once(first.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(second.as_mut()), Poll::Pending));
+
+        delayed.resolve("success".to_string());
+
+        assert_eq!(
+            poll_once(first.as_mut()),
+            Poll::Ready(Ok("success".to_string()))
+        );
+        assert_eq!(
+            poll_once(second.as_mut()),
+            Poll::Ready(Ok("success".to_string()))
+        );
+    }
+
+    #[test]
+    fn delayed_promise_accessed_future_keeps_first_settlement() {
+        let delayed = DelayedPromise::<String>::new();
+        let promise = delayed.promise();
+
+        delayed.resolve("first".to_string());
+        delayed.reject("second".to_string());
+
+        assert!(delayed.is_rejected());
+        assert_eq!(poll_ready(promise), Ok("first".to_string()));
+        assert_eq!(poll_ready(delayed.promise()), Ok("first".to_string()));
+    }
+
+    #[test]
+    fn delayed_promise_uses_latest_status_before_first_access() {
+        let delayed = DelayedPromise::<String>::new();
+
+        delayed.resolve("first".to_string());
+        delayed.reject("second".to_string());
+
+        assert!(delayed.is_rejected());
+        assert_eq!(poll_ready(delayed.promise()), Err("second".to_string()));
     }
 
     #[test]
