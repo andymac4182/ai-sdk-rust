@@ -7,14 +7,18 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::file_data::{FileDataContent, NoSuchProviderReferenceError, ProviderReference};
+use crate::file_data::{
+    FileData, FileDataContent, NoSuchProviderReferenceError, ProviderReference,
+};
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonSchema, JsonValue};
 use crate::language_model::{
-    LanguageModelFunctionTool, LanguageModelMessage, LanguageModelPrompt,
+    LanguageModelFilePart, LanguageModelFunctionTool, LanguageModelMessage, LanguageModelPrompt,
     LanguageModelSystemMessage, LanguageModelTool, LanguageModelToolInputExample,
 };
-use crate::provider::{LoadApiKeyError, LoadSettingError, ProviderOptions};
+use crate::provider::{
+    LoadApiKeyError, LoadSettingError, ProviderOptions, UnsupportedFunctionalityError,
+};
 
 const DEFAULT_JSON_SCHEMA_INSTRUCTION_PREFIX: &str = "JSON schema:";
 const DEFAULT_JSON_SCHEMA_INSTRUCTION_SUFFIX: &str =
@@ -910,6 +914,36 @@ pub fn is_full_media_type(media_type: &str) -> bool {
         .is_some_and(|(_, subtype)| !subtype.is_empty() && subtype != "*")
 }
 
+/// Resolves a prompt file part media type to a full `type/subtype` value.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils` `resolveFullMediaType`:
+/// full media types are returned unchanged, top-level or wildcard media types
+/// are detected from inline byte data when possible, and other unresolved cases
+/// report an [`UnsupportedFunctionalityError`].
+pub fn resolve_full_media_type(
+    part: &LanguageModelFilePart,
+) -> Result<String, UnsupportedFunctionalityError> {
+    if is_full_media_type(&part.media_type) {
+        return Ok(part.media_type.clone());
+    }
+
+    let FileData::Data { data } = &part.data else {
+        return Err(UnsupportedFunctionalityError::new(format!(
+            "file of media type \"{}\" must specify subtype since it is not passed as inline bytes",
+            part.media_type
+        )));
+    };
+
+    detect_media_type(data, Some(get_top_level_media_type(&part.media_type)))
+        .map(str::to_string)
+        .ok_or_else(|| {
+            UnsupportedFunctionalityError::new(format!(
+                "file of media type \"{}\" must specify subtype since it could not be auto-detected",
+                part.media_type
+            ))
+        })
+}
+
 /// Combines optional HTTP header maps, with later maps overriding earlier ones.
 ///
 /// This mirrors upstream `@ai-sdk/provider-utils` `combineHeaders`: missing
@@ -1225,12 +1259,13 @@ mod tests {
     use std::task::{Context, Poll, Waker};
 
     use crate::language_model::{
-        LanguageModelFunctionTool, LanguageModelMessage, LanguageModelProviderTool,
-        LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelTool,
-        LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelFilePart, LanguageModelFunctionTool, LanguageModelMessage,
+        LanguageModelProviderTool, LanguageModelSystemMessage, LanguageModelTextPart,
+        LanguageModelTool, LanguageModelUserContentPart, LanguageModelUserMessage,
     };
-    use crate::{FileDataContent, JsonObject, JsonValue, ProviderReference};
+    use crate::{FileData, FileDataContent, JsonObject, JsonValue, ProviderReference};
     use serde_json::json;
+    use url::Url;
 
     use super::{
         Arrayable, InjectJsonInstructionIntoMessagesOptions, LoadApiKeyOptions,
@@ -1241,8 +1276,8 @@ mod tests {
         is_non_nullable, is_provider_reference, load_api_key, load_api_key_with_env,
         load_optional_setting_with_env, load_setting, load_setting_with_env,
         media_type_to_extension, normalize_headers, prepare_tools, remove_undefined_entries,
-        resolve_provider_reference, strip_file_extension, with_user_agent_suffix,
-        without_trailing_slash,
+        resolve_full_media_type, resolve_provider_reference, strip_file_extension,
+        with_user_agent_suffix, without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -1867,6 +1902,102 @@ mod tests {
         assert_eq!(
             detect_media_type(&FileDataContent::Bytes(vec![0x1a, 0x45, 0xdf, 0xa3]), None,),
             Some("audio/webm")
+        );
+    }
+
+    #[test]
+    fn resolve_full_media_type_returns_full_media_type_as_is() {
+        let part = LanguageModelFilePart::new(
+            FileData::Data {
+                data: FileDataContent::Bytes(vec![0x89, 0x50, 0x4e, 0x47]),
+            },
+            "image/jpeg",
+        );
+
+        assert_eq!(
+            resolve_full_media_type(&part).expect("full media type resolves"),
+            "image/jpeg"
+        );
+    }
+
+    #[test]
+    fn resolve_full_media_type_detects_inline_byte_subtype() {
+        let part = LanguageModelFilePart::new(
+            FileData::Data {
+                data: FileDataContent::Bytes(vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]),
+            },
+            "image",
+        );
+
+        assert_eq!(
+            resolve_full_media_type(&part).expect("inline bytes resolve"),
+            "image/png"
+        );
+    }
+
+    #[test]
+    fn resolve_full_media_type_treats_wildcard_as_top_level() {
+        let part = LanguageModelFilePart::new(
+            FileData::Data {
+                data: FileDataContent::Base64("iVBORw0KGgo=".to_string()),
+            },
+            "image/*",
+        );
+
+        assert_eq!(
+            resolve_full_media_type(&part).expect("wildcard media type resolves"),
+            "image/png"
+        );
+    }
+
+    #[test]
+    fn resolve_full_media_type_detects_application_pdf() {
+        let part = LanguageModelFilePart::new(
+            FileData::Data {
+                data: FileDataContent::Bytes(vec![0x25, 0x50, 0x44, 0x46, 0x2d]),
+            },
+            "application",
+        );
+
+        assert_eq!(
+            resolve_full_media_type(&part).expect("application subtype resolves"),
+            "application/pdf"
+        );
+    }
+
+    #[test]
+    fn resolve_full_media_type_rejects_non_inline_byte_data() {
+        let part = LanguageModelFilePart::new(
+            FileData::Url {
+                url: Url::parse("https://example.com/file.png").expect("valid URL"),
+            },
+            "image",
+        );
+
+        let error = resolve_full_media_type(&part)
+            .expect_err("top-level URL media type requires a subtype");
+
+        assert_eq!(
+            error.functionality(),
+            "file of media type \"image\" must specify subtype since it is not passed as inline bytes"
+        );
+    }
+
+    #[test]
+    fn resolve_full_media_type_rejects_unrecognized_inline_bytes() {
+        let part = LanguageModelFilePart::new(
+            FileData::Data {
+                data: FileDataContent::Bytes(vec![0x00, 0x01, 0x02]),
+            },
+            "image",
+        );
+
+        let error = resolve_full_media_type(&part)
+            .expect_err("unrecognized inline bytes require a subtype");
+
+        assert_eq!(
+            error.functionality(),
+            "file of media type \"image\" must specify subtype since it could not be auto-detected"
         );
     }
 

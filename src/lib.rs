@@ -101,8 +101,8 @@ pub use provider_utils::{
     inject_json_instruction_into_messages, is_full_media_type, is_non_nullable,
     is_provider_reference, load_api_key, load_optional_setting, load_setting,
     media_type_to_extension, normalize_headers, prepare_tools, remove_undefined_entries,
-    resolve_provider_reference, strip_file_extension, with_user_agent_suffix,
-    without_trailing_slash,
+    resolve_full_media_type, resolve_provider_reference, strip_file_extension,
+    with_user_agent_suffix, without_trailing_slash,
 };
 pub use reranking_model::{
     RerankingModel, RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
