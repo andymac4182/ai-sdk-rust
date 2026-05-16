@@ -89,6 +89,33 @@ pub fn is_stop_condition_met(
         .any(|condition| condition.is_met(steps))
 }
 
+/// Filters high-level tools to the active tool subset.
+///
+/// This mirrors upstream `filterActiveTools`: missing tools or missing active
+/// tool names return the original tool set, while an active list keeps only
+/// tools whose names appear in that list.
+pub fn filter_active_tools(
+    tools: Option<Vec<Tool>>,
+    active_tools: Option<&[String]>,
+) -> Option<Vec<Tool>> {
+    let tools = tools?;
+
+    let Some(active_tools) = active_tools else {
+        return Some(tools);
+    };
+
+    Some(
+        tools
+            .into_iter()
+            .filter(|tool| {
+                active_tools
+                    .iter()
+                    .any(|active_tool| active_tool == &tool.name)
+            })
+            .collect(),
+    )
+}
+
 /// Error returned when a model tries to call a tool that is not available.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NoSuchToolError {
@@ -850,6 +877,9 @@ pub struct GenerateTextOptions<'a, M: LanguageModel + ?Sized> {
     /// High-level Rust tools made available to the model.
     pub tools: Vec<Tool>,
 
+    /// Optional active tool names used to restrict the available tool set.
+    pub active_tools: Option<Vec<String>>,
+
     /// Maximum number of model-call steps to run.
     pub max_steps: usize,
 
@@ -864,6 +894,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             model,
             call_options: LanguageModelCallOptions::new(prompt),
             tools: Vec::new(),
+            active_tools: None,
             max_steps: DEFAULT_MAX_STEPS,
             stop_conditions: Vec::new(),
         }
@@ -875,6 +906,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             model,
             call_options,
             tools: Vec::new(),
+            active_tools: None,
             max_steps: DEFAULT_MAX_STEPS,
             stop_conditions: Vec::new(),
         }
@@ -954,6 +986,18 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
     /// Sets the tool selection strategy.
     pub fn with_tool_choice(mut self, tool_choice: LanguageModelToolChoice) -> Self {
         self.call_options.tool_choice = Some(tool_choice);
+        self
+    }
+
+    /// Sets the active tool names for this generation.
+    ///
+    /// When set, only tools with matching names are sent to the model or
+    /// considered for local Rust execution.
+    pub fn with_active_tools(
+        mut self,
+        active_tools: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.active_tools = Some(active_tools.into_iter().map(Into::into).collect());
         self
     }
 
@@ -1589,11 +1633,19 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
     let GenerateTextOptions {
         model,
         mut call_options,
-        tools,
+        mut tools,
+        active_tools,
         max_steps,
         stop_conditions,
     } = options;
     let model_info = GenerateTextModelInfo::new(model.provider(), model.model_id());
+    let active_tools = active_tools.as_deref();
+
+    if active_tools.is_some() {
+        tools = filter_active_tools(Some(tools), active_tools).unwrap_or_default();
+        call_options.tools =
+            filter_active_language_model_tools(call_options.tools.take(), active_tools);
+    }
 
     if let Some(mut prepared_tools) = prepare_tools(&tools) {
         call_options
@@ -2193,6 +2245,29 @@ fn language_model_tool_name(tool: &LanguageModelTool) -> String {
     }
 }
 
+fn filter_active_language_model_tools(
+    tools: Option<Vec<LanguageModelTool>>,
+    active_tools: Option<&[String]>,
+) -> Option<Vec<LanguageModelTool>> {
+    let tools = tools?;
+
+    let Some(active_tools) = active_tools else {
+        return Some(tools);
+    };
+
+    let tools = tools
+        .into_iter()
+        .filter(|tool| {
+            let tool_name = language_model_tool_name(tool);
+            active_tools
+                .iter()
+                .any(|active_tool| active_tool == &tool_name)
+        })
+        .collect::<Vec<_>>();
+
+    if tools.is_empty() { None } else { Some(tools) }
+}
+
 fn no_such_tool_message(tool_name: &str, available_tool_names: Option<&[String]>) -> String {
     match available_tool_names {
         Some(available_tool_names) => {
@@ -2308,8 +2383,8 @@ mod tests {
         InvalidToolApprovalError, InvalidToolInputError, MissingToolResultsError,
         NoObjectGeneratedError, NoOutputGeneratedError, NoSuchToolError, StopCondition,
         ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOriginalError,
-        UiMessageStreamError, UnsupportedModelVersionError, generate_text, has_tool_call,
-        is_loop_finished, is_step_count, is_stop_condition_met,
+        UiMessageStreamError, UnsupportedModelVersionError, filter_active_tools, generate_text,
+        has_tool_call, is_loop_finished, is_step_count, is_stop_condition_met,
     };
     use crate::file_data::FileDataContent;
     use crate::language_model::{
@@ -3655,6 +3730,94 @@ mod tests {
             Some(vec![LanguageModelTool::Provider(
                 LanguageModelProviderTool::new("provider.web_search", "webSearch", args)
             )])
+        );
+    }
+
+    #[test]
+    fn filter_active_tools_filters_high_level_tool_sets_by_name() {
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let tools = vec![
+            Tool::new("weather", input_schema.clone()),
+            dynamic_tool("forecast", input_schema),
+        ];
+        let active_tools = vec!["forecast".to_string()];
+        let no_active_tools = None::<&[String]>;
+        let empty_active_tools = Vec::<String>::new();
+
+        let unchanged = filter_active_tools(Some(tools.clone()), no_active_tools)
+            .expect("missing active tools preserve the tool set");
+        assert_eq!(
+            unchanged
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["weather", "forecast"]
+        );
+
+        let filtered = filter_active_tools(Some(tools.clone()), Some(&active_tools))
+            .expect("filtered tools are present");
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["forecast"]
+        );
+        assert!(filter_active_tools(None, Some(&active_tools)).is_none());
+        assert!(
+            filter_active_tools(Some(tools), Some(&empty_active_tools))
+                .expect("empty active tools produce an empty tool set")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn generate_text_filters_active_tools_before_calling_language_model() {
+        let model = FakeLanguageModel::new();
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let provider_args = json!({ "location": "AU" })
+            .as_object()
+            .expect("args are an object")
+            .clone();
+        let provider_tool = LanguageModelTool::Provider(LanguageModelProviderTool::new(
+            "provider.web_search",
+            "webSearch",
+            provider_args.clone(),
+        ));
+
+        let _ = poll_ready(generate_text(
+            GenerateTextOptions::from_call_options(
+                &model,
+                LanguageModelCallOptions::new(vec![user_message("Weather?")])
+                    .with_tool(provider_tool),
+            )
+            .with_tool(Tool::new("weather", input_schema.clone()))
+            .with_tool(Tool::new("forecast", input_schema))
+            .with_active_tools(["forecast", "webSearch"]),
+        ));
+
+        assert_eq!(
+            model.calls.borrow()[0].tools,
+            Some(vec![
+                LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "provider.web_search",
+                    "webSearch",
+                    provider_args,
+                )),
+                LanguageModelTool::Function(LanguageModelFunctionTool::new(
+                    "forecast",
+                    json!({ "type": "object" })
+                        .as_object()
+                        .expect("schema is an object")
+                        .clone(),
+                )),
+            ])
         );
     }
 
