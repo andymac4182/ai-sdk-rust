@@ -34,6 +34,8 @@ use crate::provider::{
 };
 use crate::warning::Warning;
 
+pub use crate::provider::get_error_message;
+
 const DEFAULT_JSON_SCHEMA_INSTRUCTION_PREFIX: &str = "JSON schema:";
 const DEFAULT_JSON_SCHEMA_INSTRUCTION_SUFFIX: &str =
     "You MUST answer with a JSON object that matches the JSON schema above.";
@@ -5806,20 +5808,20 @@ mod tests {
         create_provider_executed_tool_factory, create_status_code_error_response_handler,
         create_tool_name_mapping, delay, detect_media_type, download_blob, dynamic_tool,
         execute_provider_api_request, extract_response_headers, filter_nullable, generate_id,
-        get_from_api, get_runtime_environment_user_agent, get_top_level_media_type,
-        handle_fetch_error, handle_provider_api_response, inject_json_instruction,
-        inject_json_instruction_into_messages, is_abort_error, is_custom_reasoning,
-        is_full_media_type, is_non_nullable, is_parsable_json, is_provider_reference,
-        is_url_supported, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
-        load_setting, load_setting_with_env, map_reasoning_to_provider_budget,
-        map_reasoning_to_provider_effort, media_type_to_extension, normalize_headers, parse_json,
-        parse_json_event_stream, parse_provider_options, post_json_to_api, post_to_api,
-        prepare_get_from_api_request, prepare_post_json_to_api_request,
-        prepare_post_to_api_request, prepare_tools, read_response_with_size_limit,
-        remove_undefined_entries, resolve_full_media_type, resolve_provider_reference,
-        safe_parse_json, safe_validate_types, serialize_model_options, strip_file_extension,
-        validate_download_url, validate_types, with_provider_utils_user_agent,
-        with_user_agent_suffix, without_trailing_slash,
+        get_error_message, get_from_api, get_runtime_environment_user_agent,
+        get_top_level_media_type, handle_fetch_error, handle_provider_api_response,
+        inject_json_instruction, inject_json_instruction_into_messages, is_abort_error,
+        is_custom_reasoning, is_full_media_type, is_non_nullable, is_parsable_json,
+        is_provider_reference, is_url_supported, load_api_key, load_api_key_with_env,
+        load_optional_setting_with_env, load_setting, load_setting_with_env,
+        map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
+        media_type_to_extension, normalize_headers, parse_json, parse_json_event_stream,
+        parse_provider_options, post_json_to_api, post_to_api, prepare_get_from_api_request,
+        prepare_post_json_to_api_request, prepare_post_to_api_request, prepare_tools,
+        read_response_with_size_limit, remove_undefined_entries, resolve_full_media_type,
+        resolve_provider_reference, safe_parse_json, safe_validate_types, serialize_model_options,
+        strip_file_extension, validate_download_url, validate_types,
+        with_provider_utils_user_agent, with_user_agent_suffix, without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -5838,6 +5840,19 @@ mod tests {
         let mut context = Context::from_waker(waker);
 
         Future::poll(future.as_mut(), &mut context)
+    }
+
+    #[test]
+    fn provider_utils_reexports_provider_get_error_message() {
+        assert_eq!(get_error_message(None), "unknown error");
+        assert_eq!(
+            get_error_message(Some(&"provider-utils failure")),
+            "provider-utils failure"
+        );
+        assert_eq!(
+            get_error_message(Some(&json!({ "code": "bad_request" }))),
+            "{\"code\":\"bad_request\"}"
+        );
     }
 
     #[test]
