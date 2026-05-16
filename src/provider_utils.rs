@@ -285,6 +285,22 @@ pub fn filter_nullable<T>(values: impl IntoIterator<Item = Option<T>>) -> Vec<T>
     values.into_iter().flatten().collect()
 }
 
+/// Removes entries whose values are missing.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils` `removeUndefinedEntries`:
+/// values that are nullish in JavaScript are omitted from the returned record,
+/// while present falsy-equivalent values are preserved.
+pub fn remove_undefined_entries<K, T, I>(record: I) -> BTreeMap<String, T>
+where
+    I: IntoIterator<Item = (K, Option<T>)>,
+    K: Into<String>,
+{
+    record
+        .into_iter()
+        .filter_map(|(key, value)| value.map(|value| (key.into(), value)))
+        .collect()
+}
+
 /// Combines optional HTTP header maps, with later maps overriding earlier ones.
 ///
 /// This mirrors upstream `@ai-sdk/provider-utils` `combineHeaders`: missing
@@ -611,8 +627,8 @@ mod tests {
         ToolExecutionError, ToolExecutionOptions, as_array, combine_headers, filter_nullable,
         is_non_nullable, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
         load_setting, load_setting_with_env, media_type_to_extension, normalize_headers,
-        prepare_tools, resolve_provider_reference, strip_file_extension, with_user_agent_suffix,
-        without_trailing_slash,
+        prepare_tools, remove_undefined_entries, resolve_provider_reference, strip_file_extension,
+        with_user_agent_suffix, without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -702,6 +718,56 @@ mod tests {
         assert_eq!(
             filter_nullable(values),
             vec![json!(0), json!(false), json!("")]
+        );
+    }
+
+    #[test]
+    fn remove_undefined_entries_removes_missing_values() {
+        let record = remove_undefined_entries([
+            ("present", Some(json!("value"))),
+            ("missing", None),
+            ("alsoPresent", Some(json!({ "nested": true }))),
+        ]);
+
+        assert_eq!(
+            record,
+            BTreeMap::from([
+                ("alsoPresent".to_string(), json!({ "nested": true })),
+                ("present".to_string(), json!("value")),
+            ])
+        );
+    }
+
+    #[test]
+    fn remove_undefined_entries_preserves_falsy_equivalent_values() {
+        let record = remove_undefined_entries([
+            ("zero", Some(json!(0))),
+            ("false", Some(json!(false))),
+            ("emptyString", Some(json!(""))),
+            ("nullish", None),
+        ]);
+
+        assert_eq!(
+            record,
+            BTreeMap::from([
+                ("emptyString".to_string(), json!("")),
+                ("false".to_string(), json!(false)),
+                ("zero".to_string(), json!(0)),
+            ])
+        );
+    }
+
+    #[test]
+    fn remove_undefined_entries_handles_json_null_values_as_missing() {
+        let record: BTreeMap<String, Option<serde_json::Value>> = serde_json::from_value(json!({
+            "keep": "value",
+            "drop": null
+        }))
+        .expect("record deserializes");
+
+        assert_eq!(
+            remove_undefined_entries(record),
+            BTreeMap::from([("keep".to_string(), json!("value"))])
         );
     }
 
