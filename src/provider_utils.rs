@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::file_data::{NoSuchProviderReferenceError, ProviderReference};
+use crate::file_data::{FileDataContent, NoSuchProviderReferenceError, ProviderReference};
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonSchema, JsonValue};
 use crate::language_model::{
@@ -20,6 +20,197 @@ const DEFAULT_JSON_SCHEMA_INSTRUCTION_PREFIX: &str = "JSON schema:";
 const DEFAULT_JSON_SCHEMA_INSTRUCTION_SUFFIX: &str =
     "You MUST answer with a JSON object that matches the JSON schema above.";
 const DEFAULT_JSON_INSTRUCTION_SUFFIX: &str = "You MUST answer with JSON.";
+
+struct MediaTypeSignature {
+    media_type: &'static str,
+    bytes_prefix: &'static [Option<u8>],
+}
+
+const IMAGE_MEDIA_TYPE_SIGNATURES: &[MediaTypeSignature] = &[
+    MediaTypeSignature {
+        media_type: "image/gif",
+        bytes_prefix: &[Some(0x47), Some(0x49), Some(0x46)],
+    },
+    MediaTypeSignature {
+        media_type: "image/png",
+        bytes_prefix: &[Some(0x89), Some(0x50), Some(0x4e), Some(0x47)],
+    },
+    MediaTypeSignature {
+        media_type: "image/jpeg",
+        bytes_prefix: &[Some(0xff), Some(0xd8)],
+    },
+    MediaTypeSignature {
+        media_type: "image/webp",
+        bytes_prefix: &[
+            Some(0x52),
+            Some(0x49),
+            Some(0x46),
+            Some(0x46),
+            None,
+            None,
+            None,
+            None,
+            Some(0x57),
+            Some(0x45),
+            Some(0x42),
+            Some(0x50),
+        ],
+    },
+    MediaTypeSignature {
+        media_type: "image/bmp",
+        bytes_prefix: &[Some(0x42), Some(0x4d)],
+    },
+    MediaTypeSignature {
+        media_type: "image/tiff",
+        bytes_prefix: &[Some(0x49), Some(0x49), Some(0x2a), Some(0x00)],
+    },
+    MediaTypeSignature {
+        media_type: "image/tiff",
+        bytes_prefix: &[Some(0x4d), Some(0x4d), Some(0x00), Some(0x2a)],
+    },
+    MediaTypeSignature {
+        media_type: "image/avif",
+        bytes_prefix: &[
+            Some(0x00),
+            Some(0x00),
+            Some(0x00),
+            Some(0x20),
+            Some(0x66),
+            Some(0x74),
+            Some(0x79),
+            Some(0x70),
+            Some(0x61),
+            Some(0x76),
+            Some(0x69),
+            Some(0x66),
+        ],
+    },
+    MediaTypeSignature {
+        media_type: "image/heic",
+        bytes_prefix: &[
+            Some(0x00),
+            Some(0x00),
+            Some(0x00),
+            Some(0x20),
+            Some(0x66),
+            Some(0x74),
+            Some(0x79),
+            Some(0x70),
+            Some(0x68),
+            Some(0x65),
+            Some(0x69),
+            Some(0x63),
+        ],
+    },
+];
+
+const DOCUMENT_MEDIA_TYPE_SIGNATURES: &[MediaTypeSignature] = &[MediaTypeSignature {
+    media_type: "application/pdf",
+    bytes_prefix: &[Some(0x25), Some(0x50), Some(0x44), Some(0x46)],
+}];
+
+const AUDIO_MEDIA_TYPE_SIGNATURES: &[MediaTypeSignature] = &[
+    MediaTypeSignature {
+        media_type: "audio/mpeg",
+        bytes_prefix: &[Some(0xff), Some(0xfb)],
+    },
+    MediaTypeSignature {
+        media_type: "audio/mpeg",
+        bytes_prefix: &[Some(0xff), Some(0xfa)],
+    },
+    MediaTypeSignature {
+        media_type: "audio/mpeg",
+        bytes_prefix: &[Some(0xff), Some(0xf3)],
+    },
+    MediaTypeSignature {
+        media_type: "audio/mpeg",
+        bytes_prefix: &[Some(0xff), Some(0xf2)],
+    },
+    MediaTypeSignature {
+        media_type: "audio/mpeg",
+        bytes_prefix: &[Some(0xff), Some(0xe3)],
+    },
+    MediaTypeSignature {
+        media_type: "audio/mpeg",
+        bytes_prefix: &[Some(0xff), Some(0xe2)],
+    },
+    MediaTypeSignature {
+        media_type: "audio/wav",
+        bytes_prefix: &[
+            Some(0x52),
+            Some(0x49),
+            Some(0x46),
+            Some(0x46),
+            None,
+            None,
+            None,
+            None,
+            Some(0x57),
+            Some(0x41),
+            Some(0x56),
+            Some(0x45),
+        ],
+    },
+    MediaTypeSignature {
+        media_type: "audio/ogg",
+        bytes_prefix: &[Some(0x4f), Some(0x67), Some(0x67), Some(0x53)],
+    },
+    MediaTypeSignature {
+        media_type: "audio/flac",
+        bytes_prefix: &[Some(0x66), Some(0x4c), Some(0x61), Some(0x43)],
+    },
+    MediaTypeSignature {
+        media_type: "audio/aac",
+        bytes_prefix: &[Some(0x40), Some(0x15), Some(0x00), Some(0x00)],
+    },
+    MediaTypeSignature {
+        media_type: "audio/mp4",
+        bytes_prefix: &[Some(0x66), Some(0x74), Some(0x79), Some(0x70)],
+    },
+    MediaTypeSignature {
+        media_type: "audio/webm",
+        bytes_prefix: &[Some(0x1a), Some(0x45), Some(0xdf), Some(0xa3)],
+    },
+];
+
+const VIDEO_MEDIA_TYPE_SIGNATURES: &[MediaTypeSignature] = &[
+    MediaTypeSignature {
+        media_type: "video/mp4",
+        bytes_prefix: &[
+            Some(0x00),
+            Some(0x00),
+            Some(0x00),
+            None,
+            Some(0x66),
+            Some(0x74),
+            Some(0x79),
+            Some(0x70),
+        ],
+    },
+    MediaTypeSignature {
+        media_type: "video/webm",
+        bytes_prefix: &[Some(0x1a), Some(0x45), Some(0xdf), Some(0xa3)],
+    },
+    MediaTypeSignature {
+        media_type: "video/quicktime",
+        bytes_prefix: &[
+            Some(0x00),
+            Some(0x00),
+            Some(0x00),
+            Some(0x14),
+            Some(0x66),
+            Some(0x74),
+            Some(0x79),
+            Some(0x70),
+            Some(0x71),
+            Some(0x74),
+        ],
+    },
+    MediaTypeSignature {
+        media_type: "video/x-msvideo",
+        bytes_prefix: &[Some(0x52), Some(0x49), Some(0x46), Some(0x46)],
+    },
+];
 
 /// Future returned by a Rust tool execution function.
 pub type ToolExecuteFuture =
@@ -568,6 +759,157 @@ pub fn is_provider_reference(data: &JsonValue) -> bool {
         .is_some_and(|object| !object.contains_key("type"))
 }
 
+/// Detects the IANA media type of raw bytes or base64-encoded file content.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils` `detectMediaType`: when a
+/// top-level media type is supplied, only that signature table is checked;
+/// otherwise image, application document, audio, and video signatures are
+/// considered in upstream order.
+pub fn detect_media_type(
+    data: &FileDataContent,
+    top_level_type: Option<&str>,
+) -> Option<&'static str> {
+    if let Some(top_level_type) = top_level_type {
+        return match top_level_type {
+            "image" => detect_media_type_by_signatures(data, IMAGE_MEDIA_TYPE_SIGNATURES),
+            "audio" => detect_media_type_by_signatures(data, AUDIO_MEDIA_TYPE_SIGNATURES),
+            "video" => detect_media_type_by_signatures(data, VIDEO_MEDIA_TYPE_SIGNATURES),
+            "application" => detect_media_type_by_signatures(data, DOCUMENT_MEDIA_TYPE_SIGNATURES),
+            _ => None,
+        };
+    }
+
+    for signatures in [
+        IMAGE_MEDIA_TYPE_SIGNATURES,
+        DOCUMENT_MEDIA_TYPE_SIGNATURES,
+        AUDIO_MEDIA_TYPE_SIGNATURES,
+        VIDEO_MEDIA_TYPE_SIGNATURES,
+    ] {
+        if let Some(media_type) = detect_media_type_by_signatures(data, signatures) {
+            return Some(media_type);
+        }
+    }
+
+    None
+}
+
+fn detect_media_type_by_signatures(
+    data: &FileDataContent,
+    signatures: &[MediaTypeSignature],
+) -> Option<&'static str> {
+    let bytes = bytes_for_media_type_detection(data)?;
+
+    signatures
+        .iter()
+        .find(|signature| bytes_match_signature(&bytes, signature.bytes_prefix))
+        .map(|signature| signature.media_type)
+}
+
+fn bytes_match_signature(bytes: &[u8], bytes_prefix: &[Option<u8>]) -> bool {
+    bytes.len() >= bytes_prefix.len()
+        && bytes_prefix
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| byte.is_none_or(|byte| bytes[index] == byte))
+}
+
+fn bytes_for_media_type_detection(data: &FileDataContent) -> Option<Vec<u8>> {
+    match data {
+        FileDataContent::Bytes(bytes) => Some(strip_id3_tags_if_present(bytes).to_vec()),
+        FileDataContent::Base64(base64) if base64.starts_with("SUQz") => {
+            decode_base64(base64).map(|bytes| strip_id3_tags_if_present(&bytes).to_vec())
+        }
+        FileDataContent::Base64(base64) => {
+            let prefix_length = base64
+                .char_indices()
+                .nth(24)
+                .map_or(base64.len(), |(index, _)| index);
+            decode_base64(&base64[..prefix_length])
+        }
+    }
+}
+
+fn strip_id3_tags_if_present(bytes: &[u8]) -> &[u8] {
+    if bytes.len() <= 10 || !bytes.starts_with(&[0x49, 0x44, 0x33]) {
+        return bytes;
+    }
+
+    let id3_size = ((usize::from(bytes[6] & 0x7f)) << 21)
+        | ((usize::from(bytes[7] & 0x7f)) << 14)
+        | ((usize::from(bytes[8] & 0x7f)) << 7)
+        | usize::from(bytes[9] & 0x7f);
+
+    bytes.get(id3_size + 10..).unwrap_or_default()
+}
+
+fn decode_base64(base64: &str) -> Option<Vec<u8>> {
+    let mut sextets = Vec::new();
+
+    for byte in base64.bytes() {
+        match byte {
+            b'=' => break,
+            b'\t' | b'\n' | b'\r' | b' ' => continue,
+            _ => sextets.push(base64_value(byte)?),
+        }
+    }
+
+    if sextets.len() % 4 == 1 {
+        return None;
+    }
+
+    let mut bytes = Vec::with_capacity((sextets.len() * 3) / 4);
+    let mut chunks = sextets.chunks_exact(4);
+
+    for chunk in &mut chunks {
+        let buffer = (u32::from(chunk[0]) << 18)
+            | (u32::from(chunk[1]) << 12)
+            | (u32::from(chunk[2]) << 6)
+            | u32::from(chunk[3]);
+        bytes.push((buffer >> 16) as u8);
+        bytes.push((buffer >> 8) as u8);
+        bytes.push(buffer as u8);
+    }
+
+    match chunks.remainder() {
+        [] => {}
+        [first, second] => {
+            bytes.push((*first << 2) | (*second >> 4));
+        }
+        [first, second, third] => {
+            bytes.push((*first << 2) | (*second >> 4));
+            bytes.push(((*second & 0x0f) << 4) | (*third >> 2));
+        }
+        _ => return None,
+    }
+
+    Some(bytes)
+}
+
+fn base64_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' | b'-' => Some(62),
+        b'/' | b'_' => Some(63),
+        _ => None,
+    }
+}
+
+/// Returns the top-level segment of a media type.
+pub fn get_top_level_media_type(media_type: &str) -> &str {
+    media_type
+        .find('/')
+        .map_or(media_type, |slash_index| &media_type[..slash_index])
+}
+
+/// Returns whether a media type has a non-empty, non-wildcard subtype.
+pub fn is_full_media_type(media_type: &str) -> bool {
+    media_type
+        .split_once('/')
+        .is_some_and(|(_, subtype)| !subtype.is_empty() && subtype != "*")
+}
+
 /// Combines optional HTTP header maps, with later maps overriding earlier ones.
 ///
 /// This mirrors upstream `@ai-sdk/provider-utils` `combineHeaders`: missing
@@ -887,19 +1229,20 @@ mod tests {
         LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelTool,
         LanguageModelUserContentPart, LanguageModelUserMessage,
     };
-    use crate::{JsonObject, JsonValue, ProviderReference};
+    use crate::{FileDataContent, JsonObject, JsonValue, ProviderReference};
     use serde_json::json;
 
     use super::{
         Arrayable, InjectJsonInstructionIntoMessagesOptions, LoadApiKeyOptions,
         LoadOptionalSettingOptions, LoadSettingOptions, Tool, ToolExecutionError,
         ToolExecutionOptions, add_additional_properties_to_json_schema, as_array, combine_headers,
-        create_tool_name_mapping, filter_nullable, inject_json_instruction,
-        inject_json_instruction_into_messages, is_non_nullable, is_provider_reference,
-        load_api_key, load_api_key_with_env, load_optional_setting_with_env, load_setting,
-        load_setting_with_env, media_type_to_extension, normalize_headers, prepare_tools,
-        remove_undefined_entries, resolve_provider_reference, strip_file_extension,
-        with_user_agent_suffix, without_trailing_slash,
+        create_tool_name_mapping, detect_media_type, filter_nullable, get_top_level_media_type,
+        inject_json_instruction, inject_json_instruction_into_messages, is_full_media_type,
+        is_non_nullable, is_provider_reference, load_api_key, load_api_key_with_env,
+        load_optional_setting_with_env, load_setting, load_setting_with_env,
+        media_type_to_extension, normalize_headers, prepare_tools, remove_undefined_entries,
+        resolve_provider_reference, strip_file_extension, with_user_agent_suffix,
+        without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -1416,6 +1759,115 @@ mod tests {
         assert!(!is_provider_reference(&json!("some-string")));
         assert!(!is_provider_reference(&json!(42)));
         assert!(!is_provider_reference(&json!([1, 2, 3])));
+    }
+
+    #[test]
+    fn get_top_level_media_type_matches_upstream_edge_cases() {
+        assert_eq!(get_top_level_media_type("image/png"), "image");
+        assert_eq!(get_top_level_media_type("audio/*"), "audio");
+        assert_eq!(get_top_level_media_type("text"), "text");
+        assert_eq!(get_top_level_media_type(""), "");
+        assert_eq!(get_top_level_media_type("/"), "");
+        assert_eq!(get_top_level_media_type("image/"), "image");
+    }
+
+    #[test]
+    fn is_full_media_type_requires_concrete_subtype() {
+        assert!(is_full_media_type("image/png"));
+        assert!(is_full_media_type("application/pdf"));
+        assert!(!is_full_media_type("image"));
+        assert!(!is_full_media_type("image/*"));
+        assert!(!is_full_media_type("image/"));
+        assert!(!is_full_media_type("/"));
+    }
+
+    #[test]
+    fn detect_media_type_matches_top_level_signature_tables() {
+        assert_eq!(
+            detect_media_type(
+                &FileDataContent::Bytes(vec![0x89, 0x50, 0x4e, 0x47, 0xff]),
+                Some("image"),
+            ),
+            Some("image/png")
+        );
+        assert_eq!(
+            detect_media_type(
+                &FileDataContent::Bytes(vec![0x25, 0x50, 0x44, 0x46, 0x00]),
+                Some("application"),
+            ),
+            Some("application/pdf")
+        );
+        assert_eq!(
+            detect_media_type(&FileDataContent::Bytes(vec![0xff, 0xfb]), Some("audio")),
+            Some("audio/mpeg")
+        );
+        assert_eq!(
+            detect_media_type(
+                &FileDataContent::Bytes(vec![0x1a, 0x45, 0xdf, 0xa3]),
+                Some("video"),
+            ),
+            Some("video/webm")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_handles_base64_and_id3_prefixed_mp3() {
+        assert_eq!(
+            detect_media_type(
+                &FileDataContent::Base64("iVBORw0KGgo=".to_string()),
+                Some("image"),
+            ),
+            Some("image/png")
+        );
+        assert_eq!(
+            detect_media_type(
+                &FileDataContent::Bytes(vec![
+                    0x49, 0x44, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xfb,
+                ]),
+                Some("audio"),
+            ),
+            Some("audio/mpeg")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_returns_none_for_unsupported_or_unmatched_data() {
+        assert_eq!(
+            detect_media_type(
+                &FileDataContent::Bytes(vec![0x89, 0x50, 0x4e, 0x47, 0xff]),
+                Some("text"),
+            ),
+            None
+        );
+        assert_eq!(
+            detect_media_type(
+                &FileDataContent::Bytes(vec![0x00, 0x01, 0x02]),
+                Some("image"),
+            ),
+            None
+        );
+        assert_eq!(
+            detect_media_type(
+                &FileDataContent::Base64("not valid base64!".to_string()),
+                None,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn detect_media_type_without_top_level_type_uses_upstream_order() {
+        assert_eq!(
+            detect_media_type(
+                &FileDataContent::Bytes(vec![0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70]),
+                None,
+            ),
+            Some("video/mp4")
+        );
+        assert_eq!(
+            detect_media_type(&FileDataContent::Bytes(vec![0x1a, 0x45, 0xdf, 0xa3]), None,),
+            Some("audio/webm")
+        );
     }
 
     #[test]
