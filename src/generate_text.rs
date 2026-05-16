@@ -737,6 +737,10 @@ fn assistant_content_part_from_content(
 ) -> Option<LanguageModelAssistantContentPart> {
     match content {
         LanguageModelContent::Text(text) => {
+            if text.text.is_empty() {
+                return None;
+            }
+
             let mut part = LanguageModelTextPart::new(text.text.clone());
 
             if let Some(provider_metadata) = &text.provider_metadata {
@@ -1445,6 +1449,7 @@ mod tests {
         calls: RefCell<Vec<LanguageModelCallOptions>>,
         tool_name: String,
         tool_input: String,
+        first_step_prefix: Vec<LanguageModelContent>,
     }
 
     impl ToolLoopLanguageModel {
@@ -1457,6 +1462,20 @@ mod tests {
                 calls: RefCell::new(Vec::new()),
                 tool_name: tool_name.into(),
                 tool_input: tool_input.into(),
+                first_step_prefix: Vec::new(),
+            }
+        }
+
+        fn with_first_step_prefix(
+            tool_name: impl Into<String>,
+            tool_input: impl Into<String>,
+            first_step_prefix: Vec<LanguageModelContent>,
+        ) -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                tool_name: tool_name.into(),
+                tool_input: tool_input.into(),
+                first_step_prefix,
             }
         }
     }
@@ -1496,12 +1515,15 @@ mod tests {
             self.calls.borrow_mut().push(options);
 
             if step_number == 0 {
+                let mut content = self.first_step_prefix.clone();
+                content.push(LanguageModelContent::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    self.tool_name.clone(),
+                    self.tool_input.clone(),
+                )));
+
                 ready(LanguageModelGenerateResult::new(
-                    vec![LanguageModelContent::ToolCall(LanguageModelToolCall::new(
-                        "call-1",
-                        self.tool_name.clone(),
-                        self.tool_input.clone(),
-                    ))],
+                    content,
                     LanguageModelFinishReason {
                         unified: FinishReason::ToolCalls,
                         raw: Some("tool_calls".to_string()),
@@ -1900,5 +1922,41 @@ mod tests {
             json!("Model tried to call unavailable tool 'forecast'. Available tools: weather.")
         );
         assert_eq!(result.text, "The weather in Brisbane is sunny.");
+    }
+
+    #[test]
+    fn generate_text_omits_empty_text_from_continuation_assistant_messages() {
+        let model = ToolLoopLanguageModel::with_first_step_prefix(
+            "weather",
+            r#"{"city":"Brisbane"}"#,
+            vec![LanguageModelContent::Text(LanguageModelText::new(""))],
+        );
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let _ = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(
+                    Tool::new("weather", input_schema)
+                        .with_execute(|_input, _options| async move { Ok(json!("sunny")) }),
+                )
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(model.calls.borrow().len(), 2);
+        assert_eq!(
+            model.calls.borrow()[1].prompt[1],
+            LanguageModelMessage::Assistant(
+                crate::language_model::LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                        "call-1",
+                        "weather",
+                        json!({ "city": "Brisbane" })
+                    ))
+                ])
+            )
+        );
     }
 }
