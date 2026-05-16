@@ -135,7 +135,9 @@ pub use reranking_model::{
     RerankingModel, RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
     RerankingModelResponse, RerankingModelResult,
 };
-pub use retry::{RetryError, RetryErrorReason};
+pub use retry::{
+    RetryError, RetryErrorReason, get_retry_delay_in_ms, retry_delay_from_response_headers,
+};
 pub use skills::{
     Skills, SkillsFile, SkillsFileData, SkillsUploadSkillCallOptions, SkillsUploadSkillResult,
 };
