@@ -60,7 +60,7 @@ pub use language_model::{
     LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
 };
 pub use provider::{
-    ModelType, NoSuchModelError, ProviderMetadata, ProviderOptions,
+    LoadApiKeyError, ModelType, NoSuchModelError, ProviderMetadata, ProviderOptions,
     TooManyEmbeddingValuesForCallError, UnsupportedFunctionalityError,
 };
 pub use reranking_model::{

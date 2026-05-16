@@ -141,6 +141,39 @@ impl fmt::Display for UnsupportedFunctionalityError {
 
 impl std::error::Error for UnsupportedFunctionalityError {}
 
+/// Error returned when an API key cannot be loaded for a provider.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LoadApiKeyError {
+    message: String,
+}
+
+impl LoadApiKeyError {
+    /// Creates an API key loading error with the upstream provider message.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into the human-readable error message.
+    pub fn into_message(self) -> String {
+        self.message
+    }
+}
+
+impl fmt::Display for LoadApiKeyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for LoadApiKeyError {}
+
 /// Error returned when an embedding model call contains too many values.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TooManyEmbeddingValuesForCallError {
@@ -231,8 +264,8 @@ pub type ProviderMetadata = BTreeMap<String, JsonObject>;
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelType, NoSuchModelError, ProviderOptions, TooManyEmbeddingValuesForCallError,
-        UnsupportedFunctionalityError,
+        LoadApiKeyError, ModelType, NoSuchModelError, ProviderOptions,
+        TooManyEmbeddingValuesForCallError, UnsupportedFunctionalityError,
     };
     use serde_json::json;
 
@@ -309,6 +342,16 @@ mod tests {
             error.to_string(),
             "Unsupported image mime type: image/avif, expected one of: image/jpeg, image/png."
         );
+    }
+
+    #[test]
+    fn load_api_key_error_uses_upstream_message_contract() {
+        let message = "OpenAI API key is missing. Pass it using the 'apiKey' parameter or the OPENAI_API_KEY environment variable.";
+        let error = LoadApiKeyError::new(message);
+
+        assert_eq!(error.message(), message);
+        assert_eq!(error.to_string(), message);
+        assert_eq!(error.into_message(), message);
     }
 
     #[test]
