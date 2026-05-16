@@ -21,8 +21,8 @@ use crate::language_model::{
     LanguageModelTool, LanguageModelToolInputExample,
 };
 use crate::provider::{
-    InvalidArgumentError, JsonParseError, LoadApiKeyError, LoadSettingError, ProviderOptions,
-    TypeValidationContext, TypeValidationError, UnsupportedFunctionalityError,
+    ApiCallError, InvalidArgumentError, JsonParseError, LoadApiKeyError, LoadSettingError,
+    ProviderOptions, TypeValidationContext, TypeValidationError, UnsupportedFunctionalityError,
 };
 use crate::warning::Warning;
 
@@ -334,6 +334,123 @@ impl<T> ParseJsonResult<T> {
             Self::Success { .. } => None,
             Self::Failure { error, .. } => Some(error),
         }
+    }
+}
+
+/// Result returned by provider response handlers.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils` response handlers: every
+/// handler returns a parsed value and may include raw JSON data plus extracted
+/// response headers.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResponseHandlerResult<T = JsonValue> {
+    /// Parsed or constructed response value.
+    pub value: T,
+
+    /// Raw JSON value before optional validation, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_value: Option<JsonValue>,
+
+    /// Headers extracted from the HTTP response, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_headers: Option<Headers>,
+}
+
+impl<T> ResponseHandlerResult<T> {
+    /// Creates a response-handler result with a parsed value.
+    pub fn new(value: T) -> Self {
+        Self {
+            value,
+            raw_value: None,
+            response_headers: None,
+        }
+    }
+
+    /// Adds the raw JSON value before validation.
+    pub fn with_raw_value(mut self, raw_value: impl Into<JsonValue>) -> Self {
+        self.raw_value = Some(raw_value.into());
+        self
+    }
+
+    /// Adds headers extracted from the response.
+    pub fn with_response_headers(mut self, response_headers: Headers) -> Self {
+        self.response_headers = Some(response_headers);
+        self
+    }
+
+    /// Returns the parsed or constructed response value.
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+
+    /// Returns the raw JSON value before validation, when available.
+    pub fn raw_value(&self) -> Option<&JsonValue> {
+        self.raw_value.as_ref()
+    }
+
+    /// Returns the extracted response headers, when available.
+    pub fn response_headers(&self) -> Option<&Headers> {
+        self.response_headers.as_ref()
+    }
+
+    /// Converts this result into the parsed or constructed response value.
+    pub fn into_value(self) -> T {
+        self.value
+    }
+}
+
+/// Inputs for the status-code error response handler.
+///
+/// This is the Rust-native data boundary for upstream
+/// `createStatusCodeErrorResponseHandler`, avoiding a concrete HTTP client
+/// dependency while preserving the API-call error shape.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusCodeErrorResponseHandlerOptions {
+    /// URL that produced the status-code error response.
+    pub url: String,
+
+    /// Request body values associated with the failed provider call.
+    pub request_body_values: JsonValue,
+
+    /// HTTP status code from the response.
+    pub status_code: u16,
+
+    /// HTTP status text from the response.
+    pub status_text: String,
+
+    /// Headers extracted from the response.
+    #[serde(default)]
+    pub response_headers: Headers,
+
+    /// Raw response body text.
+    pub response_body: String,
+}
+
+impl StatusCodeErrorResponseHandlerOptions {
+    /// Creates status-code error response handler options.
+    pub fn new(
+        url: impl Into<String>,
+        request_body_values: impl Into<JsonValue>,
+        status_code: u16,
+        status_text: impl Into<String>,
+        response_body: impl Into<String>,
+    ) -> Self {
+        Self {
+            url: url.into(),
+            request_body_values: request_body_values.into(),
+            status_code,
+            status_text: status_text.into(),
+            response_headers: Headers::new(),
+            response_body: response_body.into(),
+        }
+    }
+
+    /// Adds response headers extracted from the response.
+    pub fn with_response_headers(mut self, response_headers: Headers) -> Self {
+        self.response_headers = response_headers;
+        self
     }
 }
 
@@ -1878,6 +1995,32 @@ where
         .collect()
 }
 
+/// Creates an API-call error result from a failed HTTP status response.
+///
+/// This mirrors upstream `createStatusCodeErrorResponseHandler`: it uses the
+/// response status text as the error message, preserves request body values,
+/// status, headers, and raw response body, and returns the extracted headers
+/// beside the constructed [`ApiCallError`].
+pub fn create_status_code_error_response_handler(
+    options: StatusCodeErrorResponseHandlerOptions,
+) -> ResponseHandlerResult<ApiCallError> {
+    let StatusCodeErrorResponseHandlerOptions {
+        url,
+        request_body_values,
+        status_code,
+        status_text,
+        response_headers,
+        response_body,
+    } = options;
+
+    let error = ApiCallError::new(status_text, url, request_body_values)
+        .with_status_code(status_code)
+        .with_response_headers(response_headers.clone())
+        .with_response_body(response_body);
+
+    ResponseHandlerResult::new(error).with_response_headers(response_headers)
+}
+
 /// Combines optional HTTP header maps, with later maps overriding earlier ones.
 ///
 /// This mirrors upstream `@ai-sdk/provider-utils` `combineHeaders`: missing
@@ -2209,11 +2352,13 @@ mod tests {
         Arrayable, Base64DecodeError, DEFAULT_MAX_DOWNLOAD_SIZE, DownloadError,
         InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError, LoadApiKeyOptions,
         LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError, ParseJsonResult,
-        ReasoningLevel, Tool, ToolExecutionError, ToolExecutionOptions, ValidateTypesResult,
+        ReasoningLevel, ResponseHandlerResult, StatusCodeErrorResponseHandlerOptions, Tool,
+        ToolExecutionError, ToolExecutionOptions, ValidateTypesResult,
         add_additional_properties_to_json_schema, as_array, combine_headers,
         convert_base64_to_bytes, convert_bytes_to_base64, convert_image_model_file_to_data_uri,
-        convert_inline_file_data_to_bytes, convert_to_base64, create_tool_name_mapping,
-        detect_media_type, extract_response_headers, filter_nullable, get_top_level_media_type,
+        convert_inline_file_data_to_bytes, convert_to_base64,
+        create_status_code_error_response_handler, create_tool_name_mapping, detect_media_type,
+        extract_response_headers, filter_nullable, get_top_level_media_type,
         inject_json_instruction, inject_json_instruction_into_messages, is_custom_reasoning,
         is_full_media_type, is_non_nullable, is_parsable_json, is_provider_reference,
         is_url_supported, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
@@ -3974,6 +4119,103 @@ mod tests {
                 ("x-provider".to_string(), "second".to_string()),
             ])
         );
+    }
+
+    #[test]
+    fn response_handler_result_serializes_optional_metadata() {
+        let value = json!({ "name": "John" });
+        let raw_value = json!({ "name": "John", "extraField": "ignored" });
+        let result = ResponseHandlerResult::new(value.clone())
+            .with_raw_value(raw_value.clone())
+            .with_response_headers(BTreeMap::from([(
+                "x-request-id".to_string(),
+                "req_123".to_string(),
+            )]));
+
+        let serialized = serde_json::to_value(&result).expect("result serializes");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "value": value,
+                "rawValue": raw_value,
+                "responseHeaders": {
+                    "x-request-id": "req_123"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn response_handler_result_deserializes_minimal_result() {
+        let result: ResponseHandlerResult<JsonValue> =
+            serde_json::from_value(json!({ "value": "ok" })).expect("result deserializes");
+
+        assert_eq!(result.value(), &json!("ok"));
+        assert_eq!(result.raw_value(), None);
+        assert_eq!(result.response_headers(), None);
+    }
+
+    #[test]
+    fn status_code_error_response_handler_options_use_camel_case_json() {
+        let options = StatusCodeErrorResponseHandlerOptions::new(
+            "https://api.example.com/models",
+            json!({ "model": "test" }),
+            404,
+            "Not Found",
+            "missing",
+        )
+        .with_response_headers(BTreeMap::from([(
+            "x-request-id".to_string(),
+            "req_404".to_string(),
+        )]));
+
+        let serialized = serde_json::to_value(&options).expect("options serialize");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "url": "https://api.example.com/models",
+                "requestBodyValues": { "model": "test" },
+                "statusCode": 404,
+                "statusText": "Not Found",
+                "responseHeaders": {
+                    "x-request-id": "req_404"
+                },
+                "responseBody": "missing"
+            })
+        );
+
+        let deserialized: StatusCodeErrorResponseHandlerOptions =
+            serde_json::from_value(serialized).expect("options deserialize");
+
+        assert_eq!(deserialized, options);
+    }
+
+    #[test]
+    fn create_status_code_error_response_handler_returns_api_call_error_result() {
+        let response_headers =
+            BTreeMap::from([("content-type".to_string(), "text/plain".to_string())]);
+        let options = StatusCodeErrorResponseHandlerOptions::new(
+            "https://api.example.com/models",
+            json!({ "model": "test" }),
+            429,
+            "Too Many Requests",
+            "retry later",
+        )
+        .with_response_headers(response_headers.clone());
+
+        let result = create_status_code_error_response_handler(options);
+        let error = result.value();
+
+        assert_eq!(result.response_headers(), Some(&response_headers));
+        assert_eq!(error.message(), "Too Many Requests");
+        assert_eq!(error.url(), "https://api.example.com/models");
+        assert_eq!(error.request_body_values(), &json!({ "model": "test" }));
+        assert_eq!(error.status_code(), Some(429));
+        assert_eq!(error.response_headers(), Some(&response_headers));
+        assert_eq!(error.response_body(), Some("retry later"));
+        assert!(error.is_retryable());
     }
 
     #[test]
