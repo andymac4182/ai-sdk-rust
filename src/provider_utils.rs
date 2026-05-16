@@ -1,9 +1,241 @@
 use std::env::{self, VarError};
+use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use crate::file_data::{NoSuchProviderReferenceError, ProviderReference};
-use crate::provider::{LoadApiKeyError, LoadSettingError};
+use crate::json::{JsonObject, JsonSchema, JsonValue};
+use crate::language_model::{
+    LanguageModelFunctionTool, LanguageModelPrompt, LanguageModelTool,
+    LanguageModelToolInputExample,
+};
+use crate::provider::{LoadApiKeyError, LoadSettingError, ProviderOptions};
+
+/// Future returned by a Rust tool execution function.
+pub type ToolExecuteFuture =
+    Pin<Box<dyn Future<Output = Result<JsonValue, ToolExecutionError>> + Send>>;
+
+/// Function used to execute a Rust tool call.
+pub type ToolExecuteFunction =
+    dyn Fn(JsonValue, ToolExecutionOptions) -> ToolExecuteFuture + Send + Sync + 'static;
+
+/// Options passed to a tool execution function.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolExecutionOptions {
+    /// Identifier of the model tool call being executed.
+    pub tool_call_id: String,
+
+    /// Prompt messages sent to the model for the step that produced the tool call.
+    pub messages: LanguageModelPrompt,
+}
+
+impl ToolExecutionOptions {
+    /// Creates tool execution options.
+    pub fn new(tool_call_id: impl Into<String>, messages: LanguageModelPrompt) -> Self {
+        Self {
+            tool_call_id: tool_call_id.into(),
+            messages,
+        }
+    }
+}
+
+/// Error returned by a Rust tool execution function.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolExecutionError {
+    /// Human-readable execution failure message.
+    pub message: String,
+}
+
+impl ToolExecutionError {
+    /// Creates a tool execution error.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    /// Returns the execution failure message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into its message.
+    pub fn into_message(self) -> String {
+        self.message
+    }
+}
+
+impl fmt::Display for ToolExecutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ToolExecutionError {}
+
+impl From<String> for ToolExecutionError {
+    fn from(message: String) -> Self {
+        Self::new(message)
+    }
+}
+
+impl From<&str> for ToolExecutionError {
+    fn from(message: &str) -> Self {
+        Self::new(message)
+    }
+}
+
+/// User-defined Rust function tool made available to a language model call.
+///
+/// This mirrors the function-tool branch of upstream `@ai-sdk/provider-utils`
+/// `Tool`: it carries model-facing schema/description metadata and may include
+/// an executor for later client-side tool handling.
+#[derive(Clone)]
+pub struct Tool {
+    /// Name of the tool, unique within a model call.
+    pub name: String,
+
+    /// Optional description of what the tool does.
+    pub description: Option<String>,
+
+    /// JSON Schema 7 object describing the tool input.
+    pub input_schema: JsonSchema,
+
+    /// Optional examples that show the model what inputs should look like.
+    pub input_examples: Option<Vec<LanguageModelToolInputExample>>,
+
+    /// Strict mode setting for providers that support it.
+    pub strict: Option<bool>,
+
+    /// Provider-specific options sent with the tool definition.
+    pub provider_options: Option<ProviderOptions>,
+
+    execute: Option<Arc<ToolExecuteFunction>>,
+}
+
+impl Tool {
+    /// Creates a function tool definition.
+    pub fn new(name: impl Into<String>, input_schema: JsonSchema) -> Self {
+        Self {
+            name: name.into(),
+            description: None,
+            input_schema,
+            input_examples: None,
+            strict: None,
+            provider_options: None,
+            execute: None,
+        }
+    }
+
+    /// Sets the tool description.
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    /// Adds a tool input example.
+    pub fn with_input_example(mut self, input: JsonObject) -> Self {
+        self.input_examples
+            .get_or_insert_with(Vec::new)
+            .push(LanguageModelToolInputExample::new(input));
+        self
+    }
+
+    /// Sets strict mode for providers that support it.
+    pub fn with_strict(mut self, strict: bool) -> Self {
+        self.strict = Some(strict);
+        self
+    }
+
+    /// Adds provider-specific options to this tool.
+    pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
+        self.provider_options = Some(provider_options);
+        self
+    }
+
+    /// Sets the Rust executor for this tool.
+    pub fn with_execute<F, Fut>(mut self, execute: F) -> Self
+    where
+        F: Fn(JsonValue, ToolExecutionOptions) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<JsonValue, ToolExecutionError>> + Send + 'static,
+    {
+        self.execute = Some(Arc::new(move |input, options| {
+            Box::pin(execute(input, options))
+        }));
+        self
+    }
+
+    /// Returns whether this tool has an executor.
+    pub fn is_executable(&self) -> bool {
+        self.execute.is_some()
+    }
+
+    /// Executes this tool when an executor is present.
+    pub fn execute(
+        &self,
+        input: JsonValue,
+        options: ToolExecutionOptions,
+    ) -> Option<ToolExecuteFuture> {
+        self.execute.as_ref().map(|execute| execute(input, options))
+    }
+
+    /// Converts this high-level tool into the provider-facing language-model tool shape.
+    pub fn to_language_model_tool(&self) -> LanguageModelTool {
+        let mut tool = LanguageModelFunctionTool::new(self.name.clone(), self.input_schema.clone());
+
+        if let Some(description) = &self.description {
+            tool = tool.with_description(description.clone());
+        }
+
+        if let Some(input_examples) = &self.input_examples {
+            for input_example in input_examples {
+                tool = tool.with_input_example(input_example.input.clone());
+            }
+        }
+
+        if let Some(strict) = self.strict {
+            tool = tool.with_strict(strict);
+        }
+
+        if let Some(provider_options) = &self.provider_options {
+            tool = tool.with_provider_options(provider_options.clone());
+        }
+
+        LanguageModelTool::Function(tool)
+    }
+}
+
+impl fmt::Debug for Tool {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Tool")
+            .field("name", &self.name)
+            .field("description", &self.description)
+            .field("input_schema", &self.input_schema)
+            .field("input_examples", &self.input_examples)
+            .field("strict", &self.strict)
+            .field("provider_options", &self.provider_options)
+            .field("is_executable", &self.is_executable())
+            .finish()
+    }
+}
+
+/// Converts high-level Rust tools into provider-facing language-model tools.
+pub fn prepare_tools<'a>(
+    tools: impl IntoIterator<Item = &'a Tool>,
+) -> Option<Vec<LanguageModelTool>> {
+    let tools = tools
+        .into_iter()
+        .map(Tool::to_language_model_tool)
+        .collect::<Vec<_>>();
+
+    if tools.is_empty() { None } else { Some(tools) }
+}
 
 /// A value that can be supplied as either one item or an array of items.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -277,17 +509,48 @@ mod tests {
     use std::collections::BTreeMap;
     use std::env::VarError;
     use std::ffi::OsString;
+    use std::future::{Future, ready};
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
 
     use crate::ProviderReference;
+    use crate::language_model::{
+        LanguageModelFunctionTool, LanguageModelMessage, LanguageModelTextPart, LanguageModelTool,
+        LanguageModelUserContentPart, LanguageModelUserMessage,
+    };
     use serde_json::json;
 
     use super::{
-        Arrayable, LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, as_array,
-        filter_nullable, is_non_nullable, load_api_key, load_api_key_with_env,
-        load_optional_setting_with_env, load_setting, load_setting_with_env,
-        media_type_to_extension, resolve_provider_reference, strip_file_extension,
-        without_trailing_slash,
+        Arrayable, LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, Tool,
+        ToolExecutionError, ToolExecutionOptions, as_array, filter_nullable, is_non_nullable,
+        load_api_key, load_api_key_with_env, load_optional_setting_with_env, load_setting,
+        load_setting_with_env, media_type_to_extension, prepare_tools, resolve_provider_reference,
+        strip_file_extension, without_trailing_slash,
     };
+
+    fn poll_ready<T>(future: impl Future<Output = T>) -> T {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut future = Box::pin(future);
+
+        match Pin::new(&mut future).poll(&mut context) {
+            Poll::Ready(value) => value,
+            Poll::Pending => unreachable!("test futures should be ready"),
+        }
+    }
+
+    fn object_schema() -> crate::JsonSchema {
+        json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone()
+    }
 
     #[test]
     fn arrayable_serializes_single_or_array_values() {
@@ -352,6 +615,153 @@ mod tests {
         assert_eq!(
             filter_nullable(values),
             vec![json!(0), json!(false), json!("")]
+        );
+    }
+
+    #[test]
+    fn tool_prepares_upstream_function_tool_shape() {
+        let tool = Tool::new("weather", object_schema())
+            .with_description("Look up weather.")
+            .with_input_example(
+                json!({
+                    "city": "Brisbane"
+                })
+                .as_object()
+                .expect("input example is an object")
+                .clone(),
+            )
+            .with_strict(true);
+
+        assert_eq!(
+            tool.to_language_model_tool(),
+            LanguageModelTool::Function(
+                LanguageModelFunctionTool::new("weather", object_schema())
+                    .with_description("Look up weather.")
+                    .with_input_example(
+                        json!({ "city": "Brisbane" })
+                            .as_object()
+                            .expect("input example is an object")
+                            .clone()
+                    )
+                    .with_strict(true)
+            )
+        );
+        assert_eq!(
+            serde_json::to_value(tool.to_language_model_tool()).expect("tool serializes"),
+            json!({
+                "type": "function",
+                "name": "weather",
+                "description": "Look up weather.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    },
+                    "required": ["city"]
+                },
+                "inputExamples": [
+                    {
+                        "input": {
+                            "city": "Brisbane"
+                        }
+                    }
+                ],
+                "strict": true
+            })
+        );
+    }
+
+    #[test]
+    fn prepare_tools_returns_none_for_empty_tool_sets() {
+        assert_eq!(prepare_tools(Vec::<Tool>::new().iter()), None);
+    }
+
+    #[test]
+    fn prepare_tools_converts_high_level_tools() {
+        let tools = vec![Tool::new("weather", object_schema())];
+
+        assert_eq!(
+            prepare_tools(&tools),
+            Some(vec![LanguageModelTool::Function(
+                LanguageModelFunctionTool::new("weather", object_schema())
+            )])
+        );
+    }
+
+    #[test]
+    fn tool_execution_options_serialize_as_camel_case() {
+        let options = ToolExecutionOptions::new(
+            "call-1",
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::Text(
+                    LanguageModelTextPart::new("Weather?"),
+                )],
+            ))],
+        );
+
+        assert_eq!(
+            serde_json::to_value(options).expect("execution options serialize"),
+            json!({
+                "toolCallId": "call-1",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Weather?"
+                            }
+                        ]
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn tool_executor_returns_json_results() {
+        let tool = Tool::new("weather", object_schema()).with_execute(|input, options| {
+            ready(Ok(json!({
+                "input": input,
+                "toolCallId": options.tool_call_id
+            })))
+        });
+
+        assert!(tool.is_executable());
+
+        let result = poll_ready(
+            tool.execute(
+                json!({
+                    "city": "Brisbane"
+                }),
+                ToolExecutionOptions::new("call-1", Vec::new()),
+            )
+            .expect("tool has an executor"),
+        )
+        .expect("tool execution succeeds");
+
+        assert_eq!(
+            result,
+            json!({
+                "input": {
+                    "city": "Brisbane"
+                },
+                "toolCallId": "call-1"
+            })
+        );
+    }
+
+    #[test]
+    fn tool_execution_error_retains_message() {
+        let error = ToolExecutionError::new("Tool failed.");
+
+        assert_eq!(error.message(), "Tool failed.");
+        assert_eq!(error.to_string(), "Tool failed.");
+        assert_eq!(
+            serde_json::to_value(error).expect("tool execution error serializes"),
+            json!({
+                "message": "Tool failed."
+            })
         );
     }
 

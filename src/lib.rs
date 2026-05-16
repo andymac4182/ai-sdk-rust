@@ -38,7 +38,8 @@ pub use file_data::{
 };
 pub use files::{Files, FilesUploadFileCallOptions, FilesUploadFileData, FilesUploadFileResult};
 pub use generate_text::{
-    GenerateTextModelInfo, GenerateTextOptions, GenerateTextResult, GenerateTextStep, generate_text,
+    GenerateTextModelInfo, GenerateTextOptions, GenerateTextResult, GenerateTextStep,
+    GenerateTextTool, generate_text,
 };
 pub use headers::Headers;
 pub use image_model::{
@@ -91,9 +92,10 @@ pub use provider::{
     TypeValidationContext, TypeValidationError, UnsupportedFunctionalityError, get_error_message,
 };
 pub use provider_utils::{
-    Arrayable, LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, as_array,
+    Arrayable, LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, Tool,
+    ToolExecuteFunction, ToolExecuteFuture, ToolExecutionError, ToolExecutionOptions, as_array,
     filter_nullable, is_non_nullable, load_api_key, load_optional_setting, load_setting,
-    media_type_to_extension, resolve_provider_reference, strip_file_extension,
+    media_type_to_extension, prepare_tools, resolve_provider_reference, strip_file_extension,
     without_trailing_slash,
 };
 pub use reranking_model::{

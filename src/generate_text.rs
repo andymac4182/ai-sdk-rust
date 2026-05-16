@@ -9,7 +9,30 @@ use crate::language_model::{
     LanguageModelUsage,
 };
 use crate::provider::{ProviderMetadata, ProviderOptions};
+use crate::provider_utils::{Tool, prepare_tools};
 use crate::warning::Warning;
+
+/// Tool input accepted by [`GenerateTextOptions::with_tool`].
+#[derive(Clone, Debug)]
+pub enum GenerateTextTool {
+    /// High-level Rust function tool.
+    Rust(Tool),
+
+    /// Already prepared provider-facing language model tool.
+    LanguageModel(LanguageModelTool),
+}
+
+impl From<Tool> for GenerateTextTool {
+    fn from(tool: Tool) -> Self {
+        Self::Rust(tool)
+    }
+}
+
+impl From<LanguageModelTool> for GenerateTextTool {
+    fn from(tool: LanguageModelTool) -> Self {
+        Self::LanguageModel(tool)
+    }
+}
 
 /// Options for a high-level non-streaming text generation call.
 #[derive(Debug)]
@@ -19,6 +42,9 @@ pub struct GenerateTextOptions<'a, M: LanguageModel + ?Sized> {
 
     /// Provider-level call options sent to the model.
     pub call_options: LanguageModelCallOptions,
+
+    /// High-level Rust tools made available to the model.
+    pub tools: Vec<Tool>,
 }
 
 impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
@@ -27,6 +53,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
         Self {
             model,
             call_options: LanguageModelCallOptions::new(prompt),
+            tools: Vec::new(),
         }
     }
 
@@ -35,6 +62,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
         Self {
             model,
             call_options,
+            tools: Vec::new(),
         }
     }
 
@@ -96,11 +124,16 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
     }
 
     /// Adds a tool that is available to the model.
-    pub fn with_tool(mut self, tool: LanguageModelTool) -> Self {
-        self.call_options
-            .tools
-            .get_or_insert_with(Vec::new)
-            .push(tool);
+    pub fn with_tool(mut self, tool: impl Into<GenerateTextTool>) -> Self {
+        match tool.into() {
+            GenerateTextTool::Rust(tool) => self.tools.push(tool),
+            GenerateTextTool::LanguageModel(tool) => self
+                .call_options
+                .tools
+                .get_or_insert_with(Vec::new)
+                .push(tool),
+        }
+
         self
     }
 
@@ -314,9 +347,21 @@ impl GenerateTextResult {
 pub async fn generate_text<M: LanguageModel + ?Sized>(
     options: GenerateTextOptions<'_, M>,
 ) -> GenerateTextResult {
-    let model = options.model;
+    let GenerateTextOptions {
+        model,
+        mut call_options,
+        tools,
+    } = options;
     let model_info = GenerateTextModelInfo::new(model.provider(), model.model_id());
-    let result = model.do_generate(options.call_options).await;
+
+    if let Some(mut prepared_tools) = prepare_tools(&tools) {
+        call_options
+            .tools
+            .get_or_insert_with(Vec::new)
+            .append(&mut prepared_tools);
+    }
+
+    let result = model.do_generate(call_options).await;
     let step = GenerateTextStep::from_language_model_result(0, model_info, result);
 
     GenerateTextResult::from_steps(vec![step])
@@ -341,12 +386,13 @@ mod tests {
     use crate::language_model::{
         FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
         LanguageModelCallOptions, LanguageModelContent, LanguageModelFinishReason,
-        LanguageModelGenerateResult, LanguageModelMessage, LanguageModelStreamPart,
-        LanguageModelStreamResult, LanguageModelSupportedUrls, LanguageModelText,
-        LanguageModelTextPart, LanguageModelUsage, LanguageModelUserContentPart,
-        LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelFunctionTool, LanguageModelGenerateResult, LanguageModelMessage,
+        LanguageModelStreamPart, LanguageModelStreamResult, LanguageModelSupportedUrls,
+        LanguageModelText, LanguageModelTextPart, LanguageModelTool, LanguageModelUsage,
+        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::provider::SpecificationVersion;
+    use crate::provider_utils::Tool;
     use serde_json::json;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
@@ -634,6 +680,38 @@ mod tests {
         assert_eq!(
             model.calls.borrow()[0].response_format,
             Some(crate::language_model::LanguageModelResponseFormat::text())
+        );
+    }
+
+    #[test]
+    fn generate_text_passes_high_level_rust_tools_to_language_model() {
+        let model = FakeLanguageModel::new();
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        let _ = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")]).with_tool(
+                Tool::new("weather", input_schema.clone())
+                    .with_description("Look up weather.")
+                    .with_strict(true),
+            ),
+        ));
+
+        assert_eq!(
+            model.calls.borrow()[0].tools,
+            Some(vec![LanguageModelTool::Function(
+                LanguageModelFunctionTool::new("weather", input_schema)
+                    .with_description("Look up weather.")
+                    .with_strict(true)
+            )])
         );
     }
 
