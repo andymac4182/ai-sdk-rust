@@ -1,4 +1,4 @@
-use std::future::Future;
+use std::{fmt, future::Future};
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -333,6 +333,116 @@ impl VideoModelResponse {
     }
 }
 
+/// High-level response metadata for a video generation model call.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoModelResponseMetadata {
+    /// Timestamp for the start of the generated response.
+    #[serde(with = "time::serde::rfc3339")]
+    pub timestamp: OffsetDateTime,
+
+    /// Provider model identifier used for the response.
+    pub model_id: String,
+
+    /// Response headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Headers>,
+
+    /// Provider-specific metadata for this model call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+}
+
+impl VideoModelResponseMetadata {
+    /// Creates high-level video response metadata.
+    pub fn new(timestamp: OffsetDateTime, model_id: impl Into<String>) -> Self {
+        Self {
+            timestamp,
+            model_id: model_id.into(),
+            headers: None,
+            provider_metadata: None,
+        }
+    }
+
+    /// Creates high-level metadata from a provider-v4 response and provider metadata.
+    pub fn from_response(
+        response: VideoModelResponse,
+        provider_metadata: Option<ProviderMetadata>,
+    ) -> Self {
+        Self {
+            timestamp: response.timestamp,
+            model_id: response.model_id,
+            headers: response.headers,
+            provider_metadata,
+        }
+    }
+
+    /// Adds a response header.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers
+            .get_or_insert_with(Headers::new)
+            .insert(name.into(), value.into());
+        self
+    }
+
+    /// Adds provider-specific metadata for this model call.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+}
+
+/// Error returned when high-level video generation produces no videos.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NoVideoGeneratedError {
+    message: String,
+    responses: Vec<VideoModelResponseMetadata>,
+}
+
+impl NoVideoGeneratedError {
+    /// Creates a no-video error with the upstream default message and response metadata.
+    pub fn new(responses: impl IntoIterator<Item = VideoModelResponseMetadata>) -> Self {
+        Self {
+            message: "No video generated.".to_string(),
+            responses: responses.into_iter().collect(),
+        }
+    }
+
+    /// Creates a no-video error with a caller-supplied message and response metadata.
+    pub fn with_message(
+        message: impl Into<String>,
+        responses: impl IntoIterator<Item = VideoModelResponseMetadata>,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            responses: responses.into_iter().collect(),
+        }
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Returns response metadata for attempted provider calls.
+    pub fn responses(&self) -> &[VideoModelResponseMetadata] {
+        &self.responses
+    }
+
+    /// Converts this error into its message and response metadata.
+    pub fn into_parts(self) -> (String, Vec<VideoModelResponseMetadata>) {
+        (self.message, self.responses)
+    }
+}
+
+impl fmt::Display for NoVideoGeneratedError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for NoVideoGeneratedError {}
+
 /// Result of a video model provider call.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -378,8 +488,8 @@ impl VideoModelResult {
 #[cfg(test)]
 mod tests {
     use super::{
-        VideoModel, VideoModelCallOptions, VideoModelFile, VideoModelResponse, VideoModelResult,
-        VideoModelVideoData,
+        NoVideoGeneratedError, VideoModel, VideoModelCallOptions, VideoModelFile,
+        VideoModelResponse, VideoModelResponseMetadata, VideoModelResult, VideoModelVideoData,
     };
     use crate::file_data::FileDataContent;
     use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
@@ -679,6 +789,144 @@ mod tests {
                     "modelId": "fal-video"
                 }
             })
+        );
+    }
+
+    #[test]
+    fn response_metadata_serializes_upstream_shape_with_provider_metadata() {
+        let response_timestamp = OffsetDateTime::parse(
+            "2026-05-16T10:00:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .expect("timestamp parses");
+        let provider_metadata: ProviderMetadata = serde_json::from_value(json!({
+            "fal": {
+                "videos": [
+                    {
+                        "duration": 5.0
+                    }
+                ]
+            }
+        }))
+        .expect("provider metadata deserializes");
+
+        let metadata = VideoModelResponseMetadata::new(response_timestamp, "fal/video")
+            .with_header("x-request-id", "req_123")
+            .with_provider_metadata(provider_metadata);
+
+        assert_eq!(
+            serde_json::to_value(metadata).expect("response metadata serializes"),
+            json!({
+                "timestamp": "2026-05-16T10:00:00Z",
+                "modelId": "fal/video",
+                "headers": {
+                    "x-request-id": "req_123"
+                },
+                "providerMetadata": {
+                    "fal": {
+                        "videos": [
+                            {
+                                "duration": 5.0
+                            }
+                        ]
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn response_metadata_deserializes_minimal_shape_and_can_be_built_from_provider_response() {
+        let metadata: VideoModelResponseMetadata = serde_json::from_value(json!({
+            "timestamp": "2026-05-16T10:00:00Z",
+            "modelId": "fal/video"
+        }))
+        .expect("response metadata deserializes");
+        let response_timestamp = OffsetDateTime::parse(
+            "2026-05-16T10:00:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .expect("timestamp parses");
+
+        assert_eq!(
+            metadata,
+            VideoModelResponseMetadata::new(response_timestamp, "fal/video")
+        );
+
+        let provider_metadata: ProviderMetadata = serde_json::from_value(json!({
+            "fal": {
+                "taskId": "task_123"
+            }
+        }))
+        .expect("provider metadata deserializes");
+        let response = VideoModelResponse::new(response_timestamp, "fal/video")
+            .with_header("x-request-id", "req_123");
+
+        assert_eq!(
+            VideoModelResponseMetadata::from_response(
+                response.clone(),
+                Some(provider_metadata.clone()),
+            ),
+            VideoModelResponseMetadata {
+                timestamp: response.timestamp,
+                model_id: response.model_id,
+                headers: response.headers,
+                provider_metadata: Some(provider_metadata),
+            }
+        );
+    }
+
+    #[test]
+    fn no_video_generated_error_matches_upstream_default_message() {
+        let response_timestamp = OffsetDateTime::parse(
+            "2026-05-16T10:00:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .expect("timestamp parses");
+        let response = VideoModelResponseMetadata::new(response_timestamp, "google/veo-2");
+
+        let error = NoVideoGeneratedError::new([response.clone()]);
+
+        assert_eq!(error.message(), "No video generated.");
+        assert_eq!(error.to_string(), "No video generated.");
+        assert_eq!(error.responses(), std::slice::from_ref(&response));
+        assert_eq!(
+            error.into_parts(),
+            ("No video generated.".to_string(), vec![response])
+        );
+    }
+
+    #[test]
+    fn no_video_generated_error_retains_response_metadata_and_custom_message() {
+        let response_timestamp = OffsetDateTime::parse(
+            "2026-05-16T10:00:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .expect("timestamp parses");
+        let provider_metadata: ProviderMetadata = serde_json::from_value(json!({
+            "fal": {
+                "taskId": "task_123"
+            }
+        }))
+        .expect("provider metadata deserializes");
+        let response = VideoModelResponseMetadata::new(response_timestamp, "fal/video")
+            .with_provider_metadata(provider_metadata)
+            .with_header("x-request-id", "req_123");
+
+        let error = NoVideoGeneratedError::with_message(
+            "No video generated after polling.",
+            [response.clone()],
+        );
+
+        assert_eq!(error.message(), "No video generated after polling.");
+        assert_eq!(error.to_string(), "No video generated after polling.");
+        assert_eq!(error.responses(), std::slice::from_ref(&response));
+        assert_eq!(
+            error.into_parts(),
+            (
+                "No video generated after polling.".to_string(),
+                vec![response]
+            )
         );
     }
 }

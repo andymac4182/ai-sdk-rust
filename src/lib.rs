@@ -147,8 +147,8 @@ pub use transcription_model::{
     TranscriptionModelSegment,
 };
 pub use video_model::{
-    VideoModel, VideoModelCallOptions, VideoModelFile, VideoModelResponse, VideoModelResult,
-    VideoModelVideoData,
+    NoVideoGeneratedError, VideoModel, VideoModelCallOptions, VideoModelFile, VideoModelResponse,
+    VideoModelResponseMetadata, VideoModelResult, VideoModelVideoData,
 };
 pub use warning::Warning;
 
