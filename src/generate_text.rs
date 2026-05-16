@@ -693,7 +693,7 @@ fn should_continue_after_tool_results(
 fn response_messages_for_step(step: &GenerateTextStep) -> Option<Vec<LanguageModelMessage>> {
     let mut messages = Vec::new();
 
-    if let Some(message) = assistant_message_from_content(&step.content) {
+    if let Some(message) = assistant_message_from_step(step) {
         messages.push(message);
     }
 
@@ -715,12 +715,11 @@ fn response_messages_for_step(step: &GenerateTextStep) -> Option<Vec<LanguageMod
     }
 }
 
-fn assistant_message_from_content(
-    content: &[LanguageModelContent],
-) -> Option<LanguageModelMessage> {
-    let parts = content
+fn assistant_message_from_step(step: &GenerateTextStep) -> Option<LanguageModelMessage> {
+    let parts = step
+        .content
         .iter()
-        .filter_map(assistant_content_part_from_content)
+        .filter_map(|content| assistant_content_part_from_content(content, &step.tool_calls))
         .collect::<Vec<_>>();
 
     if parts.is_empty() {
@@ -734,6 +733,7 @@ fn assistant_message_from_content(
 
 fn assistant_content_part_from_content(
     content: &LanguageModelContent,
+    tool_calls: &[GenerateTextToolCall],
 ) -> Option<LanguageModelAssistantContentPart> {
     match content {
         LanguageModelContent::Text(text) => {
@@ -786,10 +786,17 @@ fn assistant_content_part_from_content(
             Some(LanguageModelAssistantContentPart::ReasoningFile(part))
         }
         LanguageModelContent::ToolCall(tool_call) => {
+            let input = tool_calls
+                .iter()
+                .find(|parsed| parsed.tool_call_id == tool_call.tool_call_id)
+                .map_or_else(
+                    || parse_tool_input_or_raw(&tool_call.input),
+                    tool_call_response_input,
+                );
             let mut part = LanguageModelToolCallPart::new(
                 tool_call.tool_call_id.clone(),
                 tool_call.tool_name.clone(),
-                parse_tool_input_or_raw(&tool_call.input),
+                input,
             );
 
             if let Some(provider_executed) = tool_call.provider_executed {
@@ -875,6 +882,19 @@ fn parse_tool_input(input: &str) -> Result<JsonValue, serde_json::Error> {
 
 fn parse_tool_input_or_raw(input: &str) -> JsonValue {
     parse_tool_input(input).unwrap_or_else(|_| JsonValue::String(input.to_string()))
+}
+
+fn tool_call_response_input(tool_call: &GenerateTextToolCall) -> JsonValue {
+    if tool_call.invalid == Some(true)
+        && matches!(
+            tool_call.input,
+            JsonValue::Bool(_) | JsonValue::Number(_) | JsonValue::String(_)
+        )
+    {
+        JsonValue::Object(Default::default())
+    } else {
+        tool_call.input.clone()
+    }
 }
 
 fn invalid_tool_input_message(
@@ -1787,7 +1807,7 @@ mod tests {
                     LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
                         "call-1",
                         "weather",
-                        json!("{ invalid json")
+                        json!({})
                     ))
                 ])
             )
