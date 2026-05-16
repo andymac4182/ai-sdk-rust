@@ -222,6 +222,10 @@ pub struct GenerateTextToolCall {
     /// not valid JSON.
     pub input: JsonValue,
 
+    /// Optional display title from the matched high-level tool definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+
     /// Whether the provider executed this tool call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_executed: Option<bool>,
@@ -253,6 +257,7 @@ impl Serialize for GenerateTextToolCall {
         S: serde::Serializer,
     {
         let mut field_count = 4;
+        field_count += usize::from(self.title.is_some());
         field_count += usize::from(self.provider_executed.is_some());
         field_count += usize::from(self.dynamic.is_some());
         field_count += usize::from(self.invalid.is_some());
@@ -265,6 +270,10 @@ impl Serialize for GenerateTextToolCall {
         state.serialize_field("toolCallId", &self.tool_call_id)?;
         state.serialize_field("toolName", &self.tool_name)?;
         state.serialize_field("input", &self.input)?;
+
+        if let Some(title) = &self.title {
+            state.serialize_field("title", title)?;
+        }
 
         if let Some(provider_executed) = self.provider_executed {
             state.serialize_field("providerExecuted", &provider_executed)?;
@@ -314,6 +323,7 @@ impl GenerateTextToolCall {
             tool_call_id: tool_call.tool_call_id.clone(),
             tool_name: tool_call.tool_name.clone(),
             input,
+            title: None,
             provider_executed: tool_call.provider_executed,
             dynamic,
             invalid,
@@ -800,6 +810,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
             GenerateTextStep::from_language_model_result(step_number, model_info.clone(), result);
         mark_unavailable_tool_calls(&mut step.tool_calls, call_options.tools.as_deref());
         mark_runtime_dynamic_tool_calls(&mut step.tool_calls, &tools);
+        mark_tool_call_titles(&mut step.tool_calls, &tools);
         mark_tool_call_metadata(&mut step.tool_calls, &tools);
         mark_tool_result_metadata(&mut step.tool_results, &step.tool_calls, &tools);
         refresh_tool_call_views(&mut step);
@@ -1314,6 +1325,22 @@ fn mark_runtime_dynamic_tool_calls(tool_calls: &mut [GenerateTextToolCall], tool
     }
 }
 
+fn mark_tool_call_titles(tool_calls: &mut [GenerateTextToolCall], tools: &[Tool]) {
+    for tool_call in tool_calls {
+        if tool_call.title.is_some() {
+            continue;
+        }
+
+        if let Some(title) = tools
+            .iter()
+            .find(|tool| tool.name == tool_call.tool_name)
+            .and_then(Tool::title)
+        {
+            tool_call.title = Some(title.to_string());
+        }
+    }
+}
+
 fn mark_tool_call_metadata(tool_calls: &mut [GenerateTextToolCall], tools: &[Tool]) {
     for tool_call in tool_calls {
         if tool_call.tool_metadata.is_some() {
@@ -1714,6 +1741,7 @@ mod tests {
             tool_call_id: "call-1".to_string(),
             tool_name: "weather".to_string(),
             input: json!({ "city": "Brisbane" }),
+            title: Some("Weather information".to_string()),
             provider_executed: Some(false),
             dynamic: Some(false),
             invalid: None,
@@ -1741,6 +1769,7 @@ mod tests {
                 "toolCallId": "call-1",
                 "toolName": "weather",
                 "input": { "city": "Brisbane" },
+                "title": "Weather information",
                 "providerExecuted": false,
                 "dynamic": false,
                 "toolMetadata": {
@@ -2608,6 +2637,7 @@ mod tests {
             GenerateTextOptions::new(&model, vec![user_message("Weather?")])
                 .with_tool(
                     Tool::new("weather", input_schema.clone())
+                        .with_title("Weather information")
                         .with_metadata(tool_metadata.clone())
                         .with_execute(|input, _options| async move {
                             Ok(json!({
@@ -2631,6 +2661,10 @@ mod tests {
             Some(tool_metadata.clone())
         );
         assert_eq!(
+            result.tool_calls[0].title.as_deref(),
+            Some("Weather information")
+        );
+        assert_eq!(
             result.tool_results[0].tool_metadata,
             Some(tool_metadata.clone())
         );
@@ -2640,6 +2674,10 @@ mod tests {
                 "source": "mcp",
                 "server": "weather-tools"
             })
+        );
+        assert_eq!(
+            serde_json::to_value(&result.tool_calls[0]).expect("tool call serializes")["title"],
+            json!("Weather information")
         );
         assert_eq!(
             serde_json::to_value(&result.tool_results[0]).expect("tool result serializes")["toolMetadata"],

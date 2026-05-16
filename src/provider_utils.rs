@@ -2544,6 +2544,12 @@ pub struct Tool {
     /// Name of the tool, unique within a model call.
     pub name: String,
 
+    /// Optional display title for the tool.
+    ///
+    /// This mirrors upstream's deprecated `title` field: it is not sent to the
+    /// model, but can be surfaced on high-level tool calls.
+    pub title: Option<String>,
+
     /// Optional description of what the tool does.
     pub description: Option<String>,
 
@@ -2575,6 +2581,7 @@ impl Tool {
         Self {
             kind: ToolKind::Function,
             name: name.into(),
+            title: None,
             description: None,
             input_schema,
             input_examples: None,
@@ -2594,6 +2601,7 @@ impl Tool {
         Self {
             kind: ToolKind::Dynamic,
             name: name.into(),
+            title: None,
             description: None,
             input_schema,
             input_examples: None,
@@ -2624,6 +2632,7 @@ impl Tool {
                 supports_deferred_results: None,
             },
             name: name.into(),
+            title: None,
             description: None,
             input_schema,
             input_examples: None,
@@ -2654,6 +2663,7 @@ impl Tool {
                 supports_deferred_results: None,
             },
             name: name.into(),
+            title: None,
             description: None,
             input_schema,
             input_examples: None,
@@ -2667,6 +2677,12 @@ impl Tool {
     /// Sets the tool description.
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
+        self
+    }
+
+    /// Sets the optional display title for this tool.
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
         self
     }
 
@@ -2800,6 +2816,11 @@ impl Tool {
         self.metadata.as_ref()
     }
 
+    /// Returns the optional high-level display title.
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
     /// Executes this tool when an executor is present.
     pub fn execute(
         &self,
@@ -2849,6 +2870,7 @@ impl fmt::Debug for Tool {
             .debug_struct("Tool")
             .field("kind", &self.kind)
             .field("name", &self.name)
+            .field("title", &self.title)
             .field("description", &self.description)
             .field("input_schema", &self.input_schema)
             .field("input_examples", &self.input_examples)
@@ -9786,6 +9808,27 @@ mod tests {
         let tool = Tool::new("weather", object_schema()).with_metadata(metadata.clone());
 
         assert_eq!(tool.metadata(), Some(&metadata));
+        assert_eq!(
+            serde_json::to_value(tool.to_language_model_tool()).expect("tool serializes"),
+            json!({
+                "type": "function",
+                "name": "weather",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    },
+                    "required": ["city"]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn tool_title_is_retained_but_not_sent_to_provider() {
+        let tool = Tool::new("weather", object_schema()).with_title("Weather information");
+
+        assert_eq!(tool.title(), Some("Weather information"));
         assert_eq!(
             serde_json::to_value(tool.to_language_model_tool()).expect("tool serializes"),
             json!({
