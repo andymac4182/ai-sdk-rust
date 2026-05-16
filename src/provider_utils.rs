@@ -58,6 +58,78 @@ static ID_GENERATOR_COUNTER: AtomicU64 = AtomicU64::new(0x9e37_79b9_7f4a_7c15);
 /// Default maximum response download size used by upstream provider-utils: 2 GiB.
 pub const DEFAULT_MAX_DOWNLOAD_SIZE: usize = 2 * 1024 * 1024 * 1024;
 
+/// Boxed future used by [`Resolvable`] for async values.
+pub type ResolvableFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+
+/// Lazy producer used by [`Resolvable`] for values that should be resolved on demand.
+pub type ResolvableFunction<'a, T> = Box<dyn FnOnce() -> ResolvableFuture<'a, T> + 'a>;
+
+/// A value or lazy provider of a value, either synchronous or asynchronous.
+///
+/// This mirrors upstream provider-utils `Resolvable<T>` while using Rust's
+/// [`Future`] boundary instead of JavaScript `PromiseLike`.
+pub enum Resolvable<'a, T> {
+    /// Already available value.
+    Value(T),
+
+    /// Future that resolves to the value.
+    Future(ResolvableFuture<'a, T>),
+
+    /// Lazy producer that is invoked only when [`resolve`] is called.
+    Function(ResolvableFunction<'a, T>),
+}
+
+impl<'a, T: 'a> Resolvable<'a, T> {
+    /// Creates a resolvable from an already available value.
+    pub fn value(value: T) -> Self {
+        Self::Value(value)
+    }
+
+    /// Creates a resolvable from a future.
+    pub fn future<F>(future: F) -> Self
+    where
+        F: Future<Output = T> + 'a,
+    {
+        Self::Future(Box::pin(future))
+    }
+
+    /// Creates a resolvable from a lazy future producer.
+    pub fn function<F, Fut>(function: F) -> Self
+    where
+        F: FnOnce() -> Fut + 'a,
+        Fut: Future<Output = T> + 'a,
+    {
+        Self::Function(Box::new(|| Box::pin(function())))
+    }
+
+    /// Creates a resolvable from a lazy synchronous value producer.
+    pub fn lazy_value<F>(function: F) -> Self
+    where
+        F: FnOnce() -> T + 'a,
+    {
+        Self::function(|| std::future::ready(function()))
+    }
+}
+
+impl<'a, T: 'a> From<T> for Resolvable<'a, T> {
+    fn from(value: T) -> Self {
+        Self::value(value)
+    }
+}
+
+/// Resolves a raw value, future, lazy value, or lazy future.
+///
+/// Upstream `resolve` accepts values, promises, functions returning values, and
+/// functions returning promises. Rust models thrown or rejected errors by making
+/// the resolved type a `Result`.
+pub async fn resolve<T>(value: Resolvable<'_, T>) -> T {
+    match value {
+        Resolvable::Value(value) => value,
+        Resolvable::Future(future) => future.await,
+        Resolvable::Function(function) => function().await,
+    }
+}
+
 struct DelayState {
     completed: bool,
     waker: Option<Waker>,
@@ -5794,8 +5866,8 @@ mod tests {
         PostJsonToApiOptions, PostToApiOptions, ProviderApiRequest, ProviderApiRequestBody,
         ProviderApiRequestMethod, ProviderApiResponse, ProviderApiResponseBody,
         ProviderApiResponseHandlerError, ProviderDefinedToolFactory, ProviderExecutedToolFactory,
-        ReasoningLevel, ResponseHandlerResult, RuntimeEnvironment, SerializedModelOptions,
-        StatusCodeErrorResponseHandlerOptions, StreamingToolCallDelta,
+        ReasoningLevel, Resolvable, ResponseHandlerResult, RuntimeEnvironment,
+        SerializedModelOptions, StatusCodeErrorResponseHandlerOptions, StreamingToolCallDelta,
         StreamingToolCallDeltaFunction, StreamingToolCallTracker, StreamingToolCallTrackerOptions,
         StreamingToolCallTypeValidation, Tool, ToolExecutionError, ToolExecutionOptions,
         ValidateTypesResult, add_additional_properties_to_json_schema, as_array, combine_headers,
@@ -5818,7 +5890,7 @@ mod tests {
         media_type_to_extension, normalize_headers, parse_json, parse_json_event_stream,
         parse_provider_options, post_json_to_api, post_to_api, prepare_get_from_api_request,
         prepare_post_json_to_api_request, prepare_post_to_api_request, prepare_tools,
-        read_response_with_size_limit, remove_undefined_entries, resolve_full_media_type,
+        read_response_with_size_limit, remove_undefined_entries, resolve, resolve_full_media_type,
         resolve_provider_reference, safe_parse_json, safe_validate_types, serialize_model_options,
         strip_file_extension, validate_download_url, validate_types,
         with_provider_utils_user_agent, with_user_agent_suffix, without_trailing_slash,
@@ -5853,6 +5925,45 @@ mod tests {
             get_error_message(Some(&json!({ "code": "bad_request" }))),
             "{\"code\":\"bad_request\"}"
         );
+    }
+
+    #[test]
+    fn resolve_returns_raw_values_and_future_values() {
+        assert_eq!(poll_ready(resolve(Resolvable::value(42))), 42);
+        assert_eq!(
+            poll_ready(resolve(Resolvable::future(ready(json!({
+                "foo": "bar"
+            }))))),
+            json!({
+                "foo": "bar"
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_invokes_lazy_value_and_future_producers_on_demand() {
+        let count = std::cell::Cell::new(0);
+        let lazy_value = Resolvable::lazy_value(|| {
+            count.set(count.get() + 1);
+            count.get()
+        });
+
+        assert_eq!(count.get(), 0);
+        assert_eq!(poll_ready(resolve(lazy_value)), 1);
+        assert_eq!(count.get(), 1);
+
+        let lazy_future = Resolvable::function(|| ready("resolved headers"));
+        assert_eq!(poll_ready(resolve(lazy_future)), "resolved headers");
+    }
+
+    #[test]
+    fn resolve_can_carry_result_outputs_for_fallible_values() {
+        let success: Resolvable<'_, Result<&str, &str>> = Resolvable::future(ready(Ok("ok")));
+        assert_eq!(poll_ready(resolve(success)), Ok("ok"));
+
+        let failure: Resolvable<'_, Result<&str, &str>> =
+            Resolvable::function(|| ready(Err("bad")));
+        assert_eq!(poll_ready(resolve(failure)), Err("bad"));
     }
 
     #[test]
