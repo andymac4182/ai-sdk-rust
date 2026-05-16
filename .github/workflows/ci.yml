@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+
+      - name: Check formatting
+        run: cargo +stable fmt --all --check
+
+      - name: Run Clippy
+        run: cargo +stable clippy --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo +stable test --all-features
