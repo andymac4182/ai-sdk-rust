@@ -138,8 +138,8 @@ pub use skills::{
     Skills, SkillsFile, SkillsFileData, SkillsUploadSkillCallOptions, SkillsUploadSkillResult,
 };
 pub use speech_model::{
-    SpeechModel, SpeechModelAudio, SpeechModelCallOptions, SpeechModelRequest, SpeechModelResponse,
-    SpeechModelResult,
+    NoSpeechGeneratedError, SpeechModel, SpeechModelAudio, SpeechModelCallOptions,
+    SpeechModelRequest, SpeechModelResponse, SpeechModelResult,
 };
 pub use transcription_model::{
     TranscriptionModel, TranscriptionModelCallOptions, TranscriptionModelRequest,

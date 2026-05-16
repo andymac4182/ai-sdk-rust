@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::future::Future;
+use std::{fmt, future::Future};
 use time::OffsetDateTime;
 
 use crate::file_data::FileDataContent;
@@ -201,6 +201,44 @@ impl SpeechModelResponse {
     }
 }
 
+/// Error returned when high-level speech generation produces no audio.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NoSpeechGeneratedError {
+    responses: Vec<SpeechModelResponse>,
+}
+
+impl NoSpeechGeneratedError {
+    /// Creates a no-speech error with response metadata from attempted provider calls.
+    pub fn new(responses: impl IntoIterator<Item = SpeechModelResponse>) -> Self {
+        Self {
+            responses: responses.into_iter().collect(),
+        }
+    }
+
+    /// Returns the upstream human-readable error message.
+    pub fn message(&self) -> &'static str {
+        "No speech audio generated."
+    }
+
+    /// Returns response metadata for attempted provider calls.
+    pub fn responses(&self) -> &[SpeechModelResponse] {
+        &self.responses
+    }
+
+    /// Converts this error into its response metadata.
+    pub fn into_responses(self) -> Vec<SpeechModelResponse> {
+        self.responses
+    }
+}
+
+impl fmt::Display for NoSpeechGeneratedError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+
+impl std::error::Error for NoSpeechGeneratedError {}
+
 /// Result of a speech model provider call.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -257,8 +295,8 @@ impl SpeechModelResult {
 #[cfg(test)]
 mod tests {
     use super::{
-        SpeechModel, SpeechModelCallOptions, SpeechModelRequest, SpeechModelResponse,
-        SpeechModelResult,
+        NoSpeechGeneratedError, SpeechModel, SpeechModelCallOptions, SpeechModelRequest,
+        SpeechModelResponse, SpeechModelResult,
     };
     use crate::file_data::FileDataContent;
     use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
@@ -505,5 +543,30 @@ mod tests {
                 .to_string()
                 .contains("missing field `response`")
         );
+    }
+
+    #[test]
+    fn no_speech_generated_error_matches_upstream_message() {
+        let error = NoSpeechGeneratedError::new([]);
+
+        assert_eq!(error.message(), "No speech audio generated.");
+        assert_eq!(error.to_string(), "No speech audio generated.");
+        assert!(error.responses().is_empty());
+    }
+
+    #[test]
+    fn no_speech_generated_error_retains_response_metadata() {
+        let response_timestamp =
+            OffsetDateTime::parse("2026-05-16T10:00:00Z", &Rfc3339).expect("timestamp parses");
+        let response = SpeechModelResponse::new(response_timestamp, "openai/tts-1")
+            .with_header("x-request-id", "req_123")
+            .with_body(json!({
+                "audio": []
+            }));
+
+        let error = NoSpeechGeneratedError::new([response.clone()]);
+
+        assert_eq!(error.responses(), std::slice::from_ref(&response));
+        assert_eq!(error.into_responses(), vec![response]);
     }
 }
