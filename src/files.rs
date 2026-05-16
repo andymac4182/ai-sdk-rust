@@ -1,8 +1,33 @@
+use std::future::Future;
+
 use serde::{Deserialize, Serialize};
 
 use crate::file_data::{FileDataContent, ProviderReference};
-use crate::provider::{ProviderMetadata, ProviderOptions};
+use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
 use crate::warning::Warning;
+
+/// A provider-v4 files interface.
+///
+/// The upstream TypeScript contract exposes an `uploadFile` method returning a
+/// `PromiseLike<FilesV4UploadFileResult>`. This Rust trait maps that boundary
+/// to an associated [`Future`] without introducing an async-trait dependency.
+pub trait Files {
+    /// Future returned by [`Files::upload_file`].
+    type UploadFileFuture<'a>: Future<Output = FilesUploadFileResult> + Send + 'a
+    where
+        Self: 'a;
+
+    /// Returns the provider/files interface version implemented by this interface.
+    fn specification_version(&self) -> SpecificationVersion {
+        SpecificationVersion::V4
+    }
+
+    /// Returns the provider identifier.
+    fn provider(&self) -> &str;
+
+    /// Uploads a file and returns a provider reference for later calls.
+    fn upload_file(&self, options: FilesUploadFileCallOptions) -> Self::UploadFileFuture<'_>;
+}
 
 /// File data accepted by the provider files upload interface.
 ///
@@ -137,13 +162,51 @@ impl FilesUploadFileResult {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::future::{Future, Ready, ready};
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
 
     use serde_json::json;
 
-    use super::{FilesUploadFileCallOptions, FilesUploadFileData, FilesUploadFileResult};
+    use super::{Files, FilesUploadFileCallOptions, FilesUploadFileData, FilesUploadFileResult};
     use crate::file_data::{FileDataContent, ProviderReference};
-    use crate::provider::{ProviderMetadata, ProviderOptions};
+    use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
     use crate::warning::Warning;
+
+    struct StaticFiles;
+
+    impl Files for StaticFiles {
+        type UploadFileFuture<'a>
+            = Ready<FilesUploadFileResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "test-provider"
+        }
+
+        fn upload_file(&self, options: FilesUploadFileCallOptions) -> Self::UploadFileFuture<'_> {
+            let provider_reference = ProviderReference::try_from(BTreeMap::from([(
+                "test-provider".to_string(),
+                "file_123".to_string(),
+            )]))
+            .expect("provider reference is valid");
+
+            ready(
+                FilesUploadFileResult::new(provider_reference).with_media_type(options.media_type),
+            )
+        }
+    }
+
+    fn poll_ready<T>(mut future: Ready<T>) -> T {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+
+        match Pin::new(&mut future).poll(&mut context) {
+            Poll::Ready(value) => value,
+            Poll::Pending => unreachable!("std::future::Ready never returns pending"),
+        }
+    }
 
     #[test]
     fn upload_file_call_options_serializes_data_filename_and_provider_options() {
@@ -206,6 +269,27 @@ mod tests {
                 },
                 "mediaType": "text/plain"
             })
+        );
+    }
+
+    #[test]
+    fn files_trait_exposes_upstream_v4_identity_and_upload_boundary() {
+        let files = StaticFiles;
+        let result = poll_ready(files.upload_file(FilesUploadFileCallOptions::new(
+            FilesUploadFileData::text("hello"),
+            "text/plain",
+        )));
+        let expected_provider_reference = ProviderReference::try_from(BTreeMap::from([(
+            "test-provider".to_string(),
+            "file_123".to_string(),
+        )]))
+        .expect("provider reference is valid");
+
+        assert_eq!(files.specification_version(), SpecificationVersion::V4);
+        assert_eq!(files.provider(), "test-provider");
+        assert_eq!(
+            result,
+            FilesUploadFileResult::new(expected_provider_reference).with_media_type("text/plain")
         );
     }
 

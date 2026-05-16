@@ -27,7 +27,7 @@ pub use file_data::{
     FileData, FileDataContent, NoSuchProviderReferenceError, ProviderReference,
     ProviderReferenceError,
 };
-pub use files::{FilesUploadFileCallOptions, FilesUploadFileData, FilesUploadFileResult};
+pub use files::{Files, FilesUploadFileCallOptions, FilesUploadFileData, FilesUploadFileResult};
 pub use headers::Headers;
 pub use image_model::{
     ImageModel, ImageModelCallOptions, ImageModelFile, ImageModelImage, ImageModelProviderMetadata,
