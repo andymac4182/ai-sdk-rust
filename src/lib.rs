@@ -23,6 +23,7 @@ pub mod retry;
 pub mod skills;
 pub mod speech_model;
 pub mod transcription_model;
+pub mod util;
 pub mod video_model;
 pub mod warning;
 
@@ -160,6 +161,7 @@ pub use transcription_model::{
     TranscriptionModelRequest, TranscriptionModelResponse, TranscriptionModelResult,
     TranscriptionModelSegment,
 };
+pub use util::is_deep_equal_data;
 pub use video_model::{
     NoVideoGeneratedError, VideoModel, VideoModelCallOptions, VideoModelFile, VideoModelResponse,
     VideoModelResponseMetadata, VideoModelResult, VideoModelVideoData,
