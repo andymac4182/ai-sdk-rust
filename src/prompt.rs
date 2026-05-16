@@ -1,6 +1,16 @@
 use std::fmt;
 
+use crate::file_data::FileDataContent;
 use crate::json::JsonValue;
+use crate::provider_utils::convert_to_base64;
+
+/// Converts prompt data content to a base64-encoded string.
+///
+/// This mirrors upstream `convertDataContentToBase64String`: string content is
+/// already base64 and passes through unchanged, while byte content is encoded.
+pub fn convert_data_content_to_base64_string(content: &FileDataContent) -> String {
+    convert_to_base64(content)
+}
 
 /// Error returned when prompt data content is not a supported media-data value.
 #[derive(Clone, Debug, PartialEq)]
@@ -164,9 +174,31 @@ fn json_value_js_typeof(content: &JsonValue) -> &'static str {
 mod tests {
     use serde_json::json;
 
+    use crate::file_data::FileDataContent;
     use crate::json::JsonValue;
 
-    use super::{InvalidDataContentError, InvalidMessageRoleError, MessageConversionError};
+    use super::{
+        InvalidDataContentError, InvalidMessageRoleError, MessageConversionError,
+        convert_data_content_to_base64_string,
+    };
+
+    #[test]
+    fn convert_data_content_to_base64_string_passes_base64_strings_through() {
+        assert_eq!(
+            convert_data_content_to_base64_string(&FileDataContent::Base64(
+                "already-base64".to_string()
+            )),
+            "already-base64"
+        );
+    }
+
+    #[test]
+    fn convert_data_content_to_base64_string_encodes_bytes() {
+        assert_eq!(
+            convert_data_content_to_base64_string(&FileDataContent::Bytes(b"Hello".to_vec())),
+            "SGVsbG8="
+        );
+    }
 
     #[test]
     fn invalid_data_content_error_matches_upstream_default_message() {
