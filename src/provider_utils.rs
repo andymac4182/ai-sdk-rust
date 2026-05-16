@@ -49,6 +49,18 @@ impl fmt::Display for InlineFileDataBytesError {
 
 impl std::error::Error for InlineFileDataBytesError {}
 
+/// Error returned when base64 data cannot be decoded into bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Base64DecodeError;
+
+impl fmt::Display for Base64DecodeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("invalid base64 data")
+    }
+}
+
+impl std::error::Error for Base64DecodeError {}
+
 struct MediaTypeSignature {
     media_type: &'static str,
     bytes_prefix: &'static [Option<u8>],
@@ -941,13 +953,40 @@ pub fn convert_inline_file_data_to_bytes(
         FileData::Text { text } => Ok(text.as_bytes().to_vec()),
         FileData::Data { data } => match data {
             FileDataContent::Bytes(bytes) => Ok(bytes.clone()),
-            FileDataContent::Base64(base64) => {
-                decode_base64(base64).ok_or(InlineFileDataBytesError::InvalidBase64Data)
-            }
+            FileDataContent::Base64(base64) => convert_base64_to_bytes(base64)
+                .map_err(|_| InlineFileDataBytesError::InvalidBase64Data),
         },
         FileData::Url { .. } | FileData::Reference { .. } => {
             Err(InlineFileDataBytesError::NonInlineFileData)
         }
+    }
+}
+
+/// Converts a base64 or base64url string into raw bytes.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils`
+/// `convertBase64ToUint8Array`: URL-safe `-` and `_` alphabet characters are
+/// accepted in addition to ordinary base64 data.
+pub fn convert_base64_to_bytes(base64: &str) -> Result<Vec<u8>, Base64DecodeError> {
+    decode_base64(base64).ok_or(Base64DecodeError)
+}
+
+/// Converts raw bytes into a base64 string.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils`
+/// `convertUint8ArrayToBase64`.
+pub fn convert_bytes_to_base64(bytes: &[u8]) -> String {
+    encode_base64(bytes)
+}
+
+/// Converts file data content into a base64 string.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils` `convertToBase64`: base64
+/// strings pass through unchanged, while raw bytes are encoded.
+pub fn convert_to_base64(value: &FileDataContent) -> String {
+    match value {
+        FileDataContent::Bytes(bytes) => convert_bytes_to_base64(bytes),
+        FileDataContent::Base64(base64) => base64.clone(),
     }
 }
 
@@ -1511,12 +1550,13 @@ mod tests {
     use url::Url;
 
     use super::{
-        Arrayable, InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
-        LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, ReasoningLevel, Tool,
-        ToolExecutionError, ToolExecutionOptions, add_additional_properties_to_json_schema,
-        as_array, combine_headers, convert_image_model_file_to_data_uri,
-        convert_inline_file_data_to_bytes, create_tool_name_mapping, detect_media_type,
-        filter_nullable, get_top_level_media_type, inject_json_instruction,
+        Arrayable, Base64DecodeError, InjectJsonInstructionIntoMessagesOptions,
+        InlineFileDataBytesError, LoadApiKeyOptions, LoadOptionalSettingOptions,
+        LoadSettingOptions, ReasoningLevel, Tool, ToolExecutionError, ToolExecutionOptions,
+        add_additional_properties_to_json_schema, as_array, combine_headers,
+        convert_base64_to_bytes, convert_bytes_to_base64, convert_image_model_file_to_data_uri,
+        convert_inline_file_data_to_bytes, convert_to_base64, create_tool_name_mapping,
+        detect_media_type, filter_nullable, get_top_level_media_type, inject_json_instruction,
         inject_json_instruction_into_messages, is_custom_reasoning, is_full_media_type,
         is_non_nullable, is_provider_reference, load_api_key, load_api_key_with_env,
         load_optional_setting_with_env, load_setting, load_setting_with_env,
@@ -2341,6 +2381,49 @@ mod tests {
             })
             .expect_err("invalid base64 does not convert"),
             InlineFileDataBytesError::InvalidBase64Data
+        );
+    }
+
+    #[test]
+    fn convert_base64_to_bytes_decodes_standard_and_url_safe_data() {
+        assert_eq!(
+            convert_base64_to_bytes("SGVsbG8=").expect("base64 decodes"),
+            b"Hello".to_vec()
+        );
+        assert_eq!(
+            convert_base64_to_bytes("-_8=").expect("base64url decodes"),
+            vec![251, 255]
+        );
+        assert_eq!(
+            convert_base64_to_bytes("SG V sb\tG8=\n").expect("whitespace is ignored"),
+            b"Hello".to_vec()
+        );
+    }
+
+    #[test]
+    fn convert_base64_to_bytes_rejects_invalid_data() {
+        assert_eq!(
+            convert_base64_to_bytes("not valid base64!").expect_err("invalid data fails"),
+            Base64DecodeError
+        );
+    }
+
+    #[test]
+    fn convert_bytes_to_base64_encodes_raw_bytes() {
+        assert_eq!(convert_bytes_to_base64(b"Hello"), "SGVsbG8=");
+        assert_eq!(convert_bytes_to_base64(&[251, 255]), "+/8=");
+        assert_eq!(convert_bytes_to_base64(&[]), "");
+    }
+
+    #[test]
+    fn convert_to_base64_passes_strings_through_and_encodes_bytes() {
+        assert_eq!(
+            convert_to_base64(&FileDataContent::Base64("already-base64".to_string())),
+            "already-base64"
+        );
+        assert_eq!(
+            convert_to_base64(&FileDataContent::Bytes(b"Hello".to_vec())),
+            "SGVsbG8="
         );
     }
 

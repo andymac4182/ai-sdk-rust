@@ -93,11 +93,12 @@ pub use provider::{
     TypeValidationContext, TypeValidationError, UnsupportedFunctionalityError, get_error_message,
 };
 pub use provider_utils::{
-    Arrayable, InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
-    LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, ReasoningLevel, Tool,
-    ToolExecuteFunction, ToolExecuteFuture, ToolExecutionError, ToolExecutionOptions,
-    ToolNameMapping, add_additional_properties_to_json_schema, as_array, combine_headers,
-    convert_image_model_file_to_data_uri, convert_inline_file_data_to_bytes,
+    Arrayable, Base64DecodeError, InjectJsonInstructionIntoMessagesOptions,
+    InlineFileDataBytesError, LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions,
+    ReasoningLevel, Tool, ToolExecuteFunction, ToolExecuteFuture, ToolExecutionError,
+    ToolExecutionOptions, ToolNameMapping, add_additional_properties_to_json_schema, as_array,
+    combine_headers, convert_base64_to_bytes, convert_bytes_to_base64,
+    convert_image_model_file_to_data_uri, convert_inline_file_data_to_bytes, convert_to_base64,
     create_tool_name_mapping, detect_media_type, filter_nullable, get_top_level_media_type,
     inject_json_instruction_into_messages, is_custom_reasoning, is_full_media_type,
     is_non_nullable, is_provider_reference, load_api_key, load_optional_setting, load_setting,
