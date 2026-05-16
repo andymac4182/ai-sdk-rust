@@ -21,14 +21,32 @@ impl std::error::Error for ProviderReferenceError {}
 pub struct NoSuchProviderReferenceError {
     provider: String,
     reference: ProviderReference,
+    message: String,
 }
 
 impl NoSuchProviderReferenceError {
     /// Creates an error for a missing provider reference.
     pub fn new(provider: impl Into<String>, reference: ProviderReference) -> Self {
+        let provider = provider.into();
+        let message = no_such_provider_reference_default_message(&provider, &reference);
+
+        Self {
+            provider,
+            reference,
+            message,
+        }
+    }
+
+    /// Creates an error for a missing provider reference with a caller-supplied message.
+    pub fn with_message(
+        provider: impl Into<String>,
+        reference: ProviderReference,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             provider: provider.into(),
             reference,
+            message: message.into(),
         }
     }
 
@@ -42,31 +60,45 @@ impl NoSuchProviderReferenceError {
         &self.reference
     }
 
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
     /// Converts this error into the provider reference that failed lookup.
     pub fn into_reference(self) -> ProviderReference {
         self.reference
+    }
+
+    /// Converts this error into the provider id, provider reference, and message.
+    pub fn into_parts(self) -> (String, ProviderReference, String) {
+        (self.provider, self.reference, self.message)
     }
 }
 
 impl fmt::Display for NoSuchProviderReferenceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let available_providers = self
-            .reference
-            .as_map()
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        write!(
-            formatter,
-            "no provider reference found for provider '{}'. Available providers: {}",
-            self.provider, available_providers
-        )
+        formatter.write_str(&self.message)
     }
 }
 
 impl std::error::Error for NoSuchProviderReferenceError {}
+
+fn no_such_provider_reference_default_message(
+    provider: &str,
+    reference: &ProviderReference,
+) -> String {
+    let available_providers = reference
+        .as_map()
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!(
+        "No provider reference found for provider '{provider}'. Available providers: {available_providers}"
+    )
+}
 
 /// A mapping of provider names to provider-specific file identifiers.
 ///
@@ -271,11 +303,49 @@ mod tests {
         assert_eq!(error.provider(), "google");
         assert_eq!(error.reference(), &reference);
         assert_eq!(
+            error.message(),
+            "No provider reference found for provider 'google'. Available providers: anthropic, openai"
+        );
+        assert_eq!(
             error.to_string(),
-            "no provider reference found for provider 'google'. Available providers: anthropic, openai"
+            "No provider reference found for provider 'google'. Available providers: anthropic, openai"
         );
 
         let explicit_error = NoSuchProviderReferenceError::new("google", reference.clone());
         assert_eq!(explicit_error.into_reference(), reference);
+    }
+
+    #[test]
+    fn missing_provider_reference_error_accepts_upstream_custom_message() {
+        let reference = ProviderReference::try_from(BTreeMap::from([(
+            "openai".to_string(),
+            "file-abc123".to_string(),
+        )]))
+        .expect("provider reference is valid");
+
+        let error = NoSuchProviderReferenceError::with_message(
+            "anthropic",
+            reference.clone(),
+            "Provider reference cannot be used by Anthropic.",
+        );
+
+        assert_eq!(error.provider(), "anthropic");
+        assert_eq!(error.reference(), &reference);
+        assert_eq!(
+            error.message(),
+            "Provider reference cannot be used by Anthropic."
+        );
+        assert_eq!(
+            error.to_string(),
+            "Provider reference cannot be used by Anthropic."
+        );
+        assert_eq!(
+            error.into_parts(),
+            (
+                "anthropic".to_string(),
+                reference,
+                "Provider reference cannot be used by Anthropic.".to_string()
+            )
+        );
     }
 }
