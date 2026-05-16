@@ -136,7 +136,10 @@ pub use reranking_model::{
     RerankingModelResponse, RerankingModelResult,
 };
 pub use retry::{
-    RetryError, RetryErrorReason, get_retry_delay_in_ms, retry_delay_from_response_headers,
+    DEFAULT_INITIAL_RETRY_DELAY_MS, DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BACKOFF_FACTOR,
+    RetryAttemptError, RetryError, RetryErrorReason, RetryFailure,
+    RetryWithExponentialBackoffOptions, get_retry_delay_in_ms, retry_delay_from_response_headers,
+    retry_with_exponential_backoff_respecting_retry_headers,
 };
 pub use skills::{
     Skills, SkillsFile, SkillsFileData, SkillsUploadSkillCallOptions, SkillsUploadSkillResult,
