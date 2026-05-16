@@ -6,7 +6,7 @@ use crate::json::JsonValue;
 use crate::language_model::{
     FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
     LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
-    LanguageModelCustomPart, LanguageModelFileData, LanguageModelFilePart,
+    LanguageModelCustomPart, LanguageModelFile, LanguageModelFileData, LanguageModelFilePart,
     LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelMessage,
     LanguageModelPrompt, LanguageModelReasoningEffort, LanguageModelReasoningFilePart,
     LanguageModelReasoningPart, LanguageModelRequest, LanguageModelResponse,
@@ -374,6 +374,10 @@ pub struct GenerateTextStep {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub response_messages: Vec<LanguageModelMessage>,
 
+    /// Files generated during this step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<LanguageModelFile>,
+
     /// Sources used to generate this step.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<LanguageModelSource>,
@@ -430,6 +434,7 @@ impl GenerateTextStep {
         let text = extract_text(&content);
         let tool_calls = extract_tool_calls(&content);
         let tool_results = extract_provider_tool_results(&content, &tool_calls);
+        let files = extract_files(&content);
         let sources = extract_sources(&content);
 
         Self {
@@ -439,6 +444,7 @@ impl GenerateTextStep {
             tool_calls,
             tool_results,
             response_messages: Vec::new(),
+            files,
             sources,
             text,
             finish_reason: unified,
@@ -470,6 +476,10 @@ pub struct GenerateTextResult {
     /// Accumulated response messages generated across all steps.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub response_messages: Vec<LanguageModelMessage>,
+
+    /// Files generated across all steps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<LanguageModelFile>,
 
     /// Sources used to generate the response across all steps.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -533,6 +543,10 @@ impl GenerateTextResult {
             response_messages: steps
                 .iter()
                 .flat_map(|step| step.response_messages.iter().cloned())
+                .collect(),
+            files: steps
+                .iter()
+                .flat_map(|step| step.files.iter().cloned())
                 .collect(),
             sources: steps
                 .iter()
@@ -633,6 +647,16 @@ fn extract_sources(content: &[LanguageModelContent]) -> Vec<LanguageModelSource>
         .iter()
         .filter_map(|part| match part {
             LanguageModelContent::Source(source) => Some(source.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn extract_files(content: &[LanguageModelContent]) -> Vec<LanguageModelFile> {
+    content
+        .iter()
+        .filter_map(|part| match part {
+            LanguageModelContent::File(file) => Some(file.clone()),
             _ => None,
         })
         .collect()
@@ -1063,16 +1087,17 @@ mod tests {
         GenerateTextModelInfo, GenerateTextOptions, GenerateTextResult, GenerateTextStep,
         GenerateTextToolCall, GenerateTextToolResult, generate_text,
     };
+    use crate::file_data::FileDataContent;
     use crate::language_model::{
         FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
-        LanguageModelCallOptions, LanguageModelContent, LanguageModelFinishReason,
-        LanguageModelFunctionTool, LanguageModelGenerateResult, LanguageModelMessage,
-        LanguageModelSource, LanguageModelStreamPart, LanguageModelStreamResult,
-        LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextPart, LanguageModelTool,
-        LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolContentPart,
-        LanguageModelToolResult, LanguageModelToolResultOutput, LanguageModelToolResultPart,
-        LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage,
-        OutputTokenUsage,
+        LanguageModelCallOptions, LanguageModelContent, LanguageModelFile, LanguageModelFileData,
+        LanguageModelFinishReason, LanguageModelFunctionTool, LanguageModelGenerateResult,
+        LanguageModelMessage, LanguageModelSource, LanguageModelStreamPart,
+        LanguageModelStreamResult, LanguageModelSupportedUrls, LanguageModelText,
+        LanguageModelTextPart, LanguageModelTool, LanguageModelToolCall, LanguageModelToolCallPart,
+        LanguageModelToolContentPart, LanguageModelToolResult, LanguageModelToolResultOutput,
+        LanguageModelToolResultPart, LanguageModelUsage, LanguageModelUserContentPart,
+        LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::provider::{ProviderMetadata, SpecificationVersion};
     use crate::provider_utils::{Tool, ToolExecutionError};
@@ -1236,6 +1261,7 @@ mod tests {
                     LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new("Hello")),
                 ]),
             )],
+            files: Vec::new(),
             sources: Vec::new(),
             text: "Hello".to_string(),
             finish_reason: FinishReason::Stop,
@@ -1425,12 +1451,87 @@ mod tests {
         assert_eq!(result.text, "");
         assert_eq!(result.finish_reason, FinishReason::Length);
         assert_eq!(result.raw_finish_reason, None);
+        assert_eq!(result.files, Vec::new());
         assert_eq!(result.sources, Vec::new());
         assert_eq!(result.steps[0].raw_finish_reason, None);
+        assert_eq!(result.steps[0].files, Vec::new());
         assert_eq!(result.steps[0].sources, Vec::new());
         assert_eq!(
             result.steps[0].model,
             GenerateTextModelInfo::new("test-provider", "test-model")
+        );
+    }
+
+    #[test]
+    fn generate_text_surfaces_files_across_result_and_steps() {
+        let first_file = LanguageModelFile::new(
+            "image/png",
+            LanguageModelFileData::Data {
+                data: FileDataContent::Base64("AQID".to_string()),
+            },
+        );
+        let second_file = LanguageModelFile::new(
+            "image/jpeg",
+            LanguageModelFileData::Data {
+                data: FileDataContent::Bytes(vec![4, 5, 6]),
+            },
+        );
+        let first_step = GenerateTextStep::from_language_model_result(
+            0,
+            GenerateTextModelInfo::new("test-provider", "test-model"),
+            LanguageModelGenerateResult::new(
+                vec![
+                    LanguageModelContent::Text(LanguageModelText::new("First")),
+                    LanguageModelContent::File(first_file.clone()),
+                ],
+                LanguageModelFinishReason {
+                    unified: FinishReason::ToolCalls,
+                    raw: None,
+                },
+                LanguageModelUsage::default(),
+            ),
+        );
+        let second_step = GenerateTextStep::from_language_model_result(
+            1,
+            GenerateTextModelInfo::new("test-provider", "test-model"),
+            LanguageModelGenerateResult::new(
+                vec![
+                    LanguageModelContent::File(second_file.clone()),
+                    LanguageModelContent::Text(LanguageModelText::new("Done")),
+                ],
+                LanguageModelFinishReason {
+                    unified: FinishReason::Stop,
+                    raw: None,
+                },
+                LanguageModelUsage::default(),
+            ),
+        );
+
+        let result = GenerateTextResult::from_steps(vec![first_step, second_step]);
+
+        assert_eq!(result.files, vec![first_file.clone(), second_file.clone()]);
+        assert_eq!(result.steps[0].files, vec![first_file]);
+        assert_eq!(result.steps[1].files, vec![second_file]);
+        assert_eq!(
+            serde_json::to_value(&result.files).expect("files serialize"),
+            json!([
+                {
+                    "type": "file",
+                    "mediaType": "image/png",
+                    "data": {
+                        "type": "data",
+                        "data": "AQID"
+                    }
+                },
+                {
+                    "type": "file",
+                    "mediaType": "image/jpeg",
+                    "data": {
+                        "type": "data",
+                        "data": [4, 5, 6]
+                    }
+                }
+            ])
         );
     }
 
