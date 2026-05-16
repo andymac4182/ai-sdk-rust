@@ -793,6 +793,14 @@ impl<'a> ResolveToolApprovalOptions<'a> {
         self.tool_approval = Some(tool_approval);
         self
     }
+
+    fn with_optional_tool_approval(
+        mut self,
+        tool_approval: Option<&'a ToolApprovalConfiguration>,
+    ) -> Self {
+        self.tool_approval = tool_approval;
+        self
+    }
 }
 
 /// Resolves the approval status for a valid tool call.
@@ -1635,6 +1643,9 @@ pub struct GenerateTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Optional active tool names used to restrict the available tool set.
     pub active_tools: Option<Vec<String>>,
 
+    /// Static approval configuration for tool calls.
+    pub tool_approval: Option<ToolApprovalConfiguration>,
+
     /// Maximum number of model-call steps to run.
     pub max_steps: usize,
 
@@ -1655,6 +1666,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             runtime_context: JsonObject::new(),
             tools_context: JsonObject::new(),
             active_tools: None,
+            tool_approval: None,
             max_steps: DEFAULT_MAX_STEPS,
             stop_conditions: Vec::new(),
             include: GenerateTextInclude::default(),
@@ -1670,6 +1682,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             runtime_context: JsonObject::new(),
             tools_context: JsonObject::new(),
             active_tools: None,
+            tool_approval: None,
             max_steps: DEFAULT_MAX_STEPS,
             stop_conditions: Vec::new(),
             include: GenerateTextInclude::default(),
@@ -1784,6 +1797,12 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
         active_tools: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         self.active_tools = Some(active_tools.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Sets static approval configuration for tool calls.
+    pub fn with_tool_approval(mut self, tool_approval: ToolApprovalConfiguration) -> Self {
+        self.tool_approval = Some(tool_approval);
         self
     }
 
@@ -2546,6 +2565,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         runtime_context,
         tools_context,
         active_tools,
+        tool_approval,
         max_steps,
         stop_conditions,
         include,
@@ -2589,13 +2609,26 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         mark_tool_call_metadata(&mut step.tool_calls, &tools);
         mark_tool_result_metadata(&mut step.tool_results, &step.tool_calls, &tools);
         refresh_tool_call_views(&mut step);
-        let (tool_results, tool_execution_ms) =
-            execute_tool_calls(&tools, &step.tool_calls, &step_prompt, &tools_context).await;
-        let should_continue = should_continue_after_tool_results(&step, &tool_results);
+        let tool_approvals =
+            resolve_tool_approvals_for_step(&step.tool_calls, &tools, tool_approval.as_ref());
+        let (tool_results, tool_execution_ms) = execute_tool_calls(
+            &tools,
+            &step.tool_calls,
+            &step_prompt,
+            &tools_context,
+            &tool_approvals.blocked_tool_call_ids,
+        )
+        .await;
+        let should_continue = should_continue_after_tool_results(
+            &step,
+            &tool_results,
+            tool_approvals.denied_client_tool_call_count,
+        );
         step.tool_results.extend(tool_results);
         mark_tool_result_metadata(&mut step.tool_results, &step.tool_calls, &tools);
         refresh_tool_result_views(&mut step);
-        step.response_messages = response_messages_for_step(&step).unwrap_or_default();
+        step.response_messages =
+            response_messages_for_step(&step, &tool_approvals).unwrap_or_default();
         apply_generate_text_response_metadata(&mut step);
         apply_generate_text_include(&mut step, include, &step_prompt);
         step.performance = GenerateTextStepPerformance::from_usage(
@@ -2817,17 +2850,123 @@ fn refresh_tool_result_views(step: &mut GenerateTextStep) {
     step.dynamic_tool_results = dynamic_tool_results(&step.tool_results);
 }
 
+#[derive(Clone, Debug, Default)]
+struct StepToolApprovals {
+    requests: Vec<LanguageModelToolApprovalRequestPart>,
+    responses: Vec<StepToolApprovalResponse>,
+    blocked_tool_call_ids: BTreeSet<String>,
+    denied_client_tool_call_count: usize,
+}
+
+#[derive(Clone, Debug)]
+struct StepToolApprovalResponse {
+    response: LanguageModelToolApprovalResponsePart,
+    tool_call: GenerateTextToolCall,
+}
+
+fn resolve_tool_approvals_for_step(
+    tool_calls: &[GenerateTextToolCall],
+    tools: &[Tool],
+    tool_approval: Option<&ToolApprovalConfiguration>,
+) -> StepToolApprovals {
+    let mut approvals = StepToolApprovals::default();
+
+    for tool_call in tool_calls {
+        if tool_call.invalid == Some(true) {
+            continue;
+        }
+
+        if !tools.iter().any(|tool| tool.name == tool_call.tool_name) {
+            continue;
+        }
+
+        let status = resolve_tool_approval(
+            ResolveToolApprovalOptions::new(tool_call)
+                .with_tools(tools)
+                .with_optional_tool_approval(tool_approval),
+        );
+
+        match status {
+            NormalizedToolApprovalStatus::NotApplicable => {}
+            NormalizedToolApprovalStatus::UserApproval => {
+                approvals
+                    .blocked_tool_call_ids
+                    .insert(tool_call.tool_call_id.clone());
+                approvals
+                    .requests
+                    .push(LanguageModelToolApprovalRequestPart::new(
+                        generate_id(),
+                        tool_call.tool_call_id.clone(),
+                    ));
+            }
+            NormalizedToolApprovalStatus::Approved { reason } => {
+                let approval_id = generate_id();
+                approvals.requests.push(
+                    LanguageModelToolApprovalRequestPart::new(
+                        approval_id.clone(),
+                        tool_call.tool_call_id.clone(),
+                    )
+                    .with_automatic(true),
+                );
+                approvals.responses.push(StepToolApprovalResponse {
+                    response: tool_approval_response_part(approval_id, true, reason),
+                    tool_call: tool_call.clone(),
+                });
+            }
+            NormalizedToolApprovalStatus::Denied { reason } => {
+                let approval_id = generate_id();
+                approvals
+                    .blocked_tool_call_ids
+                    .insert(tool_call.tool_call_id.clone());
+                if tool_call.provider_executed != Some(true) {
+                    approvals.denied_client_tool_call_count += 1;
+                }
+                approvals.requests.push(
+                    LanguageModelToolApprovalRequestPart::new(
+                        approval_id.clone(),
+                        tool_call.tool_call_id.clone(),
+                    )
+                    .with_automatic(true),
+                );
+                approvals.responses.push(StepToolApprovalResponse {
+                    response: tool_approval_response_part(approval_id, false, reason),
+                    tool_call: tool_call.clone(),
+                });
+            }
+        }
+    }
+
+    approvals
+}
+
+fn tool_approval_response_part(
+    approval_id: String,
+    approved: bool,
+    reason: Option<String>,
+) -> LanguageModelToolApprovalResponsePart {
+    let mut response = LanguageModelToolApprovalResponsePart::new(approval_id, approved);
+    if let Some(reason) = reason {
+        response = response.with_reason(reason);
+    }
+    response
+}
+
 async fn execute_tool_calls(
     tools: &[Tool],
     tool_calls: &[GenerateTextToolCall],
     messages: &LanguageModelPrompt,
     tools_context: &JsonObject,
+    blocked_tool_call_ids: &BTreeSet<String>,
 ) -> (Vec<GenerateTextToolResult>, BTreeMap<String, u64>) {
     let mut tool_results = Vec::new();
     let mut tool_execution_ms = BTreeMap::new();
 
     for tool_call in tool_calls {
         if tool_call.provider_executed == Some(true) {
+            continue;
+        }
+
+        if blocked_tool_call_ids.contains(&tool_call.tool_call_id) {
             continue;
         }
 
@@ -2878,6 +3017,7 @@ async fn execute_tool_calls(
 fn should_continue_after_tool_results(
     step: &GenerateTextStep,
     tool_results: &[GenerateTextToolResult],
+    denied_client_tool_call_count: usize,
 ) -> bool {
     let client_tool_call_count = step
         .tool_calls
@@ -2885,13 +3025,17 @@ fn should_continue_after_tool_results(
         .filter(|tool_call| tool_call.provider_executed != Some(true))
         .count();
 
-    client_tool_call_count > 0 && tool_results.len() == client_tool_call_count
+    client_tool_call_count > 0
+        && tool_results.len() + denied_client_tool_call_count == client_tool_call_count
 }
 
-fn response_messages_for_step(step: &GenerateTextStep) -> Option<Vec<LanguageModelMessage>> {
+fn response_messages_for_step(
+    step: &GenerateTextStep,
+    tool_approvals: &StepToolApprovals,
+) -> Option<Vec<LanguageModelMessage>> {
     let mut messages = Vec::new();
 
-    if let Some(message) = assistant_message_from_step(step) {
+    if let Some(message) = assistant_message_from_step(step, &tool_approvals.requests) {
         messages.push(message);
     }
 
@@ -2902,7 +3046,9 @@ fn response_messages_for_step(step: &GenerateTextStep) -> Option<Vec<LanguageMod
         .cloned()
         .collect::<Vec<_>>();
 
-    if let Some(message) = tool_message_from_results(&client_tool_results) {
+    if let Some(message) =
+        tool_message_from_results_and_approvals(&client_tool_results, &tool_approvals.responses)
+    {
         messages.push(message);
     }
 
@@ -2913,12 +3059,21 @@ fn response_messages_for_step(step: &GenerateTextStep) -> Option<Vec<LanguageMod
     }
 }
 
-fn assistant_message_from_step(step: &GenerateTextStep) -> Option<LanguageModelMessage> {
-    let parts = step
+fn assistant_message_from_step(
+    step: &GenerateTextStep,
+    approval_requests: &[LanguageModelToolApprovalRequestPart],
+) -> Option<LanguageModelMessage> {
+    let mut parts = step
         .content
         .iter()
         .filter_map(|content| assistant_content_part_from_content(content, &step.tool_calls))
         .collect::<Vec<_>>();
+    parts.extend(
+        approval_requests
+            .iter()
+            .cloned()
+            .map(LanguageModelAssistantContentPart::ToolApprovalRequest),
+    );
 
     if parts.is_empty() {
         None
@@ -3036,11 +3191,17 @@ fn assistant_content_part_from_content(
     }
 }
 
-fn tool_message_from_results(
+fn tool_message_from_results_and_approvals(
     tool_results: &[GenerateTextToolResult],
+    approval_responses: &[StepToolApprovalResponse],
 ) -> Option<LanguageModelMessage> {
-    let content = tool_results
+    let approval_tool_call_ids = approval_responses
         .iter()
+        .map(|approval| approval.tool_call.tool_call_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut content = tool_results
+        .iter()
+        .filter(|tool_result| !approval_tool_call_ids.contains(&tool_result.tool_call_id))
         .map(|tool_result| {
             let mut part = LanguageModelToolResultPart::new(
                 tool_result.tool_call_id.clone(),
@@ -3056,6 +3217,31 @@ fn tool_message_from_results(
         })
         .collect::<Vec<_>>();
 
+    content.extend(
+        approval_responses
+            .iter()
+            .flat_map(tool_approval_response_content),
+    );
+
+    content.extend(
+        tool_results
+            .iter()
+            .filter(|tool_result| approval_tool_call_ids.contains(&tool_result.tool_call_id))
+            .map(|tool_result| {
+                let mut part = LanguageModelToolResultPart::new(
+                    tool_result.tool_call_id.clone(),
+                    tool_result.tool_name.clone(),
+                    tool_result_output(tool_result),
+                );
+
+                if let Some(provider_metadata) = &tool_result.provider_metadata {
+                    part = part.with_provider_options(provider_metadata.clone());
+                }
+
+                LanguageModelToolContentPart::ToolResult(part)
+            }),
+    );
+
     if content.is_empty() {
         None
     } else {
@@ -3063,6 +3249,38 @@ fn tool_message_from_results(
             content,
         )))
     }
+}
+
+fn tool_approval_response_content(
+    approval_response: &StepToolApprovalResponse,
+) -> Vec<LanguageModelToolContentPart> {
+    let mut content = vec![LanguageModelToolContentPart::ToolApprovalResponse(
+        approval_response.response.clone(),
+    )];
+
+    if !approval_response.response.approved {
+        content.push(LanguageModelToolContentPart::ToolResult(
+            LanguageModelToolResultPart::new(
+                approval_response.tool_call.tool_call_id.clone(),
+                approval_response.tool_call.tool_name.clone(),
+                denied_tool_result_output(approval_response),
+            ),
+        ));
+    }
+
+    content
+}
+
+fn denied_tool_result_output(
+    approval_response: &StepToolApprovalResponse,
+) -> LanguageModelToolResultOutput {
+    let mut output = LanguageModelToolResultOutput::execution_denied();
+
+    if let Some(reason) = &approval_response.response.reason {
+        output = output.with_reason(reason.clone());
+    }
+
+    output
 }
 
 fn tool_result_output(tool_result: &GenerateTextToolResult) -> LanguageModelToolResultOutput {
@@ -6491,6 +6709,175 @@ mod tests {
             result.steps[1].performance.tool_execution_ms,
             BTreeMap::new()
         );
+    }
+
+    #[test]
+    fn generate_text_auto_approves_tool_calls_and_executes_tools() {
+        let model = ToolLoopLanguageModel::new();
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(
+                    Tool::new("weather", input_schema)
+                        .with_execute(|_input, _options| async move { Ok(json!("sunny")) }),
+                )
+                .with_tool_approval(ToolApprovalConfiguration::new().with_tool_status(
+                    "weather",
+                    NormalizedToolApprovalStatus::approved_with_reason("trusted tool"),
+                ))
+                .with_max_steps(2),
+        ));
+
+        let calls = model.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        let LanguageModelMessage::Assistant(assistant_message) = &calls[1].prompt[1] else {
+            panic!("second prompt includes assistant response");
+        };
+        let LanguageModelAssistantContentPart::ToolApprovalRequest(approval_request) =
+            &assistant_message.content[1]
+        else {
+            panic!("assistant response includes automatic approval request");
+        };
+        assert_eq!(approval_request.tool_call_id, "call-1");
+        assert_eq!(approval_request.is_automatic, Some(true));
+
+        let LanguageModelMessage::Tool(tool_message) = &calls[1].prompt[2] else {
+            panic!("second prompt includes tool response");
+        };
+        assert_eq!(
+            tool_message.content[0],
+            LanguageModelToolContentPart::ToolApprovalResponse(
+                LanguageModelToolApprovalResponsePart::new(
+                    approval_request.approval_id.clone(),
+                    true
+                )
+                .with_reason("trusted tool")
+            )
+        );
+        assert_eq!(
+            tool_message.content[1],
+            LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                "call-1",
+                "weather",
+                LanguageModelToolResultOutput::text("sunny")
+            ))
+        );
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.text, "The weather in Brisbane is sunny.");
+    }
+
+    #[test]
+    fn generate_text_auto_denies_tool_calls_without_executing_tools() {
+        let model = ToolLoopLanguageModel::new();
+        let tool_executed = Arc::new(AtomicBool::new(false));
+        let tool_executed_for_closure = Arc::clone(&tool_executed);
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    move |_input, _options| {
+                        let tool_executed = Arc::clone(&tool_executed_for_closure);
+                        async move {
+                            tool_executed.store(true, Ordering::SeqCst);
+                            Ok(json!("should not run"))
+                        }
+                    },
+                ))
+                .with_tool_approval(ToolApprovalConfiguration::new().with_tool_status(
+                    "weather",
+                    NormalizedToolApprovalStatus::denied_with_reason("policy block"),
+                ))
+                .with_max_steps(2),
+        ));
+
+        let calls = model.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert!(!tool_executed.load(Ordering::SeqCst));
+        assert!(result.tool_results.is_empty());
+
+        let LanguageModelMessage::Assistant(assistant_message) = &calls[1].prompt[1] else {
+            panic!("second prompt includes assistant response");
+        };
+        let LanguageModelAssistantContentPart::ToolApprovalRequest(approval_request) =
+            &assistant_message.content[1]
+        else {
+            panic!("assistant response includes automatic approval request");
+        };
+        assert_eq!(approval_request.is_automatic, Some(true));
+
+        let LanguageModelMessage::Tool(tool_message) = &calls[1].prompt[2] else {
+            panic!("second prompt includes tool response");
+        };
+        assert_eq!(
+            tool_message.content,
+            vec![
+                LanguageModelToolContentPart::ToolApprovalResponse(
+                    LanguageModelToolApprovalResponsePart::new(
+                        approval_request.approval_id.clone(),
+                        false,
+                    )
+                    .with_reason("policy block"),
+                ),
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call-1",
+                    "weather",
+                    LanguageModelToolResultOutput::execution_denied().with_reason("policy block"),
+                )),
+            ]
+        );
+        assert_eq!(result.text, "The weather in Brisbane is sunny.");
+    }
+
+    #[test]
+    fn generate_text_user_approval_blocks_tool_execution_until_response() {
+        let model = ToolLoopLanguageModel::new();
+        let tool_executed = Arc::new(AtomicBool::new(false));
+        let tool_executed_for_closure = Arc::clone(&tool_executed);
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    move |_input, _options| {
+                        let tool_executed = Arc::clone(&tool_executed_for_closure);
+                        async move {
+                            tool_executed.store(true, Ordering::SeqCst);
+                            Ok(json!("should not run"))
+                        }
+                    },
+                ))
+                .with_tool_approval(
+                    ToolApprovalConfiguration::new()
+                        .with_tool_status("weather", ToolApprovalStatusKind::UserApproval),
+                )
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(model.calls.borrow().len(), 1);
+        assert!(!tool_executed.load(Ordering::SeqCst));
+        assert!(result.tool_results.is_empty());
+        assert_eq!(result.finish_reason, FinishReason::ToolCalls);
+        assert_eq!(result.response_messages.len(), 1);
+
+        let LanguageModelMessage::Assistant(assistant_message) = &result.response_messages[0]
+        else {
+            panic!("response messages include assistant approval request");
+        };
+        assert!(matches!(
+            assistant_message.content[1],
+            LanguageModelAssistantContentPart::ToolApprovalRequest(_)
+        ));
     }
 
     #[test]
