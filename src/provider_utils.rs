@@ -21,8 +21,9 @@ use crate::language_model::{
     LanguageModelTool, LanguageModelToolInputExample,
 };
 use crate::provider::{
-    ApiCallError, InvalidArgumentError, JsonParseError, LoadApiKeyError, LoadSettingError,
-    ProviderOptions, TypeValidationContext, TypeValidationError, UnsupportedFunctionalityError,
+    ApiCallError, EmptyResponseBodyError, InvalidArgumentError, JsonParseError, LoadApiKeyError,
+    LoadSettingError, ProviderOptions, TypeValidationContext, TypeValidationError,
+    UnsupportedFunctionalityError,
 };
 use crate::warning::Warning;
 
@@ -547,6 +548,48 @@ impl JsonErrorResponseHandlerOptions {
             status_text: status_text.into(),
             response_headers: Headers::new(),
             response_body: response_body.into(),
+        }
+    }
+
+    /// Adds response headers extracted from the response.
+    pub fn with_response_headers(mut self, response_headers: Headers) -> Self {
+        self.response_headers = response_headers;
+        self
+    }
+}
+
+/// Inputs for the event-source response handler.
+///
+/// This is the Rust-native data boundary for upstream
+/// `createEventSourceResponseHandler`, preserving response headers and a
+/// byte-backed event stream without introducing a concrete HTTP client or async
+/// stream dependency.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventSourceResponseHandlerOptions {
+    /// Headers extracted from the HTTP response.
+    #[serde(default)]
+    pub response_headers: Headers,
+
+    /// Raw event-source response body bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body: Option<Vec<u8>>,
+}
+
+impl EventSourceResponseHandlerOptions {
+    /// Creates event-source response handler options with a readable body.
+    pub fn new(response_body: impl Into<Vec<u8>>) -> Self {
+        Self {
+            response_headers: Headers::new(),
+            response_body: Some(response_body.into()),
+        }
+    }
+
+    /// Creates event-source response handler options without a response body.
+    pub fn empty() -> Self {
+        Self {
+            response_headers: Headers::new(),
+            response_body: None,
         }
     }
 
@@ -2280,6 +2323,119 @@ fn json_error_response_result(
     ResponseHandlerResult::new(error).with_response_headers(response_headers)
 }
 
+/// Parses a JSON event stream into parsed JSON results.
+///
+/// This mirrors upstream `parseJsonEventStream`: event-source `data:` payloads
+/// are parsed independently, `[DONE]` payloads are ignored, and parse or
+/// validation failures are surfaced as safe parse results instead of panicking.
+pub fn parse_json_event_stream<T, F, E, B>(
+    chunks: impl IntoIterator<Item = B>,
+    validate: F,
+) -> Vec<ParseJsonResult<T>>
+where
+    F: Fn(&JsonValue) -> Result<T, E>,
+    E: fmt::Display,
+    B: AsRef<[u8]>,
+{
+    let mut bytes = Vec::new();
+    for chunk in chunks {
+        bytes.extend_from_slice(chunk.as_ref());
+    }
+    let text = String::from_utf8_lossy(&bytes);
+
+    parse_event_source_data_events(&text)
+        .into_iter()
+        .filter(|data| data != "[DONE]")
+        .map(|data| parse_json_event_data(&data, &validate))
+        .collect()
+}
+
+fn parse_event_source_data_events(text: &str) -> Vec<String> {
+    let mut events = Vec::new();
+    let mut data_lines = Vec::new();
+
+    for line in text.lines() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+
+        if line.is_empty() {
+            push_event_source_data_event(&mut events, &mut data_lines);
+            continue;
+        }
+
+        if line.starts_with(':') {
+            continue;
+        }
+
+        let (field, value) = line.split_once(':').map_or((line, ""), |(field, value)| {
+            (field, value.strip_prefix(' ').unwrap_or(value))
+        });
+
+        if field == "data" {
+            data_lines.push(value.to_string());
+        }
+    }
+
+    push_event_source_data_event(&mut events, &mut data_lines);
+    events
+}
+
+fn push_event_source_data_event(events: &mut Vec<String>, data_lines: &mut Vec<String>) {
+    if data_lines.is_empty() {
+        return;
+    }
+
+    events.push(data_lines.join("\n"));
+    data_lines.clear();
+}
+
+fn parse_json_event_data<T, F, E>(data: &str, validate: &F) -> ParseJsonResult<T>
+where
+    F: Fn(&JsonValue) -> Result<T, E>,
+    E: fmt::Display,
+{
+    let raw_value = match safe_parse_json(data) {
+        ParseJsonResult::Success { raw_value, .. } => raw_value,
+        ParseJsonResult::Failure { error, .. } => return ParseJsonResult::failure(error, None),
+    };
+
+    match safe_validate_types(raw_value.clone(), |value| validate(value), None) {
+        ValidateTypesResult::Success { value, raw_value } => {
+            ParseJsonResult::success(value, raw_value)
+        }
+        ValidateTypesResult::Failure { error, raw_value } => {
+            ParseJsonResult::failure(error, Some(raw_value))
+        }
+    }
+}
+
+/// Parses a successful event-source response body into JSON parse results.
+///
+/// This mirrors upstream `createEventSourceResponseHandler`: a missing response
+/// body throws [`EmptyResponseBodyError`], while a present body is parsed into
+/// safe per-event JSON results and returned with extracted response headers.
+pub fn create_event_source_response_handler<T, F, E>(
+    options: EventSourceResponseHandlerOptions,
+    validate: F,
+) -> Result<ResponseHandlerResult<Vec<ParseJsonResult<T>>>, EmptyResponseBodyError>
+where
+    F: Fn(&JsonValue) -> Result<T, E>,
+    E: fmt::Display,
+{
+    let EventSourceResponseHandlerOptions {
+        response_headers,
+        response_body,
+    } = options;
+
+    let Some(response_body) = response_body else {
+        return Err(EmptyResponseBodyError::new());
+    };
+
+    Ok(
+        ResponseHandlerResult::new(parse_json_event_stream([response_body], validate))
+            .with_response_headers(response_headers),
+    )
+}
+
 /// Parses and validates a successful JSON response body.
 ///
 /// This mirrors upstream `createJsonResponseHandler`: the returned handler
@@ -2701,22 +2857,23 @@ mod tests {
 
     use super::{
         Arrayable, Base64DecodeError, BinaryResponseHandlerOptions, DEFAULT_MAX_DOWNLOAD_SIZE,
-        DownloadError, InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
-        JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, LoadApiKeyOptions,
-        LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError, ParseJsonResult,
-        ReasoningLevel, ResponseHandlerResult, StatusCodeErrorResponseHandlerOptions, Tool,
-        ToolExecutionError, ToolExecutionOptions, ValidateTypesResult,
-        add_additional_properties_to_json_schema, as_array, combine_headers,
+        DownloadError, EventSourceResponseHandlerOptions, InjectJsonInstructionIntoMessagesOptions,
+        InlineFileDataBytesError, JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions,
+        LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError,
+        ParseJsonResult, ReasoningLevel, ResponseHandlerResult,
+        StatusCodeErrorResponseHandlerOptions, Tool, ToolExecutionError, ToolExecutionOptions,
+        ValidateTypesResult, add_additional_properties_to_json_schema, as_array, combine_headers,
         convert_base64_to_bytes, convert_bytes_to_base64, convert_image_model_file_to_data_uri,
         convert_inline_file_data_to_bytes, convert_to_base64, create_binary_response_handler,
-        create_json_error_response_handler, create_json_response_handler,
-        create_status_code_error_response_handler, create_tool_name_mapping, detect_media_type,
-        extract_response_headers, filter_nullable, get_top_level_media_type,
-        inject_json_instruction, inject_json_instruction_into_messages, is_custom_reasoning,
-        is_full_media_type, is_non_nullable, is_parsable_json, is_provider_reference,
-        is_url_supported, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
-        load_setting, load_setting_with_env, map_reasoning_to_provider_budget,
-        map_reasoning_to_provider_effort, media_type_to_extension, normalize_headers, parse_json,
+        create_event_source_response_handler, create_json_error_response_handler,
+        create_json_response_handler, create_status_code_error_response_handler,
+        create_tool_name_mapping, detect_media_type, extract_response_headers, filter_nullable,
+        get_top_level_media_type, inject_json_instruction, inject_json_instruction_into_messages,
+        is_custom_reasoning, is_full_media_type, is_non_nullable, is_parsable_json,
+        is_provider_reference, is_url_supported, load_api_key, load_api_key_with_env,
+        load_optional_setting_with_env, load_setting, load_setting_with_env,
+        map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
+        media_type_to_extension, normalize_headers, parse_json, parse_json_event_stream,
         parse_provider_options, prepare_tools, read_response_with_size_limit,
         remove_undefined_entries, resolve_full_media_type, resolve_provider_reference,
         safe_parse_json, safe_validate_types, strip_file_extension, validate_download_url,
@@ -4530,6 +4687,131 @@ mod tests {
         assert_eq!(result.value(), &json!("ok"));
         assert_eq!(result.raw_value(), None);
         assert_eq!(result.response_headers(), None);
+    }
+
+    #[test]
+    fn event_source_response_handler_options_use_camel_case_json() {
+        let options = EventSourceResponseHandlerOptions::new(
+            b"data: {\"name\":\"John\",\"age\":30}\n\n".to_vec(),
+        )
+        .with_response_headers(BTreeMap::from([(
+            "content-type".to_string(),
+            "text/event-stream".to_string(),
+        )]));
+
+        let serialized = serde_json::to_value(&options).expect("options serialize");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "responseHeaders": {
+                    "content-type": "text/event-stream"
+                },
+                "responseBody": [
+                    100, 97, 116, 97, 58, 32, 123, 34, 110, 97, 109, 101, 34, 58,
+                    34, 74, 111, 104, 110, 34, 44, 34, 97, 103, 101, 34, 58,
+                    51, 48, 125, 10, 10
+                ]
+            })
+        );
+
+        let deserialized: EventSourceResponseHandlerOptions =
+            serde_json::from_value(serialized).expect("options deserialize");
+
+        assert_eq!(deserialized, options);
+    }
+
+    #[test]
+    fn event_source_response_handler_options_deserialize_missing_body() {
+        let options: EventSourceResponseHandlerOptions = serde_json::from_value(json!({
+            "responseHeaders": {}
+        }))
+        .expect("options deserialize");
+
+        assert_eq!(options.response_body, None);
+        assert_eq!(options.response_headers, BTreeMap::new());
+    }
+
+    #[test]
+    fn parse_json_event_stream_parses_data_events_and_ignores_done() {
+        let events = parse_json_event_stream(
+            [
+                b": keepalive\r\n".as_slice(),
+                b"event: message\r\ndata: {\"name\":\r\n".as_slice(),
+                b"data: \"John\",\"age\":30}\r\n\r\n".as_slice(),
+                b"data: [DONE]\n\n".as_slice(),
+            ],
+            validate_person,
+        );
+
+        assert_eq!(
+            events,
+            vec![ParseJsonResult::success(
+                Person {
+                    name: "John".to_string(),
+                    age: 30,
+                },
+                json!({ "name": "John", "age": 30 })
+            )]
+        );
+    }
+
+    #[test]
+    fn parse_json_event_stream_preserves_parse_and_validation_failures() {
+        let events = parse_json_event_stream(
+            [
+                b"data: {not json}\n\n".as_slice(),
+                b"data: {\"name\":\"John\"}\n\n".as_slice(),
+            ],
+            validate_person,
+        );
+
+        assert_eq!(events.len(), 2);
+
+        let parse_error = events[0].error().expect("parse error is returned");
+        assert!(parse_error.as_json_parse_error().is_some());
+        assert_eq!(events[0].raw_value(), None);
+
+        let validation_error = events[1].error().expect("validation error is returned");
+        assert!(validation_error.as_type_validation_error().is_some());
+        assert_eq!(events[1].raw_value(), Some(&json!({ "name": "John" })));
+    }
+
+    #[test]
+    fn create_event_source_response_handler_returns_results_and_headers() {
+        let response_headers =
+            BTreeMap::from([("content-type".to_string(), "text/event-stream".to_string())]);
+        let options = EventSourceResponseHandlerOptions::new(
+            b"data: {\"name\":\"John\",\"age\":30}\n\n".to_vec(),
+        )
+        .with_response_headers(response_headers.clone());
+
+        let result = create_event_source_response_handler(options, validate_person)
+            .expect("event source response is handled");
+
+        assert_eq!(result.response_headers(), Some(&response_headers));
+        assert_eq!(
+            result.value(),
+            &vec![ParseJsonResult::success(
+                Person {
+                    name: "John".to_string(),
+                    age: 30,
+                },
+                json!({ "name": "John", "age": 30 })
+            )]
+        );
+        assert_eq!(result.raw_value(), None);
+    }
+
+    #[test]
+    fn create_event_source_response_handler_returns_empty_body_error_for_missing_body() {
+        let error = create_event_source_response_handler(
+            EventSourceResponseHandlerOptions::empty(),
+            validate_person,
+        )
+        .expect_err("missing body is rejected");
+
+        assert_eq!(error.message(), "Empty response body");
     }
 
     #[test]
