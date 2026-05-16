@@ -2595,6 +2595,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
     let max_steps = max_steps.max(1);
     let call_id = generate_text_call_id();
     let mut steps = Vec::new();
+    let mut pending_deferred_provider_tool_call_ids = BTreeSet::new();
 
     for step_number in 0..max_steps {
         let step_prompt = call_options.prompt.clone();
@@ -2617,6 +2618,11 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         refresh_tool_call_views(&mut step);
         let tool_approvals =
             resolve_tool_approvals_for_step(&step.tool_calls, &tools, tool_approval.as_ref());
+        update_pending_deferred_provider_tool_calls(
+            &mut pending_deferred_provider_tool_call_ids,
+            &step,
+            &tools,
+        );
         let (tool_results, tool_execution_ms) = execute_tool_calls(
             &tools,
             &step.tool_calls,
@@ -2629,6 +2635,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
             &step,
             &tool_results,
             tool_approvals.denied_client_tool_call_count,
+            !pending_deferred_provider_tool_call_ids.is_empty(),
         );
         step.tool_results.extend(tool_results);
         mark_tool_result_metadata(&mut step.tool_results, &step.tool_calls, &tools);
@@ -2854,6 +2861,40 @@ fn dynamic_tool_results(tool_results: &[GenerateTextToolResult]) -> Vec<Generate
 fn refresh_tool_result_views(step: &mut GenerateTextStep) {
     step.static_tool_results = static_tool_results(&step.tool_results);
     step.dynamic_tool_results = dynamic_tool_results(&step.tool_results);
+}
+
+fn update_pending_deferred_provider_tool_calls(
+    pending_tool_call_ids: &mut BTreeSet<String>,
+    step: &GenerateTextStep,
+    tools: &[Tool],
+) {
+    let provider_tool_result_ids = step
+        .tool_results
+        .iter()
+        .filter(|tool_result| tool_result.provider_executed == Some(true))
+        .map(|tool_result| tool_result.tool_call_id.clone())
+        .collect::<BTreeSet<_>>();
+
+    for tool_call_id in &provider_tool_result_ids {
+        pending_tool_call_ids.remove(tool_call_id);
+    }
+
+    for tool_call in step
+        .tool_calls
+        .iter()
+        .filter(|tool_call| tool_call.provider_executed == Some(true))
+    {
+        let supports_deferred_results = tools
+            .iter()
+            .find(|tool| tool.name == tool_call.tool_name)
+            .and_then(Tool::supports_deferred_results)
+            == Some(true);
+
+        if supports_deferred_results && !provider_tool_result_ids.contains(&tool_call.tool_call_id)
+        {
+            pending_tool_call_ids.insert(tool_call.tool_call_id.clone());
+        }
+    }
 }
 
 async fn initial_tool_approval_response_message(
@@ -3129,6 +3170,7 @@ fn should_continue_after_tool_results(
     step: &GenerateTextStep,
     tool_results: &[GenerateTextToolResult],
     denied_client_tool_call_count: usize,
+    has_pending_deferred_provider_tool_call: bool,
 ) -> bool {
     let client_tool_call_count = step
         .tool_calls
@@ -3136,8 +3178,9 @@ fn should_continue_after_tool_results(
         .filter(|tool_call| tool_call.provider_executed != Some(true))
         .count();
 
-    client_tool_call_count > 0
-        && tool_results.len() + denied_client_tool_call_count == client_tool_call_count
+    has_pending_deferred_provider_tool_call
+        || (client_tool_call_count > 0
+            && tool_results.len() + denied_client_tool_call_count == client_tool_call_count)
 }
 
 fn response_messages_for_step(
@@ -7579,6 +7622,97 @@ mod tests {
         }
     }
 
+    struct DeferredProviderExecutedToolLanguageModel {
+        calls: RefCell<Vec<LanguageModelCallOptions>>,
+    }
+
+    impl DeferredProviderExecutedToolLanguageModel {
+        fn new() -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl LanguageModel for DeferredProviderExecutedToolLanguageModel {
+        type SupportedUrlsFuture<'a>
+            = Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a;
+
+        type GenerateFuture<'a>
+            = Ready<LanguageModelGenerateResult>
+        where
+            Self: 'a;
+
+        type Stream = Vec<LanguageModelStreamPart>;
+
+        type StreamFuture<'a>
+            = Ready<LanguageModelStreamResult<Self::Stream>>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "test-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+
+        fn supported_urls(&self) -> Self::SupportedUrlsFuture<'_> {
+            ready(BTreeMap::new())
+        }
+
+        fn do_generate(&self, options: LanguageModelCallOptions) -> Self::GenerateFuture<'_> {
+            let step_number = self.calls.borrow().len();
+            self.calls.borrow_mut().push(options);
+
+            if step_number == 0 {
+                return ready(LanguageModelGenerateResult::new(
+                    vec![LanguageModelContent::ToolCall(
+                        LanguageModelToolCall::new(
+                            "provider-call-1",
+                            "providerTool",
+                            r#"{"city":"Brisbane"}"#,
+                        )
+                        .with_provider_executed(true),
+                    )],
+                    LanguageModelFinishReason {
+                        unified: FinishReason::ToolCalls,
+                        raw: Some("tool_calls".to_string()),
+                    },
+                    LanguageModelUsage::default(),
+                ));
+            }
+
+            ready(LanguageModelGenerateResult::new(
+                vec![
+                    LanguageModelContent::ToolResult(LanguageModelToolResult::new(
+                        "provider-call-1",
+                        "providerTool",
+                        crate::NonNullJsonValue::new(json!({
+                            "forecast": "sunny"
+                        }))
+                        .expect("provider deferred result is non-null"),
+                    )),
+                    LanguageModelContent::Text(LanguageModelText::new(
+                        "The deferred provider tool result is ready.",
+                    )),
+                ],
+                LanguageModelFinishReason {
+                    unified: FinishReason::Stop,
+                    raw: Some("stop".to_string()),
+                },
+                LanguageModelUsage::default(),
+            ))
+        }
+
+        fn do_stream(&self, _options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
+            ready(LanguageModelStreamResult::new(Vec::new()))
+        }
+    }
+
     #[test]
     fn generate_text_surfaces_provider_executed_tool_results_without_local_execution() {
         let model = ProviderExecutedToolLanguageModel::new();
@@ -7618,6 +7752,67 @@ mod tests {
         );
         assert_eq!(result.tool_results[0].provider_executed, Some(true));
         assert_eq!(result.tool_results[0].dynamic, Some(true));
+    }
+
+    #[test]
+    fn generate_text_continues_for_deferred_provider_executed_tool_results() {
+        let model = DeferredProviderExecutedToolLanguageModel::new();
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let output_schema = input_schema.clone();
+        let provider_args = json!({ "mode": "deferred" })
+            .as_object()
+            .expect("provider args are an object")
+            .clone();
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(
+                    Tool::provider_executed(
+                        "providerTool",
+                        "test.providerTool",
+                        provider_args,
+                        input_schema,
+                        output_schema,
+                    )
+                    .with_supports_deferred_results(true),
+                )
+                .with_max_steps(3),
+        ));
+
+        let calls = model.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].prompt.len(), 2);
+        assert_eq!(
+            calls[1].prompt[1],
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(
+                    LanguageModelToolCallPart::new(
+                        "provider-call-1",
+                        "providerTool",
+                        json!({ "city": "Brisbane" })
+                    )
+                    .with_provider_executed(true)
+                )
+            ]))
+        );
+
+        assert_eq!(result.steps.len(), 2);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].provider_executed, Some(true));
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_call_id, "provider-call-1");
+        assert_eq!(result.tool_results[0].tool_name, "providerTool");
+        assert_eq!(result.tool_results[0].input, json!(null));
+        assert_eq!(
+            result.tool_results[0].output,
+            json!({ "forecast": "sunny" })
+        );
+        assert_eq!(result.tool_results[0].provider_executed, Some(true));
+        assert_eq!(result.text, "The deferred provider tool result is ready.");
+        assert_eq!(result.finish_reason, FinishReason::Stop);
     }
 
     #[test]
