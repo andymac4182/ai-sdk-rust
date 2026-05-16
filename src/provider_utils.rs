@@ -2612,6 +2612,18 @@ where
     headers
 }
 
+/// Returns whether an error name represents an aborted request.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils` `isAbortError`: JavaScript
+/// checks `Error` and `DOMException` instances by their `name` field, while the
+/// Rust boundary accepts that runtime-specific name directly.
+pub fn is_abort_error(error_name: &str) -> bool {
+    matches!(
+        error_name,
+        "AbortError" | "ResponseAborted" | "TimeoutError"
+    )
+}
+
 /// Options for loading a provider API key from an explicit value or environment variable.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoadApiKeyOptions {
@@ -2869,7 +2881,7 @@ mod tests {
         create_json_response_handler, create_status_code_error_response_handler,
         create_tool_name_mapping, detect_media_type, extract_response_headers, filter_nullable,
         get_top_level_media_type, inject_json_instruction, inject_json_instruction_into_messages,
-        is_custom_reasoning, is_full_media_type, is_non_nullable, is_parsable_json,
+        is_abort_error, is_custom_reasoning, is_full_media_type, is_non_nullable, is_parsable_json,
         is_provider_reference, is_url_supported, load_api_key, load_api_key_with_env,
         load_optional_setting_with_env, load_setting, load_setting_with_env,
         map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
@@ -5397,6 +5409,23 @@ mod tests {
             ),
             BTreeMap::from([("user-agent".to_string(), String::new())])
         );
+    }
+
+    #[test]
+    fn is_abort_error_matches_upstream_error_names() {
+        for error_name in ["AbortError", "ResponseAborted", "TimeoutError"] {
+            assert!(
+                is_abort_error(error_name),
+                "{error_name} should be treated as an abort error"
+            );
+        }
+
+        for error_name in ["aborterror", "Response aborted", "TypeError", ""] {
+            assert!(
+                !is_abort_error(error_name),
+                "{error_name:?} should not be treated as an abort error"
+            );
+        }
     }
 
     #[test]

@@ -106,7 +106,7 @@ pub use provider_utils::{
     create_json_error_response_handler, create_json_response_handler,
     create_status_code_error_response_handler, create_tool_name_mapping, detect_media_type,
     extract_response_headers, filter_nullable, get_top_level_media_type,
-    inject_json_instruction_into_messages, is_custom_reasoning, is_full_media_type,
+    inject_json_instruction_into_messages, is_abort_error, is_custom_reasoning, is_full_media_type,
     is_non_nullable, is_parsable_json, is_provider_reference, is_url_supported, load_api_key,
     load_optional_setting, load_setting, map_reasoning_to_provider_budget,
     map_reasoning_to_provider_effort, media_type_to_extension, normalize_headers, parse_json,
