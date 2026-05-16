@@ -28,7 +28,9 @@ use crate::language_model::{
     LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
     OutputTokenUsage,
 };
-use crate::provider::{JsonParseError, get_error_message};
+use crate::provider::{
+    JsonParseError, TypeValidationContext, TypeValidationError, get_error_message,
+};
 use crate::provider::{ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{
     Base64DecodeError, IdGeneratorOptions, Tool, ToolExecutionOptions, convert_base64_to_bytes,
@@ -6052,7 +6054,14 @@ async fn execute_tool_calls(
             continue;
         }
 
-        let tool_context = tools_context.get(&tool_call.tool_name).cloned();
+        let tool_context =
+            match validate_tool_execution_context(tool, tools_context.get(&tool_call.tool_name)) {
+                Ok(tool_context) => tool_context,
+                Err(error) => {
+                    tool_results.push(GenerateTextToolResult::error(tool_call, error.to_string()));
+                    continue;
+                }
+            };
         if let Some(on_tool_execution_start) = on_tool_execution_start {
             on_tool_execution_start
                 .start(GenerateTextToolExecutionStartEvent {
@@ -6099,6 +6108,28 @@ async fn execute_tool_calls(
     }
 
     (tool_results, tool_execution_ms)
+}
+
+fn validate_tool_execution_context(
+    tool: &Tool,
+    context: Option<&JsonValue>,
+) -> Result<Option<JsonValue>, TypeValidationError> {
+    let Some(context_schema) = tool.context_schema() else {
+        return Ok(context.cloned());
+    };
+
+    let value = context.cloned().unwrap_or(JsonValue::Null);
+
+    crate::provider_utils::validate_types(
+        value,
+        context_schema.clone(),
+        Some(
+            TypeValidationContext::new()
+                .with_field("tool context")
+                .with_entity_name(tool.name.clone()),
+        ),
+    )
+    .map(Some)
 }
 
 fn should_continue_after_tool_results(
@@ -7217,7 +7248,7 @@ mod tests {
     use crate::provider::{
         JsonParseError, ProviderMetadata, ProviderOptions, SpecificationVersion,
     };
-    use crate::provider_utils::{Tool, ToolExecutionError, dynamic_tool};
+    use crate::provider_utils::{Schema, Tool, ToolExecutionError, ValidationResult, dynamic_tool};
     use serde_json::json;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
@@ -12095,6 +12126,146 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn generate_text_validates_tool_context_schema_before_execution() {
+        let model = ToolLoopLanguageModel::new();
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let context_schema = Schema::new(
+            json!({
+                "type": "object",
+                "properties": {
+                    "apiKey": { "type": "string" }
+                },
+                "required": ["apiKey"]
+            })
+            .as_object()
+            .expect("context schema is an object")
+            .clone(),
+        )
+        .with_validator(|value| {
+            let Some(api_key) = value.get("apiKey").and_then(JsonValue::as_str) else {
+                return ValidationResult::failure("expected apiKey string");
+            };
+
+            ValidationResult::success(json!({
+                "apiKey": api_key,
+                "region": "ap-southeast-2"
+            }))
+        });
+        let tools_context = json!({
+            "weather": {
+                "apiKey": "secret"
+            }
+        })
+        .as_object()
+        .expect("tools context is an object")
+        .clone();
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tools_context(tools_context)
+                .with_tool(
+                    Tool::new("weather", input_schema)
+                        .with_context_schema(context_schema)
+                        .with_execute(|_input, options| async move {
+                            Ok(json!({
+                                "context": options.context
+                            }))
+                        }),
+                )
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(
+            result.tool_results[0].output["context"],
+            json!({
+                "apiKey": "secret",
+                "region": "ap-southeast-2"
+            })
+        );
+    }
+
+    #[test]
+    fn generate_text_returns_tool_error_when_tool_context_schema_fails() {
+        let model = ToolLoopLanguageModel::new();
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let context_schema = Schema::new(
+            json!({
+                "type": "object",
+                "properties": {
+                    "apiKey": { "type": "string" }
+                },
+                "required": ["apiKey"]
+            })
+            .as_object()
+            .expect("context schema is an object")
+            .clone(),
+        )
+        .with_validator(|value| {
+            if value.get("apiKey").and_then(JsonValue::as_str).is_some() {
+                ValidationResult::success(value.clone())
+            } else {
+                ValidationResult::failure("expected apiKey string")
+            }
+        });
+        let executed = Arc::new(AtomicBool::new(false));
+        let executed_clone = Arc::clone(&executed);
+        let tools_context = json!({
+            "weather": {
+                "apiKey": 123
+            }
+        })
+        .as_object()
+        .expect("tools context is an object")
+        .clone();
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tools_context(tools_context)
+                .with_tool(
+                    Tool::new("weather", input_schema)
+                        .with_context_schema(context_schema)
+                        .with_execute(move |_input, _options| {
+                            let executed = Arc::clone(&executed_clone);
+                            async move {
+                                executed.store(true, Ordering::SeqCst);
+                                Ok(json!("should not run"))
+                            }
+                        }),
+                )
+                .with_max_steps(2),
+        ));
+
+        assert!(!executed.load(Ordering::SeqCst));
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].is_error, Some(true));
+        assert_eq!(
+            result.tool_results[0].output.as_str(),
+            Some(
+                "Type validation failed for tool context (weather): Value: {\"apiKey\":123}.\nError message: expected apiKey string"
+            )
+        );
+        assert_eq!(model.calls.borrow().len(), 2);
     }
 
     #[test]

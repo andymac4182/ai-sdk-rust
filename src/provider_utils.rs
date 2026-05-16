@@ -3777,6 +3777,12 @@ pub struct Tool {
     /// JSON Schema 7 object describing the tool input.
     pub input_schema: JsonSchema,
 
+    /// Optional schema describing the tool-specific execution context.
+    ///
+    /// This context is not sent to the provider. It validates and normalizes
+    /// the matching `toolsContext[toolName]` value before Rust tool execution.
+    pub context_schema: Option<FlexibleSchema<JsonValue>>,
+
     /// Optional examples that show the model what inputs should look like.
     pub input_examples: Option<Vec<LanguageModelToolInputExample>>,
 
@@ -3811,6 +3817,7 @@ impl Tool {
             title: None,
             description: None,
             input_schema,
+            context_schema: None,
             input_examples: None,
             strict: None,
             provider_options: None,
@@ -3832,6 +3839,7 @@ impl Tool {
             title: None,
             description: None,
             input_schema,
+            context_schema: None,
             input_examples: None,
             strict: None,
             provider_options: None,
@@ -3864,6 +3872,7 @@ impl Tool {
             title: None,
             description: None,
             input_schema,
+            context_schema: None,
             input_examples: None,
             strict: None,
             provider_options: None,
@@ -3896,6 +3905,7 @@ impl Tool {
             title: None,
             description: None,
             input_schema,
+            context_schema: None,
             input_examples: None,
             strict: None,
             provider_options: None,
@@ -3922,6 +3932,15 @@ impl Tool {
         self.input_examples
             .get_or_insert_with(Vec::new)
             .push(LanguageModelToolInputExample::new(input));
+        self
+    }
+
+    /// Sets the schema used to validate tool-specific context before execution.
+    pub fn with_context_schema(
+        mut self,
+        context_schema: impl Into<FlexibleSchema<JsonValue>>,
+    ) -> Self {
+        self.context_schema = Some(context_schema.into());
         self
     }
 
@@ -4040,6 +4059,11 @@ impl Tool {
         }
     }
 
+    /// Returns the schema used to validate tool-specific context, if configured.
+    pub fn context_schema(&self) -> Option<&FlexibleSchema<JsonValue>> {
+        self.context_schema.as_ref()
+    }
+
     /// Returns whether this provider-executed tool supports deferred results.
     pub fn supports_deferred_results(&self) -> Option<bool> {
         match &self.kind {
@@ -4118,6 +4142,7 @@ impl fmt::Debug for Tool {
             .field("title", &self.title)
             .field("description", &self.description)
             .field("input_schema", &self.input_schema)
+            .field("context_schema", &self.context_schema)
             .field("input_examples", &self.input_examples)
             .field("strict", &self.strict)
             .field("provider_options", &self.provider_options)
@@ -12345,6 +12370,39 @@ mod tests {
         let tool = Tool::new("weather", object_schema()).with_title("Weather information");
 
         assert_eq!(tool.title(), Some("Weather information"));
+        assert_eq!(
+            serde_json::to_value(tool.to_language_model_tool()).expect("tool serializes"),
+            json!({
+                "type": "function",
+                "name": "weather",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    },
+                    "required": ["city"]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn tool_context_schema_is_retained_but_not_sent_to_provider() {
+        let context_schema = Schema::new(
+            json!({
+                "type": "object",
+                "properties": {
+                    "apiKey": { "type": "string" }
+                },
+                "required": ["apiKey"]
+            })
+            .as_object()
+            .expect("context schema is an object")
+            .clone(),
+        );
+        let tool = Tool::new("weather", object_schema()).with_context_schema(context_schema);
+
+        assert!(tool.context_schema().is_some());
         assert_eq!(
             serde_json::to_value(tool.to_language_model_tool()).expect("tool serializes"),
             json!({
