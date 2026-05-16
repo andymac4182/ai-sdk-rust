@@ -218,6 +218,15 @@ pub trait ProviderWithRerankingModel: Provider {
     fn reranking_model(&self, model_id: &str) -> Result<Self::RerankingModel, NoSuchModelError>;
 }
 
+/// Optional provider-v4 video model lookup support.
+pub trait ProviderWithVideoModel: Provider {
+    /// Video model type returned by this provider.
+    type VideoModel: crate::video_model::VideoModel;
+
+    /// Returns the video model with the given provider-specific id.
+    fn video_model(&self, model_id: &str) -> Result<Self::VideoModel, NoSuchModelError>;
+}
+
 /// Optional provider-v4 file upload support.
 pub trait ProviderWithFiles: Provider {
     /// Files interface type returned by this provider.
@@ -1060,9 +1069,9 @@ mod tests {
         InvalidResponseDataError, JsonParseError, LoadApiKeyError, LoadSettingError, ModelType,
         NoContentGeneratedError, NoSuchModelError, Provider, ProviderOptions, ProviderWithFiles,
         ProviderWithRerankingModel, ProviderWithSkills, ProviderWithSpeechModel,
-        ProviderWithTranscriptionModel, SpecificationVersion, TooManyEmbeddingValuesForCallError,
-        TypeValidationContext, TypeValidationError, UnsupportedFunctionalityError,
-        get_error_message,
+        ProviderWithTranscriptionModel, ProviderWithVideoModel, SpecificationVersion,
+        TooManyEmbeddingValuesForCallError, TypeValidationContext, TypeValidationError,
+        UnsupportedFunctionalityError, get_error_message,
     };
     use std::collections::BTreeMap;
     use std::fmt;
@@ -1089,6 +1098,10 @@ mod tests {
     use crate::transcription_model::{
         TranscriptionModel, TranscriptionModelCallOptions, TranscriptionModelResponse,
         TranscriptionModelResult,
+    };
+    use crate::video_model::{
+        VideoModel, VideoModelCallOptions, VideoModelResponse, VideoModelResult,
+        VideoModelVideoData,
     };
     use serde_json::json;
     use time::OffsetDateTime;
@@ -1298,6 +1311,41 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct StaticVideoModel {
+        model_id: &'static str,
+    }
+
+    impl VideoModel for StaticVideoModel {
+        type MaxVideosPerCallFuture<'a>
+            = Ready<Option<usize>>
+        where
+            Self: 'a;
+        type GenerateFuture<'a>
+            = Ready<VideoModelResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "mock-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            self.model_id
+        }
+
+        fn max_videos_per_call(&self) -> Self::MaxVideosPerCallFuture<'_> {
+            ready(Some(1))
+        }
+
+        fn do_generate(&self, _options: VideoModelCallOptions) -> Self::GenerateFuture<'_> {
+            ready(VideoModelResult::new(
+                vec![VideoModelVideoData::base64("AAAAIGZ0eXBtcDQy", "video/mp4")],
+                VideoModelResponse::new(OffsetDateTime::UNIX_EPOCH, self.model_id),
+            ))
+        }
+    }
+
+    #[derive(Debug)]
     struct StaticFiles;
 
     impl Files for StaticFiles {
@@ -1419,6 +1467,19 @@ mod tests {
                 "rerank",
                 ModelType::RerankingModel,
                 StaticRerankingModel { model_id: "rerank" },
+            )
+        }
+    }
+
+    impl ProviderWithVideoModel for StaticProvider {
+        type VideoModel = StaticVideoModel;
+
+        fn video_model(&self, model_id: &str) -> Result<Self::VideoModel, NoSuchModelError> {
+            lookup_model(
+                model_id,
+                "video",
+                ModelType::VideoModel,
+                StaticVideoModel { model_id: "video" },
             )
         }
     }
@@ -1613,6 +1674,11 @@ mod tests {
             .expect("reranking model resolves");
         assert_eq!(reranking_model.provider(), "mock-provider");
         assert_eq!(reranking_model.model_id(), "rerank");
+
+        let video_model =
+            ProviderWithVideoModel::video_model(&provider, "video").expect("video resolves");
+        assert_eq!(video_model.provider(), "mock-provider");
+        assert_eq!(video_model.model_id(), "video");
 
         let files = ProviderWithFiles::files(&provider);
         assert_eq!(files.specification_version(), SpecificationVersion::V4);

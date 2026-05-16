@@ -106,8 +106,9 @@ pub use provider::{
     InvalidResponseDataError, JsonParseError, LoadApiKeyError, LoadSettingError, ModelType,
     NoContentGeneratedError, NoSuchModelError, Provider, ProviderMetadata, ProviderOptions,
     ProviderWithFiles, ProviderWithRerankingModel, ProviderWithSkills, ProviderWithSpeechModel,
-    ProviderWithTranscriptionModel, SpecificationVersion, TooManyEmbeddingValuesForCallError,
-    TypeValidationContext, TypeValidationError, UnsupportedFunctionalityError, get_error_message,
+    ProviderWithTranscriptionModel, ProviderWithVideoModel, SpecificationVersion,
+    TooManyEmbeddingValuesForCallError, TypeValidationContext, TypeValidationError,
+    UnsupportedFunctionalityError, get_error_message,
 };
 pub use provider_utils::{
     Arrayable, Base64DecodeError, BinaryResponseHandlerOptions, DEFAULT_MAX_DOWNLOAD_SIZE,

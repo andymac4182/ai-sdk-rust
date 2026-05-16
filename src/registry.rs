@@ -3,6 +3,7 @@ use std::fmt;
 use crate::provider::{
     ModelType, NoSuchModelError, Provider, ProviderWithFiles, ProviderWithRerankingModel,
     ProviderWithSkills, ProviderWithSpeechModel, ProviderWithTranscriptionModel,
+    ProviderWithVideoModel,
 };
 
 /// Configuration for a provider registry.
@@ -223,6 +224,16 @@ impl<P: ProviderWithRerankingModel> ProviderRegistry<P> {
     }
 }
 
+impl<P: ProviderWithVideoModel> ProviderRegistry<P> {
+    /// Returns the video model for a registry id shaped as `providerId:modelId`.
+    pub fn video_model(&self, id: &str) -> Result<P::VideoModel, ProviderRegistryError> {
+        let (provider_id, model_id) = self.split_id(id, ModelType::VideoModel)?;
+        let provider = self.get_provider(provider_id, ModelType::VideoModel)?;
+
+        provider.video_model(model_id).map_err(Into::into)
+    }
+}
+
 impl<P: ProviderWithFiles> ProviderRegistry<P> {
     /// Returns the files interface for a registered provider id.
     pub fn files(&self, id: &str) -> Result<P::Files, ProviderRegistryError> {
@@ -409,7 +420,7 @@ mod tests {
     use crate::provider::{
         ModelType, NoSuchModelError, Provider, ProviderWithFiles, ProviderWithRerankingModel,
         ProviderWithSkills, ProviderWithSpeechModel, ProviderWithTranscriptionModel,
-        SpecificationVersion,
+        ProviderWithVideoModel, SpecificationVersion,
     };
     use crate::reranking_model::{
         RerankingModel, RerankingModelCallOptions, RerankingModelRanking, RerankingModelResult,
@@ -421,6 +432,10 @@ mod tests {
     use crate::transcription_model::{
         TranscriptionModel, TranscriptionModelCallOptions, TranscriptionModelResponse,
         TranscriptionModelResult,
+    };
+    use crate::video_model::{
+        VideoModel, VideoModelCallOptions, VideoModelResponse, VideoModelResult,
+        VideoModelVideoData,
     };
     use std::collections::BTreeMap;
     use std::future::{Ready, ready};
@@ -637,6 +652,42 @@ mod tests {
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
+    struct StaticVideoModel {
+        provider: String,
+        model_id: String,
+    }
+
+    impl VideoModel for StaticVideoModel {
+        type MaxVideosPerCallFuture<'a>
+            = Ready<Option<usize>>
+        where
+            Self: 'a;
+        type GenerateFuture<'a>
+            = Ready<VideoModelResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            &self.provider
+        }
+
+        fn model_id(&self) -> &str {
+            &self.model_id
+        }
+
+        fn max_videos_per_call(&self) -> Self::MaxVideosPerCallFuture<'_> {
+            ready(Some(1))
+        }
+
+        fn do_generate(&self, _options: VideoModelCallOptions) -> Self::GenerateFuture<'_> {
+            ready(VideoModelResult::new(
+                vec![VideoModelVideoData::base64("AAAAIGZ0eXBtcDQy", "video/mp4")],
+                VideoModelResponse::new(OffsetDateTime::UNIX_EPOCH, self.model_id.clone()),
+            ))
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
     struct StaticFiles {
         provider: String,
     }
@@ -755,6 +806,17 @@ mod tests {
             model_id: &str,
         ) -> Result<Self::RerankingModel, NoSuchModelError> {
             lookup_model(model_id, ModelType::RerankingModel).map(|model_id| StaticRerankingModel {
+                provider: self.id.to_string(),
+                model_id,
+            })
+        }
+    }
+
+    impl ProviderWithVideoModel for StaticProvider {
+        type VideoModel = StaticVideoModel;
+
+        fn video_model(&self, model_id: &str) -> Result<Self::VideoModel, NoSuchModelError> {
+            lookup_model(model_id, ModelType::VideoModel).map(|model_id| StaticVideoModel {
                 provider: self.id.to_string(),
                 model_id,
             })
@@ -902,6 +964,21 @@ mod tests {
         );
         assert_eq!(reranking_model.provider(), "provider");
         assert_eq!(reranking_model.model_id(), "rerank-1");
+    }
+
+    #[test]
+    fn create_provider_registry_resolves_video_model_interface() {
+        let registry = create_provider_registry([("provider", StaticProvider { id: "provider" })]);
+
+        let video_model = registry
+            .video_model("provider:video-1")
+            .expect("video model resolves");
+        assert_eq!(
+            video_model.specification_version(),
+            SpecificationVersion::V4
+        );
+        assert_eq!(video_model.provider(), "provider");
+        assert_eq!(video_model.model_id(), "video-1");
     }
 
     #[test]
@@ -1085,6 +1162,41 @@ mod tests {
         assert_eq!(model_error.model_id(), "missing");
         assert_eq!(model_error.model_type(), ModelType::RerankingModel);
         assert_eq!(error.to_string(), "No such rerankingModel: missing");
+    }
+
+    #[test]
+    fn provider_registry_reports_missing_video_provider_context() {
+        let registry =
+            create_provider_registry([("anthropic", StaticProvider { id: "anthropic" })]);
+
+        let error = registry
+            .video_model("openai:video-1")
+            .expect_err("provider lookup fails");
+        let provider_error = error
+            .as_no_such_provider()
+            .expect("error is missing provider");
+
+        assert_eq!(provider_error.model_id(), "openai");
+        assert_eq!(provider_error.model_type(), ModelType::VideoModel);
+        assert_eq!(provider_error.provider_id(), "openai");
+        assert_eq!(
+            error.to_string(),
+            "No such provider: openai (available providers: anthropic)"
+        );
+    }
+
+    #[test]
+    fn provider_registry_reports_missing_video_model_context() {
+        let registry = create_provider_registry([("provider", StaticProvider { id: "provider" })]);
+
+        let error = registry
+            .video_model("provider:missing")
+            .expect_err("model lookup fails");
+        let model_error = error.as_no_such_model().expect("error is missing model");
+
+        assert_eq!(model_error.model_id(), "missing");
+        assert_eq!(model_error.model_type(), ModelType::VideoModel);
+        assert_eq!(error.to_string(), "No such videoModel: missing");
     }
 
     #[test]
