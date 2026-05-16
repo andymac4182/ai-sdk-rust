@@ -101,7 +101,7 @@ pub use provider_utils::{
     add_additional_properties_to_json_schema, as_array, combine_headers, convert_base64_to_bytes,
     convert_bytes_to_base64, convert_image_model_file_to_data_uri,
     convert_inline_file_data_to_bytes, convert_to_base64, create_tool_name_mapping,
-    detect_media_type, filter_nullable, get_top_level_media_type,
+    detect_media_type, extract_response_headers, filter_nullable, get_top_level_media_type,
     inject_json_instruction_into_messages, is_custom_reasoning, is_full_media_type,
     is_non_nullable, is_parsable_json, is_provider_reference, is_url_supported, load_api_key,
     load_optional_setting, load_setting, map_reasoning_to_provider_budget,

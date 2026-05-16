@@ -1861,6 +1861,23 @@ fn is_private_download_ipv6(ip: Ipv6Addr) -> bool {
     (first_segment & 0xfe00) == 0xfc00 || (first_segment & 0xffc0) == 0xfe80
 }
 
+/// Extracts HTTP response headers into the shared header record shape.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils` `extractResponseHeaders` by
+/// turning iterable response header entries into a plain key-value record. Header
+/// names and values are preserved as supplied by the response implementation.
+pub fn extract_response_headers<K, V, I>(headers: I) -> Headers
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<String>,
+    V: Into<String>,
+{
+    headers
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect()
+}
+
 /// Combines optional HTTP header maps, with later maps overriding earlier ones.
 ///
 /// This mirrors upstream `@ai-sdk/provider-utils` `combineHeaders`: missing
@@ -2196,16 +2213,16 @@ mod tests {
         add_additional_properties_to_json_schema, as_array, combine_headers,
         convert_base64_to_bytes, convert_bytes_to_base64, convert_image_model_file_to_data_uri,
         convert_inline_file_data_to_bytes, convert_to_base64, create_tool_name_mapping,
-        detect_media_type, filter_nullable, get_top_level_media_type, inject_json_instruction,
-        inject_json_instruction_into_messages, is_custom_reasoning, is_full_media_type,
-        is_non_nullable, is_parsable_json, is_provider_reference, is_url_supported, load_api_key,
-        load_api_key_with_env, load_optional_setting_with_env, load_setting, load_setting_with_env,
-        map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
-        media_type_to_extension, normalize_headers, parse_json, parse_provider_options,
-        prepare_tools, read_response_with_size_limit, remove_undefined_entries,
-        resolve_full_media_type, resolve_provider_reference, safe_parse_json, safe_validate_types,
-        strip_file_extension, validate_download_url, validate_types, with_user_agent_suffix,
-        without_trailing_slash,
+        detect_media_type, extract_response_headers, filter_nullable, get_top_level_media_type,
+        inject_json_instruction, inject_json_instruction_into_messages, is_custom_reasoning,
+        is_full_media_type, is_non_nullable, is_parsable_json, is_provider_reference,
+        is_url_supported, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
+        load_setting, load_setting_with_env, map_reasoning_to_provider_budget,
+        map_reasoning_to_provider_effort, media_type_to_extension, normalize_headers, parse_json,
+        parse_provider_options, prepare_tools, read_response_with_size_limit,
+        remove_undefined_entries, resolve_full_media_type, resolve_provider_reference,
+        safe_parse_json, safe_validate_types, strip_file_extension, validate_download_url,
+        validate_types, with_user_agent_suffix, without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -3924,6 +3941,39 @@ mod tests {
         }
 
         assert!(validate_download_url("http://[::ffff:203.0.113.1]/file").is_ok());
+    }
+
+    #[test]
+    fn extract_response_headers_preserves_response_header_entries() {
+        let headers = extract_response_headers([
+            ("content-type", "application/json"),
+            ("x-request-id", "req_123"),
+        ]);
+
+        assert_eq!(
+            headers,
+            BTreeMap::from([
+                ("content-type".to_string(), "application/json".to_string()),
+                ("x-request-id".to_string(), "req_123".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn extract_response_headers_lets_later_entries_override_duplicates() {
+        let headers = extract_response_headers([
+            ("x-provider", "first"),
+            ("x-provider", "second"),
+            ("x-empty", ""),
+        ]);
+
+        assert_eq!(
+            headers,
+            BTreeMap::from([
+                ("x-empty".to_string(), "".to_string()),
+                ("x-provider".to_string(), "second".to_string()),
+            ])
+        );
     }
 
     #[test]
