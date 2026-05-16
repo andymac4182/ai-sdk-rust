@@ -15,6 +15,7 @@ pub mod json;
 pub mod language_model;
 pub mod language_model_middleware;
 pub mod provider;
+pub mod provider_utils;
 pub mod reranking_model;
 pub mod skills;
 pub mod speech_model;
@@ -84,6 +85,10 @@ pub use provider::{
     ProviderWithFiles, ProviderWithRerankingModel, ProviderWithSkills, ProviderWithSpeechModel,
     ProviderWithTranscriptionModel, SpecificationVersion, TooManyEmbeddingValuesForCallError,
     TypeValidationContext, TypeValidationError, UnsupportedFunctionalityError, get_error_message,
+};
+pub use provider_utils::{
+    LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, load_api_key,
+    load_optional_setting, load_setting,
 };
 pub use reranking_model::{
     RerankingModel, RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
