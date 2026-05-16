@@ -716,6 +716,88 @@ impl ProviderApiResponse {
     }
 }
 
+/// Error returned by provider API response handlers.
+///
+/// Upstream `getFromApi` and `postToApi` pass through API-call errors from
+/// response handlers but wrap other response-handler failures in a new
+/// [`ApiCallError`]. This Rust boundary makes that distinction explicit without
+/// depending on JavaScript `Error`/`AbortSignal` runtime mechanics.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case", tag = "type")]
+pub enum ProviderApiResponseHandlerError {
+    /// The handler already produced an API-call error that should be propagated.
+    ApiCall {
+        /// API-call error returned by the response handler.
+        error: Box<ApiCallError>,
+    },
+
+    /// The handler failed for another reason and should be wrapped.
+    Other {
+        /// Human-readable handler failure message.
+        message: String,
+    },
+}
+
+impl ProviderApiResponseHandlerError {
+    /// Creates an API-call handler error.
+    pub fn api_call(error: ApiCallError) -> Self {
+        Self::ApiCall {
+            error: Box::new(error),
+        }
+    }
+
+    /// Creates an API-call handler error from a boxed API-call error.
+    pub fn boxed_api_call(error: Box<ApiCallError>) -> Self {
+        Self::ApiCall { error }
+    }
+
+    /// Creates a non-API-call handler error.
+    pub fn other(message: impl Into<String>) -> Self {
+        Self::Other {
+            message: message.into(),
+        }
+    }
+
+    /// Returns the API-call error when this failure should be propagated.
+    pub fn api_call_error(&self) -> Option<&ApiCallError> {
+        match self {
+            Self::ApiCall { error } => Some(error),
+            Self::Other { .. } => None,
+        }
+    }
+
+    /// Returns the non-API-call handler failure message.
+    pub fn other_message(&self) -> Option<&str> {
+        match self {
+            Self::ApiCall { .. } => None,
+            Self::Other { message } => Some(message),
+        }
+    }
+}
+
+impl From<ApiCallError> for ProviderApiResponseHandlerError {
+    fn from(error: ApiCallError) -> Self {
+        Self::api_call(error)
+    }
+}
+
+impl From<Box<ApiCallError>> for ProviderApiResponseHandlerError {
+    fn from(error: Box<ApiCallError>) -> Self {
+        Self::boxed_api_call(error)
+    }
+}
+
+impl fmt::Display for ProviderApiResponseHandlerError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ApiCall { error } => error.fmt(formatter),
+            Self::Other { message } => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for ProviderApiResponseHandlerError {}
+
 /// Result returned by safe type validation.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ValidateTypesResult<T = JsonValue> {
@@ -3095,6 +3177,72 @@ pub fn create_binary_response_handler(
     }
 }
 
+/// Handles a prepared provider API response using success and failure handlers.
+///
+/// This mirrors the response-processing branch shared by upstream `getFromApi`
+/// and `postToApi`: unsuccessful HTTP statuses run the failed-response handler
+/// and return its API error, successful statuses run the successful-response
+/// handler, and non-API-call handler failures are wrapped in an upstream-shaped
+/// [`ApiCallError`] with the response status and headers.
+pub fn handle_provider_api_response<T, S, F>(
+    request: &ProviderApiRequest,
+    response: &ProviderApiResponse,
+    successful_response_handler: S,
+    failed_response_handler: F,
+) -> Result<ResponseHandlerResult<T>, Box<ApiCallError>>
+where
+    S: FnOnce(
+        &ProviderApiRequest,
+        &ProviderApiResponse,
+    ) -> Result<ResponseHandlerResult<T>, ProviderApiResponseHandlerError>,
+    F: FnOnce(
+        &ProviderApiRequest,
+        &ProviderApiResponse,
+    ) -> Result<ResponseHandlerResult<ApiCallError>, ProviderApiResponseHandlerError>,
+{
+    if !response.is_success_status() {
+        return match failed_response_handler(request, response) {
+            Ok(error_information) => Err(Box::new(error_information.into_value())),
+            Err(error) => Err(provider_api_response_handler_error(
+                error,
+                "Failed to process error response",
+                request,
+                response,
+            )),
+        };
+    }
+
+    match successful_response_handler(request, response) {
+        Ok(result) => Ok(result),
+        Err(error) => Err(provider_api_response_handler_error(
+            error,
+            "Failed to process successful response",
+            request,
+            response,
+        )),
+    }
+}
+
+fn provider_api_response_handler_error(
+    error: ProviderApiResponseHandlerError,
+    message: &'static str,
+    request: &ProviderApiRequest,
+    response: &ProviderApiResponse,
+) -> Box<ApiCallError> {
+    match error {
+        ProviderApiResponseHandlerError::ApiCall { error } => error,
+        ProviderApiResponseHandlerError::Other { .. } => Box::new(
+            ApiCallError::new(
+                message,
+                request.url.clone(),
+                request.request_body_values.clone(),
+            )
+            .with_status_code(response.status_code)
+            .with_response_headers(response.headers.clone()),
+        ),
+    }
+}
+
 /// Combines optional HTTP header maps, with later maps overriding earlier ones.
 ///
 /// This mirrors upstream `@ai-sdk/provider-utils` `combineHeaders`: missing
@@ -3617,8 +3765,8 @@ mod tests {
         LanguageModelUserMessage,
     };
     use crate::{
-        FileData, FileDataContent, ImageModelFile, JsonObject, JsonValue, ProviderReference,
-        TypeValidationContext, TypeValidationError, Warning,
+        ApiCallError, FileData, FileDataContent, ImageModelFile, JsonObject, JsonValue,
+        ProviderReference, TypeValidationContext, TypeValidationError, Warning,
     };
     use serde_json::json;
     use url::Url;
@@ -3630,27 +3778,28 @@ mod tests {
         JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, LoadApiKeyOptions,
         LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError, ParseJsonResult,
         ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
-        ProviderApiResponseBody, ReasoningLevel, ResponseHandlerResult, RuntimeEnvironment,
-        StatusCodeErrorResponseHandlerOptions, Tool, ToolExecutionError, ToolExecutionOptions,
-        ValidateTypesResult, add_additional_properties_to_json_schema, as_array, combine_headers,
+        ProviderApiResponseBody, ProviderApiResponseHandlerError, ReasoningLevel,
+        ResponseHandlerResult, RuntimeEnvironment, StatusCodeErrorResponseHandlerOptions, Tool,
+        ToolExecutionError, ToolExecutionOptions, ValidateTypesResult,
+        add_additional_properties_to_json_schema, as_array, combine_headers,
         convert_base64_to_bytes, convert_bytes_to_base64, convert_image_model_file_to_data_uri,
         convert_inline_file_data_to_bytes, convert_to_base64, create_binary_response_handler,
         create_event_source_response_handler, create_json_error_response_handler,
         create_json_response_handler, create_status_code_error_response_handler,
         create_tool_name_mapping, detect_media_type, extract_response_headers, filter_nullable,
         get_runtime_environment_user_agent, get_top_level_media_type, handle_fetch_error,
-        inject_json_instruction, inject_json_instruction_into_messages, is_abort_error,
-        is_custom_reasoning, is_full_media_type, is_non_nullable, is_parsable_json,
-        is_provider_reference, is_url_supported, load_api_key, load_api_key_with_env,
-        load_optional_setting_with_env, load_setting, load_setting_with_env,
-        map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
-        media_type_to_extension, normalize_headers, parse_json, parse_json_event_stream,
-        parse_provider_options, prepare_get_from_api_request, prepare_post_json_to_api_request,
-        prepare_post_to_api_request, prepare_tools, read_response_with_size_limit,
-        remove_undefined_entries, resolve_full_media_type, resolve_provider_reference,
-        safe_parse_json, safe_validate_types, strip_file_extension, validate_download_url,
-        validate_types, with_provider_utils_user_agent, with_user_agent_suffix,
-        without_trailing_slash,
+        handle_provider_api_response, inject_json_instruction,
+        inject_json_instruction_into_messages, is_abort_error, is_custom_reasoning,
+        is_full_media_type, is_non_nullable, is_parsable_json, is_provider_reference,
+        is_url_supported, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
+        load_setting, load_setting_with_env, map_reasoning_to_provider_budget,
+        map_reasoning_to_provider_effort, media_type_to_extension, normalize_headers, parse_json,
+        parse_json_event_stream, parse_provider_options, prepare_get_from_api_request,
+        prepare_post_json_to_api_request, prepare_post_to_api_request, prepare_tools,
+        read_response_with_size_limit, remove_undefined_entries, resolve_full_media_type,
+        resolve_provider_reference, safe_parse_json, safe_validate_types, strip_file_extension,
+        validate_download_url, validate_types, with_provider_utils_user_agent,
+        with_user_agent_suffix, without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -6427,6 +6576,168 @@ mod tests {
         let options = response.json_response_handler_options(&request);
 
         assert_eq!(options.response_body, "{}");
+    }
+
+    #[test]
+    fn provider_api_response_handler_error_serializes_tagged_shape() {
+        let error = ProviderApiResponseHandlerError::api_call(
+            ApiCallError::new(
+                "provider failed",
+                "https://api.example.com/v1/data",
+                json!({}),
+            )
+            .with_status_code(500),
+        );
+
+        assert_eq!(
+            serde_json::to_value(&error).expect("handler error serializes"),
+            json!({
+                "type": "api-call",
+                "error": {
+                    "message": "provider failed",
+                    "url": "https://api.example.com/v1/data",
+                    "requestBodyValues": {},
+                    "statusCode": 500,
+                    "isRetryable": true
+                }
+            })
+        );
+
+        let deserialized: ProviderApiResponseHandlerError = serde_json::from_value(json!({
+            "type": "other",
+            "message": "invalid handler state"
+        }))
+        .expect("handler error deserializes");
+
+        assert_eq!(deserialized.other_message(), Some("invalid handler state"));
+        assert_eq!(deserialized.api_call_error(), None);
+    }
+
+    #[test]
+    fn handle_provider_api_response_returns_successful_handler_result() {
+        let request = ProviderApiRequest::get(
+            "https://api.example.com/v1/data",
+            BTreeMap::from([("authorization".to_string(), "Bearer test".to_string())]),
+        );
+        let response_headers =
+            BTreeMap::from([("x-request-id".to_string(), "req_success".to_string())]);
+        let response = ProviderApiResponse::text(200, "OK", r#"{"name":"Ada","age":36}"#)
+            .with_headers(response_headers.clone());
+
+        let result = handle_provider_api_response(
+            &request,
+            &response,
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    validate_person,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_status_code_error_response_handler(
+                    response.status_code_error_response_handler_options(request),
+                ))
+            },
+        )
+        .expect("successful response is handled");
+
+        assert_eq!(
+            result.value(),
+            &Person {
+                name: "Ada".to_string(),
+                age: 36
+            }
+        );
+        assert_eq!(
+            result.raw_value(),
+            Some(&json!({ "name": "Ada", "age": 36 }))
+        );
+        assert_eq!(result.response_headers(), Some(&response_headers));
+    }
+
+    #[test]
+    fn handle_provider_api_response_returns_failed_handler_api_error() {
+        let request = ProviderApiRequest::post(
+            "https://api.example.com/v1/chat",
+            BTreeMap::new(),
+            ProviderApiRequestBody::text("{\"prompt\":\"hi\"}"),
+            json!({ "prompt": "hi" }),
+        );
+        let response = ProviderApiResponse::text(429, "Too Many Requests", "rate limited");
+
+        let error = handle_provider_api_response::<Person, _, _>(
+            &request,
+            &response,
+            |_request, _response| {
+                Ok(ResponseHandlerResult::new(Person {
+                    name: "unused".to_string(),
+                    age: 0,
+                }))
+            },
+            |request, response| {
+                Ok(create_status_code_error_response_handler(
+                    response.status_code_error_response_handler_options(request),
+                ))
+            },
+        )
+        .expect_err("unsuccessful status returns the failed handler error");
+
+        assert_eq!(error.message(), "Too Many Requests");
+        assert_eq!(error.status_code(), Some(429));
+        assert_eq!(error.response_body(), Some("rate limited"));
+        assert_eq!(error.request_body_values(), &json!({ "prompt": "hi" }));
+        assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn handle_provider_api_response_wraps_non_api_handler_failures() {
+        let response_headers =
+            BTreeMap::from([("x-request-id".to_string(), "req_wrapper".to_string())]);
+        let request = ProviderApiRequest::get("https://api.example.com/v1/data", BTreeMap::new());
+        let response =
+            ProviderApiResponse::text(200, "OK", "not json").with_headers(response_headers.clone());
+
+        let error = handle_provider_api_response::<Person, _, _>(
+            &request,
+            &response,
+            |_request, _response| Err(ProviderApiResponseHandlerError::other("validator crashed")),
+            |request, response| {
+                Ok(create_status_code_error_response_handler(
+                    response.status_code_error_response_handler_options(request),
+                ))
+            },
+        )
+        .expect_err("non-api handler errors are wrapped");
+
+        assert_eq!(error.message(), "Failed to process successful response");
+        assert_eq!(error.url(), "https://api.example.com/v1/data");
+        assert_eq!(error.request_body_values(), &json!({}));
+        assert_eq!(error.status_code(), Some(200));
+        assert_eq!(error.response_headers(), Some(&response_headers));
+        assert_eq!(error.response_body(), None);
+    }
+
+    #[test]
+    fn handle_provider_api_response_passes_through_api_handler_failures() {
+        let request = ProviderApiRequest::get("https://api.example.com/v1/data", BTreeMap::new());
+        let response = ProviderApiResponse::text(200, "OK", "not json");
+        let api_error = ApiCallError::new("Invalid JSON response", request.url.clone(), json!({}))
+            .with_status_code(200);
+
+        let error = handle_provider_api_response::<Person, _, _>(
+            &request,
+            &response,
+            |_request, _response| Err(ProviderApiResponseHandlerError::api_call(api_error.clone())),
+            |request, response| {
+                Ok(create_status_code_error_response_handler(
+                    response.status_code_error_response_handler_options(request),
+                ))
+            },
+        )
+        .expect_err("api-call handler errors are passed through");
+
+        assert_eq!(*error, api_error);
     }
 
     #[test]
