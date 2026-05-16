@@ -836,11 +836,17 @@ fn tool_message_from_results(
     let content = tool_results
         .iter()
         .map(|tool_result| {
-            LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+            let mut part = LanguageModelToolResultPart::new(
                 tool_result.tool_call_id.clone(),
                 tool_result.tool_name.clone(),
                 tool_result_output(tool_result),
-            ))
+            );
+
+            if let Some(provider_metadata) = &tool_result.provider_metadata {
+                part = part.with_provider_options(provider_metadata.clone());
+            }
+
+            LanguageModelToolContentPart::ToolResult(part)
         })
         .collect::<Vec<_>>();
 
@@ -1015,7 +1021,7 @@ mod tests {
         LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
         LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
     };
-    use crate::provider::SpecificationVersion;
+    use crate::provider::{ProviderMetadata, SpecificationVersion};
     use crate::provider_utils::{Tool, ToolExecutionError};
     use serde_json::json;
     use std::cell::RefCell;
@@ -1449,6 +1455,7 @@ mod tests {
         calls: RefCell<Vec<LanguageModelCallOptions>>,
         tool_name: String,
         tool_input: String,
+        tool_call_provider_metadata: Option<ProviderMetadata>,
         first_step_prefix: Vec<LanguageModelContent>,
     }
 
@@ -1462,6 +1469,21 @@ mod tests {
                 calls: RefCell::new(Vec::new()),
                 tool_name: tool_name.into(),
                 tool_input: tool_input.into(),
+                tool_call_provider_metadata: None,
+                first_step_prefix: Vec::new(),
+            }
+        }
+
+        fn with_tool_call_metadata(
+            tool_name: impl Into<String>,
+            tool_input: impl Into<String>,
+            provider_metadata: ProviderMetadata,
+        ) -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                tool_name: tool_name.into(),
+                tool_input: tool_input.into(),
+                tool_call_provider_metadata: Some(provider_metadata),
                 first_step_prefix: Vec::new(),
             }
         }
@@ -1475,6 +1497,7 @@ mod tests {
                 calls: RefCell::new(Vec::new()),
                 tool_name: tool_name.into(),
                 tool_input: tool_input.into(),
+                tool_call_provider_metadata: None,
                 first_step_prefix,
             }
         }
@@ -1516,11 +1539,17 @@ mod tests {
 
             if step_number == 0 {
                 let mut content = self.first_step_prefix.clone();
-                content.push(LanguageModelContent::ToolCall(LanguageModelToolCall::new(
+                let mut tool_call = LanguageModelToolCall::new(
                     "call-1",
                     self.tool_name.clone(),
                     self.tool_input.clone(),
-                )));
+                );
+
+                if let Some(provider_metadata) = &self.tool_call_provider_metadata {
+                    tool_call = tool_call.with_provider_metadata(provider_metadata.clone());
+                }
+
+                content.push(LanguageModelContent::ToolCall(tool_call));
 
                 ready(LanguageModelGenerateResult::new(
                     content,
@@ -1679,6 +1708,50 @@ mod tests {
             ]))
         );
         assert_eq!(result.text, "The weather in Brisbane is sunny.");
+    }
+
+    #[test]
+    fn generate_text_preserves_tool_result_provider_metadata_in_continuation_message() {
+        let provider_metadata: ProviderMetadata =
+            serde_json::from_value(json!({ "testProvider": { "signature": "sig" } }))
+                .expect("provider metadata deserializes");
+        let model = ToolLoopLanguageModel::with_tool_call_metadata(
+            "weather",
+            r#"{"city":"Brisbane"}"#,
+            provider_metadata.clone(),
+        );
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(
+                    Tool::new("weather", input_schema)
+                        .with_execute(|_input, _options| async move { Ok(json!("sunny")) }),
+                )
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(model.calls.borrow().len(), 2);
+        assert_eq!(
+            result.tool_results[0].provider_metadata,
+            Some(provider_metadata.clone())
+        );
+        assert_eq!(
+            model.calls.borrow()[1].prompt[2],
+            LanguageModelMessage::Tool(crate::language_model::LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolResult(
+                    LanguageModelToolResultPart::new(
+                        "call-1",
+                        "weather",
+                        LanguageModelToolResultOutput::text("sunny")
+                    )
+                    .with_provider_options(provider_metadata)
+                )
+            ]))
+        );
     }
 
     struct ProviderExecutedToolLanguageModel {
