@@ -2559,6 +2559,13 @@ pub struct Tool {
     /// Provider-specific options sent with the tool definition.
     pub provider_options: Option<ProviderOptions>,
 
+    /// Tool metadata propagated to generated tool calls and results.
+    ///
+    /// Unlike provider options, this metadata is not sent to the language
+    /// model. It is high-level SDK state for consumers that need to identify a
+    /// tool source such as an MCP server.
+    pub metadata: Option<JsonObject>,
+
     execute: Option<Arc<ToolExecuteFunction>>,
 }
 
@@ -2573,6 +2580,7 @@ impl Tool {
             input_examples: None,
             strict: None,
             provider_options: None,
+            metadata: None,
             execute: None,
         }
     }
@@ -2591,6 +2599,7 @@ impl Tool {
             input_examples: None,
             strict: None,
             provider_options: None,
+            metadata: None,
             execute: None,
         }
     }
@@ -2620,6 +2629,7 @@ impl Tool {
             input_examples: None,
             strict: None,
             provider_options: None,
+            metadata: None,
             execute: None,
         }
     }
@@ -2649,6 +2659,7 @@ impl Tool {
             input_examples: None,
             strict: None,
             provider_options: None,
+            metadata: None,
             execute: None,
         }
     }
@@ -2702,6 +2713,12 @@ impl Tool {
     /// Adds provider-specific options to this tool.
     pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
         self.provider_options = Some(provider_options);
+        self
+    }
+
+    /// Sets high-level tool metadata that is not sent to the provider.
+    pub fn with_metadata(mut self, metadata: JsonObject) -> Self {
+        self.metadata = Some(metadata);
         self
     }
 
@@ -2778,6 +2795,11 @@ impl Tool {
         }
     }
 
+    /// Returns high-level tool metadata when configured.
+    pub fn metadata(&self) -> Option<&JsonObject> {
+        self.metadata.as_ref()
+    }
+
     /// Executes this tool when an executor is present.
     pub fn execute(
         &self,
@@ -2832,6 +2854,7 @@ impl fmt::Debug for Tool {
             .field("input_examples", &self.input_examples)
             .field("strict", &self.strict)
             .field("provider_options", &self.provider_options)
+            .field("metadata", &self.metadata)
             .field("is_executable", &self.is_executable())
             .finish()
     }
@@ -9747,6 +9770,34 @@ mod tests {
                     }
                 ],
                 "strict": true
+            })
+        );
+    }
+
+    #[test]
+    fn tool_metadata_is_retained_but_not_sent_to_provider() {
+        let metadata = json!({
+            "source": "mcp",
+            "server": "weather-tools"
+        })
+        .as_object()
+        .expect("metadata is an object")
+        .clone();
+        let tool = Tool::new("weather", object_schema()).with_metadata(metadata.clone());
+
+        assert_eq!(tool.metadata(), Some(&metadata));
+        assert_eq!(
+            serde_json::to_value(tool.to_language_model_tool()).expect("tool serializes"),
+            json!({
+                "type": "function",
+                "name": "weather",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    },
+                    "required": ["city"]
+                }
             })
         );
     }
