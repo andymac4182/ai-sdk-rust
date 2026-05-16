@@ -2602,6 +2602,48 @@ enum LanguageModelToolApprovalResponsePartKind {
     ToolApprovalResponse,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelToolApprovalRequestPartKind {
+    #[serde(rename = "tool-approval-request")]
+    ToolApprovalRequest,
+}
+
+/// Tool approval request content part in a standardized prompt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelToolApprovalRequestPart {
+    #[serde(rename = "type")]
+    kind: LanguageModelToolApprovalRequestPartKind,
+
+    /// ID of the approval request.
+    pub approval_id: String,
+
+    /// ID of the tool call that the approval request is for.
+    pub tool_call_id: String,
+
+    /// Whether the approval status was decided automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_automatic: Option<bool>,
+}
+
+impl LanguageModelToolApprovalRequestPart {
+    /// Creates a tool approval request prompt part.
+    pub fn new(approval_id: impl Into<String>, tool_call_id: impl Into<String>) -> Self {
+        Self {
+            kind: LanguageModelToolApprovalRequestPartKind::ToolApprovalRequest,
+            approval_id: approval_id.into(),
+            tool_call_id: tool_call_id.into(),
+            is_automatic: None,
+        }
+    }
+
+    /// Sets whether the approval status was decided automatically.
+    pub fn with_automatic(mut self, is_automatic: bool) -> Self {
+        self.is_automatic = Some(is_automatic);
+        self
+    }
+}
+
 /// Tool approval response content part in a standardized prompt.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2684,6 +2726,9 @@ pub enum LanguageModelAssistantContentPart {
 
     /// Tool result content.
     ToolResult(LanguageModelToolResultPart),
+
+    /// Tool approval request content.
+    ToolApprovalRequest(LanguageModelToolApprovalRequestPart),
 }
 
 /// Content part allowed in tool prompt messages.
@@ -2922,13 +2967,14 @@ mod tests {
         LanguageModelSupportedUrls, LanguageModelSystemMessage, LanguageModelText,
         LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextPart,
         LanguageModelTextStart, LanguageModelTool, LanguageModelToolApprovalRequest,
-        LanguageModelToolApprovalResponsePart, LanguageModelToolCall, LanguageModelToolCallPart,
-        LanguageModelToolChoice, LanguageModelToolContentPart, LanguageModelToolInputDelta,
-        LanguageModelToolInputEnd, LanguageModelToolInputStart, LanguageModelToolMessage,
-        LanguageModelToolResult, LanguageModelToolResultContentPart,
-        LanguageModelToolResultCustomContent, LanguageModelToolResultOutput,
-        LanguageModelToolResultPart, LanguageModelUrlSource, LanguageModelUsage,
-        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
+        LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolChoice,
+        LanguageModelToolContentPart, LanguageModelToolInputDelta, LanguageModelToolInputEnd,
+        LanguageModelToolInputStart, LanguageModelToolMessage, LanguageModelToolResult,
+        LanguageModelToolResultContentPart, LanguageModelToolResultCustomContent,
+        LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUrlSource,
+        LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage,
+        OutputTokenUsage,
     };
     use crate::file_data::{FileData, FileDataContent};
     use crate::json::NonNullJsonValue;
@@ -4816,7 +4862,7 @@ mod tests {
     }
 
     #[test]
-    fn assistant_message_deserializes_reasoning_custom_and_tool_call_parts() {
+    fn assistant_message_deserializes_reasoning_custom_tool_call_and_approval_request_parts() {
         let message: LanguageModelMessage = serde_json::from_value(json!({
             "role": "assistant",
             "content": [
@@ -4836,6 +4882,12 @@ mod tests {
                         "city": "Brisbane"
                     },
                     "providerExecuted": true
+                },
+                {
+                    "type": "tool-approval-request",
+                    "approvalId": "approval_123",
+                    "toolCallId": "tool_call_123",
+                    "isAutomatic": true
                 }
             ]
         }))
@@ -4860,7 +4912,34 @@ mod tests {
                     )
                     .with_provider_executed(true),
                 ),
+                LanguageModelAssistantContentPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequestPart::new("approval_123", "tool_call_123")
+                        .with_automatic(true),
+                ),
             ]))
+        );
+    }
+
+    #[test]
+    fn assistant_message_serializes_tool_approval_request_part() {
+        let message = LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+            LanguageModelAssistantContentPart::ToolApprovalRequest(
+                LanguageModelToolApprovalRequestPart::new("approval_123", "tool_call_456"),
+            ),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(message).expect("assistant message serializes"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool-approval-request",
+                        "approvalId": "approval_123",
+                        "toolCallId": "tool_call_456"
+                    }
+                ]
+            })
         );
     }
 

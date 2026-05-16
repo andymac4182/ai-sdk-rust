@@ -17,10 +17,10 @@ use crate::language_model::{
     LanguageModelReasoningFile, LanguageModelReasoningFilePart, LanguageModelReasoningPart,
     LanguageModelRequest, LanguageModelResponse, LanguageModelResponseFormat, LanguageModelSource,
     LanguageModelStreamPart, LanguageModelText, LanguageModelTextPart, LanguageModelTool,
-    LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolChoice,
-    LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResult,
-    LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
-    OutputTokenUsage,
+    LanguageModelToolApprovalRequestPart, LanguageModelToolCall, LanguageModelToolCallPart,
+    LanguageModelToolChoice, LanguageModelToolContentPart, LanguageModelToolMessage,
+    LanguageModelToolResult, LanguageModelToolResultOutput, LanguageModelToolResultPart,
+    LanguageModelUsage, OutputTokenUsage,
 };
 use crate::provider::{JsonParseError, get_error_message};
 use crate::provider::{ProviderMetadata, ProviderOptions};
@@ -2613,7 +2613,15 @@ fn assistant_content_part_from_content(
 
             Some(LanguageModelAssistantContentPart::ToolResult(part))
         }
-        LanguageModelContent::ToolApprovalRequest(_) | LanguageModelContent::Source(_) => None,
+        LanguageModelContent::ToolApprovalRequest(request) => {
+            Some(LanguageModelAssistantContentPart::ToolApprovalRequest(
+                LanguageModelToolApprovalRequestPart::new(
+                    request.approval_id.clone(),
+                    request.tool_call_id.clone(),
+                ),
+            ))
+        }
+        LanguageModelContent::Source(_) => None,
     }
 }
 
@@ -3025,6 +3033,9 @@ fn collect_kept_tool_references(
                         LanguageModelAssistantContentPart::ToolResult(part) => {
                             kept_tool_call_ids.insert(part.tool_call_id.clone());
                         }
+                        LanguageModelAssistantContentPart::ToolApprovalRequest(part) => {
+                            kept_approval_ids.insert(part.approval_id.clone());
+                        }
                         _ => {}
                     }
                 }
@@ -3054,17 +3065,24 @@ fn prune_assistant_tool_parts(
     kept_tool_call_ids: &BTreeSet<String>,
     kept_approval_ids: &BTreeSet<String>,
 ) -> Vec<LanguageModelAssistantContentPart> {
+    let mut tool_call_id_to_tool_name = BTreeMap::new();
+    let mut approval_id_to_tool_name = BTreeMap::new();
+
     content
         .into_iter()
         .filter(|part| match part {
-            LanguageModelAssistantContentPart::ToolCall(part) => should_keep_tool_related_part(
-                Some(&part.tool_call_id),
-                None,
-                Some(&part.tool_name),
-                rule,
-                kept_tool_call_ids,
-                kept_approval_ids,
-            ),
+            LanguageModelAssistantContentPart::ToolCall(part) => {
+                tool_call_id_to_tool_name.insert(part.tool_call_id.clone(), part.tool_name.clone());
+
+                should_keep_tool_related_part(
+                    Some(&part.tool_call_id),
+                    None,
+                    Some(&part.tool_name),
+                    rule,
+                    kept_tool_call_ids,
+                    kept_approval_ids,
+                )
+            }
             LanguageModelAssistantContentPart::ToolResult(part) => should_keep_tool_related_part(
                 Some(&part.tool_call_id),
                 None,
@@ -3073,6 +3091,22 @@ fn prune_assistant_tool_parts(
                 kept_tool_call_ids,
                 kept_approval_ids,
             ),
+            LanguageModelAssistantContentPart::ToolApprovalRequest(part) => {
+                if let Some(tool_name) = tool_call_id_to_tool_name.get(&part.tool_call_id) {
+                    approval_id_to_tool_name.insert(part.approval_id.clone(), tool_name.clone());
+                }
+
+                should_keep_tool_related_part(
+                    None,
+                    Some(&part.approval_id),
+                    approval_id_to_tool_name
+                        .get(&part.approval_id)
+                        .map(String::as_str),
+                    rule,
+                    kept_tool_call_ids,
+                    kept_approval_ids,
+                )
+            }
             _ => true,
         })
         .collect()
@@ -3230,7 +3264,8 @@ mod tests {
         LanguageModelReasoningPart, LanguageModelRequest, LanguageModelResponse,
         LanguageModelSource, LanguageModelStreamPart, LanguageModelStreamResult,
         LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextDelta,
-        LanguageModelTextPart, LanguageModelTool, LanguageModelToolApprovalResponsePart,
+        LanguageModelTextPart, LanguageModelTool, LanguageModelToolApprovalRequest,
+        LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
         LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolContentPart,
         LanguageModelToolMessage, LanguageModelToolResult, LanguageModelToolResultOutput,
         LanguageModelToolResultPart, LanguageModelUsage, LanguageModelUserContentPart,
@@ -3830,6 +3865,7 @@ mod tests {
     struct FakeLanguageModel {
         calls: RefCell<Vec<LanguageModelCallOptions>>,
         include_body_metadata: bool,
+        content: Vec<LanguageModelContent>,
     }
 
     impl FakeLanguageModel {
@@ -3837,11 +3873,20 @@ mod tests {
             Self {
                 calls: RefCell::new(Vec::new()),
                 include_body_metadata: false,
+                content: vec![
+                    LanguageModelContent::Text(LanguageModelText::new("Hello ")),
+                    LanguageModelContent::Text(LanguageModelText::new("world")),
+                ],
             }
         }
 
         fn with_body_metadata(mut self) -> Self {
             self.include_body_metadata = true;
+            self
+        }
+
+        fn with_content(mut self, content: Vec<LanguageModelContent>) -> Self {
+            self.content = content;
             self
         }
     }
@@ -3880,10 +3925,7 @@ mod tests {
             self.calls.borrow_mut().push(options);
 
             let mut result = LanguageModelGenerateResult::new(
-                vec![
-                    LanguageModelContent::Text(LanguageModelText::new("Hello ")),
-                    LanguageModelContent::Text(LanguageModelText::new("world")),
-                ],
+                self.content.clone(),
                 LanguageModelFinishReason {
                     unified: FinishReason::Stop,
                     raw: Some("stop".to_string()),
@@ -4040,6 +4082,44 @@ mod tests {
         assert_eq!(performance.input_tokens_per_second, None);
         assert_eq!(performance.tool_execution_ms, BTreeMap::new());
         assert_eq!(performance.time_to_first_output_token_ms, None);
+    }
+
+    #[test]
+    fn generate_text_response_messages_preserve_tool_approval_requests() {
+        let model = FakeLanguageModel::new().with_content(vec![
+            LanguageModelContent::ToolCall(
+                LanguageModelToolCall::new("tool_call_123", "webSearch", r#"{"query":"weather"}"#)
+                    .with_provider_executed(true),
+            ),
+            LanguageModelContent::ToolApprovalRequest(LanguageModelToolApprovalRequest::new(
+                "approval_123",
+                "tool_call_123",
+            )),
+        ]);
+
+        let result = poll_ready(generate_text(GenerateTextOptions::new(
+            &model,
+            vec![user_message("Search the web")],
+        )));
+
+        assert_eq!(
+            result.response_messages,
+            vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "tool_call_123",
+                            "webSearch",
+                            json!({ "query": "weather" }),
+                        )
+                        .with_provider_executed(true)
+                    ),
+                    LanguageModelAssistantContentPart::ToolApprovalRequest(
+                        LanguageModelToolApprovalRequestPart::new("approval_123", "tool_call_123",)
+                    ),
+                ])
+            )]
+        );
     }
 
     #[test]
@@ -5218,6 +5298,12 @@ mod tests {
                     "search",
                     json!({}),
                 )),
+                LanguageModelAssistantContentPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequestPart::new("approval-weather", "call-weather"),
+                ),
+                LanguageModelAssistantContentPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequestPart::new("approval-search", "call-search"),
+                ),
             ])),
             LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
                 LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
@@ -5246,11 +5332,16 @@ mod tests {
             panic!("second message is tool");
         };
 
-        assert_eq!(first.content.len(), 1);
+        assert_eq!(first.content.len(), 2);
         assert!(matches!(
             &first.content[0],
             LanguageModelAssistantContentPart::ToolCall(part)
                 if part.tool_name == "search"
+        ));
+        assert!(matches!(
+            &first.content[1],
+            LanguageModelAssistantContentPart::ToolApprovalRequest(part)
+                if part.approval_id == "approval-search"
         ));
         assert_eq!(second.content.len(), 1);
         assert!(matches!(
