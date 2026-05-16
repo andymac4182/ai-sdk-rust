@@ -2808,6 +2808,30 @@ where
     headers
 }
 
+/// Appends the provider-utils package and runtime user-agent suffixes to headers.
+///
+/// This is the Rust-native request-header preparation shared by upstream
+/// `getFromApi` and `postToApi`: callers supply their provider headers and an
+/// explicit runtime environment, and the result is normalized with
+/// `ai-sdk/provider-utils/{VERSION}` plus the upstream runtime suffix.
+pub fn with_provider_utils_user_agent<K, V, I>(
+    headers: Option<I>,
+    environment: &RuntimeEnvironment,
+) -> Headers
+where
+    I: IntoIterator<Item = (K, Option<V>)>,
+    K: AsRef<str>,
+    V: Into<String>,
+{
+    with_user_agent_suffix(
+        headers,
+        [
+            format!("ai-sdk/provider-utils/{}", crate::VERSION),
+            get_runtime_environment_user_agent(environment),
+        ],
+    )
+}
+
 /// Returns an upstream-style runtime user-agent suffix for provider utilities.
 ///
 /// This mirrors upstream `getRuntimeEnvironmentUserAgent`: browser indicators
@@ -3171,7 +3195,8 @@ mod tests {
         parse_provider_options, prepare_tools, read_response_with_size_limit,
         remove_undefined_entries, resolve_full_media_type, resolve_provider_reference,
         safe_parse_json, safe_validate_types, strip_file_extension, validate_download_url,
-        validate_types, with_user_agent_suffix, without_trailing_slash,
+        validate_types, with_provider_utils_user_agent, with_user_agent_suffix,
+        without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -5690,6 +5715,50 @@ mod tests {
                 Vec::new(),
             ),
             BTreeMap::from([("user-agent".to_string(), String::new())])
+        );
+    }
+
+    #[test]
+    fn with_provider_utils_user_agent_adds_version_and_runtime_suffixes() {
+        let headers = with_provider_utils_user_agent(
+            Some(vec![
+                ("Authorization", Some("Bearer token")),
+                ("X-Ignore", None),
+            ]),
+            &RuntimeEnvironment::navigator_user_agent("Deno/2.0 TEST"),
+        );
+
+        assert_eq!(
+            headers,
+            BTreeMap::from([
+                ("authorization".to_string(), "Bearer token".to_string()),
+                (
+                    "user-agent".to_string(),
+                    format!(
+                        "ai-sdk/provider-utils/{} runtime/deno/2.0 test",
+                        crate::VERSION
+                    ),
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn with_provider_utils_user_agent_appends_to_existing_user_agent() {
+        let headers = with_provider_utils_user_agent(
+            Some(vec![("User-Agent", Some("MyApp/1.0"))]),
+            &RuntimeEnvironment::node_js("v22.0.0"),
+        );
+
+        assert_eq!(
+            headers,
+            BTreeMap::from([(
+                "user-agent".to_string(),
+                format!(
+                    "MyApp/1.0 ai-sdk/provider-utils/{} runtime/node.js/v22.0.0",
+                    crate::VERSION
+                ),
+            )])
         );
     }
 

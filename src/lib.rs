@@ -115,7 +115,7 @@ pub use provider_utils::{
     parse_json_event_stream, parse_provider_options, prepare_tools, read_response_with_size_limit,
     remove_undefined_entries, resolve_full_media_type, resolve_provider_reference, safe_parse_json,
     safe_validate_types, strip_file_extension, validate_download_url, validate_types,
-    with_user_agent_suffix, without_trailing_slash,
+    with_provider_utils_user_agent, with_user_agent_suffix, without_trailing_slash,
 };
 pub use reranking_model::{
     RerankingModel, RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
