@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::future::Future;
+use std::{fmt, future::Future};
 use time::OffsetDateTime;
 
 use crate::file_data::FileDataContent;
@@ -173,6 +173,44 @@ impl TranscriptionModelResponse {
     }
 }
 
+/// Error returned when high-level transcription produces no transcript.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NoTranscriptGeneratedError {
+    responses: Vec<TranscriptionModelResponse>,
+}
+
+impl NoTranscriptGeneratedError {
+    /// Creates a no-transcript error with response metadata from attempted provider calls.
+    pub fn new(responses: impl IntoIterator<Item = TranscriptionModelResponse>) -> Self {
+        Self {
+            responses: responses.into_iter().collect(),
+        }
+    }
+
+    /// Returns the upstream human-readable error message.
+    pub fn message(&self) -> &'static str {
+        "No transcript generated."
+    }
+
+    /// Returns response metadata for attempted provider calls.
+    pub fn responses(&self) -> &[TranscriptionModelResponse] {
+        &self.responses
+    }
+
+    /// Converts this error into its response metadata.
+    pub fn into_responses(self) -> Vec<TranscriptionModelResponse> {
+        self.responses
+    }
+}
+
+impl fmt::Display for NoTranscriptGeneratedError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+
+impl std::error::Error for NoTranscriptGeneratedError {}
+
 /// Result of a transcription model provider call.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -259,8 +297,9 @@ impl TranscriptionModelResult {
 #[cfg(test)]
 mod tests {
     use super::{
-        TranscriptionModel, TranscriptionModelCallOptions, TranscriptionModelRequest,
-        TranscriptionModelResponse, TranscriptionModelResult, TranscriptionModelSegment,
+        NoTranscriptGeneratedError, TranscriptionModel, TranscriptionModelCallOptions,
+        TranscriptionModelRequest, TranscriptionModelResponse, TranscriptionModelResult,
+        TranscriptionModelSegment,
     };
     use crate::file_data::FileDataContent;
     use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
@@ -381,6 +420,24 @@ mod tests {
         assert_eq!(model.model_id(), "transcribe-test");
         assert_eq!(result.text, "hello world");
         assert_eq!(result.response.model_id, "transcribe-test");
+    }
+
+    #[test]
+    fn no_transcript_generated_error_matches_upstream_message_and_retains_responses() {
+        let response_timestamp =
+            OffsetDateTime::parse("2026-05-16T09:30:00Z", &Rfc3339).expect("timestamp parses");
+        let response = TranscriptionModelResponse::new(response_timestamp, "openai/whisper-1")
+            .with_header("x-request-id", "req_123")
+            .with_body(json!({
+                "text": ""
+            }));
+
+        let error = NoTranscriptGeneratedError::new([response.clone()]);
+
+        assert_eq!(error.message(), "No transcript generated.");
+        assert_eq!(error.to_string(), "No transcript generated.");
+        assert_eq!(error.responses(), std::slice::from_ref(&response));
+        assert_eq!(error.into_responses(), vec![response]);
     }
 
     #[test]

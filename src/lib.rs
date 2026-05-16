@@ -142,8 +142,9 @@ pub use speech_model::{
     SpeechModelRequest, SpeechModelResponse, SpeechModelResult,
 };
 pub use transcription_model::{
-    TranscriptionModel, TranscriptionModelCallOptions, TranscriptionModelRequest,
-    TranscriptionModelResponse, TranscriptionModelResult, TranscriptionModelSegment,
+    NoTranscriptGeneratedError, TranscriptionModel, TranscriptionModelCallOptions,
+    TranscriptionModelRequest, TranscriptionModelResponse, TranscriptionModelResult,
+    TranscriptionModelSegment,
 };
 pub use video_model::{
     VideoModel, VideoModelCallOptions, VideoModelFile, VideoModelResponse, VideoModelResult,
