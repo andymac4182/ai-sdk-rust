@@ -35,7 +35,7 @@ use crate::provider::{ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{
     Base64DecodeError, ExperimentalSandbox, IdGeneratorOptions, Tool, ToolExecutionOptions,
     convert_base64_to_bytes, convert_bytes_to_base64, create_id_generator, generate_id,
-    prepare_tools,
+    prepare_tools_with_context,
 };
 use crate::warning::Warning;
 
@@ -3267,7 +3267,7 @@ pub type ExperimentalGeneratedImage = GeneratedFile;
 #[derive(Clone, Debug)]
 pub enum GenerateTextTool {
     /// High-level Rust function tool.
-    Rust(Tool),
+    Rust(Box<Tool>),
 
     /// Already prepared provider-facing language model tool.
     LanguageModel(LanguageModelTool),
@@ -3275,7 +3275,7 @@ pub enum GenerateTextTool {
 
 impl From<Tool> for GenerateTextTool {
     fn from(tool: Tool) -> Self {
-        Self::Rust(tool)
+        Self::Rust(Box::new(tool))
     }
 }
 
@@ -3514,7 +3514,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
     /// Adds a tool that is available to the model.
     pub fn with_tool(mut self, tool: impl Into<GenerateTextTool>) -> Self {
         match tool.into() {
-            GenerateTextTool::Rust(tool) => self.tools.push(tool),
+            GenerateTextTool::Rust(tool) => self.tools.push(*tool),
             GenerateTextTool::LanguageModel(tool) => self
                 .call_options
                 .tools
@@ -5068,7 +5068,9 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
 
     if let Some(on_start) = &on_start {
         let mut start_tools = base_language_model_tools.clone().unwrap_or_default();
-        if let Some(mut prepared_tools) = prepare_tools(&tools) {
+        if let Some(mut prepared_tools) =
+            prepare_tools_with_context(&tools, Some(&tools_context), experimental_sandbox.as_ref())
+        {
             start_tools.append(&mut prepared_tools);
         }
 
@@ -5177,7 +5179,11 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
             step_active_tools,
         );
 
-        if let Some(mut prepared_tools) = prepare_tools(&step_tools) {
+        if let Some(mut prepared_tools) = prepare_tools_with_context(
+            &step_tools,
+            Some(&tools_context),
+            step_experimental_sandbox.as_ref(),
+        ) {
             step_language_model_tools
                 .get_or_insert_with(Vec::new)
                 .append(&mut prepared_tools);
@@ -12273,6 +12279,71 @@ mod tests {
         );
         assert_eq!(result.tool_results[0].output["description"], "step sandbox");
         assert_eq!(result.tool_results[0].output["stdout"], "pwd");
+    }
+
+    #[test]
+    fn generate_text_resolves_dynamic_tool_descriptions_with_step_context_and_sandbox() {
+        let model = FakeLanguageModel::new();
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let step_sandbox: Arc<dyn ExperimentalSandbox> = Arc::new(TestSandbox::new("step shell"));
+        let step_sandbox_clone = Arc::clone(&step_sandbox);
+
+        let _ = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(
+                    Tool::new("weather", input_schema.clone()).with_dynamic_description(
+                        |options| {
+                            let region = options
+                                .context
+                                .as_ref()
+                                .and_then(|context| context.get("region"))
+                                .and_then(JsonValue::as_str)
+                                .unwrap_or("missing");
+                            let sandbox = options
+                                .experimental_sandbox
+                                .as_ref()
+                                .map(|sandbox| sandbox.description())
+                                .unwrap_or("no sandbox");
+
+                            format!("Look up weather for {region} using {sandbox}.")
+                        },
+                    ),
+                )
+                .with_prepare_step(move |_| {
+                    let step_sandbox = Arc::clone(&step_sandbox_clone);
+
+                    async move {
+                        let mut weather_context = JsonObject::new();
+                        weather_context
+                            .insert("region".to_string(), JsonValue::String("Brisbane".into()));
+
+                        let mut tools_context = JsonObject::new();
+                        tools_context
+                            .insert("weather".to_string(), JsonValue::Object(weather_context));
+
+                        PrepareStepResult::new()
+                            .with_tools_context(tools_context)
+                            .with_experimental_sandbox(step_sandbox)
+                    }
+                }),
+        ));
+
+        assert_eq!(
+            model.calls.borrow()[0].tools,
+            Some(vec![LanguageModelTool::Function(
+                LanguageModelFunctionTool::new("weather", input_schema)
+                    .with_description("Look up weather for Brisbane using step shell.")
+            )])
+        );
     }
 
     #[test]

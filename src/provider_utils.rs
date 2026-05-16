@@ -3740,6 +3740,38 @@ impl From<&str> for ToolExecutionError {
     }
 }
 
+/// Options passed when resolving a runtime-dependent tool description.
+#[derive(Clone, Debug)]
+pub struct ToolDescriptionOptions {
+    /// Tool-specific context for the current generation call, when supplied.
+    pub context: Option<JsonValue>,
+
+    /// Experimental sandbox available while preparing tool definitions.
+    pub experimental_sandbox: Option<Arc<dyn ExperimentalSandbox>>,
+}
+
+impl ToolDescriptionOptions {
+    /// Creates description-resolution options.
+    pub fn new(context: Option<JsonValue>) -> Self {
+        Self {
+            context,
+            experimental_sandbox: None,
+        }
+    }
+
+    /// Adds an experimental sandbox to the description-resolution context.
+    pub fn with_experimental_sandbox(
+        mut self,
+        experimental_sandbox: Arc<dyn ExperimentalSandbox>,
+    ) -> Self {
+        self.experimental_sandbox = Some(experimental_sandbox);
+        self
+    }
+}
+
+/// Runtime-dependent tool description callback.
+pub type ToolDescriptionFunction = dyn Fn(ToolDescriptionOptions) -> String + Send + Sync;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ToolKind {
     Function,
@@ -3882,6 +3914,8 @@ pub struct Tool {
     /// Optional description of what the tool does.
     pub description: Option<String>,
 
+    description_resolver: Option<Arc<ToolDescriptionFunction>>,
+
     /// JSON Schema 7 object describing the tool input.
     pub input_schema: JsonSchema,
 
@@ -3924,6 +3958,7 @@ impl Tool {
             name: name.into(),
             title: None,
             description: None,
+            description_resolver: None,
             input_schema,
             context_schema: None,
             input_examples: None,
@@ -3946,6 +3981,7 @@ impl Tool {
             name: name.into(),
             title: None,
             description: None,
+            description_resolver: None,
             input_schema,
             context_schema: None,
             input_examples: None,
@@ -3979,6 +4015,7 @@ impl Tool {
             name: name.into(),
             title: None,
             description: None,
+            description_resolver: None,
             input_schema,
             context_schema: None,
             input_examples: None,
@@ -4012,6 +4049,7 @@ impl Tool {
             name: name.into(),
             title: None,
             description: None,
+            description_resolver: None,
             input_schema,
             context_schema: None,
             input_examples: None,
@@ -4026,6 +4064,22 @@ impl Tool {
     /// Sets the tool description.
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
+        self.description_resolver = None;
+        self
+    }
+
+    /// Sets a runtime-dependent tool description.
+    ///
+    /// Upstream function-style tool descriptions can be functions that receive
+    /// the current tool context and experimental sandbox. Rust keeps that
+    /// runtime-only behavior as a synchronous callback so provider-facing tool
+    /// definitions can be prepared without adding an async dependency.
+    pub fn with_dynamic_description<F>(mut self, description: F) -> Self
+    where
+        F: Fn(ToolDescriptionOptions) -> String + Send + Sync + 'static,
+    {
+        self.description = None;
+        self.description_resolver = Some(Arc::new(description));
         self
     }
 
@@ -4198,6 +4252,11 @@ impl Tool {
         self.needs_approval
     }
 
+    /// Returns whether this tool has a runtime-dependent description callback.
+    pub fn has_dynamic_description(&self) -> bool {
+        self.description_resolver.is_some()
+    }
+
     /// Executes this tool when an executor is present.
     pub fn execute(
         &self,
@@ -4209,6 +4268,16 @@ impl Tool {
 
     /// Converts this high-level tool into the provider-facing language-model tool shape.
     pub fn to_language_model_tool(&self) -> LanguageModelTool {
+        self.to_language_model_tool_with_context(None, None)
+    }
+
+    /// Converts this high-level tool into the provider-facing shape with
+    /// runtime context available for dynamic descriptions.
+    pub fn to_language_model_tool_with_context(
+        &self,
+        context: Option<&JsonValue>,
+        experimental_sandbox: Option<&Arc<dyn ExperimentalSandbox>>,
+    ) -> LanguageModelTool {
         if let ToolKind::Provider { id, args, .. } = &self.kind {
             return LanguageModelTool::Provider(LanguageModelProviderTool::new(
                 id.clone(),
@@ -4219,8 +4288,8 @@ impl Tool {
 
         let mut tool = LanguageModelFunctionTool::new(self.name.clone(), self.input_schema.clone());
 
-        if let Some(description) = &self.description {
-            tool = tool.with_description(description.clone());
+        if let Some(description) = self.resolve_description(context, experimental_sandbox) {
+            tool = tool.with_description(description);
         }
 
         if let Some(input_examples) = &self.input_examples {
@@ -4239,6 +4308,21 @@ impl Tool {
 
         LanguageModelTool::Function(tool)
     }
+
+    fn resolve_description(
+        &self,
+        context: Option<&JsonValue>,
+        experimental_sandbox: Option<&Arc<dyn ExperimentalSandbox>>,
+    ) -> Option<String> {
+        if let Some(description_resolver) = &self.description_resolver {
+            return Some(description_resolver(ToolDescriptionOptions {
+                context: context.cloned(),
+                experimental_sandbox: experimental_sandbox.cloned(),
+            }));
+        }
+
+        self.description.clone()
+    }
 }
 
 impl fmt::Debug for Tool {
@@ -4249,6 +4333,10 @@ impl fmt::Debug for Tool {
             .field("name", &self.name)
             .field("title", &self.title)
             .field("description", &self.description)
+            .field(
+                "has_dynamic_description",
+                &self.description_resolver.is_some(),
+            )
             .field("input_schema", &self.input_schema)
             .field("context_schema", &self.context_schema)
             .field("input_examples", &self.input_examples)
@@ -4358,9 +4446,24 @@ pub fn create_tool_name_mapping<'a>(
 pub fn prepare_tools<'a>(
     tools: impl IntoIterator<Item = &'a Tool>,
 ) -> Option<Vec<LanguageModelTool>> {
+    prepare_tools_with_context(tools, None, None)
+}
+
+/// Converts high-level Rust tools into provider-facing language-model tools
+/// with runtime context available for dynamic tool descriptions.
+pub fn prepare_tools_with_context<'a>(
+    tools: impl IntoIterator<Item = &'a Tool>,
+    tools_context: Option<&JsonObject>,
+    experimental_sandbox: Option<&Arc<dyn ExperimentalSandbox>>,
+) -> Option<Vec<LanguageModelTool>> {
     let tools = tools
         .into_iter()
-        .map(Tool::to_language_model_tool)
+        .map(|tool| {
+            tool.to_language_model_tool_with_context(
+                tools_context.and_then(|context| context.get(&tool.name)),
+                experimental_sandbox,
+            )
+        })
         .collect::<Vec<_>>();
 
     if tools.is_empty() { None } else { Some(tools) }
@@ -6842,10 +6945,10 @@ mod tests {
         RuntimeEnvironment, SandboxCommandOptions, SandboxCommandResult, SandboxRunCommandFuture,
         Schema, SerializedModelOptions, StatusCodeErrorResponseHandlerOptions,
         StreamingToolCallDelta, StreamingToolCallDeltaFunction, StreamingToolCallTracker,
-        StreamingToolCallTrackerOptions, StreamingToolCallTypeValidation, Tool, ToolExecutionError,
-        ToolExecutionOptions, ValidateTypesResult, ValidationResult,
-        add_additional_properties_to_json_schema, as_array, as_flexible_schema, as_schema,
-        combine_headers, convert_base64_to_bytes, convert_bytes_to_base64,
+        StreamingToolCallTrackerOptions, StreamingToolCallTypeValidation, Tool,
+        ToolDescriptionOptions, ToolExecutionError, ToolExecutionOptions, ValidateTypesResult,
+        ValidationResult, add_additional_properties_to_json_schema, as_array, as_flexible_schema,
+        as_schema, combine_headers, convert_base64_to_bytes, convert_bytes_to_base64,
         convert_image_model_file_to_data_uri, convert_inline_file_data_to_bytes, convert_to_base64,
         convert_to_form_data, create_binary_response_handler, create_event_source_response_handler,
         create_id_generator, create_json_error_response_handler, create_json_response_handler,
@@ -6865,11 +6968,11 @@ mod tests {
         parse_json_with_schema, parse_provider_options, post_form_data_to_api, post_json_to_api,
         post_to_api, prepare_get_from_api_request, prepare_post_form_data_to_api_request,
         prepare_post_json_to_api_request, prepare_post_to_api_request, prepare_tools,
-        read_response_with_size_limit, remove_undefined_entries, resolve, resolve_full_media_type,
-        resolve_provider_reference, safe_parse_json, safe_parse_json_with_schema,
-        safe_validate_types, serialize_model_options, strip_file_extension, validate_download_url,
-        validate_types, with_provider_utils_user_agent, with_user_agent_suffix,
-        without_trailing_slash,
+        prepare_tools_with_context, read_response_with_size_limit, remove_undefined_entries,
+        resolve, resolve_full_media_type, resolve_provider_reference, safe_parse_json,
+        safe_parse_json_with_schema, safe_validate_types, serialize_model_options,
+        strip_file_extension, validate_download_url, validate_types,
+        with_provider_utils_user_agent, with_user_agent_suffix, without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -12468,6 +12571,68 @@ mod tests {
                 ],
                 "strict": true
             })
+        );
+    }
+
+    #[test]
+    fn tool_dynamic_description_uses_context_and_sandbox_when_prepared() {
+        let sandbox: Arc<dyn ExperimentalSandbox> =
+            Arc::new(StaticSandbox::new("workspace sandbox"));
+        let mut tools_context = JsonObject::new();
+        tools_context.insert(
+            "weather".to_string(),
+            json!({
+                "region": "Brisbane"
+            }),
+        );
+
+        let tool = Tool::new("weather", object_schema()).with_dynamic_description(|options| {
+            let region = options
+                .context
+                .as_ref()
+                .and_then(|context| context.get("region"))
+                .and_then(JsonValue::as_str)
+                .expect("context is provided");
+            let sandbox_description = options
+                .experimental_sandbox
+                .as_ref()
+                .expect("sandbox is provided")
+                .description();
+
+            format!("Look up {region} weather in {sandbox_description}.")
+        });
+
+        assert!(tool.has_dynamic_description());
+        assert_eq!(
+            ToolDescriptionOptions::new(None)
+                .with_experimental_sandbox(Arc::clone(&sandbox))
+                .experimental_sandbox
+                .as_ref()
+                .expect("sandbox is set")
+                .description(),
+            "workspace sandbox"
+        );
+
+        let tools = vec![tool];
+        let prepared = prepare_tools_with_context(&tools, Some(&tools_context), Some(&sandbox))
+            .expect("tools are prepared");
+
+        assert_eq!(
+            serde_json::to_value(prepared).expect("prepared tools serialize"),
+            json!([
+                {
+                    "type": "function",
+                    "name": "weather",
+                    "description": "Look up Brisbane weather in workspace sandbox.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "city": { "type": "string" }
+                        },
+                        "required": ["city"]
+                    }
+                }
+            ])
         );
     }
 
