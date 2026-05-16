@@ -1,16 +1,25 @@
 use serde::{Deserialize, Serialize};
 
+use crate::file_data::FileData;
 use crate::headers::Headers;
+use crate::json::JsonValue;
 use crate::language_model::{
-    FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
-    LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelPrompt,
-    LanguageModelReasoningEffort, LanguageModelRequest, LanguageModelResponse,
-    LanguageModelResponseFormat, LanguageModelText, LanguageModelTool, LanguageModelToolChoice,
-    LanguageModelUsage,
+    FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
+    LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
+    LanguageModelCustomPart, LanguageModelFileData, LanguageModelFilePart,
+    LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelMessage,
+    LanguageModelPrompt, LanguageModelReasoningEffort, LanguageModelReasoningFilePart,
+    LanguageModelReasoningPart, LanguageModelRequest, LanguageModelResponse,
+    LanguageModelResponseFormat, LanguageModelText, LanguageModelTextPart, LanguageModelTool,
+    LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolChoice,
+    LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultOutput,
+    LanguageModelToolResultPart, LanguageModelUsage, OutputTokenUsage,
 };
 use crate::provider::{ProviderMetadata, ProviderOptions};
-use crate::provider_utils::{Tool, prepare_tools};
+use crate::provider_utils::{Tool, ToolExecutionOptions, prepare_tools};
 use crate::warning::Warning;
+
+const DEFAULT_MAX_STEPS: usize = 1;
 
 /// Tool input accepted by [`GenerateTextOptions::with_tool`].
 #[derive(Clone, Debug)]
@@ -45,6 +54,9 @@ pub struct GenerateTextOptions<'a, M: LanguageModel + ?Sized> {
 
     /// High-level Rust tools made available to the model.
     pub tools: Vec<Tool>,
+
+    /// Maximum number of model-call steps to run.
+    pub max_steps: usize,
 }
 
 impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
@@ -54,6 +66,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             model,
             call_options: LanguageModelCallOptions::new(prompt),
             tools: Vec::new(),
+            max_steps: DEFAULT_MAX_STEPS,
         }
     }
 
@@ -63,6 +76,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             model,
             call_options,
             tools: Vec::new(),
+            max_steps: DEFAULT_MAX_STEPS,
         }
     }
 
@@ -143,6 +157,15 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
         self
     }
 
+    /// Sets the maximum number of model-call steps.
+    ///
+    /// Values lower than 1 are clamped to one step so every call still invokes
+    /// the model at least once.
+    pub fn with_max_steps(mut self, max_steps: usize) -> Self {
+        self.max_steps = max_steps.max(1);
+        self
+    }
+
     /// Sets whether raw stream chunks should be included.
     pub fn with_include_raw_chunks(mut self, include_raw_chunks: bool) -> Self {
         self.call_options.include_raw_chunks = Some(include_raw_chunks);
@@ -168,6 +191,90 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
     pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
         self.call_options.provider_options = Some(provider_options);
         self
+    }
+}
+
+/// Tool call emitted during a high-level generate-text step.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateTextToolCall {
+    /// Identifier of the model tool call.
+    pub tool_call_id: String,
+
+    /// Name of the tool the model requested.
+    pub tool_name: String,
+
+    /// Parsed JSON input for the tool call, or the raw input string when it was
+    /// not valid JSON.
+    pub input: JsonValue,
+
+    /// Whether the provider executed this tool call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_executed: Option<bool>,
+
+    /// Whether the tool was dynamically defined by the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic: Option<bool>,
+
+    /// Provider-specific metadata returned with the tool call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+}
+
+impl GenerateTextToolCall {
+    fn from_language_model_tool_call(tool_call: &LanguageModelToolCall) -> Self {
+        Self {
+            tool_call_id: tool_call.tool_call_id.clone(),
+            tool_name: tool_call.tool_name.clone(),
+            input: parse_tool_input_or_raw(&tool_call.input),
+            provider_executed: tool_call.provider_executed,
+            dynamic: tool_call.dynamic,
+            provider_metadata: tool_call.provider_metadata.clone(),
+        }
+    }
+}
+
+/// Result produced by executing a Rust tool during a generate-text step.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateTextToolResult {
+    /// Identifier of the matching tool call.
+    pub tool_call_id: String,
+
+    /// Name of the executed tool.
+    pub tool_name: String,
+
+    /// Input passed to the Rust tool executor.
+    pub input: JsonValue,
+
+    /// JSON-serializable tool output, or the error message when `is_error` is
+    /// true.
+    pub output: JsonValue,
+
+    /// Whether this result represents a tool execution error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_error: Option<bool>,
+}
+
+impl GenerateTextToolResult {
+    fn success(tool_call: &GenerateTextToolCall, output: JsonValue) -> Self {
+        Self {
+            tool_call_id: tool_call.tool_call_id.clone(),
+            tool_name: tool_call.tool_name.clone(),
+            input: tool_call.input.clone(),
+            output,
+            is_error: None,
+        }
+    }
+
+    fn error(tool_call: &GenerateTextToolCall, message: String) -> Self {
+        Self {
+            tool_call_id: tool_call.tool_call_id.clone(),
+            tool_name: tool_call.tool_name.clone(),
+            input: tool_call.input.clone(),
+            output: JsonValue::String(message),
+            is_error: Some(true),
+        }
     }
 }
 
@@ -204,6 +311,14 @@ pub struct GenerateTextStep {
 
     /// Content generated in this step.
     pub content: Vec<LanguageModelContent>,
+
+    /// Tool calls generated in this step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<GenerateTextToolCall>,
+
+    /// Rust tool results produced for this step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_results: Vec<GenerateTextToolResult>,
 
     /// Text content generated in this step, formed by concatenating all text parts.
     pub text: String,
@@ -255,11 +370,14 @@ impl GenerateTextStep {
         } = result;
 
         let text = extract_text(&content);
+        let tool_calls = extract_tool_calls(&content);
 
         Self {
             step_number,
             model,
             content,
+            tool_calls,
+            tool_results: Vec::new(),
             text,
             finish_reason: unified,
             raw_finish_reason,
@@ -278,6 +396,14 @@ impl GenerateTextStep {
 pub struct GenerateTextResult {
     /// Content generated across all steps.
     pub content: Vec<LanguageModelContent>,
+
+    /// Tool calls generated across all steps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<GenerateTextToolCall>,
+
+    /// Rust tool results produced across all steps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_results: Vec<GenerateTextToolResult>,
 
     /// Text generated in the final step.
     pub text: String,
@@ -325,7 +451,15 @@ impl GenerateTextResult {
             text: final_step.text.clone(),
             finish_reason: final_step.finish_reason.clone(),
             raw_finish_reason: final_step.raw_finish_reason.clone(),
-            usage: final_step.usage.clone(),
+            usage: add_step_usage(&steps),
+            tool_calls: steps
+                .iter()
+                .flat_map(|step| step.tool_calls.iter().cloned())
+                .collect(),
+            tool_results: steps
+                .iter()
+                .flat_map(|step| step.tool_results.iter().cloned())
+                .collect(),
             warnings: steps
                 .iter()
                 .flat_map(|step| step.warnings.iter().cloned())
@@ -351,6 +485,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         model,
         mut call_options,
         tools,
+        max_steps,
     } = options;
     let model_info = GenerateTextModelInfo::new(model.provider(), model.model_id());
 
@@ -361,10 +496,34 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
             .append(&mut prepared_tools);
     }
 
-    let result = model.do_generate(call_options).await;
-    let step = GenerateTextStep::from_language_model_result(0, model_info, result);
+    let max_steps = max_steps.max(1);
+    let mut steps = Vec::new();
 
-    GenerateTextResult::from_steps(vec![step])
+    for step_number in 0..max_steps {
+        let step_prompt = call_options.prompt.clone();
+        let result = model.do_generate(call_options.clone()).await;
+        let mut step =
+            GenerateTextStep::from_language_model_result(step_number, model_info.clone(), result);
+        let tool_results = execute_tool_calls(&tools, &step.tool_calls, &step_prompt).await;
+        let should_continue = should_continue_after_tool_results(&step, &tool_results);
+        step.tool_results = tool_results;
+
+        if should_continue && step_number + 1 < max_steps {
+            if let Some(messages) = response_messages_for_step(&step) {
+                call_options.prompt.extend(messages);
+            } else {
+                steps.push(step);
+                break;
+            }
+
+            steps.push(step);
+        } else {
+            steps.push(step);
+            break;
+        }
+    }
+
+    GenerateTextResult::from_steps(steps)
 }
 
 fn extract_text(content: &[LanguageModelContent]) -> String {
@@ -377,19 +536,305 @@ fn extract_text(content: &[LanguageModelContent]) -> String {
         .collect()
 }
 
+fn extract_tool_calls(content: &[LanguageModelContent]) -> Vec<GenerateTextToolCall> {
+    content
+        .iter()
+        .filter_map(|part| match part {
+            LanguageModelContent::ToolCall(tool_call) => Some(
+                GenerateTextToolCall::from_language_model_tool_call(tool_call),
+            ),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn execute_tool_calls(
+    tools: &[Tool],
+    tool_calls: &[GenerateTextToolCall],
+    messages: &LanguageModelPrompt,
+) -> Vec<GenerateTextToolResult> {
+    let mut tool_results = Vec::new();
+
+    for tool_call in tool_calls {
+        if tool_call.provider_executed == Some(true) {
+            continue;
+        }
+
+        let Some(tool) = tools.iter().find(|tool| tool.name == tool_call.tool_name) else {
+            continue;
+        };
+
+        let Some(execute) = tool.execute(
+            tool_call.input.clone(),
+            ToolExecutionOptions::new(tool_call.tool_call_id.clone(), messages.clone()),
+        ) else {
+            continue;
+        };
+
+        match execute.await {
+            Ok(output) => tool_results.push(GenerateTextToolResult::success(tool_call, output)),
+            Err(error) => {
+                tool_results.push(GenerateTextToolResult::error(
+                    tool_call,
+                    error.into_message(),
+                ));
+            }
+        }
+    }
+
+    tool_results
+}
+
+fn should_continue_after_tool_results(
+    step: &GenerateTextStep,
+    tool_results: &[GenerateTextToolResult],
+) -> bool {
+    let client_tool_call_count = step
+        .tool_calls
+        .iter()
+        .filter(|tool_call| tool_call.provider_executed != Some(true))
+        .count();
+
+    client_tool_call_count > 0 && tool_results.len() == client_tool_call_count
+}
+
+fn response_messages_for_step(step: &GenerateTextStep) -> Option<Vec<LanguageModelMessage>> {
+    let mut messages = Vec::new();
+
+    if let Some(message) = assistant_message_from_content(&step.content) {
+        messages.push(message);
+    }
+
+    if let Some(message) = tool_message_from_results(&step.tool_results) {
+        messages.push(message);
+    }
+
+    if messages.is_empty() {
+        None
+    } else {
+        Some(messages)
+    }
+}
+
+fn assistant_message_from_content(
+    content: &[LanguageModelContent],
+) -> Option<LanguageModelMessage> {
+    let parts = content
+        .iter()
+        .filter_map(assistant_content_part_from_content)
+        .collect::<Vec<_>>();
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(LanguageModelMessage::Assistant(
+            LanguageModelAssistantMessage::new(parts),
+        ))
+    }
+}
+
+fn assistant_content_part_from_content(
+    content: &LanguageModelContent,
+) -> Option<LanguageModelAssistantContentPart> {
+    match content {
+        LanguageModelContent::Text(text) => {
+            let mut part = LanguageModelTextPart::new(text.text.clone());
+
+            if let Some(provider_metadata) = &text.provider_metadata {
+                part = part.with_provider_options(provider_metadata.clone());
+            }
+
+            Some(LanguageModelAssistantContentPart::Text(part))
+        }
+        LanguageModelContent::Reasoning(reasoning) => {
+            let mut part = LanguageModelReasoningPart::new(reasoning.text.clone());
+
+            if let Some(provider_metadata) = &reasoning.provider_metadata {
+                part = part.with_provider_options(provider_metadata.clone());
+            }
+
+            Some(LanguageModelAssistantContentPart::Reasoning(part))
+        }
+        LanguageModelContent::Custom(custom) => {
+            let mut part = LanguageModelCustomPart::new(custom.kind.clone());
+
+            if let Some(provider_metadata) = &custom.provider_metadata {
+                part = part.with_provider_options(provider_metadata.clone());
+            }
+
+            Some(LanguageModelAssistantContentPart::Custom(part))
+        }
+        LanguageModelContent::File(file) => {
+            let mut part = LanguageModelFilePart::new(
+                file_data_from_language_model_file_data(file.data.clone()),
+                file.media_type.clone(),
+            );
+
+            if let Some(provider_metadata) = &file.provider_metadata {
+                part = part.with_provider_options(provider_metadata.clone());
+            }
+
+            Some(LanguageModelAssistantContentPart::File(part))
+        }
+        LanguageModelContent::ReasoningFile(file) => {
+            let mut part =
+                LanguageModelReasoningFilePart::new(file.data.clone(), file.media_type.clone());
+
+            if let Some(provider_metadata) = &file.provider_metadata {
+                part = part.with_provider_options(provider_metadata.clone());
+            }
+
+            Some(LanguageModelAssistantContentPart::ReasoningFile(part))
+        }
+        LanguageModelContent::ToolCall(tool_call) => {
+            let mut part = LanguageModelToolCallPart::new(
+                tool_call.tool_call_id.clone(),
+                tool_call.tool_name.clone(),
+                parse_tool_input_or_empty(&tool_call.input),
+            );
+
+            if let Some(provider_executed) = tool_call.provider_executed {
+                part = part.with_provider_executed(provider_executed);
+            }
+
+            if let Some(provider_metadata) = &tool_call.provider_metadata {
+                part = part.with_provider_options(provider_metadata.clone());
+            }
+
+            Some(LanguageModelAssistantContentPart::ToolCall(part))
+        }
+        LanguageModelContent::ToolResult(tool_result) => {
+            let mut part = LanguageModelToolResultPart::new(
+                tool_result.tool_call_id.clone(),
+                tool_result.tool_name.clone(),
+                LanguageModelToolResultOutput::json(tool_result.result.as_value().clone()),
+            );
+
+            if let Some(provider_metadata) = &tool_result.provider_metadata {
+                part = part.with_provider_options(provider_metadata.clone());
+            }
+
+            Some(LanguageModelAssistantContentPart::ToolResult(part))
+        }
+        LanguageModelContent::ToolApprovalRequest(_) | LanguageModelContent::Source(_) => None,
+    }
+}
+
+fn tool_message_from_results(
+    tool_results: &[GenerateTextToolResult],
+) -> Option<LanguageModelMessage> {
+    let content = tool_results
+        .iter()
+        .map(|tool_result| {
+            LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                tool_result.tool_call_id.clone(),
+                tool_result.tool_name.clone(),
+                tool_result_output(tool_result),
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    if content.is_empty() {
+        None
+    } else {
+        Some(LanguageModelMessage::Tool(LanguageModelToolMessage::new(
+            content,
+        )))
+    }
+}
+
+fn tool_result_output(tool_result: &GenerateTextToolResult) -> LanguageModelToolResultOutput {
+    if tool_result.is_error == Some(true) {
+        return match &tool_result.output {
+            JsonValue::String(message) => {
+                LanguageModelToolResultOutput::error_text(message.clone())
+            }
+            output => LanguageModelToolResultOutput::error_json(output.clone()),
+        };
+    }
+
+    match &tool_result.output {
+        JsonValue::String(output) => LanguageModelToolResultOutput::text(output.clone()),
+        output => LanguageModelToolResultOutput::json(output.clone()),
+    }
+}
+
+fn file_data_from_language_model_file_data(data: LanguageModelFileData) -> FileData {
+    match data {
+        LanguageModelFileData::Data { data } => FileData::Data { data },
+        LanguageModelFileData::Url { url } => FileData::Url { url },
+    }
+}
+
+fn parse_tool_input(input: &str) -> Result<JsonValue, serde_json::Error> {
+    if input.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+
+    serde_json::from_str(input)
+}
+
+fn parse_tool_input_or_raw(input: &str) -> JsonValue {
+    parse_tool_input(input).unwrap_or_else(|_| JsonValue::String(input.to_string()))
+}
+
+fn parse_tool_input_or_empty(input: &str) -> JsonValue {
+    parse_tool_input(input).unwrap_or_else(|_| serde_json::json!({}))
+}
+
+fn add_step_usage(steps: &[GenerateTextStep]) -> LanguageModelUsage {
+    steps
+        .iter()
+        .fold(LanguageModelUsage::default(), |usage, step| {
+            add_usage(usage, &step.usage)
+        })
+}
+
+fn add_usage(mut usage: LanguageModelUsage, next: &LanguageModelUsage) -> LanguageModelUsage {
+    usage.input_tokens = add_input_token_usage(usage.input_tokens, &next.input_tokens);
+    usage.output_tokens = add_output_token_usage(usage.output_tokens, &next.output_tokens);
+    usage
+}
+
+fn add_input_token_usage(usage: InputTokenUsage, next: &InputTokenUsage) -> InputTokenUsage {
+    InputTokenUsage {
+        total: add_optional_counts(usage.total, next.total),
+        no_cache: add_optional_counts(usage.no_cache, next.no_cache),
+        cache_read: add_optional_counts(usage.cache_read, next.cache_read),
+        cache_write: add_optional_counts(usage.cache_write, next.cache_write),
+    }
+}
+
+fn add_output_token_usage(usage: OutputTokenUsage, next: &OutputTokenUsage) -> OutputTokenUsage {
+    OutputTokenUsage {
+        total: add_optional_counts(usage.total, next.total),
+        text: add_optional_counts(usage.text, next.text),
+        reasoning: add_optional_counts(usage.reasoning, next.reasoning),
+    }
+}
+
+fn add_optional_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (None, None) => None,
+        (left, right) => Some(left.unwrap_or(0) + right.unwrap_or(0)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         GenerateTextModelInfo, GenerateTextOptions, GenerateTextResult, GenerateTextStep,
-        generate_text,
+        GenerateTextToolCall, GenerateTextToolResult, generate_text,
     };
     use crate::language_model::{
         FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
         LanguageModelCallOptions, LanguageModelContent, LanguageModelFinishReason,
         LanguageModelFunctionTool, LanguageModelGenerateResult, LanguageModelMessage,
         LanguageModelStreamPart, LanguageModelStreamResult, LanguageModelSupportedUrls,
-        LanguageModelText, LanguageModelTextPart, LanguageModelTool, LanguageModelUsage,
-        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelText, LanguageModelTextPart, LanguageModelTool, LanguageModelToolCall,
+        LanguageModelToolCallPart, LanguageModelToolContentPart, LanguageModelToolResultOutput,
+        LanguageModelToolResultPart, LanguageModelUsage, LanguageModelUserContentPart,
+        LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::provider::SpecificationVersion;
     use crate::provider_utils::Tool;
@@ -529,6 +974,8 @@ mod tests {
             step_number: 0,
             model: GenerateTextModelInfo::new("test-provider", "test-model"),
             content: vec![LanguageModelContent::Text(LanguageModelText::new("Hello"))],
+            tool_calls: Vec::new(),
+            tool_results: Vec::new(),
             text: "Hello".to_string(),
             finish_reason: FinishReason::Stop,
             raw_finish_reason: Some("stop".to_string()),
@@ -598,6 +1045,60 @@ mod tests {
                     }
                 ]
             })
+        );
+    }
+
+    #[test]
+    fn generate_text_tool_call_and_result_serialize_as_camel_case_contracts() {
+        let tool_call = GenerateTextToolCall {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "weather".to_string(),
+            input: json!({ "city": "Brisbane" }),
+            provider_executed: Some(false),
+            dynamic: Some(false),
+            provider_metadata: None,
+        };
+        let tool_result = GenerateTextToolResult {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "weather".to_string(),
+            input: json!({ "city": "Brisbane" }),
+            output: json!({ "forecast": "sunny" }),
+            is_error: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&tool_call).expect("tool call serializes"),
+            json!({
+                "toolCallId": "call-1",
+                "toolName": "weather",
+                "input": { "city": "Brisbane" },
+                "providerExecuted": false,
+                "dynamic": false
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&tool_result).expect("tool result serializes"),
+            json!({
+                "toolCallId": "call-1",
+                "toolName": "weather",
+                "input": { "city": "Brisbane" },
+                "output": { "forecast": "sunny" }
+            })
+        );
+
+        assert_eq!(
+            serde_json::from_value::<GenerateTextToolCall>(
+                serde_json::to_value(tool_call.clone()).expect("tool call serializes")
+            )
+            .expect("tool call deserializes"),
+            tool_call
+        );
+        assert_eq!(
+            serde_json::from_value::<GenerateTextToolResult>(
+                serde_json::to_value(tool_result.clone()).expect("tool result serializes")
+            )
+            .expect("tool result deserializes"),
+            tool_result
         );
     }
 
@@ -753,5 +1254,196 @@ mod tests {
         )));
 
         assert_eq!(model.calls.borrow()[0].prompt, prompt);
+    }
+
+    struct ToolLoopLanguageModel {
+        calls: RefCell<Vec<LanguageModelCallOptions>>,
+    }
+
+    impl ToolLoopLanguageModel {
+        fn new() -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl LanguageModel for ToolLoopLanguageModel {
+        type SupportedUrlsFuture<'a>
+            = Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a;
+
+        type GenerateFuture<'a>
+            = Ready<LanguageModelGenerateResult>
+        where
+            Self: 'a;
+
+        type Stream = Vec<LanguageModelStreamPart>;
+
+        type StreamFuture<'a>
+            = Ready<LanguageModelStreamResult<Self::Stream>>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "test-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+
+        fn supported_urls(&self) -> Self::SupportedUrlsFuture<'_> {
+            ready(BTreeMap::new())
+        }
+
+        fn do_generate(&self, options: LanguageModelCallOptions) -> Self::GenerateFuture<'_> {
+            let step_number = self.calls.borrow().len();
+            self.calls.borrow_mut().push(options);
+
+            if step_number == 0 {
+                ready(LanguageModelGenerateResult::new(
+                    vec![LanguageModelContent::ToolCall(LanguageModelToolCall::new(
+                        "call-1",
+                        "weather",
+                        r#"{"city":"Brisbane"}"#,
+                    ))],
+                    LanguageModelFinishReason {
+                        unified: FinishReason::ToolCalls,
+                        raw: Some("tool_calls".to_string()),
+                    },
+                    LanguageModelUsage {
+                        input_tokens: InputTokenUsage {
+                            total: Some(4),
+                            ..InputTokenUsage::default()
+                        },
+                        output_tokens: OutputTokenUsage {
+                            total: Some(1),
+                            ..OutputTokenUsage::default()
+                        },
+                        raw: None,
+                    },
+                ))
+            } else {
+                ready(LanguageModelGenerateResult::new(
+                    vec![LanguageModelContent::Text(LanguageModelText::new(
+                        "The weather in Brisbane is sunny.",
+                    ))],
+                    LanguageModelFinishReason {
+                        unified: FinishReason::Stop,
+                        raw: Some("stop".to_string()),
+                    },
+                    LanguageModelUsage {
+                        input_tokens: InputTokenUsage {
+                            total: Some(9),
+                            ..InputTokenUsage::default()
+                        },
+                        output_tokens: OutputTokenUsage {
+                            total: Some(7),
+                            text: Some(7),
+                            ..OutputTokenUsage::default()
+                        },
+                        raw: None,
+                    },
+                ))
+            }
+        }
+
+        fn do_stream(&self, _options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
+            ready(LanguageModelStreamResult::new(Vec::new()))
+        }
+    }
+
+    #[test]
+    fn generate_text_executes_tool_result_and_continues_to_final_text() {
+        let model = ToolLoopLanguageModel::new();
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |input, options| async move {
+                        Ok(json!({
+                            "forecast": "sunny",
+                            "city": input["city"],
+                            "toolCallId": options.tool_call_id
+                        }))
+                    },
+                ))
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(model.calls.borrow().len(), 2);
+        assert_eq!(model.calls.borrow()[1].prompt.len(), 3);
+        assert_eq!(
+            model.calls.borrow()[1].prompt[1],
+            LanguageModelMessage::Assistant(
+                crate::language_model::LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                        "call-1",
+                        "weather",
+                        json!({ "city": "Brisbane" })
+                    ))
+                ])
+            )
+        );
+        assert_eq!(
+            model.calls.borrow()[1].prompt[2],
+            LanguageModelMessage::Tool(crate::language_model::LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call-1",
+                    "weather",
+                    LanguageModelToolResultOutput::json(json!({
+                        "forecast": "sunny",
+                        "city": "Brisbane",
+                        "toolCallId": "call-1"
+                    }))
+                ))
+            ]))
+        );
+
+        assert_eq!(result.text, "The weather in Brisbane is sunny.");
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.steps.len(), 2);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].output["forecast"], "sunny");
+        assert_eq!(result.usage.input_tokens.total, Some(13));
+        assert_eq!(result.usage.output_tokens.total, Some(8));
+        assert_eq!(result.usage.output_tokens.text, Some(7));
+    }
+
+    #[test]
+    fn generate_text_stops_after_max_steps_even_when_tool_calls_continue() {
+        let model = ToolLoopLanguageModel::new();
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(
+                    Tool::new("weather", input_schema)
+                        .with_execute(|_input, _options| async move { Ok(json!("sunny")) }),
+                )
+                .with_max_steps(1),
+        ));
+
+        assert_eq!(model.calls.borrow().len(), 1);
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.finish_reason, FinishReason::ToolCalls);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_results.len(), 1);
     }
 }

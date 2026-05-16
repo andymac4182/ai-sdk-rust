@@ -39,7 +39,7 @@ pub use file_data::{
 pub use files::{Files, FilesUploadFileCallOptions, FilesUploadFileData, FilesUploadFileResult};
 pub use generate_text::{
     GenerateTextModelInfo, GenerateTextOptions, GenerateTextResult, GenerateTextStep,
-    GenerateTextTool, generate_text,
+    GenerateTextTool, GenerateTextToolCall, GenerateTextToolResult, generate_text,
 };
 pub use headers::Headers;
 pub use image_model::{
