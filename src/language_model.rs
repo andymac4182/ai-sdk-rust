@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 use crate::json::JsonObject;
 
@@ -84,13 +85,35 @@ pub struct LanguageModelUsage {
     pub raw: Option<JsonObject>,
 }
 
+/// Provider response metadata for a language model call.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelResponseMetadata {
+    /// Provider response identifier, when one is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
+    /// Start timestamp for the generated response, when one is available.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub timestamp: Option<OffsetDateTime>,
+
+    /// Provider model identifier used for the response, when one is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        FinishReason, InputTokenUsage, LanguageModelFinishReason, LanguageModelUsage,
-        OutputTokenUsage,
+        FinishReason, InputTokenUsage, LanguageModelFinishReason, LanguageModelResponseMetadata,
+        LanguageModelUsage, OutputTokenUsage,
     };
     use serde_json::json;
+    use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
     #[test]
     fn finish_reason_uses_upstream_kebab_case_names() {
@@ -166,6 +189,42 @@ mod tests {
                     ..OutputTokenUsage::default()
                 },
                 raw: None,
+            }
+        );
+    }
+
+    #[test]
+    fn response_metadata_uses_upstream_camel_case_and_rfc3339_timestamp() {
+        let metadata = LanguageModelResponseMetadata {
+            id: Some("resp_123".to_string()),
+            timestamp: Some(
+                OffsetDateTime::parse("2026-05-16T09:30:00Z", &Rfc3339).expect("timestamp parses"),
+            ),
+            model_id: Some("openai/gpt-5".to_string()),
+        };
+
+        assert_eq!(
+            serde_json::to_value(metadata).expect("response metadata serializes"),
+            json!({
+                "id": "resp_123",
+                "timestamp": "2026-05-16T09:30:00Z",
+                "modelId": "openai/gpt-5"
+            })
+        );
+    }
+
+    #[test]
+    fn response_metadata_deserializes_when_optional_fields_are_missing() {
+        let metadata: LanguageModelResponseMetadata = serde_json::from_value(json!({
+            "modelId": "provider/model"
+        }))
+        .expect("response metadata deserializes");
+
+        assert_eq!(
+            metadata,
+            LanguageModelResponseMetadata {
+                model_id: Some("provider/model".to_string()),
+                ..LanguageModelResponseMetadata::default()
             }
         );
     }
