@@ -20,6 +20,7 @@ pub mod prompt;
 pub mod provider;
 pub mod provider_utils;
 pub mod registry;
+pub mod rerank;
 pub mod reranking_model;
 pub mod retry;
 pub mod skills;
@@ -204,6 +205,13 @@ pub use provider_utils::{
 pub use registry::{
     NoSuchProviderError, ProviderRegistry, ProviderRegistryError, ProviderRegistryOptions,
     create_provider_registry, create_provider_registry_with_options, split_registry_model_id,
+};
+pub use rerank::{
+    RerankDocument, RerankDocuments, RerankEndEvent, RerankOnEnd, RerankOnEndCallback,
+    RerankOnEndFunction, RerankOnEndFuture, RerankOnStart, RerankOnStartCallback,
+    RerankOnStartFunction, RerankOnStartFuture, RerankOptions, RerankRanking, RerankResponse,
+    RerankResult, RerankStartEvent, RerankingModelCallEndEvent, RerankingModelCallStartEvent,
+    rerank,
 };
 pub use reranking_model::{
     RerankingModel, RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
