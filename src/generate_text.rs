@@ -22,7 +22,9 @@ use crate::language_model::{
 };
 use crate::provider::{JsonParseError, get_error_message};
 use crate::provider::{ProviderMetadata, ProviderOptions};
-use crate::provider_utils::{Tool, ToolExecutionOptions, prepare_tools};
+use crate::provider_utils::{
+    IdGeneratorOptions, Tool, ToolExecutionOptions, create_id_generator, prepare_tools,
+};
 use crate::warning::Warning;
 
 const DEFAULT_MAX_STEPS: usize = 1;
@@ -1383,6 +1385,9 @@ impl GenerateTextModelInfo {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateTextStep {
+    /// Unique identifier for the generation call this step belongs to.
+    pub call_id: String,
+
     /// Zero-based index of this step.
     pub step_number: usize,
 
@@ -1467,10 +1472,12 @@ pub struct GenerateTextStep {
 
 impl GenerateTextStep {
     fn from_language_model_result(
+        call_id: impl Into<String>,
         step_number: usize,
         model: GenerateTextModelInfo,
         result: LanguageModelGenerateResult,
     ) -> Self {
+        let call_id = call_id.into();
         let LanguageModelGenerateResult {
             content,
             finish_reason:
@@ -1498,6 +1505,7 @@ impl GenerateTextStep {
         let sources = extract_sources(&content);
 
         Self {
+            call_id,
             step_number,
             model,
             content,
@@ -1737,13 +1745,18 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
     }
 
     let max_steps = max_steps.max(1);
+    let call_id = generate_text_call_id();
     let mut steps = Vec::new();
 
     for step_number in 0..max_steps {
         let step_prompt = call_options.prompt.clone();
         let result = model.do_generate(call_options.clone()).await;
-        let mut step =
-            GenerateTextStep::from_language_model_result(step_number, model_info.clone(), result);
+        let mut step = GenerateTextStep::from_language_model_result(
+            call_id.clone(),
+            step_number,
+            model_info.clone(),
+            result,
+        );
         mark_unavailable_tool_calls(&mut step.tool_calls, call_options.tools.as_deref());
         mark_runtime_dynamic_tool_calls(&mut step.tool_calls, &tools);
         mark_tool_call_titles(&mut step.tool_calls, &tools);
@@ -1776,6 +1789,14 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
     }
 
     GenerateTextResult::from_steps(steps)
+}
+
+fn generate_text_call_id() -> String {
+    let generate_call_id =
+        create_id_generator(IdGeneratorOptions::new().with_prefix("call").with_size(24))
+            .expect("default generate_text call id configuration is valid");
+
+    generate_call_id()
 }
 
 fn apply_generate_text_include(
@@ -2577,6 +2598,7 @@ mod tests {
         };
 
         GenerateTextStep::from_language_model_result(
+            "call-test",
             0,
             GenerateTextModelInfo::new("test-provider", "test-model"),
             LanguageModelGenerateResult::new(
@@ -3210,6 +3232,9 @@ mod tests {
             result.final_step().expect("step exists").model,
             GenerateTextModelInfo::new("test-provider", "test-model")
         );
+        let call_id = &result.final_step().expect("step exists").call_id;
+        assert!(call_id.starts_with("call-"));
+        assert_eq!(call_id.len(), "call-".len() + 24);
     }
 
     #[test]
@@ -3313,6 +3338,7 @@ mod tests {
     #[test]
     fn generate_text_result_serializes_as_camel_case_step_record() {
         let result = GenerateTextResult::from_steps(vec![GenerateTextStep {
+            call_id: "call-test".to_string(),
             step_number: 0,
             model: GenerateTextModelInfo::new("test-provider", "test-model"),
             content: vec![LanguageModelContent::Text(LanguageModelText::new("Hello"))],
@@ -3394,6 +3420,7 @@ mod tests {
                 "warnings": [],
                 "steps": [
                     {
+                        "callId": "call-test",
                         "stepNumber": 0,
                         "model": {
                             "provider": "test-provider",
@@ -3431,6 +3458,7 @@ mod tests {
                     }
                 ],
                 "finalStep": {
+                    "callId": "call-test",
                     "stepNumber": 0,
                     "model": {
                         "provider": "test-provider",
@@ -3549,6 +3577,7 @@ mod tests {
     #[test]
     fn generate_text_splits_static_and_dynamic_tool_calls_and_results() {
         let step = GenerateTextStep::from_language_model_result(
+            "call-test",
             0,
             GenerateTextModelInfo::new("test-provider", "test-model"),
             LanguageModelGenerateResult::new(
@@ -3666,6 +3695,7 @@ mod tests {
             "warnings": [],
             "steps": [
                 {
+                    "callId": "call-test",
                     "stepNumber": 0,
                     "model": {
                         "provider": "test-provider",
@@ -3682,6 +3712,7 @@ mod tests {
                 }
             ],
             "finalStep": {
+                "callId": "call-test",
                 "stepNumber": 0,
                 "model": {
                     "provider": "test-provider",
@@ -3724,6 +3755,7 @@ mod tests {
         assert_eq!(result.steps[0].dynamic_tool_results, Vec::new());
         assert_eq!(result.steps[0].files, Vec::new());
         assert_eq!(result.steps[0].sources, Vec::new());
+        assert_eq!(result.steps[0].call_id, "call-test");
         assert_eq!(
             result.steps[0].model,
             GenerateTextModelInfo::new("test-provider", "test-model")
@@ -3746,6 +3778,7 @@ mod tests {
             },
         );
         let first_step = GenerateTextStep::from_language_model_result(
+            "call-test",
             0,
             GenerateTextModelInfo::new("test-provider", "test-model"),
             LanguageModelGenerateResult::new(
@@ -3761,6 +3794,7 @@ mod tests {
             ),
         );
         let second_step = GenerateTextStep::from_language_model_result(
+            "call-test",
             1,
             GenerateTextModelInfo::new("test-provider", "test-model"),
             LanguageModelGenerateResult::new(
@@ -3813,6 +3847,7 @@ mod tests {
             },
         );
         let first_step = GenerateTextStep::from_language_model_result(
+            "call-test",
             0,
             GenerateTextModelInfo::new("test-provider", "test-model"),
             LanguageModelGenerateResult::new(
@@ -3827,6 +3862,7 @@ mod tests {
             ),
         );
         let second_step = GenerateTextStep::from_language_model_result(
+            "call-test",
             1,
             GenerateTextModelInfo::new("test-provider", "test-model"),
             LanguageModelGenerateResult::new(
@@ -3894,6 +3930,7 @@ mod tests {
         let second_source =
             LanguageModelSource::document("source-2", "application/pdf", "Reference PDF");
         let first_step = GenerateTextStep::from_language_model_result(
+            "call-test",
             0,
             GenerateTextModelInfo::new("test-provider", "test-model"),
             LanguageModelGenerateResult::new(
@@ -3909,6 +3946,7 @@ mod tests {
             ),
         );
         let second_step = GenerateTextStep::from_language_model_result(
+            "call-test",
             1,
             GenerateTextModelInfo::new("test-provider", "test-model"),
             LanguageModelGenerateResult::new(
@@ -3955,6 +3993,7 @@ mod tests {
     #[test]
     fn generate_text_concatenates_only_final_step_text_parts() {
         let step = GenerateTextStep::from_language_model_result(
+            "call-test",
             0,
             GenerateTextModelInfo::new("test-provider", "test-model"),
             LanguageModelGenerateResult::new(
@@ -4156,6 +4195,7 @@ mod tests {
             crate::language_model::LanguageModelToolCall::new("call-1", "lookup", "{}"),
         )];
         let step = GenerateTextStep::from_language_model_result(
+            "call-test",
             0,
             GenerateTextModelInfo::new("test-provider", "test-model"),
             LanguageModelGenerateResult::new(
@@ -4568,6 +4608,8 @@ mod tests {
             result.tool_results[0].output,
             json!("weather service timed out")
         );
+        assert_eq!(result.steps[0].call_id, result.steps[1].call_id);
+        assert!(result.steps[0].call_id.starts_with("call-"));
         assert_eq!(
             model.calls.borrow()[1].prompt[2],
             LanguageModelMessage::Tool(crate::language_model::LanguageModelToolMessage::new(vec![
