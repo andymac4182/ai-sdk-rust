@@ -63,9 +63,10 @@ pub use language_model::{
 pub use provider::{
     ApiCallError, EmptyResponseBodyError, InvalidArgumentError, InvalidPromptError,
     InvalidResponseDataError, JsonParseError, LoadApiKeyError, LoadSettingError, ModelType,
-    NoContentGeneratedError, NoSuchModelError, ProviderMetadata, ProviderOptions,
-    SpecificationVersion, TooManyEmbeddingValuesForCallError, TypeValidationContext,
-    TypeValidationError, UnsupportedFunctionalityError, get_error_message,
+    NoContentGeneratedError, NoSuchModelError, Provider, ProviderMetadata, ProviderOptions,
+    ProviderWithFiles, ProviderWithRerankingModel, ProviderWithSkills, ProviderWithSpeechModel,
+    ProviderWithTranscriptionModel, SpecificationVersion, TooManyEmbeddingValuesForCallError,
+    TypeValidationContext, TypeValidationError, UnsupportedFunctionalityError, get_error_message,
 };
 pub use reranking_model::{
     RerankingModel, RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,

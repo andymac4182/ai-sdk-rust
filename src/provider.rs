@@ -125,6 +125,85 @@ impl fmt::Display for NoSuchModelError {
 
 impl std::error::Error for NoSuchModelError {}
 
+/// A provider-v4 provider for required model lookups.
+///
+/// Upstream `ProviderV4` requires language, embedding, and image model lookup
+/// methods. Optional upstream provider methods are represented as opt-in
+/// extension traits so providers do not need placeholder associated types for
+/// unsupported capabilities.
+pub trait Provider {
+    /// Language model type returned by this provider.
+    type LanguageModel: crate::language_model::LanguageModel;
+
+    /// Embedding model type returned by this provider.
+    type EmbeddingModel: crate::embedding_model::EmbeddingModel;
+
+    /// Image model type returned by this provider.
+    type ImageModel: crate::image_model::ImageModel;
+
+    /// Returns the provider interface version implemented by this provider.
+    fn specification_version(&self) -> SpecificationVersion {
+        SpecificationVersion::V4
+    }
+
+    /// Returns the language model with the given provider-specific id.
+    fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError>;
+
+    /// Returns the embedding model with the given provider-specific id.
+    fn embedding_model(&self, model_id: &str) -> Result<Self::EmbeddingModel, NoSuchModelError>;
+
+    /// Returns the image model with the given provider-specific id.
+    fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError>;
+}
+
+/// Optional provider-v4 transcription model lookup support.
+pub trait ProviderWithTranscriptionModel: Provider {
+    /// Transcription model type returned by this provider.
+    type TranscriptionModel: crate::transcription_model::TranscriptionModel;
+
+    /// Returns the transcription model with the given provider-specific id.
+    fn transcription_model(
+        &self,
+        model_id: &str,
+    ) -> Result<Self::TranscriptionModel, NoSuchModelError>;
+}
+
+/// Optional provider-v4 speech model lookup support.
+pub trait ProviderWithSpeechModel: Provider {
+    /// Speech model type returned by this provider.
+    type SpeechModel: crate::speech_model::SpeechModel;
+
+    /// Returns the speech model with the given provider-specific id.
+    fn speech_model(&self, model_id: &str) -> Result<Self::SpeechModel, NoSuchModelError>;
+}
+
+/// Optional provider-v4 reranking model lookup support.
+pub trait ProviderWithRerankingModel: Provider {
+    /// Reranking model type returned by this provider.
+    type RerankingModel: crate::reranking_model::RerankingModel;
+
+    /// Returns the reranking model with the given provider-specific id.
+    fn reranking_model(&self, model_id: &str) -> Result<Self::RerankingModel, NoSuchModelError>;
+}
+
+/// Optional provider-v4 file upload support.
+pub trait ProviderWithFiles: Provider {
+    /// Files interface type returned by this provider.
+    type Files: crate::files::Files;
+
+    /// Returns the files interface for this provider.
+    fn files(&self) -> Self::Files;
+}
+
+/// Optional provider-v4 skill upload support.
+pub trait ProviderWithSkills: Provider {
+    /// Skills interface type returned by this provider.
+    type Skills: crate::skills::Skills;
+
+    /// Returns the skills interface for this provider.
+    fn skills(&self) -> Self::Skills;
+}
+
 /// Error returned when a provider cannot support requested functionality.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UnsupportedFunctionalityError {
@@ -943,13 +1022,404 @@ mod tests {
     use super::{
         ApiCallError, EmptyResponseBodyError, InvalidArgumentError, InvalidPromptError,
         InvalidResponseDataError, JsonParseError, LoadApiKeyError, LoadSettingError, ModelType,
-        NoContentGeneratedError, NoSuchModelError, ProviderOptions, SpecificationVersion,
-        TooManyEmbeddingValuesForCallError, TypeValidationContext, TypeValidationError,
-        UnsupportedFunctionalityError, get_error_message,
+        NoContentGeneratedError, NoSuchModelError, Provider, ProviderOptions, ProviderWithFiles,
+        ProviderWithRerankingModel, ProviderWithSkills, ProviderWithSpeechModel,
+        ProviderWithTranscriptionModel, SpecificationVersion, TooManyEmbeddingValuesForCallError,
+        TypeValidationContext, TypeValidationError, UnsupportedFunctionalityError,
+        get_error_message,
     };
+    use std::collections::BTreeMap;
     use std::fmt;
+    use std::future::{Ready, ready};
 
+    use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelResult};
+    use crate::file_data::{FileDataContent, ProviderReference};
+    use crate::files::{Files, FilesUploadFileCallOptions, FilesUploadFileResult};
+    use crate::image_model::{
+        ImageModel, ImageModelCallOptions, ImageModelResponse, ImageModelResult,
+    };
+    use crate::language_model::{
+        FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
+        LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelStreamPart,
+        LanguageModelStreamResult, LanguageModelSupportedUrls, LanguageModelText,
+        LanguageModelUsage,
+    };
+    use crate::reranking_model::{RerankingModel, RerankingModelCallOptions, RerankingModelResult};
+    use crate::skills::{Skills, SkillsUploadSkillCallOptions, SkillsUploadSkillResult};
+    use crate::speech_model::{
+        SpeechModel, SpeechModelAudio, SpeechModelCallOptions, SpeechModelResponse,
+        SpeechModelResult,
+    };
+    use crate::transcription_model::{
+        TranscriptionModel, TranscriptionModelCallOptions, TranscriptionModelResponse,
+        TranscriptionModelResult,
+    };
     use serde_json::json;
+    use time::OffsetDateTime;
+
+    #[derive(Debug)]
+    struct StaticLanguageModel {
+        model_id: &'static str,
+    }
+
+    impl LanguageModel for StaticLanguageModel {
+        type SupportedUrlsFuture<'a>
+            = Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a;
+        type GenerateFuture<'a>
+            = Ready<LanguageModelGenerateResult>
+        where
+            Self: 'a;
+        type Stream = Vec<LanguageModelStreamPart>;
+        type StreamFuture<'a>
+            = Ready<LanguageModelStreamResult<Self::Stream>>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "mock-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            self.model_id
+        }
+
+        fn supported_urls(&self) -> Self::SupportedUrlsFuture<'_> {
+            ready(LanguageModelSupportedUrls::new())
+        }
+
+        fn do_generate(&self, _options: LanguageModelCallOptions) -> Self::GenerateFuture<'_> {
+            ready(LanguageModelGenerateResult::new(
+                vec![LanguageModelContent::Text(LanguageModelText::new("ok"))],
+                LanguageModelFinishReason {
+                    unified: FinishReason::Stop,
+                    raw: None,
+                },
+                LanguageModelUsage::default(),
+            ))
+        }
+
+        fn do_stream(&self, _options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
+            ready(LanguageModelStreamResult::new(Vec::new()))
+        }
+    }
+
+    #[derive(Debug)]
+    struct StaticEmbeddingModel {
+        model_id: &'static str,
+    }
+
+    impl EmbeddingModel for StaticEmbeddingModel {
+        type MaxEmbeddingsPerCallFuture<'a>
+            = Ready<Option<usize>>
+        where
+            Self: 'a;
+        type SupportsParallelCallsFuture<'a>
+            = Ready<bool>
+        where
+            Self: 'a;
+        type EmbedFuture<'a>
+            = Ready<EmbeddingModelResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "mock-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            self.model_id
+        }
+
+        fn max_embeddings_per_call(&self) -> Self::MaxEmbeddingsPerCallFuture<'_> {
+            ready(Some(16))
+        }
+
+        fn supports_parallel_calls(&self) -> Self::SupportsParallelCallsFuture<'_> {
+            ready(true)
+        }
+
+        fn do_embed(&self, _options: EmbeddingModelCallOptions) -> Self::EmbedFuture<'_> {
+            ready(EmbeddingModelResult::new(vec![vec![1.0, 2.0]]))
+        }
+    }
+
+    #[derive(Debug)]
+    struct StaticImageModel {
+        model_id: &'static str,
+    }
+
+    impl ImageModel for StaticImageModel {
+        type MaxImagesPerCallFuture<'a>
+            = Ready<Option<usize>>
+        where
+            Self: 'a;
+        type GenerateFuture<'a>
+            = Ready<ImageModelResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "mock-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            self.model_id
+        }
+
+        fn max_images_per_call(&self) -> Self::MaxImagesPerCallFuture<'_> {
+            ready(Some(4))
+        }
+
+        fn do_generate(&self, _options: ImageModelCallOptions) -> Self::GenerateFuture<'_> {
+            ready(ImageModelResult::new(
+                vec![FileDataContent::Bytes(Vec::new())],
+                ImageModelResponse::new(OffsetDateTime::UNIX_EPOCH, self.model_id),
+            ))
+        }
+    }
+
+    #[derive(Debug)]
+    struct StaticTranscriptionModel {
+        model_id: &'static str,
+    }
+
+    impl TranscriptionModel for StaticTranscriptionModel {
+        type GenerateFuture<'a>
+            = Ready<TranscriptionModelResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "mock-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            self.model_id
+        }
+
+        fn do_generate(&self, _options: TranscriptionModelCallOptions) -> Self::GenerateFuture<'_> {
+            ready(TranscriptionModelResult::new(
+                "",
+                Vec::new(),
+                TranscriptionModelResponse::new(OffsetDateTime::UNIX_EPOCH, self.model_id),
+            ))
+        }
+    }
+
+    #[derive(Debug)]
+    struct StaticSpeechModel {
+        model_id: &'static str,
+    }
+
+    impl SpeechModel for StaticSpeechModel {
+        type GenerateFuture<'a>
+            = Ready<SpeechModelResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "mock-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            self.model_id
+        }
+
+        fn do_generate(&self, _options: SpeechModelCallOptions) -> Self::GenerateFuture<'_> {
+            let audio: SpeechModelAudio = FileDataContent::Bytes(Vec::new());
+
+            ready(SpeechModelResult::new(
+                audio,
+                SpeechModelResponse::new(OffsetDateTime::UNIX_EPOCH, self.model_id),
+            ))
+        }
+    }
+
+    #[derive(Debug)]
+    struct StaticRerankingModel {
+        model_id: &'static str,
+    }
+
+    impl RerankingModel for StaticRerankingModel {
+        type RerankFuture<'a>
+            = Ready<RerankingModelResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "mock-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            self.model_id
+        }
+
+        fn do_rerank(&self, _options: RerankingModelCallOptions) -> Self::RerankFuture<'_> {
+            ready(RerankingModelResult::new(Vec::new()))
+        }
+    }
+
+    #[derive(Debug)]
+    struct StaticFiles;
+
+    impl Files for StaticFiles {
+        type UploadFileFuture<'a>
+            = Ready<FilesUploadFileResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "mock-provider"
+        }
+
+        fn upload_file(&self, _options: FilesUploadFileCallOptions) -> Self::UploadFileFuture<'_> {
+            ready(FilesUploadFileResult::new(provider_reference("file_123")))
+        }
+    }
+
+    #[derive(Debug)]
+    struct StaticSkills;
+
+    impl Skills for StaticSkills {
+        type UploadSkillFuture<'a>
+            = Ready<SkillsUploadSkillResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "mock-provider"
+        }
+
+        fn upload_skill(
+            &self,
+            _options: SkillsUploadSkillCallOptions,
+        ) -> Self::UploadSkillFuture<'_> {
+            ready(SkillsUploadSkillResult::new(provider_reference(
+                "skill_123",
+            )))
+        }
+    }
+
+    struct StaticProvider;
+
+    impl Provider for StaticProvider {
+        type LanguageModel = StaticLanguageModel;
+        type EmbeddingModel = StaticEmbeddingModel;
+        type ImageModel = StaticImageModel;
+
+        fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+            lookup_model(
+                model_id,
+                "chat",
+                ModelType::LanguageModel,
+                StaticLanguageModel { model_id: "chat" },
+            )
+        }
+
+        fn embedding_model(
+            &self,
+            model_id: &str,
+        ) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+            lookup_model(
+                model_id,
+                "embed",
+                ModelType::EmbeddingModel,
+                StaticEmbeddingModel { model_id: "embed" },
+            )
+        }
+
+        fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+            lookup_model(
+                model_id,
+                "image",
+                ModelType::ImageModel,
+                StaticImageModel { model_id: "image" },
+            )
+        }
+    }
+
+    impl ProviderWithTranscriptionModel for StaticProvider {
+        type TranscriptionModel = StaticTranscriptionModel;
+
+        fn transcription_model(
+            &self,
+            model_id: &str,
+        ) -> Result<Self::TranscriptionModel, NoSuchModelError> {
+            lookup_model(
+                model_id,
+                "transcribe",
+                ModelType::TranscriptionModel,
+                StaticTranscriptionModel {
+                    model_id: "transcribe",
+                },
+            )
+        }
+    }
+
+    impl ProviderWithSpeechModel for StaticProvider {
+        type SpeechModel = StaticSpeechModel;
+
+        fn speech_model(&self, model_id: &str) -> Result<Self::SpeechModel, NoSuchModelError> {
+            lookup_model(
+                model_id,
+                "speech",
+                ModelType::SpeechModel,
+                StaticSpeechModel { model_id: "speech" },
+            )
+        }
+    }
+
+    impl ProviderWithRerankingModel for StaticProvider {
+        type RerankingModel = StaticRerankingModel;
+
+        fn reranking_model(
+            &self,
+            model_id: &str,
+        ) -> Result<Self::RerankingModel, NoSuchModelError> {
+            lookup_model(
+                model_id,
+                "rerank",
+                ModelType::RerankingModel,
+                StaticRerankingModel { model_id: "rerank" },
+            )
+        }
+    }
+
+    impl ProviderWithFiles for StaticProvider {
+        type Files = StaticFiles;
+
+        fn files(&self) -> Self::Files {
+            StaticFiles
+        }
+    }
+
+    impl ProviderWithSkills for StaticProvider {
+        type Skills = StaticSkills;
+
+        fn skills(&self) -> Self::Skills {
+            StaticSkills
+        }
+    }
+
+    fn lookup_model<T>(
+        requested_model_id: &str,
+        expected_model_id: &str,
+        model_type: ModelType,
+        model: T,
+    ) -> Result<T, NoSuchModelError> {
+        if requested_model_id == expected_model_id {
+            Ok(model)
+        } else {
+            Err(NoSuchModelError::new(requested_model_id, model_type))
+        }
+    }
+
+    fn provider_reference(id: impl Into<String>) -> ProviderReference {
+        ProviderReference::try_from(BTreeMap::from([("mock-provider".to_string(), id.into())]))
+            .expect("provider reference has one entry")
+    }
 
     #[test]
     fn get_error_message_matches_upstream_unknown_string_error_and_json_cases() {
@@ -1036,6 +1506,85 @@ mod tests {
             serde_json::from_value(json!("v4")).expect("specification version deserializes");
 
         assert_eq!(version, SpecificationVersion::V4);
+    }
+
+    #[test]
+    fn provider_resolves_required_v4_model_interfaces() {
+        let provider = StaticProvider;
+
+        assert_eq!(provider.specification_version(), SpecificationVersion::V4);
+
+        let language_model = provider
+            .language_model("chat")
+            .expect("language model resolves");
+        assert_eq!(
+            language_model.specification_version(),
+            SpecificationVersion::V4
+        );
+        assert_eq!(language_model.provider(), "mock-provider");
+        assert_eq!(language_model.model_id(), "chat");
+
+        let embedding_model = provider
+            .embedding_model("embed")
+            .expect("embedding model resolves");
+        assert_eq!(
+            embedding_model.specification_version(),
+            SpecificationVersion::V4
+        );
+        assert_eq!(embedding_model.provider(), "mock-provider");
+        assert_eq!(embedding_model.model_id(), "embed");
+
+        let image_model = provider.image_model("image").expect("image model resolves");
+        assert_eq!(
+            image_model.specification_version(),
+            SpecificationVersion::V4
+        );
+        assert_eq!(image_model.provider(), "mock-provider");
+        assert_eq!(image_model.model_id(), "image");
+    }
+
+    #[test]
+    fn provider_required_model_lookup_reports_missing_model_type() {
+        let provider = StaticProvider;
+
+        let error = provider
+            .language_model("missing-chat")
+            .expect_err("missing language model reports an error");
+
+        assert_eq!(
+            error,
+            NoSuchModelError::new("missing-chat", ModelType::LanguageModel)
+        );
+        assert_eq!(error.to_string(), "No such languageModel: missing-chat");
+    }
+
+    #[test]
+    fn provider_extension_traits_resolve_optional_v4_interfaces() {
+        let provider = StaticProvider;
+
+        let transcription_model =
+            ProviderWithTranscriptionModel::transcription_model(&provider, "transcribe")
+                .expect("transcription model resolves");
+        assert_eq!(transcription_model.provider(), "mock-provider");
+        assert_eq!(transcription_model.model_id(), "transcribe");
+
+        let speech_model =
+            ProviderWithSpeechModel::speech_model(&provider, "speech").expect("speech resolves");
+        assert_eq!(speech_model.provider(), "mock-provider");
+        assert_eq!(speech_model.model_id(), "speech");
+
+        let reranking_model = ProviderWithRerankingModel::reranking_model(&provider, "rerank")
+            .expect("reranking model resolves");
+        assert_eq!(reranking_model.provider(), "mock-provider");
+        assert_eq!(reranking_model.model_id(), "rerank");
+
+        let files = ProviderWithFiles::files(&provider);
+        assert_eq!(files.specification_version(), SpecificationVersion::V4);
+        assert_eq!(files.provider(), "mock-provider");
+
+        let skills = ProviderWithSkills::skills(&provider);
+        assert_eq!(skills.specification_version(), SpecificationVersion::V4);
+        assert_eq!(skills.provider(), "mock-provider");
     }
 
     #[test]
