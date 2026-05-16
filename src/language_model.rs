@@ -183,6 +183,44 @@ impl LanguageModelReasoning {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelCustomContentType {
+    #[serde(rename = "custom")]
+    Custom,
+}
+
+/// Provider-specific generated content that does not map to a standardized part.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelCustomContent {
+    #[serde(rename = "type")]
+    content_type: LanguageModelCustomContentType,
+
+    /// Provider-specific kind in the `{provider}.{provider-type}` format.
+    pub kind: String,
+
+    /// Optional provider-specific metadata for the custom content part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+}
+
+impl LanguageModelCustomContent {
+    /// Creates a provider-specific generated content part.
+    pub fn new(kind: impl Into<String>) -> Self {
+        Self {
+            content_type: LanguageModelCustomContentType::Custom,
+            kind: kind.into(),
+            provider_metadata: None,
+        }
+    }
+
+    /// Adds provider-specific metadata to this custom content part.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+}
+
 /// Strategy for selecting a tool during a language model call.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -207,9 +245,9 @@ pub enum LanguageModelToolChoice {
 #[cfg(test)]
 mod tests {
     use super::{
-        FinishReason, InputTokenUsage, LanguageModelFinishReason, LanguageModelReasoning,
-        LanguageModelResponseMetadata, LanguageModelText, LanguageModelToolChoice,
-        LanguageModelUsage, OutputTokenUsage,
+        FinishReason, InputTokenUsage, LanguageModelCustomContent, LanguageModelFinishReason,
+        LanguageModelReasoning, LanguageModelResponseMetadata, LanguageModelText,
+        LanguageModelToolChoice, LanguageModelUsage, OutputTokenUsage,
     };
     use serde_json::json;
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -406,6 +444,49 @@ mod tests {
         .expect_err("wrong discriminator is rejected");
 
         assert!(error.to_string().contains("unknown variant `text`"));
+    }
+
+    #[test]
+    fn custom_content_serializes_upstream_shape_with_provider_metadata() {
+        let custom = LanguageModelCustomContent::new("openai.audio").with_provider_metadata(
+            serde_json::from_value(json!({
+                "openai": {
+                    "format": "wav"
+                }
+            }))
+            .expect("provider metadata deserializes"),
+        );
+
+        assert_eq!(
+            serde_json::to_value(custom).expect("custom content serializes"),
+            json!({
+                "type": "custom",
+                "kind": "openai.audio",
+                "providerMetadata": {
+                    "openai": {
+                        "format": "wav"
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn custom_content_deserializes_and_omits_missing_provider_metadata() {
+        let custom: LanguageModelCustomContent = serde_json::from_value(json!({
+            "type": "custom",
+            "kind": "provider.block"
+        }))
+        .expect("custom content deserializes");
+
+        assert_eq!(custom, LanguageModelCustomContent::new("provider.block"));
+        assert_eq!(
+            serde_json::to_value(custom).expect("custom content serializes"),
+            json!({
+                "type": "custom",
+                "kind": "provider.block"
+            })
+        );
     }
 
     #[test]

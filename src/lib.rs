@@ -15,9 +15,9 @@ pub use file_data::{FileData, FileDataContent, ProviderReference, ProviderRefere
 pub use headers::Headers;
 pub use json::{JsonArray, JsonObject, JsonValue};
 pub use language_model::{
-    FinishReason, InputTokenUsage, LanguageModelFinishReason, LanguageModelReasoning,
-    LanguageModelResponseMetadata, LanguageModelText, LanguageModelToolChoice, LanguageModelUsage,
-    OutputTokenUsage,
+    FinishReason, InputTokenUsage, LanguageModelCustomContent, LanguageModelFinishReason,
+    LanguageModelReasoning, LanguageModelResponseMetadata, LanguageModelText,
+    LanguageModelToolChoice, LanguageModelUsage, OutputTokenUsage,
 };
 pub use provider::{ProviderMetadata, ProviderOptions};
 pub use warning::Warning;
