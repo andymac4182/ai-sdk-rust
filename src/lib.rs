@@ -112,7 +112,7 @@ pub use provider_utils::{
     create_json_error_response_handler, create_json_response_handler,
     create_provider_defined_tool_factory, create_provider_defined_tool_factory_with_output_schema,
     create_provider_executed_tool_factory, create_status_code_error_response_handler,
-    create_tool_name_mapping, detect_media_type, execute_provider_api_request,
+    create_tool_name_mapping, detect_media_type, dynamic_tool, execute_provider_api_request,
     extract_response_headers, filter_nullable, generate_id, get_from_api,
     get_runtime_environment_user_agent, get_top_level_media_type, handle_fetch_error,
     handle_provider_api_response, inject_json_instruction_into_messages, is_abort_error,

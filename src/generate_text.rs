@@ -778,6 +778,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         let mut step =
             GenerateTextStep::from_language_model_result(step_number, model_info.clone(), result);
         mark_unavailable_tool_calls(&mut step.tool_calls, call_options.tools.as_deref());
+        mark_runtime_dynamic_tool_calls(&mut step.tool_calls, &tools);
         refresh_tool_call_views(&mut step);
         let tool_results = execute_tool_calls(&tools, &step.tool_calls, &step_prompt).await;
         let should_continue = should_continue_after_tool_results(&step, &tool_results);
@@ -1277,6 +1278,17 @@ fn mark_unavailable_tool_calls(
     }
 }
 
+fn mark_runtime_dynamic_tool_calls(tool_calls: &mut [GenerateTextToolCall], tools: &[Tool]) {
+    for tool_call in tool_calls {
+        if tools
+            .iter()
+            .any(|tool| tool.name == tool_call.tool_name && tool.is_dynamic())
+        {
+            tool_call.dynamic = Some(true);
+        }
+    }
+}
+
 fn language_model_tool_name(tool: &LanguageModelTool) -> String {
     match tool {
         LanguageModelTool::Function(tool) => tool.name.clone(),
@@ -1353,7 +1365,7 @@ mod tests {
         LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::provider::{ProviderMetadata, SpecificationVersion};
-    use crate::provider_utils::{Tool, ToolExecutionError};
+    use crate::provider_utils::{Tool, ToolExecutionError, dynamic_tool};
     use serde_json::json;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
@@ -2455,6 +2467,47 @@ mod tests {
         assert_eq!(result.usage.input_tokens.total, Some(13));
         assert_eq!(result.usage.output_tokens.total, Some(8));
         assert_eq!(result.usage.output_tokens.text, Some(7));
+    }
+
+    #[test]
+    fn generate_text_marks_runtime_dynamic_tool_calls_and_results() {
+        let model = ToolLoopLanguageModel::new();
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(dynamic_tool("weather", input_schema.clone()).with_execute(
+                    |input, _options| async move {
+                        Ok(json!({
+                            "forecast": "sunny",
+                            "city": input["city"]
+                        }))
+                    },
+                ))
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(
+            model.calls.borrow()[0].tools,
+            Some(vec![LanguageModelTool::Function(
+                LanguageModelFunctionTool::new("weather", input_schema)
+            )])
+        );
+        assert_eq!(result.tool_calls[0].dynamic, Some(true));
+        assert_eq!(result.tool_results[0].dynamic, Some(true));
+        assert_eq!(result.static_tool_calls, Vec::new());
+        assert_eq!(result.static_tool_results, Vec::new());
+        assert_eq!(result.dynamic_tool_calls.len(), 1);
+        assert_eq!(result.dynamic_tool_results.len(), 1);
     }
 
     #[test]

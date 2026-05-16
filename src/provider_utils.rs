@@ -2414,6 +2414,7 @@ impl From<&str> for ToolExecutionError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ToolKind {
     Function,
+    Dynamic,
     Provider {
         id: String,
         args: JsonObject,
@@ -2529,12 +2530,13 @@ impl ProviderExecutedToolFactory {
     }
 }
 
-/// User-defined Rust or provider-defined tool made available to a language model call.
+/// User-defined Rust, dynamic runtime, or provider-defined tool made available to a language model call.
 ///
-/// This mirrors the function-tool branch of upstream `@ai-sdk/provider-utils`
-/// `Tool`, plus provider tools whose model-facing schema is owned by the
-/// provider. Function tools carry model-facing schema/description metadata and
-/// may include an executor for later client-side tool handling.
+/// This mirrors the function and dynamic branches of upstream
+/// `@ai-sdk/provider-utils` `Tool`, plus provider tools whose model-facing
+/// schema is owned by the provider. Function-style tools carry model-facing
+/// schema/description metadata and may include an executor for later
+/// client-side tool handling.
 #[derive(Clone)]
 pub struct Tool {
     kind: ToolKind,
@@ -2565,6 +2567,24 @@ impl Tool {
     pub fn new(name: impl Into<String>, input_schema: JsonSchema) -> Self {
         Self {
             kind: ToolKind::Function,
+            name: name.into(),
+            description: None,
+            input_schema,
+            input_examples: None,
+            strict: None,
+            provider_options: None,
+            execute: None,
+        }
+    }
+
+    /// Creates a dynamic function tool definition.
+    ///
+    /// Upstream dynamic tools are defined at runtime, but cross the provider-v4
+    /// boundary as ordinary function tools. The dynamic flag remains high-level
+    /// metadata used when interpreting tool calls and results.
+    pub fn dynamic(name: impl Into<String>, input_schema: JsonSchema) -> Self {
+        Self {
+            kind: ToolKind::Dynamic,
             name: name.into(),
             description: None,
             input_schema,
@@ -2707,6 +2727,11 @@ impl Tool {
         matches!(self.kind, ToolKind::Provider { .. })
     }
 
+    /// Returns whether this tool is defined dynamically at runtime.
+    pub fn is_dynamic(&self) -> bool {
+        matches!(self.kind, ToolKind::Dynamic)
+    }
+
     /// Returns whether this tool is executed by the provider.
     pub fn is_provider_executed(&self) -> bool {
         matches!(
@@ -2722,7 +2747,7 @@ impl Tool {
     pub fn provider_tool_id(&self) -> Option<&str> {
         match &self.kind {
             ToolKind::Provider { id, .. } => Some(id),
-            ToolKind::Function => None,
+            ToolKind::Function | ToolKind::Dynamic => None,
         }
     }
 
@@ -2730,7 +2755,7 @@ impl Tool {
     pub fn provider_tool_args(&self) -> Option<&JsonObject> {
         match &self.kind {
             ToolKind::Provider { args, .. } => Some(args),
-            ToolKind::Function => None,
+            ToolKind::Function | ToolKind::Dynamic => None,
         }
     }
 
@@ -2738,7 +2763,7 @@ impl Tool {
     pub fn output_schema(&self) -> Option<&JsonSchema> {
         match &self.kind {
             ToolKind::Provider { output_schema, .. } => output_schema.as_ref(),
-            ToolKind::Function => None,
+            ToolKind::Function | ToolKind::Dynamic => None,
         }
     }
 
@@ -2749,7 +2774,7 @@ impl Tool {
                 supports_deferred_results,
                 ..
             } => *supports_deferred_results,
-            ToolKind::Function => None,
+            ToolKind::Function | ToolKind::Dynamic => None,
         }
     }
 
@@ -2836,6 +2861,14 @@ pub fn create_provider_executed_tool_factory(
     output_schema: JsonSchema,
 ) -> ProviderExecutedToolFactory {
     ProviderExecutedToolFactory::new(id, input_schema, output_schema)
+}
+
+/// Defines a dynamic runtime tool.
+///
+/// Dynamic tools prepare as provider-v4 function tools, matching upstream
+/// `dynamicTool`, while retaining their high-level dynamic identity in Rust.
+pub fn dynamic_tool(name: impl Into<String>, input_schema: JsonSchema) -> Tool {
+    Tool::dynamic(name, input_schema)
 }
 
 /// Bidirectional mapping between caller-facing and provider-facing tool names.
@@ -5168,7 +5201,7 @@ mod tests {
         create_provider_defined_tool_factory,
         create_provider_defined_tool_factory_with_output_schema,
         create_provider_executed_tool_factory, create_status_code_error_response_handler,
-        create_tool_name_mapping, detect_media_type, execute_provider_api_request,
+        create_tool_name_mapping, detect_media_type, dynamic_tool, execute_provider_api_request,
         extract_response_headers, filter_nullable, generate_id, get_from_api,
         get_runtime_environment_user_agent, get_top_level_media_type, handle_fetch_error,
         handle_provider_api_response, inject_json_instruction,
@@ -9719,6 +9752,37 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_tool_prepares_upstream_function_tool_shape() {
+        let tool = dynamic_tool("mcpWeather", object_schema())
+            .with_description("Runtime weather lookup.")
+            .with_strict(true);
+
+        assert!(tool.is_dynamic());
+        assert!(!tool.is_provider_tool());
+        assert!(!tool.is_provider_executed());
+        assert_eq!(tool.provider_tool_id(), None);
+        assert_eq!(tool.provider_tool_args(), None);
+        assert_eq!(tool.output_schema(), None);
+        assert_eq!(tool.supports_deferred_results(), None);
+        assert_eq!(
+            serde_json::to_value(tool.to_language_model_tool()).expect("tool serializes"),
+            json!({
+                "type": "function",
+                "name": "mcpWeather",
+                "description": "Runtime weather lookup.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    },
+                    "required": ["city"]
+                },
+                "strict": true
+            })
+        );
+    }
+
+    #[test]
     fn tool_prepares_upstream_provider_defined_tool_shape() {
         let args = json!({ "maxResults": 3 })
             .as_object()
@@ -10076,6 +10140,7 @@ mod tests {
             .clone();
         let tools = vec![
             Tool::new("weather", object_schema()),
+            dynamic_tool("runtimeWeather", object_schema()),
             Tool::provider_defined(
                 "providerTool",
                 "provider.tool-id",
@@ -10089,6 +10154,10 @@ mod tests {
             Some(vec![
                 LanguageModelTool::Function(LanguageModelFunctionTool::new(
                     "weather",
+                    object_schema()
+                )),
+                LanguageModelTool::Function(LanguageModelFunctionTool::new(
+                    "runtimeWeather",
                     object_schema()
                 )),
                 LanguageModelTool::Provider(LanguageModelProviderTool::new(
