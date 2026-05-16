@@ -14,10 +14,11 @@ use crate::language_model::{
     LanguageModelPrompt, LanguageModelReasoning, LanguageModelReasoningEffort,
     LanguageModelReasoningFile, LanguageModelReasoningFilePart, LanguageModelReasoningPart,
     LanguageModelRequest, LanguageModelResponse, LanguageModelResponseFormat, LanguageModelSource,
-    LanguageModelText, LanguageModelTextPart, LanguageModelTool, LanguageModelToolCall,
-    LanguageModelToolCallPart, LanguageModelToolChoice, LanguageModelToolContentPart,
-    LanguageModelToolMessage, LanguageModelToolResult, LanguageModelToolResultOutput,
-    LanguageModelToolResultPart, LanguageModelUsage, OutputTokenUsage,
+    LanguageModelStreamPart, LanguageModelText, LanguageModelTextPart, LanguageModelTool,
+    LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolChoice,
+    LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResult,
+    LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
+    OutputTokenUsage,
 };
 use crate::provider::{JsonParseError, get_error_message};
 use crate::provider::{ProviderMetadata, ProviderOptions};
@@ -465,6 +466,46 @@ impl fmt::Display for NoOutputGeneratedError {
 }
 
 impl std::error::Error for NoOutputGeneratedError {}
+
+/// Error returned when a language model stream emits an invalid part.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvalidStreamPartError {
+    chunk: LanguageModelStreamPart,
+    message: String,
+}
+
+impl InvalidStreamPartError {
+    /// Creates an invalid-stream-part error with the offending stream chunk and message.
+    pub fn new(chunk: LanguageModelStreamPart, message: impl Into<String>) -> Self {
+        Self {
+            chunk,
+            message: message.into(),
+        }
+    }
+
+    /// Returns the stream chunk that caused the error.
+    pub fn chunk(&self) -> &LanguageModelStreamPart {
+        &self.chunk
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into its retained chunk and message.
+    pub fn into_parts(self) -> (LanguageModelStreamPart, String) {
+        (self.chunk, self.message)
+    }
+}
+
+impl fmt::Display for InvalidStreamPartError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for InvalidStreamPartError {}
 
 /// Reasoning content emitted during a high-level generate-text step.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1931,10 +1972,10 @@ fn add_optional_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 mod tests {
     use super::{
         GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning, GenerateTextResult,
-        GenerateTextStep, GenerateTextToolCall, GenerateTextToolResult, InvalidToolApprovalError,
-        InvalidToolInputError, MissingToolResultsError, NoOutputGeneratedError, NoSuchToolError,
-        ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOriginalError,
-        generate_text,
+        GenerateTextStep, GenerateTextToolCall, GenerateTextToolResult, InvalidStreamPartError,
+        InvalidToolApprovalError, InvalidToolInputError, MissingToolResultsError,
+        NoOutputGeneratedError, NoSuchToolError, ToolCallNotFoundForApprovalError,
+        ToolCallRepairError, ToolCallRepairOriginalError, generate_text,
     };
     use crate::file_data::FileDataContent;
     use crate::language_model::{
@@ -1944,10 +1985,10 @@ mod tests {
         LanguageModelMessage, LanguageModelProviderTool, LanguageModelReasoning,
         LanguageModelReasoningFile, LanguageModelSource, LanguageModelStreamPart,
         LanguageModelStreamResult, LanguageModelSupportedUrls, LanguageModelText,
-        LanguageModelTextPart, LanguageModelTool, LanguageModelToolCall, LanguageModelToolCallPart,
-        LanguageModelToolContentPart, LanguageModelToolResult, LanguageModelToolResultOutput,
-        LanguageModelToolResultPart, LanguageModelUsage, LanguageModelUserContentPart,
-        LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelTextDelta, LanguageModelTextPart, LanguageModelTool, LanguageModelToolCall,
+        LanguageModelToolCallPart, LanguageModelToolContentPart, LanguageModelToolResult,
+        LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
+        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::provider::{JsonParseError, ProviderMetadata, SpecificationVersion};
     use crate::provider_utils::{Tool, ToolExecutionError, dynamic_tool};
@@ -2167,6 +2208,30 @@ mod tests {
             "No output generated. Check the stream for errors."
         );
         assert_eq!(error.to_string(), error.message());
+    }
+
+    #[test]
+    fn invalid_stream_part_error_retains_chunk_and_message() {
+        let chunk =
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "Hello"));
+        let error = InvalidStreamPartError::new(
+            chunk.clone(),
+            "text-delta chunk arrived without a matching text-start",
+        );
+
+        assert_eq!(error.chunk(), &chunk);
+        assert_eq!(
+            error.message(),
+            "text-delta chunk arrived without a matching text-start"
+        );
+        assert_eq!(error.to_string(), error.message());
+        assert_eq!(
+            error.into_parts(),
+            (
+                chunk,
+                "text-delta chunk arrived without a matching text-start".to_string()
+            )
+        );
     }
 
     struct FakeLanguageModel {

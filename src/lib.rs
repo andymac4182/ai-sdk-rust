@@ -40,9 +40,10 @@ pub use files::{Files, FilesUploadFileCallOptions, FilesUploadFileData, FilesUpl
 pub use generate_text::{
     GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning, GenerateTextResult,
     GenerateTextStep, GenerateTextTool, GenerateTextToolCall, GenerateTextToolResult,
-    InvalidToolApprovalError, InvalidToolInputError, MissingToolResultsError,
-    NoOutputGeneratedError, NoSuchToolError, ToolCallNotFoundForApprovalError, ToolCallRepairError,
-    ToolCallRepairOriginalError, generate_text,
+    InvalidStreamPartError, InvalidToolApprovalError, InvalidToolInputError,
+    MissingToolResultsError, NoOutputGeneratedError, NoSuchToolError,
+    ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOriginalError,
+    generate_text,
 };
 pub use headers::Headers;
 pub use image_model::{
