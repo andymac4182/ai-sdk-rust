@@ -318,6 +318,48 @@ impl LanguageModelReasoningFile {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelToolApprovalRequestKind {
+    #[serde(rename = "tool-approval-request")]
+    ToolApprovalRequest,
+}
+
+/// Tool approval request emitted for a provider-executed tool call.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelToolApprovalRequest {
+    #[serde(rename = "type")]
+    kind: LanguageModelToolApprovalRequestKind,
+
+    /// Identifier for the approval request.
+    pub approval_id: String,
+
+    /// Identifier of the tool call that requires approval.
+    pub tool_call_id: String,
+
+    /// Optional provider-specific metadata for the approval request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+}
+
+impl LanguageModelToolApprovalRequest {
+    /// Creates a provider-executed tool approval request.
+    pub fn new(approval_id: impl Into<String>, tool_call_id: impl Into<String>) -> Self {
+        Self {
+            kind: LanguageModelToolApprovalRequestKind::ToolApprovalRequest,
+            approval_id: approval_id.into(),
+            tool_call_id: tool_call_id.into(),
+            provider_metadata: None,
+        }
+    }
+
+    /// Adds provider-specific metadata to this tool approval request.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+}
+
 /// Strategy for selecting a tool during a language model call.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -345,7 +387,8 @@ mod tests {
         FinishReason, InputTokenUsage, LanguageModelCustomContent, LanguageModelFile,
         LanguageModelFileData, LanguageModelFinishReason, LanguageModelReasoning,
         LanguageModelReasoningFile, LanguageModelResponseMetadata, LanguageModelText,
-        LanguageModelToolChoice, LanguageModelUsage, OutputTokenUsage,
+        LanguageModelToolApprovalRequest, LanguageModelToolChoice, LanguageModelUsage,
+        OutputTokenUsage,
     };
     use crate::file_data::FileDataContent;
     use serde_json::json;
@@ -669,6 +712,68 @@ mod tests {
         .expect_err("reference data is rejected for generated file data");
 
         assert!(error.to_string().contains("unknown variant `reference`"));
+    }
+
+    #[test]
+    fn tool_approval_request_serializes_upstream_shape_with_provider_metadata() {
+        let request = LanguageModelToolApprovalRequest::new("approval_123", "tool_call_456")
+            .with_provider_metadata(
+                serde_json::from_value(json!({
+                    "openai": {
+                        "serverLabel": "mcp-server"
+                    }
+                }))
+                .expect("provider metadata deserializes"),
+            );
+
+        assert_eq!(
+            serde_json::to_value(request).expect("tool approval request serializes"),
+            json!({
+                "type": "tool-approval-request",
+                "approvalId": "approval_123",
+                "toolCallId": "tool_call_456",
+                "providerMetadata": {
+                    "openai": {
+                        "serverLabel": "mcp-server"
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn tool_approval_request_deserializes_and_omits_missing_provider_metadata() {
+        let request: LanguageModelToolApprovalRequest = serde_json::from_value(json!({
+            "type": "tool-approval-request",
+            "approvalId": "approval_123",
+            "toolCallId": "tool_call_456"
+        }))
+        .expect("tool approval request deserializes");
+
+        assert_eq!(
+            request,
+            LanguageModelToolApprovalRequest::new("approval_123", "tool_call_456")
+        );
+        assert_eq!(
+            serde_json::to_value(request).expect("tool approval request serializes"),
+            json!({
+                "type": "tool-approval-request",
+                "approvalId": "approval_123",
+                "toolCallId": "tool_call_456"
+            })
+        );
+    }
+
+    #[test]
+    fn tool_approval_request_rejects_other_content_types() {
+        let error = serde_json::from_value::<LanguageModelToolApprovalRequest>(json!({
+            "type": "tool-call",
+            "approvalId": "approval_123",
+            "toolCallId": "tool_call_456"
+        }))
+        .expect_err("wrong discriminator is rejected");
+
+        assert!(error.to_string().contains("unknown variant `tool-call`"));
     }
 
     #[test]
