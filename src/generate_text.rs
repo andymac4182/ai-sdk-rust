@@ -569,6 +569,10 @@ pub struct GenerateTextResult {
     /// Total usage across all steps.
     pub usage: LanguageModelUsage,
 
+    /// Deprecated upstream alias for [`GenerateTextResult::usage`].
+    #[serde(default)]
+    pub total_usage: LanguageModelUsage,
+
     /// Warnings reported across all steps.
     pub warnings: Vec<Warning>,
 
@@ -593,6 +597,7 @@ impl GenerateTextResult {
         let final_step = steps
             .last()
             .expect("generate_text always creates at least one step");
+        let total_usage = add_step_usage(&steps);
 
         Self {
             content: steps
@@ -602,7 +607,8 @@ impl GenerateTextResult {
             text: final_step.text.clone(),
             finish_reason: final_step.finish_reason.clone(),
             raw_finish_reason: final_step.raw_finish_reason.clone(),
-            usage: add_step_usage(&steps),
+            usage: total_usage.clone(),
+            total_usage,
             tool_calls: steps
                 .iter()
                 .flat_map(|step| step.tool_calls.iter().cloned())
@@ -1386,6 +1392,7 @@ mod tests {
         assert_eq!(result.raw_finish_reason.as_deref(), Some("stop"));
         assert_eq!(result.usage.input_tokens.total, Some(5));
         assert_eq!(result.usage.output_tokens.text, Some(2));
+        assert_eq!(result.total_usage, result.usage);
         assert_eq!(result.warnings, Vec::new());
         assert_eq!(result.content.len(), 2);
         assert_eq!(result.steps.len(), 1);
@@ -1474,6 +1481,14 @@ mod tests {
                 "finishReason": "stop",
                 "rawFinishReason": "stop",
                 "usage": {
+                    "inputTokens": {
+                        "total": 3
+                    },
+                    "outputTokens": {
+                        "total": 1
+                    }
+                },
+                "totalUsage": {
                     "inputTokens": {
                         "total": 3
                     },
@@ -1693,6 +1708,14 @@ mod tests {
                 "inputTokens": {},
                 "outputTokens": {}
             },
+            "totalUsage": {
+                "inputTokens": {
+                    "total": 12
+                },
+                "outputTokens": {
+                    "total": 4
+                }
+            },
             "warnings": [],
             "steps": [
                 {
@@ -1717,6 +1740,8 @@ mod tests {
         assert_eq!(result.text, "");
         assert_eq!(result.finish_reason, FinishReason::Length);
         assert_eq!(result.raw_finish_reason, None);
+        assert_eq!(result.total_usage.input_tokens.total, Some(12));
+        assert_eq!(result.total_usage.output_tokens.total, Some(4));
         assert_eq!(result.static_tool_calls, Vec::new());
         assert_eq!(result.dynamic_tool_calls, Vec::new());
         assert_eq!(result.static_tool_results, Vec::new());
