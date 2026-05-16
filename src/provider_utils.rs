@@ -11,7 +11,11 @@ use std::sync::{
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser::SerializeStruct};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::{self, DeserializeOwned},
+    ser::SerializeStruct,
+};
 use url::{Host, Url};
 
 use crate::file_data::{
@@ -4641,33 +4645,60 @@ pub fn is_provider_reference(data: &JsonValue) -> bool {
         .is_some_and(|object| !object.contains_key("type"))
 }
 
-/// Validates a JSON value with a caller-supplied type validator.
+/// Validates a JSON value with a schema.
 ///
 /// This mirrors upstream `@ai-sdk/provider-utils` `validateTypes`: validation
 /// failures are wrapped in the provider-level [`TypeValidationError`] with the
 /// original JSON value and optional validation context.
-pub fn validate_types<T, F, E>(
+pub fn validate_types<T>(
     value: JsonValue,
-    validate: F,
+    schema: impl Into<FlexibleSchema<T>>,
     context: Option<TypeValidationContext>,
 ) -> Result<T, TypeValidationError>
 where
-    F: FnOnce(&JsonValue) -> Result<T, E>,
-    E: fmt::Display,
+    T: DeserializeOwned,
 {
-    match safe_validate_types(value, validate, context) {
+    match safe_validate_types(value, schema, context) {
         ValidateTypesResult::Success { value, .. } => Ok(value),
         ValidateTypesResult::Failure { error, .. } => Err(error),
     }
 }
 
-/// Safely validates a JSON value with a caller-supplied type validator.
+/// Safely validates a JSON value with a schema.
 ///
 /// This mirrors upstream `@ai-sdk/provider-utils` `safeValidateTypes`: success
 /// returns both the validated value and the original raw value, while
 /// validation failures return a [`TypeValidationError`] and preserve the raw
 /// value.
-pub fn safe_validate_types<T, F, E>(
+pub fn safe_validate_types<T>(
+    value: JsonValue,
+    schema: impl Into<FlexibleSchema<T>>,
+    context: Option<TypeValidationContext>,
+) -> ValidateTypesResult<T>
+where
+    T: DeserializeOwned,
+{
+    let schema = schema.into().into_schema();
+
+    match schema.validate(&value) {
+        Some(ValidationResult::Success {
+            value: validated_value,
+        }) => ValidateTypesResult::success(validated_value, value),
+        Some(ValidationResult::Failure { error }) => {
+            let validation_error = TypeValidationError::new(value.clone(), error, context);
+            ValidateTypesResult::failure(validation_error, value)
+        }
+        None => match serde_json::from_value::<T>(value.clone()) {
+            Ok(validated_value) => ValidateTypesResult::success(validated_value, value),
+            Err(error) => {
+                let validation_error = TypeValidationError::new(value.clone(), error, context);
+                ValidateTypesResult::failure(validation_error, value)
+            }
+        },
+    }
+}
+
+fn safe_validate_types_with<T, F, E>(
     value: JsonValue,
     validate: F,
     context: Option<TypeValidationContext>,
@@ -4704,7 +4735,7 @@ where
         return Ok(None);
     };
 
-    match safe_validate_types(JsonValue::Object(provider_options.clone()), validate, None) {
+    match safe_validate_types_with(JsonValue::Object(provider_options.clone()), validate, None) {
         ValidateTypesResult::Success { value, .. } => Ok(Some(value)),
         ValidateTypesResult::Failure { .. } => Err(InvalidArgumentError::new(
             "providerOptions",
@@ -5419,7 +5450,7 @@ where
         }
     };
 
-    match safe_validate_types(raw_value, validate, None) {
+    match safe_validate_types_with(raw_value, validate, None) {
         ValidateTypesResult::Success {
             value: parsed_error,
             ..
@@ -5549,7 +5580,7 @@ where
         ParseJsonResult::Failure { error, .. } => return ParseJsonResult::failure(error, None),
     };
 
-    match safe_validate_types(raw_value.clone(), |value| validate(value), None) {
+    match safe_validate_types_with(raw_value.clone(), |value| validate(value), None) {
         ValidateTypesResult::Success { value, raw_value } => {
             ParseJsonResult::success(value, raw_value)
         }
@@ -5623,7 +5654,7 @@ where
         }
     };
 
-    match safe_validate_types(raw_value.clone(), validate, None) {
+    match safe_validate_types_with(raw_value.clone(), validate, None) {
         ValidateTypesResult::Success { value, raw_value } => Ok(ResponseHandlerResult::new(value)
             .with_raw_value(raw_value)
             .with_response_headers(response_headers)),
@@ -6694,7 +6725,7 @@ mod tests {
         serde_json::to_string(&object_schema()).expect("schema serializes")
     }
 
-    #[derive(Debug, Eq, PartialEq)]
+    #[derive(Debug, Eq, PartialEq, serde::Deserialize)]
     struct Person {
         name: String,
         age: u64,
@@ -6714,6 +6745,13 @@ mod tests {
         Ok(Person {
             name: name.to_string(),
             age,
+        })
+    }
+
+    fn person_schema() -> Schema<Person> {
+        Schema::new(object_schema()).with_validator(|value| match validate_person(value) {
+            Ok(person) => ValidationResult::success(person),
+            Err(error) => ValidationResult::failure(error),
         })
     }
 
@@ -8402,7 +8440,7 @@ mod tests {
     fn validate_types_returns_validated_values() {
         let value = json!({ "name": "John", "age": 30 });
 
-        let person = validate_types(value, validate_person, None).expect("person validates");
+        let person = validate_types(value, person_schema(), None).expect("person validates");
 
         assert_eq!(
             person,
@@ -8421,7 +8459,7 @@ mod tests {
             .with_entity_name("person")
             .with_entity_id("user-1");
 
-        let error = validate_types(value.clone(), validate_person, Some(context.clone()))
+        let error = validate_types(value.clone(), person_schema(), Some(context.clone()))
             .expect_err("invalid person should fail validation");
 
         assert_eq!(error.value(), &value);
@@ -8437,20 +8475,18 @@ mod tests {
     #[test]
     fn safe_validate_types_preserves_raw_value_after_transformation() {
         let value = json!({ "count": "42" });
+        let schema = Schema::new(object_schema()).with_validator(|value| {
+            match value
+                .get("count")
+                .and_then(JsonValue::as_str)
+                .and_then(|count| count.parse::<u64>().ok())
+            {
+                Some(count) => ValidationResult::success(json!({ "count": count })),
+                None => ValidationResult::failure("Expected numeric string"),
+            }
+        });
 
-        let parsed = safe_validate_types(
-            value.clone(),
-            |value| {
-                let count = value
-                    .get("count")
-                    .and_then(JsonValue::as_str)
-                    .and_then(|count| count.parse::<u64>().ok())
-                    .ok_or("Expected numeric string")?;
-
-                Ok::<_, &'static str>(json!({ "count": count }))
-            },
-            None,
-        );
+        let parsed = safe_validate_types(value.clone(), schema, None);
 
         assert_eq!(
             parsed,
@@ -8466,7 +8502,7 @@ mod tests {
     #[test]
     fn safe_validate_types_returns_error_and_raw_value_on_failure() {
         let value = json!({ "name": "John", "age": "30" });
-        let parsed = safe_validate_types(value.clone(), validate_person, None);
+        let parsed = safe_validate_types(value.clone(), person_schema(), None);
 
         assert!(parsed.is_failure());
         assert!(parsed.value().is_none());
@@ -8475,6 +8511,16 @@ mod tests {
         let error = parsed.error().expect("validation error is returned");
         assert_eq!(error.value(), &value);
         assert_eq!(error.cause_message(), "Invalid input");
+    }
+
+    #[test]
+    fn safe_validate_types_passes_through_json_when_schema_has_no_validator() {
+        let value = json!({ "name": "John", "age": 30 });
+
+        let parsed: ValidateTypesResult<JsonValue> =
+            safe_validate_types(value.clone(), json_schema(object_schema()), None);
+
+        assert_eq!(parsed, ValidateTypesResult::success(value.clone(), value));
     }
 
     #[test]
