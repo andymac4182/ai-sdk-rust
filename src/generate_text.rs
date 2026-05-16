@@ -389,6 +389,88 @@ impl<M: LanguageModel + ?Sized> fmt::Debug for PrepareStep<'_, M> {
     }
 }
 
+/// Future returned by a high-level generate-text step-finish callback.
+pub type GenerateTextOnStepFinishFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+/// Callback invoked after each non-streaming generate-text step is complete.
+pub type GenerateTextOnStepFinishFunction<'a> =
+    dyn Fn(GenerateTextStep) -> GenerateTextOnStepFinishFuture<'a> + 'a;
+
+/// Callback wrapper for upstream `onStepFinish`.
+///
+/// The callback receives the fully constructed step result after response
+/// messages, include filtering, and performance metrics have been populated.
+pub struct GenerateTextOnStepFinish<'a> {
+    on_step_finish: Rc<GenerateTextOnStepFinishFunction<'a>>,
+}
+
+impl<'a> GenerateTextOnStepFinish<'a> {
+    /// Creates a step-finish callback.
+    pub fn new<F, Fut>(on_step_finish: F) -> Self
+    where
+        F: Fn(GenerateTextStep) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        Self {
+            on_step_finish: Rc::new(move |step| Box::pin(on_step_finish(step))),
+        }
+    }
+
+    /// Runs the step-finish callback.
+    pub fn finish(&self, step: GenerateTextStep) -> GenerateTextOnStepFinishFuture<'a> {
+        (self.on_step_finish)(step)
+    }
+}
+
+impl fmt::Debug for GenerateTextOnStepFinish<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GenerateTextOnStepFinish")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Future returned by a high-level generate-text finish callback.
+pub type GenerateTextOnFinishFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+/// Callback invoked after a non-streaming generate-text call is complete.
+pub type GenerateTextOnFinishFunction<'a> =
+    dyn Fn(GenerateTextFinishEvent) -> GenerateTextOnFinishFuture<'a> + 'a;
+
+/// Callback wrapper for upstream `onFinish`.
+///
+/// The callback receives the final step fields plus all accumulated response
+/// messages, steps, and total usage before high-level output parsing.
+pub struct GenerateTextOnFinish<'a> {
+    on_finish: Rc<GenerateTextOnFinishFunction<'a>>,
+}
+
+impl<'a> GenerateTextOnFinish<'a> {
+    /// Creates a finish callback.
+    pub fn new<F, Fut>(on_finish: F) -> Self
+    where
+        F: Fn(GenerateTextFinishEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        Self {
+            on_finish: Rc::new(move |result| Box::pin(on_finish(result))),
+        }
+    }
+
+    /// Runs the finish callback.
+    pub fn finish(&self, event: GenerateTextFinishEvent) -> GenerateTextOnFinishFuture<'a> {
+        (self.on_finish)(event)
+    }
+}
+
+impl fmt::Debug for GenerateTextOnFinish<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GenerateTextOnFinish")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Predicate-style stop condition for high-level generate-text tool loops.
 ///
 /// The upstream SDK models stop conditions as async predicates. This Rust
@@ -2026,6 +2108,12 @@ pub struct GenerateTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Optional per-step preparation callback.
     pub prepare_step: Option<PrepareStep<'a, M>>,
 
+    /// Optional callback invoked after each completed generation step.
+    pub on_step_finish: Option<GenerateTextOnStepFinish<'a>>,
+
+    /// Optional callback invoked after the full generation result is complete.
+    pub on_finish: Option<GenerateTextOnFinish<'a>>,
+
     /// Maximum number of model-call steps to run.
     pub max_steps: usize,
 
@@ -2050,6 +2138,8 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             tool_input_refinements: BTreeMap::new(),
             tool_call_repair: None,
             prepare_step: None,
+            on_step_finish: None,
+            on_finish: None,
             max_steps: DEFAULT_MAX_STEPS,
             stop_conditions: Vec::new(),
             include: GenerateTextInclude::default(),
@@ -2069,6 +2159,8 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             tool_input_refinements: BTreeMap::new(),
             tool_call_repair: None,
             prepare_step: None,
+            on_step_finish: None,
+            on_finish: None,
             max_steps: DEFAULT_MAX_STEPS,
             stop_conditions: Vec::new(),
             include: GenerateTextInclude::default(),
@@ -2236,6 +2328,26 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
         Fut: Future<Output = PrepareStepResult<'a, M>> + 'a,
     {
         self.prepare_step = Some(PrepareStep::new(prepare));
+        self
+    }
+
+    /// Sets a callback that is invoked after every completed step.
+    pub fn with_on_step_finish<F, Fut>(mut self, on_step_finish: F) -> Self
+    where
+        F: Fn(GenerateTextStep) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_step_finish = Some(GenerateTextOnStepFinish::new(on_step_finish));
+        self
+    }
+
+    /// Sets a callback that is invoked after the generation result is complete.
+    pub fn with_on_finish<F, Fut>(mut self, on_finish: F) -> Self
+    where
+        F: Fn(GenerateTextFinishEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_finish = Some(GenerateTextOnFinish::new(on_finish));
         self
     }
 
@@ -2804,6 +2916,162 @@ impl GenerateTextStep {
     }
 }
 
+/// Event sent to a high-level non-streaming generate-text finish callback.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateTextFinishEvent {
+    /// Unique identifier for the generation call.
+    pub call_id: String,
+
+    /// Zero-based index of the final step.
+    pub step_number: usize,
+
+    /// Model that produced the final step.
+    pub model: GenerateTextModelInfo,
+
+    /// Runtime context used for the final step.
+    #[serde(default)]
+    pub runtime_context: JsonObject,
+
+    /// Tool context used for the final step.
+    #[serde(default)]
+    pub tools_context: JsonObject,
+
+    /// Unified reason why the final step finished.
+    pub finish_reason: FinishReason,
+
+    /// Raw provider finish reason from the final step, when one is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_finish_reason: Option<String>,
+
+    /// Usage reported by the final step.
+    pub usage: LanguageModelUsage,
+
+    /// Total usage across all steps.
+    pub total_usage: LanguageModelUsage,
+
+    /// Content generated in the final step.
+    pub content: Vec<LanguageModelContent>,
+
+    /// Text generated in the final step.
+    pub text: String,
+
+    /// Text from reasoning parts generated in the final step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_text: Option<String>,
+
+    /// Reasoning generated in the final step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning: Vec<GenerateTextReasoning>,
+
+    /// Files generated across all steps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<LanguageModelFile>,
+
+    /// Sources used to generate the final step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<LanguageModelSource>,
+
+    /// Tool calls generated in the final step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<GenerateTextToolCall>,
+
+    /// Static tool calls generated in the final step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub static_tool_calls: Vec<GenerateTextToolCall>,
+
+    /// Dynamic tool calls generated in the final step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dynamic_tool_calls: Vec<GenerateTextToolCall>,
+
+    /// Tool results produced in the final step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_results: Vec<GenerateTextToolResult>,
+
+    /// Static tool results produced in the final step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub static_tool_results: Vec<GenerateTextToolResult>,
+
+    /// Dynamic tool results produced in the final step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dynamic_tool_results: Vec<GenerateTextToolResult>,
+
+    /// Accumulated response messages generated across all steps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub response_messages: Vec<LanguageModelMessage>,
+
+    /// Warnings reported across all steps.
+    pub warnings: Vec<Warning>,
+
+    /// Optional request information from the final step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<LanguageModelRequest>,
+
+    /// Optional response information from the final step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<LanguageModelResponse>,
+
+    /// Provider-specific metadata from the final step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+
+    /// Details for all generation steps.
+    pub steps: Vec<GenerateTextStep>,
+}
+
+impl GenerateTextFinishEvent {
+    fn from_steps(
+        initial_response_messages: &[LanguageModelMessage],
+        steps: &[GenerateTextStep],
+    ) -> Self {
+        let final_step = steps
+            .last()
+            .expect("generate_text always creates at least one step");
+        let mut response_messages = initial_response_messages.to_vec();
+        response_messages.extend(
+            steps
+                .iter()
+                .flat_map(|step| step.response_messages.iter().cloned()),
+        );
+
+        Self {
+            call_id: final_step.call_id.clone(),
+            step_number: final_step.step_number,
+            model: final_step.model.clone(),
+            runtime_context: final_step.runtime_context.clone(),
+            tools_context: final_step.tools_context.clone(),
+            finish_reason: final_step.finish_reason.clone(),
+            raw_finish_reason: final_step.raw_finish_reason.clone(),
+            usage: final_step.usage.clone(),
+            total_usage: add_step_usage(steps),
+            content: final_step.content.clone(),
+            text: final_step.text.clone(),
+            reasoning_text: final_step.reasoning_text.clone(),
+            reasoning: final_step.reasoning.clone(),
+            files: steps
+                .iter()
+                .flat_map(|step| step.files.iter().cloned())
+                .collect(),
+            sources: final_step.sources.clone(),
+            tool_calls: final_step.tool_calls.clone(),
+            static_tool_calls: final_step.static_tool_calls.clone(),
+            dynamic_tool_calls: final_step.dynamic_tool_calls.clone(),
+            tool_results: final_step.tool_results.clone(),
+            static_tool_results: final_step.static_tool_results.clone(),
+            dynamic_tool_results: final_step.dynamic_tool_results.clone(),
+            response_messages,
+            warnings: steps
+                .iter()
+                .flat_map(|step| step.warnings.iter().cloned())
+                .collect(),
+            request: final_step.request.clone(),
+            response: final_step.response.clone(),
+            provider_metadata: final_step.provider_metadata.clone(),
+            steps: steps.to_vec(),
+        }
+    }
+}
+
 /// Result of a high-level non-streaming text generation call.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -3002,6 +3270,8 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         tool_input_refinements,
         tool_call_repair,
         prepare_step,
+        on_step_finish,
+        on_finish,
         max_steps,
         stop_conditions,
         include,
@@ -3159,6 +3429,10 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
             tool_execution_ms,
         );
 
+        if let Some(on_step_finish) = &on_step_finish {
+            on_step_finish.finish(step.clone()).await;
+        }
+
         let response_messages = step.response_messages.clone();
         steps.push(step);
 
@@ -3175,6 +3449,15 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         } else {
             break;
         }
+    }
+
+    if let Some(on_finish) = &on_finish {
+        on_finish
+            .finish(GenerateTextFinishEvent::from_steps(
+                &initial_response_messages,
+                &steps,
+            ))
+            .await;
     }
 
     GenerateTextResult::from_steps(steps)
@@ -4751,20 +5034,20 @@ fn add_optional_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        GenerateTextInclude, GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning,
-        GenerateTextResult, GenerateTextStep, GenerateTextStepPerformance, GenerateTextToolCall,
-        GenerateTextToolResult, InvalidStreamPartError, InvalidToolApprovalError,
-        InvalidToolInputError, MissingToolResultsError, NoObjectGeneratedError,
-        NoOutputGeneratedError, NoSuchToolError, NormalizedToolApprovalStatus, PrepareStepResult,
-        PruneEmptyMessages, PruneMessagesOptions, PruneReasoning, PruneToolCallRule,
-        PruneToolCallRuleMode, PruneToolCalls, ResolveToolApprovalOptions, StopCondition,
-        ToolApprovalConfiguration, ToolApprovalStatus, ToolApprovalStatusKind,
-        ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOptions,
-        ToolCallRepairOriginalError, ToolInputRefinementError, UiMessageStreamError,
-        UnsupportedModelVersionError, collect_tool_approvals, experimental_filter_active_tools,
-        filter_active_tools, generate_text, has_tool_call, is_loop_finished, is_step_count,
-        is_stop_condition_met, normalize_tool_approval_status, prune_messages,
-        resolve_tool_approval, step_count_is,
+        GenerateTextFinishEvent, GenerateTextInclude, GenerateTextModelInfo, GenerateTextOptions,
+        GenerateTextReasoning, GenerateTextResult, GenerateTextStep, GenerateTextStepPerformance,
+        GenerateTextToolCall, GenerateTextToolResult, InvalidStreamPartError,
+        InvalidToolApprovalError, InvalidToolInputError, MissingToolResultsError,
+        NoObjectGeneratedError, NoOutputGeneratedError, NoSuchToolError,
+        NormalizedToolApprovalStatus, PrepareStepResult, PruneEmptyMessages, PruneMessagesOptions,
+        PruneReasoning, PruneToolCallRule, PruneToolCallRuleMode, PruneToolCalls,
+        ResolveToolApprovalOptions, StopCondition, ToolApprovalConfiguration, ToolApprovalStatus,
+        ToolApprovalStatusKind, ToolCallNotFoundForApprovalError, ToolCallRepairError,
+        ToolCallRepairOptions, ToolCallRepairOriginalError, ToolInputRefinementError,
+        UiMessageStreamError, UnsupportedModelVersionError, collect_tool_approvals,
+        experimental_filter_active_tools, filter_active_tools, generate_text, has_tool_call,
+        is_loop_finished, is_step_count, is_stop_condition_met, normalize_tool_approval_status,
+        prune_messages, resolve_tool_approval, step_count_is,
     };
     use crate::file_data::FileDataContent;
     use crate::json::JsonValue;
@@ -6029,6 +6312,64 @@ mod tests {
         assert_eq!(performance.input_tokens_per_second, None);
         assert_eq!(performance.tool_execution_ms, BTreeMap::new());
         assert_eq!(performance.time_to_first_output_token_ms, None);
+    }
+
+    #[test]
+    fn generate_text_invokes_finish_callbacks_with_completed_records() {
+        let model = FakeLanguageModel::new();
+        let step_events = Arc::new(Mutex::new(Vec::<GenerateTextStep>::new()));
+        let finish_events = Arc::new(Mutex::new(Vec::<GenerateTextFinishEvent>::new()));
+        let step_events_for_callback = Arc::clone(&step_events);
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_on_step_finish(move |step| {
+                    let step_events = Arc::clone(&step_events_for_callback);
+                    async move {
+                        step_events.lock().expect("step events lock").push(step);
+                    }
+                })
+                .with_on_finish(move |result| {
+                    let finish_events = Arc::clone(&finish_events_for_callback);
+                    async move {
+                        finish_events
+                            .lock()
+                            .expect("finish events lock")
+                            .push(result);
+                    }
+                }),
+        ));
+
+        let step_events = step_events.lock().expect("step events lock");
+        assert_eq!(step_events.len(), 1);
+        assert_eq!(step_events[0], result.final_step);
+        assert_eq!(step_events[0].response_messages, result.response_messages);
+        assert!(
+            step_events[0].performance.response_time_ms <= step_events[0].performance.step_time_ms
+        );
+        drop(step_events);
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert_eq!(finish_events[0].call_id, result.final_step.call_id);
+        assert_eq!(finish_events[0].step_number, result.final_step.step_number);
+        assert_eq!(finish_events[0].model, result.final_step.model);
+        assert_eq!(finish_events[0].text, result.text);
+        assert_eq!(finish_events[0].finish_reason, result.finish_reason);
+        assert_eq!(finish_events[0].usage, result.final_step.usage);
+        assert_eq!(finish_events[0].total_usage, result.total_usage);
+        assert_eq!(finish_events[0].response_messages, result.response_messages);
+        assert_eq!(finish_events[0].steps, result.steps);
+        let finish_value =
+            serde_json::to_value(&finish_events[0]).expect("finish event serializes");
+        assert!(finish_value.get("output").is_none());
+        assert!(finish_value.get("performance").is_none());
+        assert_eq!(
+            serde_json::from_value::<GenerateTextFinishEvent>(finish_value)
+                .expect("finish event deserializes"),
+            finish_events[0]
+        );
     }
 
     #[test]
