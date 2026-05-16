@@ -34,8 +34,8 @@ use crate::provider::{
 use crate::provider::{ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{
     Base64DecodeError, ExperimentalSandbox, IdGeneratorOptions, Tool, ToolExecutionOptions,
-    convert_base64_to_bytes, convert_bytes_to_base64, create_id_generator, generate_id,
-    prepare_tools_with_context,
+    ToolModelOutputOptions, convert_base64_to_bytes, convert_bytes_to_base64, create_id_generator,
+    generate_id, prepare_tools_with_context,
 };
 use crate::warning::Warning;
 
@@ -5310,7 +5310,8 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         mark_tool_result_metadata(&mut step.tool_results, &step.tool_calls, &step_tools);
         refresh_tool_result_views(&mut step);
         step.response_messages =
-            response_messages_for_step(&step, &provider_content, &tool_approvals)
+            response_messages_for_step(&step, &provider_content, &tool_approvals, &step_tools)
+                .await
                 .unwrap_or_default();
         refresh_generate_text_content(&mut step, &provider_content, &tool_approvals);
         apply_generate_text_response_metadata(&mut step);
@@ -5872,22 +5873,21 @@ async fn initial_tool_approval_response_message(
     )
     .await;
 
-    let mut content = tool_results
-        .iter()
-        .map(|tool_result| {
-            let mut part = LanguageModelToolResultPart::new(
-                tool_result.tool_call_id.clone(),
-                tool_result.tool_name.clone(),
-                tool_result_output(tool_result),
-            );
+    let mut content = Vec::new();
+    for tool_result in &tool_results {
+        let tool = find_tool_for_result(tools, tool_result);
+        let mut part = LanguageModelToolResultPart::new(
+            tool_result.tool_call_id.clone(),
+            tool_result.tool_name.clone(),
+            tool_result_output(tool_result, tool).await,
+        );
 
-            if let Some(provider_metadata) = &tool_result.provider_metadata {
-                part = part.with_provider_options(provider_metadata.clone());
-            }
+        if let Some(provider_metadata) = &tool_result.provider_metadata {
+            part = part.with_provider_options(provider_metadata.clone());
+        }
 
-            LanguageModelToolContentPart::ToolResult(part)
-        })
-        .collect::<Vec<_>>();
+        content.push(LanguageModelToolContentPart::ToolResult(part));
+    }
 
     content.extend(
         approvals
@@ -6204,10 +6204,11 @@ fn should_continue_after_tool_results(
             && tool_results.len() + denied_client_tool_call_count == client_tool_call_count)
 }
 
-fn response_messages_for_step(
+async fn response_messages_for_step(
     step: &GenerateTextStep,
     provider_content: &[LanguageModelContent],
     tool_approvals: &StepToolApprovals,
+    tools: &[Tool],
 ) -> Option<Vec<LanguageModelMessage>> {
     let mut messages = Vec::new();
 
@@ -6224,8 +6225,12 @@ fn response_messages_for_step(
         .cloned()
         .collect::<Vec<_>>();
 
-    if let Some(message) =
-        tool_message_from_results_and_approvals(&client_tool_results, &tool_approvals.responses)
+    if let Some(message) = tool_message_from_results_and_approvals(
+        &client_tool_results,
+        &tool_approvals.responses,
+        tools,
+    )
+    .await
     {
         messages.push(message);
     }
@@ -6369,31 +6374,34 @@ fn assistant_content_part_from_content(
     }
 }
 
-fn tool_message_from_results_and_approvals(
+async fn tool_message_from_results_and_approvals(
     tool_results: &[GenerateTextToolResult],
     approval_responses: &[StepToolApprovalResponse],
+    tools: &[Tool],
 ) -> Option<LanguageModelMessage> {
     let approval_tool_call_ids = approval_responses
         .iter()
         .map(|approval| approval.tool_call.tool_call_id.clone())
         .collect::<BTreeSet<_>>();
-    let mut content = tool_results
+    let mut content = Vec::new();
+
+    for tool_result in tool_results
         .iter()
         .filter(|tool_result| !approval_tool_call_ids.contains(&tool_result.tool_call_id))
-        .map(|tool_result| {
-            let mut part = LanguageModelToolResultPart::new(
-                tool_result.tool_call_id.clone(),
-                tool_result.tool_name.clone(),
-                tool_result_output(tool_result),
-            );
+    {
+        let tool = find_tool_for_result(tools, tool_result);
+        let mut part = LanguageModelToolResultPart::new(
+            tool_result.tool_call_id.clone(),
+            tool_result.tool_name.clone(),
+            tool_result_output(tool_result, tool).await,
+        );
 
-            if let Some(provider_metadata) = &tool_result.provider_metadata {
-                part = part.with_provider_options(provider_metadata.clone());
-            }
+        if let Some(provider_metadata) = &tool_result.provider_metadata {
+            part = part.with_provider_options(provider_metadata.clone());
+        }
 
-            LanguageModelToolContentPart::ToolResult(part)
-        })
-        .collect::<Vec<_>>();
+        content.push(LanguageModelToolContentPart::ToolResult(part));
+    }
 
     content.extend(
         approval_responses
@@ -6401,24 +6409,23 @@ fn tool_message_from_results_and_approvals(
             .flat_map(tool_approval_response_content),
     );
 
-    content.extend(
-        tool_results
-            .iter()
-            .filter(|tool_result| approval_tool_call_ids.contains(&tool_result.tool_call_id))
-            .map(|tool_result| {
-                let mut part = LanguageModelToolResultPart::new(
-                    tool_result.tool_call_id.clone(),
-                    tool_result.tool_name.clone(),
-                    tool_result_output(tool_result),
-                );
+    for tool_result in tool_results
+        .iter()
+        .filter(|tool_result| approval_tool_call_ids.contains(&tool_result.tool_call_id))
+    {
+        let tool = find_tool_for_result(tools, tool_result);
+        let mut part = LanguageModelToolResultPart::new(
+            tool_result.tool_call_id.clone(),
+            tool_result.tool_name.clone(),
+            tool_result_output(tool_result, tool).await,
+        );
 
-                if let Some(provider_metadata) = &tool_result.provider_metadata {
-                    part = part.with_provider_options(provider_metadata.clone());
-                }
+        if let Some(provider_metadata) = &tool_result.provider_metadata {
+            part = part.with_provider_options(provider_metadata.clone());
+        }
 
-                LanguageModelToolContentPart::ToolResult(part)
-            }),
-    );
+        content.push(LanguageModelToolContentPart::ToolResult(part));
+    }
 
     if content.is_empty() {
         None
@@ -6479,17 +6486,75 @@ fn provider_executed_approval_provider_options(approval_id: &str) -> ProviderOpt
     provider_options
 }
 
-fn tool_result_output(tool_result: &GenerateTextToolResult) -> LanguageModelToolResultOutput {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolModelOutputErrorMode {
+    None,
+    Text,
+}
+
+fn find_tool_for_result<'a>(
+    tools: &'a [Tool],
+    tool_result: &GenerateTextToolResult,
+) -> Option<&'a Tool> {
+    tools.iter().find(|tool| tool.name == tool_result.tool_name)
+}
+
+async fn tool_result_output(
+    tool_result: &GenerateTextToolResult,
+    tool: Option<&Tool>,
+) -> LanguageModelToolResultOutput {
     if tool_result.is_error == Some(true) {
-        return match &tool_result.output {
-            JsonValue::String(message) => {
-                LanguageModelToolResultOutput::error_text(message.clone())
-            }
-            output => LanguageModelToolResultOutput::error_json(output.clone()),
-        };
+        return create_tool_model_output(
+            &tool_result.tool_call_id,
+            &tool_result.input,
+            &tool_result.output,
+            tool,
+            ToolModelOutputErrorMode::Text,
+        )
+        .await;
     }
 
-    match &tool_result.output {
+    create_tool_model_output(
+        &tool_result.tool_call_id,
+        &tool_result.input,
+        &tool_result.output,
+        tool,
+        ToolModelOutputErrorMode::None,
+    )
+    .await
+}
+
+async fn create_tool_model_output(
+    tool_call_id: &str,
+    input: &JsonValue,
+    output: &JsonValue,
+    tool: Option<&Tool>,
+    error_mode: ToolModelOutputErrorMode,
+) -> LanguageModelToolResultOutput {
+    match error_mode {
+        ToolModelOutputErrorMode::Text => {
+            if let JsonValue::String(message) = output {
+                return LanguageModelToolResultOutput::error_text(message.clone());
+            }
+
+            return LanguageModelToolResultOutput::error_text(get_error_message(Some(
+                output as &dyn fmt::Display,
+            )));
+        }
+        ToolModelOutputErrorMode::None => {}
+    }
+
+    if let Some(model_output) = tool.and_then(|tool| {
+        tool.model_output(ToolModelOutputOptions::new(
+            tool_call_id,
+            input.clone(),
+            output.clone(),
+        ))
+    }) {
+        return model_output.await;
+    }
+
+    match output {
         JsonValue::String(output) => LanguageModelToolResultOutput::text(output.clone()),
         output => LanguageModelToolResultOutput::json(output.clone()),
     }
@@ -11450,6 +11515,64 @@ mod tests {
         assert_eq!(
             result.steps[1].performance.tool_execution_ms,
             BTreeMap::new()
+        );
+    }
+
+    #[test]
+    fn generate_text_uses_tool_model_output_for_continuation_messages() {
+        let model = ToolLoopLanguageModel::new();
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(
+                    Tool::new("weather", input_schema)
+                        .with_execute(|input, _options| async move {
+                            Ok(json!({
+                                "forecast": "sunny",
+                                "city": input["city"]
+                            }))
+                        })
+                        .with_to_model_output(|options| async move {
+                            LanguageModelToolResultOutput::json(json!({
+                                "modelFacing": true,
+                                "toolCallId": options.tool_call_id,
+                                "city": options.input["city"],
+                                "forecast": options.output["forecast"]
+                            }))
+                        }),
+                )
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(
+            result.tool_results[0].output,
+            json!({
+                "forecast": "sunny",
+                "city": "Brisbane"
+            })
+        );
+
+        let calls = model.calls.borrow();
+        let LanguageModelMessage::Tool(tool_message) = &calls[1].prompt[2] else {
+            panic!("second prompt includes tool response");
+        };
+
+        assert_eq!(
+            tool_message.content[0],
+            LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                "call-1",
+                "weather",
+                LanguageModelToolResultOutput::json(json!({
+                    "modelFacing": true,
+                    "toolCallId": "call-1",
+                    "city": "Brisbane",
+                    "forecast": "sunny"
+                }))
+            ))
         );
     }
 

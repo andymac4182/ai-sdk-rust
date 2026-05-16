@@ -29,7 +29,7 @@ use crate::language_model::{
     LanguageModelProviderTool, LanguageModelReasoningEffort, LanguageModelStreamPart,
     LanguageModelSupportedUrls, LanguageModelSystemMessage, LanguageModelTool,
     LanguageModelToolCall, LanguageModelToolInputDelta, LanguageModelToolInputEnd,
-    LanguageModelToolInputExample, LanguageModelToolInputStart,
+    LanguageModelToolInputExample, LanguageModelToolInputStart, LanguageModelToolResultOutput,
 };
 use crate::provider::{
     ApiCallError, EmptyResponseBodyError, InvalidArgumentError, InvalidResponseDataError,
@@ -3772,6 +3772,39 @@ impl ToolDescriptionOptions {
 /// Runtime-dependent tool description callback.
 pub type ToolDescriptionFunction = dyn Fn(ToolDescriptionOptions) -> String + Send + Sync;
 
+/// Options passed when converting a tool result into model-facing output.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolModelOutputOptions {
+    /// Identifier of the model tool call whose result is being converted.
+    pub tool_call_id: String,
+
+    /// Tool input that produced the output.
+    pub input: JsonValue,
+
+    /// Raw tool output returned by the executor or high-level message.
+    pub output: JsonValue,
+}
+
+impl ToolModelOutputOptions {
+    /// Creates model-output conversion options.
+    pub fn new(tool_call_id: impl Into<String>, input: JsonValue, output: JsonValue) -> Self {
+        Self {
+            tool_call_id: tool_call_id.into(),
+            input,
+            output,
+        }
+    }
+}
+
+/// Future returned by a tool model-output conversion callback.
+pub type ToolModelOutputFuture =
+    Pin<Box<dyn Future<Output = LanguageModelToolResultOutput> + Send>>;
+
+/// Runtime callback that converts raw tool output to model-facing output.
+pub type ToolModelOutputFunction =
+    dyn Fn(ToolModelOutputOptions) -> ToolModelOutputFuture + Send + Sync;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ToolKind {
     Function,
@@ -3948,6 +3981,7 @@ pub struct Tool {
     pub needs_approval: Option<bool>,
 
     execute: Option<Arc<ToolExecuteFunction>>,
+    to_model_output: Option<Arc<ToolModelOutputFunction>>,
 }
 
 impl Tool {
@@ -3967,6 +4001,7 @@ impl Tool {
             metadata: None,
             needs_approval: None,
             execute: None,
+            to_model_output: None,
         }
     }
 
@@ -3990,6 +4025,7 @@ impl Tool {
             metadata: None,
             needs_approval: None,
             execute: None,
+            to_model_output: None,
         }
     }
 
@@ -4024,6 +4060,7 @@ impl Tool {
             metadata: None,
             needs_approval: None,
             execute: None,
+            to_model_output: None,
         }
     }
 
@@ -4058,6 +4095,7 @@ impl Tool {
             metadata: None,
             needs_approval: None,
             execute: None,
+            to_model_output: None,
         }
     }
 
@@ -4171,6 +4209,20 @@ impl Tool {
         self
     }
 
+    /// Sets the conversion callback used to shape model-facing tool output.
+    ///
+    /// Upstream `toModelOutput` is invoked after successful local tool
+    /// execution, and before a tool result is appended to the next model
+    /// prompt. Error outputs bypass this callback.
+    pub fn with_to_model_output<F, Fut>(mut self, to_model_output: F) -> Self
+    where
+        F: Fn(ToolModelOutputOptions) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = LanguageModelToolResultOutput> + Send + 'static,
+    {
+        self.to_model_output = Some(Arc::new(move |options| Box::pin(to_model_output(options))));
+        self
+    }
+
     /// Returns whether this tool has an executor.
     pub fn is_executable(&self) -> bool {
         self.execute.is_some()
@@ -4257,6 +4309,11 @@ impl Tool {
         self.description_resolver.is_some()
     }
 
+    /// Returns whether this tool has a model-output conversion callback.
+    pub fn has_to_model_output(&self) -> bool {
+        self.to_model_output.is_some()
+    }
+
     /// Executes this tool when an executor is present.
     pub fn execute(
         &self,
@@ -4264,6 +4321,13 @@ impl Tool {
         options: ToolExecutionOptions,
     ) -> Option<ToolExecuteFuture> {
         self.execute.as_ref().map(|execute| execute(input, options))
+    }
+
+    /// Converts raw tool output into model-facing output when a callback exists.
+    pub fn model_output(&self, options: ToolModelOutputOptions) -> Option<ToolModelOutputFuture> {
+        self.to_model_output
+            .as_ref()
+            .map(|to_model_output| to_model_output(options))
     }
 
     /// Converts this high-level tool into the provider-facing language-model tool shape.
@@ -4337,6 +4401,7 @@ impl fmt::Debug for Tool {
                 "has_dynamic_description",
                 &self.description_resolver.is_some(),
             )
+            .field("has_to_model_output", &self.to_model_output.is_some())
             .field("input_schema", &self.input_schema)
             .field("context_schema", &self.context_schema)
             .field("input_examples", &self.input_examples)
@@ -6919,8 +6984,8 @@ mod tests {
     use crate::language_model::{
         LanguageModelFilePart, LanguageModelFunctionTool, LanguageModelMessage,
         LanguageModelProviderTool, LanguageModelReasoningEffort, LanguageModelSystemMessage,
-        LanguageModelTextPart, LanguageModelTool, LanguageModelUserContentPart,
-        LanguageModelUserMessage,
+        LanguageModelTextPart, LanguageModelTool, LanguageModelToolResultOutput,
+        LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::{
         ApiCallError, FileData, FileDataContent, ImageModelFile, JsonObject, JsonValue,
@@ -6946,12 +7011,13 @@ mod tests {
         Schema, SerializedModelOptions, StatusCodeErrorResponseHandlerOptions,
         StreamingToolCallDelta, StreamingToolCallDeltaFunction, StreamingToolCallTracker,
         StreamingToolCallTrackerOptions, StreamingToolCallTypeValidation, Tool,
-        ToolDescriptionOptions, ToolExecutionError, ToolExecutionOptions, ValidateTypesResult,
-        ValidationResult, add_additional_properties_to_json_schema, as_array, as_flexible_schema,
-        as_schema, combine_headers, convert_base64_to_bytes, convert_bytes_to_base64,
-        convert_image_model_file_to_data_uri, convert_inline_file_data_to_bytes, convert_to_base64,
-        convert_to_form_data, create_binary_response_handler, create_event_source_response_handler,
-        create_id_generator, create_json_error_response_handler, create_json_response_handler,
+        ToolDescriptionOptions, ToolExecutionError, ToolExecutionOptions, ToolModelOutputOptions,
+        ValidateTypesResult, ValidationResult, add_additional_properties_to_json_schema, as_array,
+        as_flexible_schema, as_schema, combine_headers, convert_base64_to_bytes,
+        convert_bytes_to_base64, convert_image_model_file_to_data_uri,
+        convert_inline_file_data_to_bytes, convert_to_base64, convert_to_form_data,
+        create_binary_response_handler, create_event_source_response_handler, create_id_generator,
+        create_json_error_response_handler, create_json_response_handler,
         create_provider_defined_tool_factory,
         create_provider_defined_tool_factory_with_output_schema,
         create_provider_executed_tool_factory, create_status_code_error_response_handler,
@@ -13169,6 +13235,71 @@ mod tests {
                     "apiKey": "secret"
                 }
             })
+        );
+    }
+
+    #[test]
+    fn tool_model_output_options_round_trip_upstream_shape() {
+        let options = ToolModelOutputOptions::new(
+            "call-1",
+            json!({ "city": "Brisbane" }),
+            json!({ "forecast": "sunny" }),
+        );
+
+        assert_eq!(
+            serde_json::to_value(&options).expect("model output options serialize"),
+            json!({
+                "toolCallId": "call-1",
+                "input": {
+                    "city": "Brisbane"
+                },
+                "output": {
+                    "forecast": "sunny"
+                }
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ToolModelOutputOptions>(json!({
+                "toolCallId": "call-2",
+                "input": {
+                    "query": "weather"
+                },
+                "output": "sunny"
+            }))
+            .expect("model output options deserialize"),
+            ToolModelOutputOptions::new("call-2", json!({ "query": "weather" }), json!("sunny"))
+        );
+    }
+
+    #[test]
+    fn tool_model_output_callback_receives_tool_result_context() {
+        let tool =
+            Tool::new("weather", object_schema()).with_to_model_output(|options| async move {
+                LanguageModelToolResultOutput::json(json!({
+                    "call": options.tool_call_id,
+                    "city": options.input["city"],
+                    "forecast": options.output["forecast"]
+                }))
+            });
+
+        assert!(tool.has_to_model_output());
+
+        let output = poll_ready(
+            tool.model_output(ToolModelOutputOptions::new(
+                "call-1",
+                json!({ "city": "Brisbane" }),
+                json!({ "forecast": "sunny" }),
+            ))
+            .expect("callback is configured"),
+        );
+
+        assert_eq!(
+            output,
+            LanguageModelToolResultOutput::json(json!({
+                "call": "call-1",
+                "city": "Brisbane",
+                "forecast": "sunny"
+            }))
         );
     }
 
