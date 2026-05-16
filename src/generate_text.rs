@@ -8,13 +8,13 @@ use crate::language_model::{
     LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
     LanguageModelCustomPart, LanguageModelFile, LanguageModelFileData, LanguageModelFilePart,
     LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelMessage,
-    LanguageModelPrompt, LanguageModelReasoningEffort, LanguageModelReasoningFilePart,
-    LanguageModelReasoningPart, LanguageModelRequest, LanguageModelResponse,
-    LanguageModelResponseFormat, LanguageModelSource, LanguageModelText, LanguageModelTextPart,
-    LanguageModelTool, LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolChoice,
-    LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResult,
-    LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
-    OutputTokenUsage,
+    LanguageModelPrompt, LanguageModelReasoning, LanguageModelReasoningEffort,
+    LanguageModelReasoningFile, LanguageModelReasoningFilePart, LanguageModelReasoningPart,
+    LanguageModelRequest, LanguageModelResponse, LanguageModelResponseFormat, LanguageModelSource,
+    LanguageModelText, LanguageModelTextPart, LanguageModelTool, LanguageModelToolCall,
+    LanguageModelToolCallPart, LanguageModelToolChoice, LanguageModelToolContentPart,
+    LanguageModelToolMessage, LanguageModelToolResult, LanguageModelToolResultOutput,
+    LanguageModelToolResultPart, LanguageModelUsage, OutputTokenUsage,
 };
 use crate::provider::JsonParseError;
 use crate::provider::{ProviderMetadata, ProviderOptions};
@@ -22,6 +22,17 @@ use crate::provider_utils::{Tool, ToolExecutionOptions, prepare_tools};
 use crate::warning::Warning;
 
 const DEFAULT_MAX_STEPS: usize = 1;
+
+/// Reasoning content emitted during a high-level generate-text step.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum GenerateTextReasoning {
+    /// Text reasoning emitted by the model.
+    Reasoning(LanguageModelReasoning),
+
+    /// File emitted by the model as part of reasoning.
+    ReasoningFile(LanguageModelReasoningFile),
+}
 
 /// Tool input accepted by [`GenerateTextOptions::with_tool`].
 #[derive(Clone, Debug)]
@@ -378,6 +389,14 @@ pub struct GenerateTextStep {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<LanguageModelFile>,
 
+    /// Reasoning generated during this step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning: Vec<GenerateTextReasoning>,
+
+    /// Text from reasoning parts generated during this step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_text: Option<String>,
+
     /// Sources used to generate this step.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<LanguageModelSource>,
@@ -435,6 +454,8 @@ impl GenerateTextStep {
         let tool_calls = extract_tool_calls(&content);
         let tool_results = extract_provider_tool_results(&content, &tool_calls);
         let files = extract_files(&content);
+        let reasoning = extract_reasoning(&content);
+        let reasoning_text = extract_reasoning_text(&reasoning);
         let sources = extract_sources(&content);
 
         Self {
@@ -445,6 +466,8 @@ impl GenerateTextStep {
             tool_results,
             response_messages: Vec::new(),
             files,
+            reasoning,
+            reasoning_text,
             sources,
             text,
             finish_reason: unified,
@@ -480,6 +503,14 @@ pub struct GenerateTextResult {
     /// Files generated across all steps.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<LanguageModelFile>,
+
+    /// Reasoning generated in the final step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning: Vec<GenerateTextReasoning>,
+
+    /// Text from reasoning parts generated in the final step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_text: Option<String>,
 
     /// Sources used to generate the response across all steps.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -548,6 +579,8 @@ impl GenerateTextResult {
                 .iter()
                 .flat_map(|step| step.files.iter().cloned())
                 .collect(),
+            reasoning: final_step.reasoning.clone(),
+            reasoning_text: final_step.reasoning_text.clone(),
             sources: steps
                 .iter()
                 .flat_map(|step| step.sources.iter().cloned())
@@ -660,6 +693,33 @@ fn extract_files(content: &[LanguageModelContent]) -> Vec<LanguageModelFile> {
             _ => None,
         })
         .collect()
+}
+
+fn extract_reasoning(content: &[LanguageModelContent]) -> Vec<GenerateTextReasoning> {
+    content
+        .iter()
+        .filter_map(|part| match part {
+            LanguageModelContent::Reasoning(reasoning) => {
+                Some(GenerateTextReasoning::Reasoning(reasoning.clone()))
+            }
+            LanguageModelContent::ReasoningFile(file) => {
+                Some(GenerateTextReasoning::ReasoningFile(file.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn extract_reasoning_text(reasoning: &[GenerateTextReasoning]) -> Option<String> {
+    let text = reasoning
+        .iter()
+        .filter_map(|part| match part {
+            GenerateTextReasoning::Reasoning(reasoning) => Some(reasoning.text.as_str()),
+            GenerateTextReasoning::ReasoningFile(_) => None,
+        })
+        .collect::<String>();
+
+    if text.is_empty() { None } else { Some(text) }
 }
 
 fn extract_provider_tool_results(
@@ -1084,20 +1144,21 @@ fn add_optional_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        GenerateTextModelInfo, GenerateTextOptions, GenerateTextResult, GenerateTextStep,
-        GenerateTextToolCall, GenerateTextToolResult, generate_text,
+        GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning, GenerateTextResult,
+        GenerateTextStep, GenerateTextToolCall, GenerateTextToolResult, generate_text,
     };
     use crate::file_data::FileDataContent;
     use crate::language_model::{
         FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
         LanguageModelCallOptions, LanguageModelContent, LanguageModelFile, LanguageModelFileData,
         LanguageModelFinishReason, LanguageModelFunctionTool, LanguageModelGenerateResult,
-        LanguageModelMessage, LanguageModelSource, LanguageModelStreamPart,
-        LanguageModelStreamResult, LanguageModelSupportedUrls, LanguageModelText,
-        LanguageModelTextPart, LanguageModelTool, LanguageModelToolCall, LanguageModelToolCallPart,
-        LanguageModelToolContentPart, LanguageModelToolResult, LanguageModelToolResultOutput,
-        LanguageModelToolResultPart, LanguageModelUsage, LanguageModelUserContentPart,
-        LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelMessage, LanguageModelReasoning, LanguageModelReasoningFile,
+        LanguageModelSource, LanguageModelStreamPart, LanguageModelStreamResult,
+        LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextPart, LanguageModelTool,
+        LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolContentPart,
+        LanguageModelToolResult, LanguageModelToolResultOutput, LanguageModelToolResultPart,
+        LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage,
+        OutputTokenUsage,
     };
     use crate::provider::{ProviderMetadata, SpecificationVersion};
     use crate::provider_utils::{Tool, ToolExecutionError};
@@ -1262,6 +1323,8 @@ mod tests {
                 ]),
             )],
             files: Vec::new(),
+            reasoning: Vec::new(),
+            reasoning_text: None,
             sources: Vec::new(),
             text: "Hello".to_string(),
             finish_reason: FinishReason::Stop,
@@ -1418,6 +1481,38 @@ mod tests {
     }
 
     #[test]
+    fn generate_text_reasoning_deserializes_generated_reasoning_shapes() {
+        let reasoning: GenerateTextReasoning = serde_json::from_value(json!({
+            "type": "reasoning",
+            "text": "thinking"
+        }))
+        .expect("reasoning deserializes");
+        let reasoning_file: GenerateTextReasoning = serde_json::from_value(json!({
+            "type": "reasoning-file",
+            "mediaType": "text/plain",
+            "data": {
+                "type": "data",
+                "data": "notes"
+            }
+        }))
+        .expect("reasoning file deserializes");
+
+        assert_eq!(
+            reasoning,
+            GenerateTextReasoning::Reasoning(LanguageModelReasoning::new("thinking"))
+        );
+        assert_eq!(
+            reasoning_file,
+            GenerateTextReasoning::ReasoningFile(LanguageModelReasoningFile::new(
+                "text/plain",
+                LanguageModelFileData::Data {
+                    data: FileDataContent::Base64("notes".to_string())
+                }
+            ))
+        );
+    }
+
+    #[test]
     fn generate_text_result_deserializes_minimal_contract() {
         let result: GenerateTextResult = serde_json::from_value(json!({
             "content": [],
@@ -1530,6 +1625,90 @@ mod tests {
                         "type": "data",
                         "data": [4, 5, 6]
                     }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn generate_text_surfaces_final_step_reasoning_and_reasoning_text() {
+        let reasoning_file = LanguageModelReasoningFile::new(
+            "image/png",
+            LanguageModelFileData::Data {
+                data: FileDataContent::Base64("cmVhc29uaW5n".to_string()),
+            },
+        );
+        let first_step = GenerateTextStep::from_language_model_result(
+            0,
+            GenerateTextModelInfo::new("test-provider", "test-model"),
+            LanguageModelGenerateResult::new(
+                vec![LanguageModelContent::Reasoning(
+                    LanguageModelReasoning::new("first thoughts"),
+                )],
+                LanguageModelFinishReason {
+                    unified: FinishReason::ToolCalls,
+                    raw: None,
+                },
+                LanguageModelUsage::default(),
+            ),
+        );
+        let second_step = GenerateTextStep::from_language_model_result(
+            1,
+            GenerateTextModelInfo::new("test-provider", "test-model"),
+            LanguageModelGenerateResult::new(
+                vec![
+                    LanguageModelContent::Reasoning(LanguageModelReasoning::new("final ")),
+                    LanguageModelContent::ReasoningFile(reasoning_file.clone()),
+                    LanguageModelContent::Reasoning(LanguageModelReasoning::new("thoughts")),
+                    LanguageModelContent::Text(LanguageModelText::new("Done")),
+                ],
+                LanguageModelFinishReason {
+                    unified: FinishReason::Stop,
+                    raw: None,
+                },
+                LanguageModelUsage::default(),
+            ),
+        );
+
+        let result = GenerateTextResult::from_steps(vec![first_step, second_step]);
+
+        assert_eq!(
+            result.steps[0].reasoning,
+            vec![GenerateTextReasoning::Reasoning(
+                LanguageModelReasoning::new("first thoughts")
+            )]
+        );
+        assert_eq!(
+            result.steps[0].reasoning_text.as_deref(),
+            Some("first thoughts")
+        );
+        assert_eq!(result.reasoning_text.as_deref(), Some("final thoughts"));
+        assert_eq!(
+            result.reasoning,
+            vec![
+                GenerateTextReasoning::Reasoning(LanguageModelReasoning::new("final ")),
+                GenerateTextReasoning::ReasoningFile(reasoning_file.clone()),
+                GenerateTextReasoning::Reasoning(LanguageModelReasoning::new("thoughts")),
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(&result.reasoning).expect("reasoning serializes"),
+            json!([
+                {
+                    "type": "reasoning",
+                    "text": "final "
+                },
+                {
+                    "type": "reasoning-file",
+                    "mediaType": "image/png",
+                    "data": {
+                        "type": "data",
+                        "data": "cmVhc29uaW5n"
+                    }
+                },
+                {
+                    "type": "reasoning",
+                    "text": "thoughts"
                 }
             ])
         );
