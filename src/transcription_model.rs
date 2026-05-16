@@ -1,11 +1,39 @@
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use time::OffsetDateTime;
 
 use crate::file_data::FileDataContent;
 use crate::headers::Headers;
 use crate::json::JsonValue;
-use crate::provider::{ProviderMetadata, ProviderOptions};
+use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
 use crate::warning::Warning;
+
+/// A provider-v4 transcription model.
+///
+/// The upstream TypeScript contract exposes a `doGenerate` method returning a
+/// `PromiseLike<TranscriptionModelV4Result>`. This Rust trait maps that
+/// boundary to an associated [`Future`] without introducing an async-trait
+/// dependency.
+pub trait TranscriptionModel {
+    /// Future returned by [`TranscriptionModel::do_generate`].
+    type GenerateFuture<'a>: Future<Output = TranscriptionModelResult> + Send + 'a
+    where
+        Self: 'a;
+
+    /// Returns the provider/model interface version implemented by this model.
+    fn specification_version(&self) -> SpecificationVersion {
+        SpecificationVersion::V4
+    }
+
+    /// Returns the provider identifier.
+    fn provider(&self) -> &str;
+
+    /// Returns the provider-specific model id.
+    fn model_id(&self) -> &str;
+
+    /// Generates a transcript for the supplied audio options.
+    fn do_generate(&self, options: TranscriptionModelCallOptions) -> Self::GenerateFuture<'_>;
+}
 
 /// Options passed to a transcription model provider call.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -231,14 +259,55 @@ impl TranscriptionModelResult {
 #[cfg(test)]
 mod tests {
     use super::{
-        TranscriptionModelCallOptions, TranscriptionModelRequest, TranscriptionModelResponse,
-        TranscriptionModelResult, TranscriptionModelSegment,
+        TranscriptionModel, TranscriptionModelCallOptions, TranscriptionModelRequest,
+        TranscriptionModelResponse, TranscriptionModelResult, TranscriptionModelSegment,
     };
     use crate::file_data::FileDataContent;
-    use crate::provider::{ProviderMetadata, ProviderOptions};
+    use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
     use crate::warning::Warning;
     use serde_json::json;
+    use std::future::{Future, Ready, ready};
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+
+    struct StaticTranscriptionModel;
+
+    impl TranscriptionModel for StaticTranscriptionModel {
+        type GenerateFuture<'a>
+            = Ready<TranscriptionModelResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "test-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            "transcribe-test"
+        }
+
+        fn do_generate(&self, _options: TranscriptionModelCallOptions) -> Self::GenerateFuture<'_> {
+            let timestamp =
+                OffsetDateTime::parse("2024-01-02T03:04:05Z", &Rfc3339).expect("timestamp parses");
+
+            ready(TranscriptionModelResult::new(
+                "hello world",
+                vec![TranscriptionModelSegment::new("hello world", 0.0, 1.2)],
+                TranscriptionModelResponse::new(timestamp, self.model_id()),
+            ))
+        }
+    }
+
+    fn poll_ready<T>(mut future: Ready<T>) -> T {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+
+        match Pin::new(&mut future).poll(&mut context) {
+            Poll::Ready(value) => value,
+            Poll::Pending => unreachable!("std::future::Ready never returns pending"),
+        }
+    }
 
     #[test]
     fn call_options_serializes_upstream_shape_with_audio_options_and_headers() {
@@ -295,6 +364,23 @@ mod tests {
                 "mediaType": "audio/wav"
             })
         );
+    }
+
+    #[test]
+    fn transcription_model_trait_exposes_upstream_v4_identity_and_generate_boundary() {
+        let model = StaticTranscriptionModel;
+        let options = TranscriptionModelCallOptions::new(
+            FileDataContent::Base64("UklGRg==".to_string()),
+            "audio/wav",
+        );
+
+        let result = poll_ready(model.do_generate(options));
+
+        assert_eq!(model.specification_version(), SpecificationVersion::V4);
+        assert_eq!(model.provider(), "test-provider");
+        assert_eq!(model.model_id(), "transcribe-test");
+        assert_eq!(result.text, "hello world");
+        assert_eq!(result.response.model_id, "transcribe-test");
     }
 
     #[test]

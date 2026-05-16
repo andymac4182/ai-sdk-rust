@@ -64,8 +64,8 @@ pub use provider::{
     ApiCallError, EmptyResponseBodyError, InvalidArgumentError, InvalidPromptError,
     InvalidResponseDataError, JsonParseError, LoadApiKeyError, LoadSettingError, ModelType,
     NoContentGeneratedError, NoSuchModelError, ProviderMetadata, ProviderOptions,
-    TooManyEmbeddingValuesForCallError, TypeValidationContext, TypeValidationError,
-    UnsupportedFunctionalityError, get_error_message,
+    SpecificationVersion, TooManyEmbeddingValuesForCallError, TypeValidationContext,
+    TypeValidationError, UnsupportedFunctionalityError, get_error_message,
 };
 pub use reranking_model::{
     RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
@@ -79,8 +79,8 @@ pub use speech_model::{
     SpeechModelResult,
 };
 pub use transcription_model::{
-    TranscriptionModelCallOptions, TranscriptionModelRequest, TranscriptionModelResponse,
-    TranscriptionModelResult, TranscriptionModelSegment,
+    TranscriptionModel, TranscriptionModelCallOptions, TranscriptionModelRequest,
+    TranscriptionModelResponse, TranscriptionModelResult, TranscriptionModelSegment,
 };
 pub use video_model::{
     VideoModelCallOptions, VideoModelFile, VideoModelResponse, VideoModelResult,

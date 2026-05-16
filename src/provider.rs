@@ -15,6 +15,29 @@ pub fn get_error_message(error: Option<&dyn fmt::Display>) -> String {
     error.map_or_else(|| "unknown error".to_string(), ToString::to_string)
 }
 
+/// Provider and model interface specification versions supported by this crate.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub enum SpecificationVersion {
+    /// The upstream provider-v4 interface version.
+    #[serde(rename = "v4")]
+    V4,
+}
+
+impl SpecificationVersion {
+    /// Returns the upstream specification version string.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::V4 => "v4",
+        }
+    }
+}
+
+impl fmt::Display for SpecificationVersion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// The upstream provider model categories used when reporting missing models.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -920,7 +943,7 @@ mod tests {
     use super::{
         ApiCallError, EmptyResponseBodyError, InvalidArgumentError, InvalidPromptError,
         InvalidResponseDataError, JsonParseError, LoadApiKeyError, LoadSettingError, ModelType,
-        NoContentGeneratedError, NoSuchModelError, ProviderOptions,
+        NoContentGeneratedError, NoSuchModelError, ProviderOptions, SpecificationVersion,
         TooManyEmbeddingValuesForCallError, TypeValidationContext, TypeValidationError,
         UnsupportedFunctionalityError, get_error_message,
     };
@@ -994,6 +1017,25 @@ mod tests {
         assert_eq!(model_type, ModelType::RerankingModel);
         assert_eq!(model_type.as_str(), "rerankingModel");
         assert_eq!(model_type.to_string(), "rerankingModel");
+    }
+
+    #[test]
+    fn specification_version_serializes_as_upstream_v4_literal() {
+        assert_eq!(
+            serde_json::to_value(SpecificationVersion::V4)
+                .expect("specification version serializes"),
+            json!("v4")
+        );
+        assert_eq!(SpecificationVersion::V4.as_str(), "v4");
+        assert_eq!(SpecificationVersion::V4.to_string(), "v4");
+    }
+
+    #[test]
+    fn specification_version_deserializes_from_upstream_v4_literal() {
+        let version: SpecificationVersion =
+            serde_json::from_value(json!("v4")).expect("specification version deserializes");
+
+        assert_eq!(version, SpecificationVersion::V4);
     }
 
     #[test]
