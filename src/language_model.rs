@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+use url::Url;
 
+use crate::file_data::FileDataContent;
 use crate::json::JsonObject;
 use crate::provider::ProviderMetadata;
 
@@ -221,6 +223,101 @@ impl LanguageModelCustomContent {
     }
 }
 
+/// Generated file data returned by a language model.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum LanguageModelFileData {
+    /// Raw bytes or base64-encoded generated file content.
+    Data { data: FileDataContent },
+
+    /// A URL pointing to the generated file.
+    Url { url: Url },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelFileKind {
+    #[serde(rename = "file")]
+    File,
+}
+
+/// A file that the model has generated.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelFile {
+    #[serde(rename = "type")]
+    kind: LanguageModelFileKind,
+
+    /// The IANA media type of the generated file.
+    pub media_type: String,
+
+    /// Generated file data.
+    pub data: LanguageModelFileData,
+
+    /// Optional provider-specific metadata for the file part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+}
+
+impl LanguageModelFile {
+    /// Creates a generated file part.
+    pub fn new(media_type: impl Into<String>, data: LanguageModelFileData) -> Self {
+        Self {
+            kind: LanguageModelFileKind::File,
+            media_type: media_type.into(),
+            data,
+            provider_metadata: None,
+        }
+    }
+
+    /// Adds provider-specific metadata to this generated file part.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelReasoningFileKind {
+    #[serde(rename = "reasoning-file")]
+    ReasoningFile,
+}
+
+/// A file that the model has generated as part of reasoning.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelReasoningFile {
+    #[serde(rename = "type")]
+    kind: LanguageModelReasoningFileKind,
+
+    /// The IANA media type of the generated reasoning file.
+    pub media_type: String,
+
+    /// Generated file data.
+    pub data: LanguageModelFileData,
+
+    /// Optional provider-specific metadata for the reasoning file part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+}
+
+impl LanguageModelReasoningFile {
+    /// Creates a generated reasoning file part.
+    pub fn new(media_type: impl Into<String>, data: LanguageModelFileData) -> Self {
+        Self {
+            kind: LanguageModelReasoningFileKind::ReasoningFile,
+            media_type: media_type.into(),
+            data,
+            provider_metadata: None,
+        }
+    }
+
+    /// Adds provider-specific metadata to this reasoning file part.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+}
+
 /// Strategy for selecting a tool during a language model call.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -245,12 +342,15 @@ pub enum LanguageModelToolChoice {
 #[cfg(test)]
 mod tests {
     use super::{
-        FinishReason, InputTokenUsage, LanguageModelCustomContent, LanguageModelFinishReason,
-        LanguageModelReasoning, LanguageModelResponseMetadata, LanguageModelText,
+        FinishReason, InputTokenUsage, LanguageModelCustomContent, LanguageModelFile,
+        LanguageModelFileData, LanguageModelFinishReason, LanguageModelReasoning,
+        LanguageModelReasoningFile, LanguageModelResponseMetadata, LanguageModelText,
         LanguageModelToolChoice, LanguageModelUsage, OutputTokenUsage,
     };
+    use crate::file_data::FileDataContent;
     use serde_json::json;
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+    use url::Url;
 
     #[test]
     fn finish_reason_uses_upstream_kebab_case_names() {
@@ -487,6 +587,88 @@ mod tests {
                 "kind": "provider.block"
             })
         );
+    }
+
+    #[test]
+    fn file_part_serializes_upstream_data_shape_with_provider_metadata() {
+        let file = LanguageModelFile::new(
+            "image/png",
+            LanguageModelFileData::Data {
+                data: FileDataContent::Base64("iVBORw0KGgo=".to_string()),
+            },
+        )
+        .with_provider_metadata(
+            serde_json::from_value(json!({
+                "openai": {
+                    "fileId": "file_123"
+                }
+            }))
+            .expect("provider metadata deserializes"),
+        );
+
+        assert_eq!(
+            serde_json::to_value(file).expect("file part serializes"),
+            json!({
+                "type": "file",
+                "mediaType": "image/png",
+                "data": {
+                    "type": "data",
+                    "data": "iVBORw0KGgo="
+                },
+                "providerMetadata": {
+                    "openai": {
+                        "fileId": "file_123"
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn reasoning_file_part_deserializes_url_data_and_omits_missing_provider_metadata() {
+        let reasoning_file: LanguageModelReasoningFile = serde_json::from_value(json!({
+            "type": "reasoning-file",
+            "mediaType": "application/pdf",
+            "data": {
+                "type": "url",
+                "url": "https://example.com/reasoning.pdf"
+            }
+        }))
+        .expect("reasoning file part deserializes");
+
+        assert_eq!(
+            reasoning_file,
+            LanguageModelReasoningFile::new(
+                "application/pdf",
+                LanguageModelFileData::Url {
+                    url: Url::parse("https://example.com/reasoning.pdf").expect("valid URL"),
+                },
+            )
+        );
+        assert_eq!(
+            serde_json::to_value(reasoning_file).expect("reasoning file part serializes"),
+            json!({
+                "type": "reasoning-file",
+                "mediaType": "application/pdf",
+                "data": {
+                    "type": "url",
+                    "url": "https://example.com/reasoning.pdf"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn language_model_file_data_rejects_prompt_only_file_variants() {
+        let error = serde_json::from_value::<LanguageModelFileData>(json!({
+            "type": "reference",
+            "reference": {
+                "openai": "file_123"
+            }
+        }))
+        .expect_err("reference data is rejected for generated file data");
+
+        assert!(error.to_string().contains("unknown variant `reference`"));
     }
 
     #[test]
