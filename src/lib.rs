@@ -14,6 +14,7 @@ pub mod provider;
 pub mod reranking_model;
 pub mod speech_model;
 pub mod transcription_model;
+pub mod video_model;
 pub mod warning;
 
 pub use embedding_model::{
@@ -64,6 +65,10 @@ pub use speech_model::{
 pub use transcription_model::{
     TranscriptionModelCallOptions, TranscriptionModelRequest, TranscriptionModelResponse,
     TranscriptionModelResult, TranscriptionModelSegment,
+};
+pub use video_model::{
+    VideoModelCallOptions, VideoModelFile, VideoModelResponse, VideoModelResult,
+    VideoModelVideoData,
 };
 pub use warning::Warning;
 
