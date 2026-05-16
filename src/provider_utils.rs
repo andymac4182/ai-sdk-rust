@@ -201,6 +201,13 @@ pub fn media_type_to_extension(media_type: &str) -> String {
     }
 }
 
+/// Strips all file extension segments from a filename.
+pub fn strip_file_extension(filename: &str) -> &str {
+    filename
+        .find('.')
+        .map_or(filename, |first_dot_index| &filename[..first_dot_index])
+}
+
 /// Resolves a provider reference to the provider-specific identifier.
 ///
 /// This mirrors upstream `@ai-sdk/provider-utils` `resolveProviderReference`
@@ -223,7 +230,7 @@ mod tests {
     use super::{
         LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, load_api_key,
         load_api_key_with_env, load_optional_setting_with_env, load_setting, load_setting_with_env,
-        media_type_to_extension, resolve_provider_reference,
+        media_type_to_extension, resolve_provider_reference, strip_file_extension,
     };
 
     #[test]
@@ -401,6 +408,26 @@ mod tests {
         assert_eq!(media_type_to_extension("AUDIO/MPEG"), "mp3");
         assert_eq!(media_type_to_extension("AUDIO/MP3"), "mp3");
         assert_eq!(media_type_to_extension("nope"), "");
+    }
+
+    #[test]
+    fn strip_file_extension_strips_single_extension() {
+        assert_eq!(strip_file_extension("report.pdf"), "report");
+    }
+
+    #[test]
+    fn strip_file_extension_returns_input_when_there_is_no_dot() {
+        assert_eq!(strip_file_extension("report"), "report");
+    }
+
+    #[test]
+    fn strip_file_extension_strips_all_extension_segments() {
+        assert_eq!(strip_file_extension("archive.tar.gz"), "archive");
+    }
+
+    #[test]
+    fn strip_file_extension_strips_a_trailing_dot() {
+        assert_eq!(strip_file_extension("report."), "report");
     }
 
     #[test]
