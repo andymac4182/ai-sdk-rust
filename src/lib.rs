@@ -18,6 +18,7 @@ pub mod language_model_middleware;
 pub mod provider;
 pub mod provider_utils;
 pub mod reranking_model;
+pub mod retry;
 pub mod skills;
 pub mod speech_model;
 pub mod transcription_model;
@@ -134,6 +135,7 @@ pub use reranking_model::{
     RerankingModel, RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
     RerankingModelResponse, RerankingModelResult,
 };
+pub use retry::{RetryError, RetryErrorReason};
 pub use skills::{
     Skills, SkillsFile, SkillsFileData, SkillsUploadSkillCallOptions, SkillsUploadSkillResult,
 };
