@@ -389,6 +389,214 @@ impl<M: LanguageModel + ?Sized> fmt::Debug for PrepareStep<'_, M> {
     }
 }
 
+/// Event sent when a high-level non-streaming generate-text call starts.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateTextStartEvent {
+    /// Unique identifier for the generation call.
+    pub call_id: String,
+
+    /// Upstream operation identifier.
+    pub operation_id: String,
+
+    /// Provider identifier for the initial model.
+    pub provider: String,
+
+    /// Provider-specific model id for the initial model.
+    pub model_id: String,
+
+    /// Prompt messages at the start of the generation.
+    pub messages: LanguageModelPrompt,
+
+    /// Tools available to the generation before active-tool filtering.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<LanguageModelTool>,
+
+    /// Tool-choice strategy configured for the generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<LanguageModelToolChoice>,
+
+    /// Optional active-tool restriction for the generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_tools: Option<Vec<String>>,
+
+    /// Maximum output tokens configured for the generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
+
+    /// Sampling temperature configured for the generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+
+    /// Nucleus sampling value configured for the generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+
+    /// Top-k sampling value configured for the generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u64>,
+
+    /// Presence penalty configured for the generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f64>,
+
+    /// Frequency penalty configured for the generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f64>,
+
+    /// Stop sequences configured for the generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_sequences: Option<Vec<String>>,
+
+    /// Deterministic sampling seed configured for the generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+
+    /// Reasoning effort configured for the generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<LanguageModelReasoningEffort>,
+
+    /// Additional HTTP headers configured for the generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Headers>,
+
+    /// Provider-specific options configured for the generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+
+    /// Runtime context at the start of the generation.
+    #[serde(default)]
+    pub runtime_context: JsonObject,
+
+    /// Tool context at the start of the generation.
+    #[serde(default)]
+    pub tools_context: JsonObject,
+}
+
+/// Event sent before each high-level non-streaming generate-text model step.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateTextStepStartEvent {
+    /// Unique identifier for the generation call.
+    pub call_id: String,
+
+    /// Provider identifier for the step model.
+    pub provider: String,
+
+    /// Provider-specific model id for the step model.
+    pub model_id: String,
+
+    /// Zero-based step index.
+    pub step_number: usize,
+
+    /// Prompt messages that will be sent for this step.
+    pub messages: LanguageModelPrompt,
+
+    /// Tools available to the model for this step after active-tool filtering.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<LanguageModelTool>,
+
+    /// Tool-choice strategy for this step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<LanguageModelToolChoice>,
+
+    /// Active-tool restriction used for this step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_tools: Option<Vec<String>>,
+
+    /// Previously completed steps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<GenerateTextStep>,
+
+    /// Provider-specific options for this step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+
+    /// Runtime context used for this step.
+    #[serde(default)]
+    pub runtime_context: JsonObject,
+
+    /// Tool context used for this step.
+    #[serde(default)]
+    pub tools_context: JsonObject,
+}
+
+/// Future returned by a high-level generate-text start callback.
+pub type GenerateTextOnStartFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+/// Callback invoked before a non-streaming generate-text call performs model work.
+pub type GenerateTextOnStartFunction<'a> =
+    dyn Fn(GenerateTextStartEvent) -> GenerateTextOnStartFuture<'a> + 'a;
+
+/// Callback wrapper for upstream `experimental_onStart`.
+pub struct GenerateTextOnStart<'a> {
+    on_start: Rc<GenerateTextOnStartFunction<'a>>,
+}
+
+impl<'a> GenerateTextOnStart<'a> {
+    /// Creates a generation-start callback.
+    pub fn new<F, Fut>(on_start: F) -> Self
+    where
+        F: Fn(GenerateTextStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        Self {
+            on_start: Rc::new(move |event| Box::pin(on_start(event))),
+        }
+    }
+
+    /// Runs the generation-start callback.
+    pub fn start(&self, event: GenerateTextStartEvent) -> GenerateTextOnStartFuture<'a> {
+        (self.on_start)(event)
+    }
+}
+
+impl fmt::Debug for GenerateTextOnStart<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GenerateTextOnStart")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Future returned by a high-level generate-text step-start callback.
+pub type GenerateTextOnStepStartFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+/// Callback invoked before each non-streaming generate-text model step starts.
+pub type GenerateTextOnStepStartFunction<'a> =
+    dyn Fn(GenerateTextStepStartEvent) -> GenerateTextOnStepStartFuture<'a> + 'a;
+
+/// Callback wrapper for upstream `experimental_onStepStart`.
+pub struct GenerateTextOnStepStart<'a> {
+    on_step_start: Rc<GenerateTextOnStepStartFunction<'a>>,
+}
+
+impl<'a> GenerateTextOnStepStart<'a> {
+    /// Creates a step-start callback.
+    pub fn new<F, Fut>(on_step_start: F) -> Self
+    where
+        F: Fn(GenerateTextStepStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        Self {
+            on_step_start: Rc::new(move |event| Box::pin(on_step_start(event))),
+        }
+    }
+
+    /// Runs the step-start callback.
+    pub fn start(&self, event: GenerateTextStepStartEvent) -> GenerateTextOnStepStartFuture<'a> {
+        (self.on_step_start)(event)
+    }
+}
+
+impl fmt::Debug for GenerateTextOnStepStart<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GenerateTextOnStepStart")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Future returned by a high-level generate-text step-finish callback.
 pub type GenerateTextOnStepFinishFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
 
@@ -2108,6 +2316,12 @@ pub struct GenerateTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Optional per-step preparation callback.
     pub prepare_step: Option<PrepareStep<'a, M>>,
 
+    /// Optional callback invoked before any model work begins.
+    pub on_start: Option<GenerateTextOnStart<'a>>,
+
+    /// Optional callback invoked before each model step begins.
+    pub on_step_start: Option<GenerateTextOnStepStart<'a>>,
+
     /// Optional callback invoked after each completed generation step.
     pub on_step_finish: Option<GenerateTextOnStepFinish<'a>>,
 
@@ -2138,6 +2352,8 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             tool_input_refinements: BTreeMap::new(),
             tool_call_repair: None,
             prepare_step: None,
+            on_start: None,
+            on_step_start: None,
             on_step_finish: None,
             on_finish: None,
             max_steps: DEFAULT_MAX_STEPS,
@@ -2159,6 +2375,8 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             tool_input_refinements: BTreeMap::new(),
             tool_call_repair: None,
             prepare_step: None,
+            on_start: None,
+            on_step_start: None,
             on_step_finish: None,
             on_finish: None,
             max_steps: DEFAULT_MAX_STEPS,
@@ -2328,6 +2546,26 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
         Fut: Future<Output = PrepareStepResult<'a, M>> + 'a,
     {
         self.prepare_step = Some(PrepareStep::new(prepare));
+        self
+    }
+
+    /// Sets a callback that is invoked when generation starts before model work.
+    pub fn with_on_start<F, Fut>(mut self, on_start: F) -> Self
+    where
+        F: Fn(GenerateTextStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_start = Some(GenerateTextOnStart::new(on_start));
+        self
+    }
+
+    /// Sets a callback that is invoked before every model step.
+    pub fn with_on_step_start<F, Fut>(mut self, on_step_start: F) -> Self
+    where
+        F: Fn(GenerateTextStepStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_step_start = Some(GenerateTextOnStepStart::new(on_step_start));
         self
     }
 
@@ -3270,6 +3508,8 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         tool_input_refinements,
         tool_call_repair,
         prepare_step,
+        on_start,
+        on_step_start,
         on_step_finish,
         on_finish,
         max_steps,
@@ -3279,8 +3519,45 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
     let base_language_model_tools = call_options.tools.take();
     let initial_messages = call_options.prompt.clone();
     let mut current_prompt = initial_messages.clone();
+    let active_tools_for_start = active_tools.clone();
     let active_tools = active_tools.as_deref();
     let base_provider_options = call_options.provider_options.clone();
+
+    let max_steps = max_steps.max(1);
+    let call_id = generate_text_call_id();
+
+    if let Some(on_start) = &on_start {
+        let mut start_tools = base_language_model_tools.clone().unwrap_or_default();
+        if let Some(mut prepared_tools) = prepare_tools(&tools) {
+            start_tools.append(&mut prepared_tools);
+        }
+
+        on_start
+            .start(GenerateTextStartEvent {
+                call_id: call_id.clone(),
+                operation_id: "ai.generateText".to_string(),
+                provider: model.provider().to_string(),
+                model_id: model.model_id().to_string(),
+                messages: initial_messages.clone(),
+                tools: start_tools,
+                tool_choice: call_options.tool_choice.clone(),
+                active_tools: active_tools_for_start,
+                max_output_tokens: call_options.max_output_tokens,
+                temperature: call_options.temperature,
+                top_p: call_options.top_p,
+                top_k: call_options.top_k,
+                presence_penalty: call_options.presence_penalty,
+                frequency_penalty: call_options.frequency_penalty,
+                stop_sequences: call_options.stop_sequences.clone(),
+                seed: call_options.seed,
+                reasoning: call_options.reasoning.clone(),
+                headers: call_options.headers.clone(),
+                provider_options: call_options.provider_options.clone(),
+                runtime_context: runtime_context.clone(),
+                tools_context: tools_context.clone(),
+            })
+            .await;
+    }
 
     let mut initial_response_messages = Vec::new();
     if let Some(message) =
@@ -3290,8 +3567,6 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         initial_response_messages.push(message);
     }
 
-    let max_steps = max_steps.max(1);
-    let call_id = generate_text_call_id();
     let mut steps = Vec::new();
     let mut pending_deferred_provider_tool_call_ids = BTreeSet::new();
 
@@ -3366,6 +3641,25 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
             merge_provider_options(base_provider_options.as_ref(), step_provider_options);
 
         let step_prompt = step_call_options.prompt.clone();
+        if let Some(on_step_start) = &on_step_start {
+            on_step_start
+                .start(GenerateTextStepStartEvent {
+                    call_id: call_id.clone(),
+                    provider: step_model.provider().to_string(),
+                    model_id: step_model.model_id().to_string(),
+                    step_number,
+                    messages: step_prompt.clone(),
+                    tools: step_call_options.tools.clone().unwrap_or_default(),
+                    tool_choice: step_call_options.tool_choice.clone(),
+                    active_tools: step_active_tools.map(|tools| tools.to_vec()),
+                    steps: steps.clone(),
+                    provider_options: step_call_options.provider_options.clone(),
+                    runtime_context: runtime_context.clone(),
+                    tools_context: tools_context.clone(),
+                })
+                .await;
+        }
+
         let step_started_at = Instant::now();
         let result = step_model.do_generate(step_call_options.clone()).await;
         let response_time_ms = duration_ms(step_started_at.elapsed());
@@ -5035,19 +5329,20 @@ fn add_optional_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 mod tests {
     use super::{
         GenerateTextFinishEvent, GenerateTextInclude, GenerateTextModelInfo, GenerateTextOptions,
-        GenerateTextReasoning, GenerateTextResult, GenerateTextStep, GenerateTextStepPerformance,
-        GenerateTextToolCall, GenerateTextToolResult, InvalidStreamPartError,
-        InvalidToolApprovalError, InvalidToolInputError, MissingToolResultsError,
-        NoObjectGeneratedError, NoOutputGeneratedError, NoSuchToolError,
-        NormalizedToolApprovalStatus, PrepareStepResult, PruneEmptyMessages, PruneMessagesOptions,
-        PruneReasoning, PruneToolCallRule, PruneToolCallRuleMode, PruneToolCalls,
-        ResolveToolApprovalOptions, StopCondition, ToolApprovalConfiguration, ToolApprovalStatus,
-        ToolApprovalStatusKind, ToolCallNotFoundForApprovalError, ToolCallRepairError,
-        ToolCallRepairOptions, ToolCallRepairOriginalError, ToolInputRefinementError,
-        UiMessageStreamError, UnsupportedModelVersionError, collect_tool_approvals,
-        experimental_filter_active_tools, filter_active_tools, generate_text, has_tool_call,
-        is_loop_finished, is_step_count, is_stop_condition_met, normalize_tool_approval_status,
-        prune_messages, resolve_tool_approval, step_count_is,
+        GenerateTextReasoning, GenerateTextResult, GenerateTextStartEvent, GenerateTextStep,
+        GenerateTextStepPerformance, GenerateTextStepStartEvent, GenerateTextToolCall,
+        GenerateTextToolResult, InvalidStreamPartError, InvalidToolApprovalError,
+        InvalidToolInputError, MissingToolResultsError, NoObjectGeneratedError,
+        NoOutputGeneratedError, NoSuchToolError, NormalizedToolApprovalStatus, PrepareStepResult,
+        PruneEmptyMessages, PruneMessagesOptions, PruneReasoning, PruneToolCallRule,
+        PruneToolCallRuleMode, PruneToolCalls, ResolveToolApprovalOptions, StopCondition,
+        ToolApprovalConfiguration, ToolApprovalStatus, ToolApprovalStatusKind,
+        ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOptions,
+        ToolCallRepairOriginalError, ToolInputRefinementError, UiMessageStreamError,
+        UnsupportedModelVersionError, collect_tool_approvals, experimental_filter_active_tools,
+        filter_active_tools, generate_text, has_tool_call, is_loop_finished, is_step_count,
+        is_stop_condition_met, normalize_tool_approval_status, prune_messages,
+        resolve_tool_approval, step_count_is,
     };
     use crate::file_data::FileDataContent;
     use crate::json::JsonValue;
@@ -5067,7 +5362,9 @@ mod tests {
         LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
         LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
     };
-    use crate::provider::{JsonParseError, ProviderMetadata, SpecificationVersion};
+    use crate::provider::{
+        JsonParseError, ProviderMetadata, ProviderOptions, SpecificationVersion,
+    };
     use crate::provider_utils::{Tool, ToolExecutionError, dynamic_tool};
     use serde_json::json;
     use std::cell::RefCell;
@@ -6312,6 +6609,159 @@ mod tests {
         assert_eq!(performance.input_tokens_per_second, None);
         assert_eq!(performance.tool_execution_ms, BTreeMap::new());
         assert_eq!(performance.time_to_first_output_token_ms, None);
+    }
+
+    #[test]
+    fn generate_text_invokes_start_callbacks_with_configuration() {
+        let model = FakeLanguageModel::new();
+        let prompt = vec![user_message("Say hello")];
+        let runtime_context = json!({
+            "traceId": "trace_123"
+        })
+        .as_object()
+        .expect("runtime context is object")
+        .clone();
+        let tools_context = json!({
+            "weather": {
+                "unit": "celsius"
+            }
+        })
+        .as_object()
+        .expect("tools context is object")
+        .clone();
+        let mut provider_options = ProviderOptions::new();
+        provider_options.insert(
+            "test".to_string(),
+            json!({
+                "mode": "fast"
+            })
+            .as_object()
+            .expect("provider options are object")
+            .clone(),
+        );
+
+        let order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let start_events = Arc::new(Mutex::new(Vec::<GenerateTextStartEvent>::new()));
+        let step_start_events = Arc::new(Mutex::new(Vec::<GenerateTextStepStartEvent>::new()));
+        let order_for_start = Arc::clone(&order);
+        let order_for_step = Arc::clone(&order);
+        let start_events_for_callback = Arc::clone(&start_events);
+        let step_start_events_for_callback = Arc::clone(&step_start_events);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, prompt.clone())
+                .with_tool(
+                    Tool::new("weather", approval_tool_schema())
+                        .with_description("Look up weather"),
+                )
+                .with_active_tools(["weather"])
+                .with_tool_choice(LanguageModelToolChoice::Auto)
+                .with_max_output_tokens(42)
+                .with_temperature(0.2)
+                .with_top_p(0.8)
+                .with_stop_sequence("DONE")
+                .with_seed(7)
+                .with_header("x-trace", "trace_123")
+                .with_provider_options(provider_options.clone())
+                .with_runtime_context(runtime_context.clone())
+                .with_tools_context(tools_context.clone())
+                .with_on_start(move |event| {
+                    let order = Arc::clone(&order_for_start);
+                    let start_events = Arc::clone(&start_events_for_callback);
+                    async move {
+                        order.lock().expect("order lock").push("start");
+                        start_events.lock().expect("start events lock").push(event);
+                    }
+                })
+                .with_on_step_start(move |event| {
+                    let order = Arc::clone(&order_for_step);
+                    let step_start_events = Arc::clone(&step_start_events_for_callback);
+                    async move {
+                        order.lock().expect("order lock").push("step-start");
+                        step_start_events
+                            .lock()
+                            .expect("step-start events lock")
+                            .push(event);
+                    }
+                }),
+        ));
+
+        assert_eq!(
+            order.lock().expect("order lock").as_slice(),
+            ["start", "step-start"]
+        );
+
+        let start_events = start_events.lock().expect("start events lock");
+        assert_eq!(start_events.len(), 1);
+        let start = &start_events[0];
+        assert_eq!(start.call_id, result.final_step.call_id);
+        assert_eq!(start.operation_id, "ai.generateText");
+        assert_eq!(start.provider, "test-provider");
+        assert_eq!(start.model_id, "test-model");
+        assert_eq!(start.messages, prompt);
+        assert_eq!(start.active_tools, Some(vec!["weather".to_string()]));
+        assert_eq!(start.tool_choice, Some(LanguageModelToolChoice::Auto));
+        assert_eq!(start.max_output_tokens, Some(42));
+        assert_eq!(start.temperature, Some(0.2));
+        assert_eq!(start.top_p, Some(0.8));
+        assert_eq!(start.stop_sequences, Some(vec!["DONE".to_string()]));
+        assert_eq!(start.seed, Some(7));
+        assert_eq!(
+            start
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-trace")),
+            Some(&"trace_123".to_string())
+        );
+        assert_eq!(start.provider_options.as_ref(), Some(&provider_options));
+        assert_eq!(start.runtime_context, runtime_context);
+        assert_eq!(start.tools_context, tools_context);
+        assert_eq!(start.tools.len(), 1);
+        match &start.tools[0] {
+            LanguageModelTool::Function(tool) => {
+                assert_eq!(tool.name, "weather");
+                assert_eq!(tool.description.as_deref(), Some("Look up weather"));
+            }
+            LanguageModelTool::Provider(_) => panic!("expected prepared function tool"),
+        }
+        let start_value = serde_json::to_value(start).expect("start event serializes");
+        assert_eq!(start_value["operationId"], json!("ai.generateText"));
+        assert_eq!(
+            serde_json::from_value::<GenerateTextStartEvent>(start_value)
+                .expect("start event deserializes"),
+            start.clone()
+        );
+        drop(start_events);
+
+        let step_start_events = step_start_events.lock().expect("step-start events lock");
+        assert_eq!(step_start_events.len(), 1);
+        let step_start = &step_start_events[0];
+        assert_eq!(step_start.call_id, result.final_step.call_id);
+        assert_eq!(step_start.provider, "test-provider");
+        assert_eq!(step_start.model_id, "test-model");
+        assert_eq!(step_start.step_number, 0);
+        assert!(step_start.steps.is_empty());
+        assert_eq!(step_start.active_tools, Some(vec!["weather".to_string()]));
+        assert_eq!(step_start.tool_choice, Some(LanguageModelToolChoice::Auto));
+        assert_eq!(
+            step_start.provider_options.as_ref(),
+            Some(&provider_options)
+        );
+        assert_eq!(step_start.tools.len(), 1);
+        assert_eq!(step_start.messages, model.calls.borrow()[0].prompt);
+        assert_eq!(
+            step_start.runtime_context,
+            result.final_step.runtime_context
+        );
+        assert_eq!(step_start.tools_context, result.final_step.tools_context);
+        let step_start_value =
+            serde_json::to_value(step_start).expect("step-start event serializes");
+        assert_eq!(step_start_value["stepNumber"], json!(0));
+        assert_eq!(
+            serde_json::from_value::<GenerateTextStepStartEvent>(step_start_value)
+                .expect("step-start event deserializes"),
+            step_start.clone()
+        );
     }
 
     #[test]
