@@ -21,13 +21,15 @@ use crate::image_model::ImageModelFile;
 use crate::json::{JsonObject, JsonSchema, JsonValue};
 use crate::language_model::{
     LanguageModelFilePart, LanguageModelFunctionTool, LanguageModelMessage, LanguageModelPrompt,
-    LanguageModelReasoningEffort, LanguageModelSupportedUrls, LanguageModelSystemMessage,
-    LanguageModelTool, LanguageModelToolInputExample,
+    LanguageModelReasoningEffort, LanguageModelStreamPart, LanguageModelSupportedUrls,
+    LanguageModelSystemMessage, LanguageModelTool, LanguageModelToolCall,
+    LanguageModelToolInputDelta, LanguageModelToolInputEnd, LanguageModelToolInputExample,
+    LanguageModelToolInputStart,
 };
 use crate::provider::{
-    ApiCallError, EmptyResponseBodyError, InvalidArgumentError, JsonParseError, LoadApiKeyError,
-    LoadSettingError, ProviderOptions, TypeValidationContext, TypeValidationError,
-    UnsupportedFunctionalityError,
+    ApiCallError, EmptyResponseBodyError, InvalidArgumentError, InvalidResponseDataError,
+    JsonParseError, LoadApiKeyError, LoadSettingError, ProviderMetadata, ProviderOptions,
+    TypeValidationContext, TypeValidationError, UnsupportedFunctionalityError,
 };
 use crate::warning::Warning;
 
@@ -55,6 +57,10 @@ pub const DEFAULT_MAX_DOWNLOAD_SIZE: usize = 2 * 1024 * 1024 * 1024;
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn is_streaming_tool_call_type_validation_none(value: &StreamingToolCallTypeValidation) -> bool {
+    matches!(value, StreamingToolCallTypeValidation::None)
 }
 
 /// Error returned when inline file data cannot be converted to raw bytes.
@@ -263,6 +269,458 @@ impl SerializedModelOptions {
             config,
         }
     }
+}
+
+/// Validation mode for OpenAI-compatible streaming tool-call deltas.
+///
+/// Upstream `StreamingToolCallTracker` accepts `none`, `if-present`, or
+/// `required` to control whether the delta `type` field must be `function`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StreamingToolCallTypeValidation {
+    /// Do not validate the delta `type` field.
+    #[default]
+    None,
+
+    /// Validate the delta `type` field only when it is present.
+    IfPresent,
+
+    /// Require the delta `type` field to be exactly `function`.
+    Required,
+}
+
+/// Options for a [`StreamingToolCallTracker`].
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamingToolCallTrackerOptions {
+    /// How to validate the `type` field on newly observed tool-call deltas.
+    #[serde(
+        default,
+        skip_serializing_if = "is_streaming_tool_call_type_validation_none"
+    )]
+    pub type_validation: StreamingToolCallTypeValidation,
+}
+
+impl StreamingToolCallTrackerOptions {
+    /// Creates streaming tool-call tracker options with upstream defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the delta `type` validation mode.
+    pub fn with_type_validation(
+        mut self,
+        type_validation: StreamingToolCallTypeValidation,
+    ) -> Self {
+        self.type_validation = type_validation;
+        self
+    }
+}
+
+/// Function payload carried by an OpenAI-compatible streaming tool-call delta.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamingToolCallDeltaFunction {
+    /// Name of the function-style tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// Incremental JSON input text for the tool call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+}
+
+impl StreamingToolCallDeltaFunction {
+    /// Creates an empty streaming tool-call function payload.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the tool function name.
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Sets the incremental JSON arguments text.
+    pub fn with_arguments(mut self, arguments: impl Into<String>) -> Self {
+        self.arguments = Some(arguments.into());
+        self
+    }
+}
+
+/// Minimal OpenAI-compatible streaming tool-call delta.
+///
+/// The upstream tracker accepts provider-specific delta extensions. Rust keeps
+/// those extensions in [`StreamingToolCallDelta::extra`] so provider adapters can
+/// preserve metadata without forcing a provider-specific type into this crate.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamingToolCallDelta {
+    /// Tool-call index in the provider stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<usize>,
+
+    /// Provider-supplied tool-call identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
+    /// Provider-supplied delta type, expected to be `function` depending on validation mode.
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub call_type: Option<String>,
+
+    /// Function tool-call details.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function: Option<StreamingToolCallDeltaFunction>,
+
+    /// Provider-specific extension fields preserved from the source delta.
+    #[serde(default, flatten, skip_serializing_if = "JsonObject::is_empty")]
+    pub extra: JsonObject,
+}
+
+impl StreamingToolCallDelta {
+    /// Creates an empty streaming tool-call delta.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the provider stream index for the delta.
+    pub fn with_index(mut self, index: usize) -> Self {
+        self.index = Some(index);
+        self
+    }
+
+    /// Sets the provider tool-call identifier.
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
+    /// Sets the provider delta type.
+    pub fn with_type(mut self, call_type: impl Into<String>) -> Self {
+        self.call_type = Some(call_type.into());
+        self
+    }
+
+    /// Sets the function payload for the delta.
+    pub fn with_function(mut self, function: StreamingToolCallDeltaFunction) -> Self {
+        self.function = Some(function);
+        self
+    }
+
+    /// Adds a provider-specific extension value.
+    pub fn with_extra_value(mut self, key: impl Into<String>, value: JsonValue) -> Self {
+        self.extra.insert(key.into(), value);
+        self
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TrackedStreamingToolCall {
+    id: Option<String>,
+    function_name: String,
+    arguments: String,
+    has_finished: bool,
+    metadata: Option<ProviderMetadata>,
+}
+
+type StreamingToolCallGenerateId = dyn Fn() -> String + Send + Sync + 'static;
+type StreamingToolCallExtractMetadata =
+    dyn Fn(&StreamingToolCallDelta) -> Option<ProviderMetadata> + Send + Sync + 'static;
+type StreamingToolCallBuildProviderMetadata =
+    dyn Fn(Option<&ProviderMetadata>) -> Option<ProviderMetadata> + Send + Sync + 'static;
+
+/// Tracks streaming tool-call state across multiple OpenAI-compatible deltas.
+///
+/// Upstream uses a stream controller and enqueues language model stream parts.
+/// This Rust boundary returns the parts produced by each processed delta, which
+/// keeps the helper dependency-free and easy to compose with any async stream.
+#[derive(Clone)]
+pub struct StreamingToolCallTracker {
+    tool_calls: Vec<Option<TrackedStreamingToolCall>>,
+    generate_id: Arc<StreamingToolCallGenerateId>,
+    type_validation: StreamingToolCallTypeValidation,
+    extract_metadata: Option<Arc<StreamingToolCallExtractMetadata>>,
+    build_tool_call_provider_metadata: Option<Arc<StreamingToolCallBuildProviderMetadata>>,
+}
+
+impl Default for StreamingToolCallTracker {
+    fn default() -> Self {
+        Self::from_options(StreamingToolCallTrackerOptions::default())
+    }
+}
+
+impl StreamingToolCallTracker {
+    /// Creates a streaming tool-call tracker with upstream defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates a streaming tool-call tracker from explicit options.
+    pub fn from_options(options: StreamingToolCallTrackerOptions) -> Self {
+        Self {
+            tool_calls: Vec::new(),
+            generate_id: Arc::new(generate_id),
+            type_validation: options.type_validation,
+            extract_metadata: None,
+            build_tool_call_provider_metadata: None,
+        }
+    }
+
+    /// Sets the ID generator used by the upstream fallback path.
+    pub fn with_generate_id<F>(mut self, generate_id: F) -> Self
+    where
+        F: Fn() -> String + Send + Sync + 'static,
+    {
+        self.generate_id = Arc::new(generate_id);
+        self
+    }
+
+    /// Extracts provider metadata from a newly observed tool-call delta.
+    pub fn with_extract_metadata<F>(mut self, extract_metadata: F) -> Self
+    where
+        F: Fn(&StreamingToolCallDelta) -> Option<ProviderMetadata> + Send + Sync + 'static,
+    {
+        self.extract_metadata = Some(Arc::new(extract_metadata));
+        self
+    }
+
+    /// Builds provider metadata for the final `tool-call` stream part.
+    pub fn with_tool_call_provider_metadata<F>(mut self, build_provider_metadata: F) -> Self
+    where
+        F: Fn(Option<&ProviderMetadata>) -> Option<ProviderMetadata> + Send + Sync + 'static,
+    {
+        self.build_tool_call_provider_metadata = Some(Arc::new(build_provider_metadata));
+        self
+    }
+
+    /// Processes one provider tool-call delta and returns emitted stream parts.
+    pub fn process_delta(
+        &mut self,
+        delta: StreamingToolCallDelta,
+    ) -> Result<Vec<LanguageModelStreamPart>, InvalidResponseDataError> {
+        let index = delta.index.unwrap_or(self.tool_calls.len());
+
+        if self
+            .tool_calls
+            .get(index)
+            .and_then(Option::as_ref)
+            .is_some()
+        {
+            self.process_existing_tool_call(index, &delta)
+        } else {
+            self.process_new_tool_call(index, &delta)
+        }
+    }
+
+    /// Finalizes unfinished tool calls and returns the emitted stream parts.
+    pub fn flush(&mut self) -> Vec<LanguageModelStreamPart> {
+        let generate_id = Arc::clone(&self.generate_id);
+        let build_provider_metadata = self.build_tool_call_provider_metadata.clone();
+        let mut parts = Vec::new();
+
+        for tool_call in self.tool_calls.iter_mut().flatten() {
+            if !tool_call.has_finished {
+                finish_streaming_tool_call(
+                    tool_call,
+                    &generate_id,
+                    build_provider_metadata.as_deref(),
+                    &mut parts,
+                );
+            }
+        }
+
+        parts
+    }
+
+    fn process_new_tool_call(
+        &mut self,
+        index: usize,
+        delta: &StreamingToolCallDelta,
+    ) -> Result<Vec<LanguageModelStreamPart>, InvalidResponseDataError> {
+        self.validate_delta_type(delta)?;
+
+        let id = delta.id.clone().ok_or_else(|| {
+            invalid_streaming_tool_call_delta_error(delta, "Expected 'id' to be a string.")
+        })?;
+        let function = delta.function.as_ref();
+        let function_name = function
+            .and_then(|function| function.name.clone())
+            .ok_or_else(|| {
+                invalid_streaming_tool_call_delta_error(
+                    delta,
+                    "Expected 'function.name' to be a string.",
+                )
+            })?;
+        let arguments = function
+            .and_then(|function| function.arguments.clone())
+            .unwrap_or_default();
+
+        let mut parts = vec![LanguageModelStreamPart::ToolInputStart(
+            LanguageModelToolInputStart::new(id.clone(), function_name.clone()),
+        )];
+        let metadata = self
+            .extract_metadata
+            .as_ref()
+            .and_then(|extract_metadata| extract_metadata(delta));
+
+        if self.tool_calls.len() <= index {
+            self.tool_calls.resize_with(index + 1, || None);
+        }
+
+        self.tool_calls[index] = Some(TrackedStreamingToolCall {
+            id: Some(id),
+            function_name,
+            arguments: arguments.clone(),
+            has_finished: false,
+            metadata,
+        });
+
+        if !arguments.is_empty() {
+            let tool_call = self.tool_calls[index]
+                .as_ref()
+                .expect("new tool call was inserted");
+            parts.push(LanguageModelStreamPart::ToolInputDelta(
+                LanguageModelToolInputDelta::new(
+                    tool_call.id.as_deref().unwrap_or_default(),
+                    arguments.clone(),
+                ),
+            ));
+        }
+
+        if is_parsable_json(&arguments) {
+            let generate_id = Arc::clone(&self.generate_id);
+            let build_provider_metadata = self.build_tool_call_provider_metadata.clone();
+            let tool_call = self.tool_calls[index]
+                .as_mut()
+                .expect("new tool call was inserted");
+            finish_streaming_tool_call(
+                tool_call,
+                &generate_id,
+                build_provider_metadata.as_deref(),
+                &mut parts,
+            );
+        }
+
+        Ok(parts)
+    }
+
+    fn process_existing_tool_call(
+        &mut self,
+        index: usize,
+        delta: &StreamingToolCallDelta,
+    ) -> Result<Vec<LanguageModelStreamPart>, InvalidResponseDataError> {
+        let Some(tool_call) = self.tool_calls.get_mut(index).and_then(Option::as_mut) else {
+            return Ok(Vec::new());
+        };
+
+        if tool_call.has_finished {
+            return Ok(Vec::new());
+        }
+
+        let mut parts = Vec::new();
+
+        if let Some(arguments) = delta
+            .function
+            .as_ref()
+            .and_then(|function| function.arguments.as_ref())
+        {
+            tool_call.arguments.push_str(arguments);
+            parts.push(LanguageModelStreamPart::ToolInputDelta(
+                LanguageModelToolInputDelta::new(
+                    tool_call.id.as_deref().unwrap_or_default(),
+                    arguments.clone(),
+                ),
+            ));
+        }
+
+        if is_parsable_json(&tool_call.arguments) {
+            let generate_id = Arc::clone(&self.generate_id);
+            let build_provider_metadata = self.build_tool_call_provider_metadata.clone();
+            finish_streaming_tool_call(
+                tool_call,
+                &generate_id,
+                build_provider_metadata.as_deref(),
+                &mut parts,
+            );
+        }
+
+        Ok(parts)
+    }
+
+    fn validate_delta_type(
+        &self,
+        delta: &StreamingToolCallDelta,
+    ) -> Result<(), InvalidResponseDataError> {
+        match self.type_validation {
+            StreamingToolCallTypeValidation::None => Ok(()),
+            StreamingToolCallTypeValidation::IfPresent => {
+                if delta
+                    .call_type
+                    .as_deref()
+                    .is_some_and(|call_type| call_type != "function")
+                {
+                    Err(invalid_streaming_tool_call_delta_error(
+                        delta,
+                        "Expected 'function' type.",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+            StreamingToolCallTypeValidation::Required => {
+                if delta.call_type.as_deref() == Some("function") {
+                    Ok(())
+                } else {
+                    Err(invalid_streaming_tool_call_delta_error(
+                        delta,
+                        "Expected 'function' type.",
+                    ))
+                }
+            }
+        }
+    }
+}
+
+fn finish_streaming_tool_call(
+    tool_call: &mut TrackedStreamingToolCall,
+    generate_id: &Arc<StreamingToolCallGenerateId>,
+    build_provider_metadata: Option<&StreamingToolCallBuildProviderMetadata>,
+    parts: &mut Vec<LanguageModelStreamPart>,
+) {
+    let id = tool_call
+        .id
+        .clone()
+        .unwrap_or_else(|| (generate_id.as_ref())());
+
+    parts.push(LanguageModelStreamPart::ToolInputEnd(
+        LanguageModelToolInputEnd::new(id.clone()),
+    ));
+
+    let provider_metadata =
+        build_provider_metadata.and_then(|build| build(tool_call.metadata.as_ref()));
+    let mut tool_call_part = LanguageModelToolCall::new(
+        id,
+        tool_call.function_name.clone(),
+        tool_call.arguments.clone(),
+    );
+
+    if let Some(provider_metadata) = provider_metadata {
+        tool_call_part = tool_call_part.with_provider_metadata(provider_metadata);
+    }
+
+    parts.push(LanguageModelStreamPart::ToolCall(tool_call_part));
+    tool_call.has_finished = true;
+}
+
+fn invalid_streaming_tool_call_delta_error(
+    delta: &StreamingToolCallDelta,
+    message: &'static str,
+) -> InvalidResponseDataError {
+    InvalidResponseDataError::with_message(
+        serde_json::to_value(delta).expect("streaming tool-call deltas serialize"),
+        message,
+    )
 }
 
 fn default_id_alphabet() -> String {
@@ -4392,7 +4850,7 @@ mod tests {
     };
     use crate::{
         ApiCallError, FileData, FileDataContent, ImageModelFile, JsonObject, JsonValue,
-        ProviderReference, TypeValidationContext, TypeValidationError, Warning,
+        ProviderMetadata, ProviderReference, TypeValidationContext, TypeValidationError, Warning,
     };
     use serde_json::json;
     use url::Url;
@@ -4407,7 +4865,9 @@ mod tests {
         ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
         ProviderApiResponseBody, ProviderApiResponseHandlerError, ReasoningLevel,
         ResponseHandlerResult, RuntimeEnvironment, SerializedModelOptions,
-        StatusCodeErrorResponseHandlerOptions, Tool, ToolExecutionError, ToolExecutionOptions,
+        StatusCodeErrorResponseHandlerOptions, StreamingToolCallDelta,
+        StreamingToolCallDeltaFunction, StreamingToolCallTracker, StreamingToolCallTrackerOptions,
+        StreamingToolCallTypeValidation, Tool, ToolExecutionError, ToolExecutionOptions,
         ValidateTypesResult, add_additional_properties_to_json_schema, as_array, combine_headers,
         convert_base64_to_bytes, convert_bytes_to_base64, convert_image_model_file_to_data_uri,
         convert_inline_file_data_to_bytes, convert_to_base64, create_binary_response_handler,
@@ -5282,6 +5742,261 @@ mod tests {
                 .expect("config is an object")
                 .clone()
             )
+        );
+    }
+
+    #[test]
+    fn streaming_tool_call_tracker_options_serialize_and_deserialize_validation_mode() {
+        let options = StreamingToolCallTrackerOptions::new()
+            .with_type_validation(StreamingToolCallTypeValidation::IfPresent);
+
+        let serialized = serde_json::to_value(&options).expect("tracker options serialize");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "typeValidation": "if-present"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<StreamingToolCallTrackerOptions>(serialized)
+                .expect("tracker options deserialize"),
+            options
+        );
+        assert_eq!(
+            serde_json::from_value::<StreamingToolCallTrackerOptions>(json!({}))
+                .expect("empty options deserialize"),
+            StreamingToolCallTrackerOptions::default()
+        );
+    }
+
+    #[test]
+    fn streaming_tool_call_delta_round_trips_upstream_shape_with_extensions() {
+        let delta = StreamingToolCallDelta::new()
+            .with_index(0)
+            .with_id("call_1")
+            .with_type("function")
+            .with_function(
+                StreamingToolCallDeltaFunction::new()
+                    .with_name("get_weather")
+                    .with_arguments(r#"{"city":"London"}"#),
+            )
+            .with_extra_value(
+                "extra_content",
+                json!({ "google": { "thought_signature": "sig123" } }),
+            );
+
+        let serialized = serde_json::to_value(&delta).expect("delta serializes");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "index": 0,
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "arguments": r#"{"city":"London"}"#
+                },
+                "extra_content": {
+                    "google": { "thought_signature": "sig123" }
+                }
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<StreamingToolCallDelta>(serialized)
+                .expect("delta deserializes"),
+            delta
+        );
+    }
+
+    #[test]
+    fn streaming_tool_call_tracker_accumulates_and_finishes_json_arguments() {
+        let mut tracker = StreamingToolCallTracker::new();
+
+        let first_parts = tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_index(0)
+                    .with_id("call_1")
+                    .with_type("function")
+                    .with_function(
+                        StreamingToolCallDeltaFunction::new()
+                            .with_name("get_weather")
+                            .with_arguments(r#"{"ci"#),
+                    ),
+            )
+            .expect("first delta succeeds");
+
+        assert_eq!(
+            serde_json::to_value(first_parts).expect("parts serialize"),
+            json!([
+                { "type": "tool-input-start", "id": "call_1", "toolName": "get_weather" },
+                { "type": "tool-input-delta", "id": "call_1", "delta": r#"{"ci"# }
+            ])
+        );
+
+        let middle_parts =
+            tracker
+                .process_delta(StreamingToolCallDelta::new().with_index(0).with_function(
+                    StreamingToolCallDeltaFunction::new().with_arguments(r#"ty":"San"#),
+                ))
+                .expect("middle delta succeeds");
+
+        assert_eq!(
+            serde_json::to_value(middle_parts).expect("parts serialize"),
+            json!([
+                { "type": "tool-input-delta", "id": "call_1", "delta": r#"ty":"San"# }
+            ])
+        );
+
+        let final_parts = tracker
+            .process_delta(StreamingToolCallDelta::new().with_index(0).with_function(
+                StreamingToolCallDeltaFunction::new().with_arguments(r#" Francisco"}"#),
+            ))
+            .expect("final delta succeeds");
+
+        assert_eq!(
+            serde_json::to_value(final_parts).expect("parts serialize"),
+            json!([
+                { "type": "tool-input-delta", "id": "call_1", "delta": r#" Francisco"}"# },
+                { "type": "tool-input-end", "id": "call_1" },
+                {
+                    "type": "tool-call",
+                    "toolCallId": "call_1",
+                    "toolName": "get_weather",
+                    "input": r#"{"city":"San Francisco"}"#
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn streaming_tool_call_tracker_flushes_unfinished_tool_calls_once() {
+        let mut tracker = StreamingToolCallTracker::new();
+
+        tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_index(0)
+                    .with_id("call_1")
+                    .with_type("function")
+                    .with_function(
+                        StreamingToolCallDeltaFunction::new()
+                            .with_name("fn")
+                            .with_arguments(r#"{"key":"val"#),
+                    ),
+            )
+            .expect("delta succeeds");
+
+        assert_eq!(
+            serde_json::to_value(tracker.flush()).expect("flush parts serialize"),
+            json!([
+                { "type": "tool-input-end", "id": "call_1" },
+                {
+                    "type": "tool-call",
+                    "toolCallId": "call_1",
+                    "toolName": "fn",
+                    "input": r#"{"key":"val"#
+                }
+            ])
+        );
+        assert!(tracker.flush().is_empty());
+    }
+
+    #[test]
+    fn streaming_tool_call_tracker_validates_required_delta_type_and_fields() {
+        let mut tracker = StreamingToolCallTracker::from_options(
+            StreamingToolCallTrackerOptions::new()
+                .with_type_validation(StreamingToolCallTypeValidation::Required),
+        );
+
+        let type_error = tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_index(0)
+                    .with_id("call_1")
+                    .with_function(StreamingToolCallDeltaFunction::new().with_name("fn")),
+            )
+            .expect_err("missing function type is rejected");
+
+        assert_eq!(type_error.to_string(), "Expected 'function' type.");
+        assert_eq!(
+            type_error.data(),
+            &json!({
+                "index": 0,
+                "id": "call_1",
+                "function": { "name": "fn" }
+            })
+        );
+
+        let mut tracker = StreamingToolCallTracker::new();
+        let id_error = tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_type("function")
+                    .with_function(StreamingToolCallDeltaFunction::new().with_name("fn")),
+            )
+            .expect_err("missing id is rejected");
+
+        assert_eq!(id_error.to_string(), "Expected 'id' to be a string.");
+    }
+
+    #[test]
+    fn streaming_tool_call_tracker_attaches_provider_metadata_to_tool_call_events() {
+        let mut tracker = StreamingToolCallTracker::new()
+            .with_extract_metadata(|delta| {
+                let signature = delta
+                    .extra
+                    .get("extra_content")?
+                    .get("google")?
+                    .get("thought_signature")?
+                    .as_str()?;
+
+                Some(ProviderMetadata::from([(
+                    "google".to_string(),
+                    json!({ "thoughtSignature": signature })
+                        .as_object()
+                        .expect("metadata is an object")
+                        .clone(),
+                )]))
+            })
+            .with_tool_call_provider_metadata(|metadata| metadata.cloned());
+
+        let parts = tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_index(0)
+                    .with_id("call_1")
+                    .with_type("function")
+                    .with_function(
+                        StreamingToolCallDeltaFunction::new()
+                            .with_name("fn")
+                            .with_arguments("{}"),
+                    )
+                    .with_extra_value(
+                        "extra_content",
+                        json!({ "google": { "thought_signature": "sig123" } }),
+                    ),
+            )
+            .expect("delta succeeds");
+
+        assert_eq!(
+            serde_json::to_value(parts).expect("parts serialize"),
+            json!([
+                { "type": "tool-input-start", "id": "call_1", "toolName": "fn" },
+                { "type": "tool-input-delta", "id": "call_1", "delta": "{}" },
+                { "type": "tool-input-end", "id": "call_1" },
+                {
+                    "type": "tool-call",
+                    "toolCallId": "call_1",
+                    "toolName": "fn",
+                    "input": "{}",
+                    "providerMetadata": {
+                        "google": { "thoughtSignature": "sig123" }
+                    }
+                }
+            ])
         );
     }
 
