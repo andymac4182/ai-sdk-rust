@@ -298,6 +298,74 @@ pub fn prepare_tools<'a>(
     if tools.is_empty() { None } else { Some(tools) }
 }
 
+/// Adds `additionalProperties: false` to object JSON schemas recursively.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils`
+/// `addAdditionalPropertiesToJsonSchema`: object schemas, including union
+/// schemas whose `type` includes `"object"`, are made closed recursively across
+/// properties, items, composition lists, and definitions.
+pub fn add_additional_properties_to_json_schema(mut json_schema: JsonSchema) -> JsonSchema {
+    add_additional_properties_to_json_schema_object(&mut json_schema);
+    json_schema
+}
+
+fn add_additional_properties_to_json_schema_object(json_schema: &mut JsonSchema) {
+    if is_object_json_schema(json_schema) {
+        json_schema.insert("additionalProperties".to_string(), JsonValue::Bool(false));
+
+        if let Some(JsonValue::Object(properties)) = json_schema.get_mut("properties") {
+            for property in properties.values_mut() {
+                visit_json_schema_definition(property);
+            }
+        }
+    }
+
+    if let Some(items) = json_schema.get_mut("items") {
+        visit_json_schema_definition_or_array(items);
+    }
+
+    for key in ["anyOf", "allOf", "oneOf"] {
+        if let Some(JsonValue::Array(definitions)) = json_schema.get_mut(key) {
+            for definition in definitions {
+                visit_json_schema_definition(definition);
+            }
+        }
+    }
+
+    if let Some(JsonValue::Object(definitions)) = json_schema.get_mut("definitions") {
+        for definition in definitions.values_mut() {
+            visit_json_schema_definition(definition);
+        }
+    }
+}
+
+fn visit_json_schema_definition_or_array(definition: &mut JsonValue) {
+    match definition {
+        JsonValue::Array(definitions) => {
+            for definition in definitions {
+                visit_json_schema_definition(definition);
+            }
+        }
+        _ => visit_json_schema_definition(definition),
+    }
+}
+
+fn visit_json_schema_definition(definition: &mut JsonValue) {
+    if let JsonValue::Object(json_schema) = definition {
+        add_additional_properties_to_json_schema_object(json_schema);
+    }
+}
+
+fn is_object_json_schema(json_schema: &JsonSchema) -> bool {
+    match json_schema.get("type") {
+        Some(JsonValue::String(schema_type)) => schema_type == "object",
+        Some(JsonValue::Array(schema_types)) => schema_types
+            .iter()
+            .any(|schema_type| schema_type.as_str() == Some("object")),
+        _ => false,
+    }
+}
+
 /// A value that can be supplied as either one item or an array of items.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(untagged)]
@@ -694,11 +762,11 @@ mod tests {
 
     use super::{
         Arrayable, LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, Tool,
-        ToolExecutionError, ToolExecutionOptions, as_array, combine_headers,
-        create_tool_name_mapping, filter_nullable, is_non_nullable, is_provider_reference,
-        load_api_key, load_api_key_with_env, load_optional_setting_with_env, load_setting,
-        load_setting_with_env, media_type_to_extension, normalize_headers, prepare_tools,
-        remove_undefined_entries, resolve_provider_reference, strip_file_extension,
+        ToolExecutionError, ToolExecutionOptions, add_additional_properties_to_json_schema,
+        as_array, combine_headers, create_tool_name_mapping, filter_nullable, is_non_nullable,
+        is_provider_reference, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
+        load_setting, load_setting_with_env, media_type_to_extension, normalize_headers,
+        prepare_tools, remove_undefined_entries, resolve_provider_reference, strip_file_extension,
         with_user_agent_suffix, without_trailing_slash,
     };
 
@@ -767,6 +835,204 @@ mod tests {
         let value = vec!["a", "b"];
 
         assert_eq!(as_array(Some(Arrayable::array(value.clone()))), value);
+    }
+
+    #[test]
+    fn add_additional_properties_to_json_schema_closes_nested_objects() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "user": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" }
+                    }
+                },
+                "age": { "type": "number" }
+            }
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        assert_eq!(
+            add_additional_properties_to_json_schema(schema),
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "user": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "name": { "type": "string" }
+                        }
+                    },
+                    "age": { "type": "number" }
+                }
+            })
+            .as_object()
+            .expect("schema is an object")
+            .clone()
+        );
+    }
+
+    #[test]
+    fn add_additional_properties_to_json_schema_closes_objects_in_arrays_and_unions() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "ingredients": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" }
+                        }
+                    }
+                },
+                "response": {
+                    "type": ["object", "null"],
+                    "properties": {
+                        "ok": { "type": "boolean" }
+                    }
+                }
+            }
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        assert_eq!(
+            add_additional_properties_to_json_schema(schema),
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "ingredients": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "name": { "type": "string" }
+                            }
+                        }
+                    },
+                    "response": {
+                        "type": ["object", "null"],
+                        "additionalProperties": false,
+                        "properties": {
+                            "ok": { "type": "boolean" }
+                        }
+                    }
+                }
+            })
+            .as_object()
+            .expect("schema is an object")
+            .clone()
+        );
+    }
+
+    #[test]
+    fn add_additional_properties_to_json_schema_visits_compositions_and_definitions() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "response": {
+                    "anyOf": [
+                        { "type": "object", "properties": { "name": { "type": "string" } } },
+                        { "type": "string" }
+                    ],
+                    "allOf": [
+                        { "type": "object", "properties": { "age": { "type": "number" } } }
+                    ],
+                    "oneOf": [
+                        { "type": "object", "properties": { "success": { "type": "boolean" } } }
+                    ]
+                },
+                "node": { "$ref": "#/definitions/Node" }
+            },
+            "definitions": {
+                "Node": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                        "value": { "type": "string" }
+                    }
+                }
+            }
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        assert_eq!(
+            add_additional_properties_to_json_schema(schema),
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "response": {
+                        "anyOf": [
+                            {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": { "name": { "type": "string" } }
+                            },
+                            { "type": "string" }
+                        ],
+                        "allOf": [
+                            {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": { "age": { "type": "number" } }
+                            }
+                        ],
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": { "success": { "type": "boolean" } }
+                            }
+                        ]
+                    },
+                    "node": { "$ref": "#/definitions/Node" }
+                },
+                "definitions": {
+                    "Node": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "value": { "type": "string" }
+                        }
+                    }
+                }
+            })
+            .as_object()
+            .expect("schema is an object")
+            .clone()
+        );
+    }
+
+    #[test]
+    fn add_additional_properties_to_json_schema_leaves_non_object_schema_unchanged() {
+        let schema = json!({
+            "type": "string"
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        assert_eq!(
+            add_additional_properties_to_json_schema(schema),
+            json!({
+                "type": "string"
+            })
+            .as_object()
+            .expect("schema is an object")
+            .clone()
+        );
     }
 
     #[test]
