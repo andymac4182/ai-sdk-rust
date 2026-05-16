@@ -1012,7 +1012,7 @@ mod tests {
         LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::provider::SpecificationVersion;
-    use crate::provider_utils::Tool;
+    use crate::provider_utils::{Tool, ToolExecutionError};
     use serde_json::json;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
@@ -1614,6 +1614,49 @@ mod tests {
         assert_eq!(result.usage.input_tokens.total, Some(13));
         assert_eq!(result.usage.output_tokens.total, Some(8));
         assert_eq!(result.usage.output_tokens.text, Some(7));
+    }
+
+    #[test]
+    fn generate_text_records_tool_execution_errors_and_continues() {
+        let model = ToolLoopLanguageModel::new();
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |_input, _options| async move {
+                        Err::<serde_json::Value, ToolExecutionError>(ToolExecutionError::new(
+                            "weather service timed out",
+                        ))
+                    },
+                ))
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(model.calls.borrow().len(), 2);
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_call_id, "call-1");
+        assert_eq!(result.tool_results[0].tool_name, "weather");
+        assert_eq!(result.tool_results[0].input, json!({ "city": "Brisbane" }));
+        assert_eq!(result.tool_results[0].is_error, Some(true));
+        assert_eq!(
+            result.tool_results[0].output,
+            json!("weather service timed out")
+        );
+        assert_eq!(
+            model.calls.borrow()[1].prompt[2],
+            LanguageModelMessage::Tool(crate::language_model::LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call-1",
+                    "weather",
+                    LanguageModelToolResultOutput::error_text("weather service timed out")
+                ))
+            ]))
+        );
+        assert_eq!(result.text, "The weather in Brisbane is sunny.");
     }
 
     struct ProviderExecutedToolLanguageModel {
