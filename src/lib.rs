@@ -161,7 +161,7 @@ pub use transcription_model::{
     TranscriptionModelRequest, TranscriptionModelResponse, TranscriptionModelResult,
     TranscriptionModelSegment,
 };
-pub use util::is_deep_equal_data;
+pub use util::{DataUrlTextError, get_text_from_data_url, is_deep_equal_data};
 pub use video_model::{
     NoVideoGeneratedError, VideoModel, VideoModelCallOptions, VideoModelFile, VideoModelResponse,
     VideoModelResponseMetadata, VideoModelResult, VideoModelVideoData,
