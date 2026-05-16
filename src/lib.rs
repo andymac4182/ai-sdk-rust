@@ -7,6 +7,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub mod embedding_model;
 pub mod file_data;
 pub mod headers;
+pub mod image_model;
 pub mod json;
 pub mod language_model;
 pub mod provider;
@@ -19,6 +20,10 @@ pub use embedding_model::{
 };
 pub use file_data::{FileData, FileDataContent, ProviderReference, ProviderReferenceError};
 pub use headers::Headers;
+pub use image_model::{
+    ImageModelCallOptions, ImageModelFile, ImageModelImage, ImageModelProviderMetadata,
+    ImageModelProviderMetadataEntry, ImageModelResponse, ImageModelResult, ImageModelUsage,
+};
 pub use json::{
     JsonArray, JsonObject, JsonSchema, JsonValue, NonNullJsonValue, NullJsonValueError,
 };
