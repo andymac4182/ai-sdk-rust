@@ -722,12 +722,21 @@ impl LanguageModelCallEndEvent {
     }
 }
 
+/// Upstream callback alias for [`LanguageModelCallStartEvent`].
+pub type OnLanguageModelCallStartCallback<'a> = GenerateTextOnLanguageModelCallStartFunction<'a>;
+
+/// Upstream callback alias for [`LanguageModelCallEndEvent`].
+pub type OnLanguageModelCallEndCallback<'a> = GenerateTextOnLanguageModelCallEndFunction<'a>;
+
 /// Future returned by a high-level generate-text start callback.
 pub type GenerateTextOnStartFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
 
 /// Callback invoked before a non-streaming generate-text call performs model work.
 pub type GenerateTextOnStartFunction<'a> =
     dyn Fn(GenerateTextStartEvent) -> GenerateTextOnStartFuture<'a> + 'a;
+
+/// Upstream callback alias for [`GenerateTextOnStartFunction`].
+pub type GenerateTextOnStartCallback<'a> = GenerateTextOnStartFunction<'a>;
 
 /// Callback wrapper for upstream `experimental_onStart`.
 pub struct GenerateTextOnStart<'a> {
@@ -766,6 +775,9 @@ pub type GenerateTextOnStepStartFuture<'a> = Pin<Box<dyn Future<Output = ()> + '
 /// Callback invoked before each non-streaming generate-text model step starts.
 pub type GenerateTextOnStepStartFunction<'a> =
     dyn Fn(GenerateTextStepStartEvent) -> GenerateTextOnStepStartFuture<'a> + 'a;
+
+/// Upstream callback alias for [`GenerateTextOnStepStartFunction`].
+pub type GenerateTextOnStepStartCallback<'a> = GenerateTextOnStepStartFunction<'a>;
 
 /// Callback wrapper for upstream `experimental_onStepStart`.
 pub struct GenerateTextOnStepStart<'a> {
@@ -926,12 +938,29 @@ pub struct GenerateTextToolExecutionEndEvent {
     pub tool_output: GenerateTextToolResult,
 }
 
+/// Upstream generate-text tool execution start event name.
+pub type ToolExecutionStartEvent = GenerateTextToolExecutionStartEvent;
+
+/// Upstream generate-text tool execution end event name.
+pub type ToolExecutionEndEvent = GenerateTextToolExecutionEndEvent;
+
+/// Deprecated upstream alias for [`ToolExecutionStartEvent`].
+#[deprecated(note = "use ToolExecutionStartEvent instead")]
+pub type OnToolCallStartEvent = ToolExecutionStartEvent;
+
+/// Deprecated upstream alias for [`ToolExecutionEndEvent`].
+#[deprecated(note = "use ToolExecutionEndEvent instead")]
+pub type OnToolCallFinishEvent = ToolExecutionEndEvent;
+
 /// Future returned by a high-level tool-execution start callback.
 pub type GenerateTextOnToolExecutionStartFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
 
 /// Callback invoked before a Rust tool executor is invoked.
 pub type GenerateTextOnToolExecutionStartFunction<'a> =
     dyn Fn(GenerateTextToolExecutionStartEvent) -> GenerateTextOnToolExecutionStartFuture<'a> + 'a;
+
+/// Upstream callback alias for [`GenerateTextOnToolExecutionStartFunction`].
+pub type OnToolExecutionStartCallback<'a> = GenerateTextOnToolExecutionStartFunction<'a>;
 
 /// Callback wrapper for upstream `onToolExecutionStart`.
 pub struct GenerateTextOnToolExecutionStart<'a> {
@@ -974,6 +1003,9 @@ pub type GenerateTextOnToolExecutionEndFuture<'a> = Pin<Box<dyn Future<Output = 
 pub type GenerateTextOnToolExecutionEndFunction<'a> =
     dyn Fn(GenerateTextToolExecutionEndEvent) -> GenerateTextOnToolExecutionEndFuture<'a> + 'a;
 
+/// Upstream callback alias for [`GenerateTextOnToolExecutionEndFunction`].
+pub type OnToolExecutionEndCallback<'a> = GenerateTextOnToolExecutionEndFunction<'a>;
+
 /// Callback wrapper for upstream `onToolExecutionEnd`.
 pub struct GenerateTextOnToolExecutionEnd<'a> {
     on_tool_execution_end: Rc<GenerateTextOnToolExecutionEndFunction<'a>>,
@@ -1015,6 +1047,9 @@ pub type GenerateTextOnStepFinishFuture<'a> = Pin<Box<dyn Future<Output = ()> + 
 pub type GenerateTextOnStepFinishFunction<'a> =
     dyn Fn(GenerateTextStep) -> GenerateTextOnStepFinishFuture<'a> + 'a;
 
+/// Upstream callback alias for [`GenerateTextOnStepFinishFunction`].
+pub type GenerateTextOnStepFinishCallback<'a> = GenerateTextOnStepFinishFunction<'a>;
+
 /// Callback wrapper for upstream `onStepFinish`.
 ///
 /// The callback receives the fully constructed step result after response
@@ -1055,6 +1090,9 @@ pub type GenerateTextOnFinishFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>
 /// Callback invoked after a non-streaming generate-text call is complete.
 pub type GenerateTextOnFinishFunction<'a> =
     dyn Fn(GenerateTextFinishEvent) -> GenerateTextOnFinishFuture<'a> + 'a;
+
+/// Upstream callback alias for [`GenerateTextOnFinishFunction`].
+pub type GenerateTextOnFinishCallback<'a> = GenerateTextOnFinishFunction<'a>;
 
 /// Callback wrapper for upstream `onFinish`.
 ///
@@ -3418,6 +3456,9 @@ impl GenerateTextModelInfo {
     }
 }
 
+/// Upstream model info event name.
+pub type ModelInfo = GenerateTextModelInfo;
+
 /// Performance metrics for a single generate-text step.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -3811,6 +3852,28 @@ impl GenerateTextFinishEvent {
         }
     }
 }
+
+/// Upstream event name for a completed generate-text step.
+pub type GenerateTextStepEndEvent = GenerateTextStep;
+
+/// Upstream event name for a completed generate-text call.
+pub type GenerateTextEndEvent = GenerateTextFinishEvent;
+
+/// Deprecated upstream alias for [`GenerateTextStartEvent`].
+#[deprecated(note = "use GenerateTextStartEvent instead")]
+pub type OnStartEvent = GenerateTextStartEvent;
+
+/// Deprecated upstream alias for [`GenerateTextStepStartEvent`].
+#[deprecated(note = "use GenerateTextStepStartEvent instead")]
+pub type OnStepStartEvent = GenerateTextStepStartEvent;
+
+/// Deprecated upstream alias for [`GenerateTextStepEndEvent`].
+#[deprecated(note = "use GenerateTextStepEndEvent instead")]
+pub type OnStepFinishEvent = GenerateTextStepEndEvent;
+
+/// Deprecated upstream alias for [`GenerateTextEndEvent`].
+#[deprecated(note = "use GenerateTextEndEvent instead")]
+pub type OnFinishEvent = GenerateTextEndEvent;
 
 /// Result of a high-level non-streaming text generation call.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -5915,19 +5978,20 @@ fn add_optional_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        GenerateTextFinishEvent, GenerateTextInclude, GenerateTextModelInfo, GenerateTextOptions,
-        GenerateTextReasoning, GenerateTextResult, GenerateTextStartEvent, GenerateTextStep,
-        GenerateTextStepPerformance, GenerateTextStepStartEvent, GenerateTextToolCall,
-        GenerateTextToolExecutionEndEvent, GenerateTextToolExecutionStartEvent,
-        GenerateTextToolResult, InvalidStreamPartError, InvalidToolApprovalError,
-        InvalidToolInputError, LanguageModelCallEndEvent, LanguageModelCallPerformance,
-        LanguageModelCallStartEvent, MissingToolResultsError, NoObjectGeneratedError,
-        NoOutputGeneratedError, NoSuchToolError, NormalizedToolApprovalStatus, PrepareStepResult,
-        PruneEmptyMessages, PruneMessagesOptions, PruneReasoning, PruneToolCallRule,
-        PruneToolCallRuleMode, PruneToolCalls, ResolveToolApprovalOptions, StopCondition,
-        ToolApprovalConfiguration, ToolApprovalStatus, ToolApprovalStatusKind,
-        ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOptions,
-        ToolCallRepairOriginalError, ToolInputRefinementError, UiMessageStreamError,
+        GenerateTextEndEvent, GenerateTextFinishEvent, GenerateTextInclude, GenerateTextModelInfo,
+        GenerateTextOptions, GenerateTextReasoning, GenerateTextResult, GenerateTextStartEvent,
+        GenerateTextStep, GenerateTextStepEndEvent, GenerateTextStepPerformance,
+        GenerateTextStepStartEvent, GenerateTextToolCall, GenerateTextToolExecutionEndEvent,
+        GenerateTextToolExecutionStartEvent, GenerateTextToolResult, InvalidStreamPartError,
+        InvalidToolApprovalError, InvalidToolInputError, LanguageModelCallEndEvent,
+        LanguageModelCallPerformance, LanguageModelCallStartEvent, MissingToolResultsError,
+        ModelInfo, NoObjectGeneratedError, NoOutputGeneratedError, NoSuchToolError,
+        NormalizedToolApprovalStatus, PrepareStepResult, PruneEmptyMessages, PruneMessagesOptions,
+        PruneReasoning, PruneToolCallRule, PruneToolCallRuleMode, PruneToolCalls,
+        ResolveToolApprovalOptions, StopCondition, ToolApprovalConfiguration, ToolApprovalStatus,
+        ToolApprovalStatusKind, ToolCallNotFoundForApprovalError, ToolCallRepairError,
+        ToolCallRepairOptions, ToolCallRepairOriginalError, ToolExecutionEndEvent,
+        ToolExecutionStartEvent, ToolInputRefinementError, UiMessageStreamError,
         UnsupportedModelVersionError, collect_tool_approvals, experimental_filter_active_tools,
         filter_active_tools, generate_text, has_tool_call, is_loop_finished, is_step_count,
         is_stop_condition_met, normalize_tool_approval_status, prune_messages,
@@ -5935,7 +5999,7 @@ mod tests {
     };
     use crate::file_data::FileDataContent;
     use crate::headers::Headers;
-    use crate::json::JsonValue;
+    use crate::json::{JsonObject, JsonValue};
     use crate::language_model::{
         FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
         LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
@@ -7077,6 +7141,141 @@ mod tests {
         LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
             LanguageModelUserContentPart::Text(LanguageModelTextPart::new(text)),
         ]))
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn generate_text_event_aliases_share_upstream_json_shapes() {
+        let prompt = vec![user_message("Use aliases")];
+        let model_info: ModelInfo = GenerateTextModelInfo::new("test-provider", "test-model");
+
+        assert_eq!(
+            serde_json::to_value(&model_info).expect("model info serializes"),
+            json!({
+                "provider": "test-provider",
+                "modelId": "test-model"
+            })
+        );
+
+        let start_event: super::OnStartEvent = GenerateTextStartEvent {
+            call_id: "call-alias".to_string(),
+            operation_id: "ai.generateText".to_string(),
+            provider: model_info.provider.clone(),
+            model_id: model_info.model_id.clone(),
+            messages: prompt.clone(),
+            tools: Vec::new(),
+            tool_choice: None,
+            active_tools: None,
+            max_output_tokens: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            presence_penalty: None,
+            frequency_penalty: None,
+            stop_sequences: None,
+            seed: None,
+            reasoning: None,
+            headers: None,
+            provider_options: None,
+            runtime_context: JsonObject::new(),
+            tools_context: JsonObject::new(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&start_event).expect("start alias serializes")["operationId"],
+            "ai.generateText"
+        );
+
+        let step_start_event: super::OnStepStartEvent = GenerateTextStepStartEvent {
+            call_id: "call-alias".to_string(),
+            provider: model_info.provider.clone(),
+            model_id: model_info.model_id.clone(),
+            step_number: 0,
+            messages: prompt.clone(),
+            tools: Vec::new(),
+            tool_choice: None,
+            active_tools: None,
+            steps: Vec::new(),
+            provider_options: None,
+            runtime_context: JsonObject::new(),
+            tools_context: JsonObject::new(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&step_start_event).expect("step-start alias serializes")["stepNumber"],
+            0
+        );
+
+        let step_event: GenerateTextStepEndEvent = stop_condition_step(&[]);
+        let deprecated_step_event: super::OnStepFinishEvent = step_event.clone();
+
+        assert_eq!(
+            serde_json::to_value(&deprecated_step_event)
+                .expect("deprecated step-finish alias serializes"),
+            serde_json::to_value(&step_event).expect("step-end alias serializes")
+        );
+
+        let finish_event: GenerateTextEndEvent =
+            GenerateTextFinishEvent::from_steps(&[], std::slice::from_ref(&step_event));
+        let deprecated_finish_event: super::OnFinishEvent = finish_event.clone();
+
+        assert_eq!(
+            serde_json::to_value(&deprecated_finish_event)
+                .expect("deprecated finish alias serializes"),
+            serde_json::to_value(&finish_event).expect("finish alias serializes")
+        );
+
+        let tool_call = GenerateTextToolCall {
+            tool_call_id: "call-tool".to_string(),
+            tool_name: "weather".to_string(),
+            input: json!({ "city": "Brisbane" }),
+            title: None,
+            provider_executed: None,
+            dynamic: None,
+            invalid: None,
+            error: None,
+            provider_metadata: None,
+            tool_metadata: None,
+        };
+        let tool_result = GenerateTextToolResult {
+            tool_call_id: tool_call.tool_call_id.clone(),
+            tool_name: tool_call.tool_name.clone(),
+            input: tool_call.input.clone(),
+            output: json!({ "weather": "sunny" }),
+            is_error: None,
+            provider_executed: None,
+            dynamic: None,
+            preliminary: None,
+            provider_metadata: None,
+            tool_metadata: None,
+        };
+        let tool_start_event: ToolExecutionStartEvent = GenerateTextToolExecutionStartEvent {
+            call_id: "call-alias".to_string(),
+            messages: prompt.clone(),
+            tool_call: tool_call.clone(),
+            tool_context: Some(json!({ "unit": "celsius" })),
+        };
+        let deprecated_tool_start_event: super::OnToolCallStartEvent = tool_start_event.clone();
+        let tool_end_event: ToolExecutionEndEvent = GenerateTextToolExecutionEndEvent {
+            call_id: "call-alias".to_string(),
+            messages: prompt,
+            tool_call,
+            tool_context: Some(json!({ "unit": "celsius" })),
+            tool_execution_ms: 12,
+            tool_output: tool_result,
+        };
+        let deprecated_tool_end_event: super::OnToolCallFinishEvent = tool_end_event.clone();
+
+        assert_eq!(
+            serde_json::to_value(&deprecated_tool_start_event)
+                .expect("deprecated tool-start alias serializes"),
+            serde_json::to_value(&tool_start_event).expect("tool-start alias serializes")
+        );
+        assert_eq!(
+            serde_json::to_value(&deprecated_tool_end_event)
+                .expect("deprecated tool-end alias serializes"),
+            serde_json::to_value(&tool_end_event).expect("tool-end alias serializes")
+        );
     }
 
     fn approval_response_prompt(
