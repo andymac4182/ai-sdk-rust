@@ -243,8 +243,9 @@ pub use speech_model::{
     SpeechModelRequest, SpeechModelResponse, SpeechModelResult,
 };
 pub use transcribe::{
-    ExperimentalTranscriptionResult, TranscribeOptions, TranscriptionResult,
-    experimental_transcribe, transcribe,
+    ExperimentalTranscriptionResult, TranscribeAudio, TranscribeDownload,
+    TranscribeDownloadFunction, TranscribeDownloadFuture, TranscribeError, TranscribeOptions,
+    TranscriptionResult, experimental_transcribe, transcribe,
 };
 pub use transcription_model::{
     NoTranscriptGeneratedError, TranscriptionModel, TranscriptionModelCallOptions,

@@ -1,11 +1,20 @@
+use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 use crate::VERSION;
 use crate::file_data::FileDataContent;
 use crate::headers::Headers;
 use crate::provider::ProviderMetadata;
 use crate::provider::ProviderOptions;
-use crate::provider_utils::{convert_base64_to_bytes, detect_media_type, with_user_agent_suffix};
+use crate::provider_utils::{
+    DownloadError, DownloadedBlob, convert_base64_to_bytes, detect_media_type,
+    with_user_agent_suffix,
+};
 use crate::transcription_model::{
     NoTranscriptGeneratedError, TranscriptionModel, TranscriptionModelCallOptions,
     TranscriptionModelResponse, TranscriptionModelResult, TranscriptionModelSegment,
@@ -82,29 +91,174 @@ impl TranscriptionResult {
 /// Upstream-compatible experimental result alias for [`TranscriptionResult`].
 pub type ExperimentalTranscriptionResult = TranscriptionResult;
 
+/// Audio input accepted by high-level transcription.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum TranscribeAudio {
+    /// Inline audio data.
+    Data { data: FileDataContent },
+
+    /// URL audio that must be downloaded before the model call.
+    Url { url: Url },
+}
+
+impl TranscribeAudio {
+    /// Creates inline transcription audio.
+    pub fn data(data: FileDataContent) -> Self {
+        Self::Data { data }
+    }
+
+    /// Creates URL transcription audio.
+    pub fn url(url: Url) -> Self {
+        Self::Url { url }
+    }
+}
+
+impl From<FileDataContent> for TranscribeAudio {
+    fn from(data: FileDataContent) -> Self {
+        Self::data(data)
+    }
+}
+
+impl From<Url> for TranscribeAudio {
+    fn from(url: Url) -> Self {
+        Self::url(url)
+    }
+}
+
+/// Future returned by a transcription download function.
+pub type TranscribeDownloadFuture =
+    Pin<Box<dyn Future<Output = Result<DownloadedBlob, DownloadError>> + Send>>;
+
+/// Function used to download URL audio before transcription.
+pub type TranscribeDownloadFunction =
+    dyn Fn(Url) -> TranscribeDownloadFuture + Send + Sync + 'static;
+
+/// Runtime download callback used for URL audio.
+#[derive(Clone)]
+pub struct TranscribeDownload {
+    download: Arc<TranscribeDownloadFunction>,
+}
+
+impl TranscribeDownload {
+    /// Creates a URL-audio download callback.
+    pub fn new<F, Fut>(download: F) -> Self
+    where
+        F: Fn(Url) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<DownloadedBlob, DownloadError>> + Send + 'static,
+    {
+        Self {
+            download: Arc::new(move |url| Box::pin(download(url))),
+        }
+    }
+
+    /// Downloads URL audio.
+    pub fn download(&self, url: Url) -> TranscribeDownloadFuture {
+        (self.download)(url)
+    }
+}
+
+impl fmt::Debug for TranscribeDownload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TranscribeDownload")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Error returned by high-level transcription.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TranscribeError {
+    /// The model produced no transcript text.
+    NoTranscriptGenerated(NoTranscriptGeneratedError),
+
+    /// URL audio could not be downloaded.
+    Download(DownloadError),
+}
+
+impl TranscribeError {
+    /// Returns the inner no-transcript error, when present.
+    pub fn as_no_transcript_generated(&self) -> Option<&NoTranscriptGeneratedError> {
+        match self {
+            Self::NoTranscriptGenerated(error) => Some(error),
+            Self::Download(_) => None,
+        }
+    }
+
+    /// Returns the inner download error, when present.
+    pub fn as_download_error(&self) -> Option<&DownloadError> {
+        match self {
+            Self::NoTranscriptGenerated(_) => None,
+            Self::Download(error) => Some(error),
+        }
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        match self {
+            Self::NoTranscriptGenerated(error) => error.message(),
+            Self::Download(error) => error.message(),
+        }
+    }
+}
+
+impl fmt::Display for TranscribeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoTranscriptGenerated(error) => error.fmt(formatter),
+            Self::Download(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for TranscribeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::NoTranscriptGenerated(error) => Some(error),
+            Self::Download(error) => Some(error),
+        }
+    }
+}
+
+impl From<NoTranscriptGeneratedError> for TranscribeError {
+    fn from(error: NoTranscriptGeneratedError) -> Self {
+        Self::NoTranscriptGenerated(error)
+    }
+}
+
+impl From<DownloadError> for TranscribeError {
+    fn from(error: DownloadError) -> Self {
+        Self::Download(error)
+    }
+}
+
 /// Options for a high-level `transcribe` call.
 pub struct TranscribeOptions<'a, M: TranscriptionModel + ?Sized> {
     /// Transcription model used for the call.
     pub model: &'a M,
 
     /// Audio data to transcribe.
-    pub audio: FileDataContent,
+    pub audio: TranscribeAudio,
 
     /// Provider-specific options passed through to the model.
     pub provider_options: Option<ProviderOptions>,
 
     /// Additional HTTP headers for HTTP-based providers.
     pub headers: Option<Headers>,
+
+    /// Download function used when audio is supplied as a URL.
+    pub download: Option<TranscribeDownload>,
 }
 
 impl<'a, M: TranscriptionModel + ?Sized> TranscribeOptions<'a, M> {
     /// Creates options for a high-level `transcribe` call.
-    pub fn new(model: &'a M, audio: FileDataContent) -> Self {
+    pub fn new(model: &'a M, audio: impl Into<TranscribeAudio>) -> Self {
         Self {
             model,
-            audio,
+            audio: audio.into(),
             provider_options: None,
             headers: None,
+            download: None,
         }
     }
 
@@ -127,20 +281,27 @@ impl<'a, M: TranscriptionModel + ?Sized> TranscribeOptions<'a, M> {
             .insert(name.into(), value.into());
         self
     }
+
+    /// Sets the download callback for URL audio.
+    pub fn with_download(mut self, download: TranscribeDownload) -> Self {
+        self.download = Some(download);
+        self
+    }
 }
 
 /// Generates a transcript using a transcription model.
 pub async fn transcribe<M: TranscriptionModel + ?Sized>(
     options: TranscribeOptions<'_, M>,
-) -> Result<TranscriptionResult, NoTranscriptGeneratedError> {
+) -> Result<TranscriptionResult, TranscribeError> {
     let TranscribeOptions {
         model,
         audio,
         provider_options,
         headers,
+        download,
     } = options;
 
-    let audio = normalize_audio_data(audio);
+    let audio = resolve_audio_data(audio, download.as_ref()).await?;
     let media_type = detect_media_type(&audio, Some("audio"))
         .unwrap_or("audio/wav")
         .to_string();
@@ -165,7 +326,7 @@ pub async fn transcribe<M: TranscriptionModel + ?Sized>(
         .await;
 
     if text.is_empty() {
-        return Err(NoTranscriptGeneratedError::new([response]));
+        return Err(NoTranscriptGeneratedError::new([response]).into());
     }
 
     Ok(TranscriptionResult {
@@ -182,8 +343,29 @@ pub async fn transcribe<M: TranscriptionModel + ?Sized>(
 /// Upstream-compatible experimental alias for [`transcribe`].
 pub async fn experimental_transcribe<M: TranscriptionModel + ?Sized>(
     options: TranscribeOptions<'_, M>,
-) -> Result<ExperimentalTranscriptionResult, NoTranscriptGeneratedError> {
+) -> Result<ExperimentalTranscriptionResult, TranscribeError> {
     transcribe(options).await
+}
+
+async fn resolve_audio_data(
+    audio: TranscribeAudio,
+    download: Option<&TranscribeDownload>,
+) -> Result<FileDataContent, TranscribeError> {
+    match audio {
+        TranscribeAudio::Data { data } => Ok(normalize_audio_data(data)),
+        TranscribeAudio::Url { url } => {
+            let Some(download) = download else {
+                return Err(DownloadError::new(
+                    url.to_string(),
+                    "URL audio requires a download function",
+                )
+                .into());
+            };
+
+            let blob = download.download(url).await?;
+            Ok(FileDataContent::Bytes(blob.data))
+        }
+    }
 }
 
 fn normalize_audio_data(audio: FileDataContent) -> FileDataContent {
@@ -208,13 +390,14 @@ fn headers_with_ai_user_agent(headers: Option<Headers>) -> Headers {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExperimentalTranscriptionResult, TranscribeOptions, TranscriptionResult,
-        experimental_transcribe, transcribe,
+        ExperimentalTranscriptionResult, TranscribeAudio, TranscribeDownload, TranscribeOptions,
+        TranscriptionResult, experimental_transcribe, transcribe,
     };
     use crate::VERSION;
     use crate::file_data::FileDataContent;
     use crate::headers::Headers;
     use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
+    use crate::provider_utils::{DownloadError, DownloadedBlob};
     use crate::transcription_model::{
         TranscriptionModel, TranscriptionModelCallOptions, TranscriptionModelResponse,
         TranscriptionModelResult, TranscriptionModelSegment,
@@ -224,9 +407,10 @@ mod tests {
     use std::collections::VecDeque;
     use std::future::{Future, Ready, ready};
     use std::pin::Pin;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Waker};
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+    use url::Url;
 
     struct RecordingTranscriptionModel {
         calls: Mutex<Vec<TranscriptionModelCallOptions>>,
@@ -425,6 +609,29 @@ mod tests {
     }
 
     #[test]
+    fn transcribe_audio_serializes_upstream_file_data_variants() {
+        let url = Url::parse("https://example.com/audio.wav").expect("url parses");
+
+        assert_eq!(
+            serde_json::to_value(TranscribeAudio::data(FileDataContent::Base64(
+                "UklGRgAAAAA=".to_string()
+            )))
+            .expect("audio serializes"),
+            json!({
+                "type": "data",
+                "data": "UklGRgAAAAA="
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(TranscribeAudio::url(url)).expect("url audio serializes"),
+            json!({
+                "type": "url",
+                "url": "https://example.com/audio.wav"
+            })
+        );
+    }
+
+    #[test]
     fn transcribe_forwards_normalized_audio_options_headers_and_provider_options() {
         let provider_options: ProviderOptions = serde_json::from_value(json!({
             "openai": {
@@ -463,6 +670,110 @@ mod tests {
                 }),
             }]
         );
+    }
+
+    #[test]
+    fn transcribe_downloads_url_audio_before_model_call() {
+        let downloaded_urls = Arc::new(Mutex::new(Vec::new()));
+        let download = TranscribeDownload::new({
+            let downloaded_urls = Arc::clone(&downloaded_urls);
+            move |url| {
+                downloaded_urls
+                    .lock()
+                    .expect("download urls lock is not poisoned")
+                    .push(url);
+
+                ready(Ok(
+                    DownloadedBlob::new(vec![0xff, 0xfb]).with_media_type("audio/ogg")
+                ))
+            }
+        });
+        let model = RecordingTranscriptionModel::new(vec![TranscriptionModelResult::new(
+            "Downloaded transcript.",
+            Vec::new(),
+            transcription_response("openai/whisper-1"),
+        )]);
+        let url = Url::parse("https://example.com/audio.mp3").expect("url parses");
+
+        let result = poll_ready(transcribe(
+            TranscribeOptions::new(&model, url.clone()).with_download(download),
+        ))
+        .expect("transcription succeeds");
+
+        assert_eq!(result.text, "Downloaded transcript.");
+        assert_eq!(
+            *downloaded_urls
+                .lock()
+                .expect("download urls lock is not poisoned"),
+            vec![url]
+        );
+        assert_eq!(
+            model.calls(),
+            vec![TranscriptionModelCallOptions {
+                audio: FileDataContent::Bytes(vec![0xff, 0xfb]),
+                media_type: "audio/mpeg".to_string(),
+                provider_options: Some(ProviderOptions::new()),
+                headers: Some({
+                    let mut headers = Headers::new();
+                    headers.insert("user-agent".to_string(), format!("ai/{VERSION}"));
+                    headers
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn transcribe_url_audio_requires_download_callback() {
+        let model = RecordingTranscriptionModel::new(vec![TranscriptionModelResult::new(
+            "unreachable",
+            Vec::new(),
+            transcription_response("transcribe-test"),
+        )]);
+        let url = Url::parse("https://example.com/audio.mp3").expect("url parses");
+
+        let error = poll_ready(transcribe(TranscribeOptions::new(&model, url.clone())))
+            .expect_err("missing download function errors");
+
+        let download_error = error
+            .as_download_error()
+            .expect("error is a download failure");
+        assert_eq!(download_error.url(), url.as_str());
+        assert_eq!(
+            download_error.message(),
+            "URL audio requires a download function"
+        );
+        assert_eq!(model.calls(), Vec::new());
+    }
+
+    #[test]
+    fn transcribe_propagates_url_download_errors() {
+        let download = TranscribeDownload::new(|url| {
+            ready(Err(DownloadError::with_cause_message(
+                url.to_string(),
+                "network down",
+            )))
+        });
+        let model = RecordingTranscriptionModel::new(vec![TranscriptionModelResult::new(
+            "unreachable",
+            Vec::new(),
+            transcription_response("transcribe-test"),
+        )]);
+        let url = Url::parse("https://example.com/audio.mp3").expect("url parses");
+
+        let error = poll_ready(transcribe(
+            TranscribeOptions::new(&model, url.clone()).with_download(download),
+        ))
+        .expect_err("download failure errors");
+
+        let download_error = error
+            .as_download_error()
+            .expect("error is a download failure");
+        assert_eq!(download_error.url(), url.as_str());
+        assert_eq!(
+            download_error.message(),
+            "Failed to download https://example.com/audio.mp3: network down"
+        );
+        assert_eq!(model.calls(), Vec::new());
     }
 
     #[test]
@@ -561,8 +872,11 @@ mod tests {
         )))
         .expect_err("empty transcript errors");
 
-        assert_eq!(error.message(), "No transcript generated.");
-        assert_eq!(error.responses(), &[response]);
+        let no_transcript = error
+            .as_no_transcript_generated()
+            .expect("error is no-transcript");
+        assert_eq!(no_transcript.message(), "No transcript generated.");
+        assert_eq!(no_transcript.responses(), &[response]);
     }
 
     #[test]
