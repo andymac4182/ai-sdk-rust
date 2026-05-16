@@ -695,6 +695,134 @@ pub fn normalize_tool_approval_status(
     )
 }
 
+/// Static per-tool approval configuration for high-level generate-text calls.
+///
+/// Upstream `toolApproval` also accepts callback forms. This Rust slice models
+/// the JSON/data configuration form first: caller-supplied per-tool statuses
+/// override any tool-defined `needs_approval` boolean.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct ToolApprovalConfiguration {
+    tool_statuses: BTreeMap<String, ToolApprovalStatus>,
+}
+
+impl ToolApprovalConfiguration {
+    /// Creates an empty approval configuration.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates an approval configuration from tool-name statuses.
+    pub fn from_statuses(
+        statuses: impl IntoIterator<Item = (impl Into<String>, ToolApprovalStatus)>,
+    ) -> Self {
+        Self {
+            tool_statuses: statuses
+                .into_iter()
+                .map(|(tool_name, status)| (tool_name.into(), status))
+                .collect(),
+        }
+    }
+
+    /// Adds or replaces the approval status for one tool.
+    pub fn with_tool_status(
+        mut self,
+        tool_name: impl Into<String>,
+        status: impl Into<ToolApprovalStatus>,
+    ) -> Self {
+        self.tool_statuses.insert(tool_name.into(), status.into());
+        self
+    }
+
+    /// Inserts or replaces the approval status for one tool.
+    pub fn insert_tool_status(
+        &mut self,
+        tool_name: impl Into<String>,
+        status: impl Into<ToolApprovalStatus>,
+    ) -> Option<ToolApprovalStatus> {
+        self.tool_statuses.insert(tool_name.into(), status.into())
+    }
+
+    /// Returns the configured approval status for one tool.
+    pub fn tool_status(&self, tool_name: &str) -> Option<&ToolApprovalStatus> {
+        self.tool_statuses.get(tool_name)
+    }
+
+    /// Returns the configured tool-status map.
+    pub fn tool_statuses(&self) -> &BTreeMap<String, ToolApprovalStatus> {
+        &self.tool_statuses
+    }
+
+    /// Returns whether this configuration has no per-tool statuses.
+    pub fn is_empty(&self) -> bool {
+        self.tool_statuses.is_empty()
+    }
+}
+
+/// Inputs used by [`resolve_tool_approval`].
+#[derive(Clone, Copy, Debug)]
+pub struct ResolveToolApprovalOptions<'a> {
+    /// Tools available to the model call.
+    pub tools: Option<&'a [Tool]>,
+
+    /// Valid tool call whose approval status should be resolved.
+    pub tool_call: &'a GenerateTextToolCall,
+
+    /// User-defined generate-text approval configuration.
+    pub tool_approval: Option<&'a ToolApprovalConfiguration>,
+}
+
+impl<'a> ResolveToolApprovalOptions<'a> {
+    /// Creates resolve options for a tool call.
+    pub fn new(tool_call: &'a GenerateTextToolCall) -> Self {
+        Self {
+            tools: None,
+            tool_call,
+            tool_approval: None,
+        }
+    }
+
+    /// Sets the available tools.
+    pub fn with_tools(mut self, tools: &'a [Tool]) -> Self {
+        self.tools = Some(tools);
+        self
+    }
+
+    /// Sets the user-defined approval configuration.
+    pub fn with_tool_approval(mut self, tool_approval: &'a ToolApprovalConfiguration) -> Self {
+        self.tool_approval = Some(tool_approval);
+        self
+    }
+}
+
+/// Resolves the approval status for a valid tool call.
+///
+/// This mirrors the static branches of upstream `resolveToolApproval`: explicit
+/// generate-text approval configuration wins first, then tool-defined boolean
+/// approval, and missing configuration normalizes to `not-applicable`.
+pub fn resolve_tool_approval(
+    options: ResolveToolApprovalOptions<'_>,
+) -> NormalizedToolApprovalStatus {
+    if let Some(status) = options
+        .tool_approval
+        .and_then(|configuration| configuration.tool_status(&options.tool_call.tool_name))
+    {
+        return normalize_tool_approval_status(Some(status.clone()));
+    }
+
+    let needs_approval = options.tools.and_then(|tools| {
+        tools
+            .iter()
+            .find(|tool| tool.name == options.tool_call.tool_name)
+            .and_then(Tool::needs_approval)
+    });
+
+    match needs_approval {
+        Some(true) => NormalizedToolApprovalStatus::UserApproval,
+        Some(false) | None => NormalizedToolApprovalStatus::NotApplicable,
+    }
+}
+
 /// Error returned when a model tries to call a tool that is not available.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NoSuchToolError {
@@ -3532,12 +3660,13 @@ mod tests {
         InvalidToolInputError, MissingToolResultsError, NoObjectGeneratedError,
         NoOutputGeneratedError, NoSuchToolError, NormalizedToolApprovalStatus, PruneEmptyMessages,
         PruneMessagesOptions, PruneReasoning, PruneToolCallRule, PruneToolCallRuleMode,
-        PruneToolCalls, StopCondition, ToolApprovalStatus, ToolApprovalStatusKind,
-        ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOriginalError,
-        UiMessageStreamError, UnsupportedModelVersionError, collect_tool_approvals,
-        experimental_filter_active_tools, filter_active_tools, generate_text, has_tool_call,
-        is_loop_finished, is_step_count, is_stop_condition_met, normalize_tool_approval_status,
-        prune_messages, step_count_is,
+        PruneToolCalls, ResolveToolApprovalOptions, StopCondition, ToolApprovalConfiguration,
+        ToolApprovalStatus, ToolApprovalStatusKind, ToolCallNotFoundForApprovalError,
+        ToolCallRepairError, ToolCallRepairOriginalError, UiMessageStreamError,
+        UnsupportedModelVersionError, collect_tool_approvals, experimental_filter_active_tools,
+        filter_active_tools, generate_text, has_tool_call, is_loop_finished, is_step_count,
+        is_stop_condition_met, normalize_tool_approval_status, prune_messages,
+        resolve_tool_approval, step_count_is,
     };
     use crate::file_data::FileDataContent;
     use crate::language_model::{
@@ -4027,6 +4156,141 @@ mod tests {
             serde_json::from_value::<ToolApprovalStatusKind>(json!("user-approval"))
                 .expect("status kind deserializes"),
             ToolApprovalStatusKind::UserApproval
+        );
+    }
+
+    fn approval_tool_call(tool_name: &str) -> GenerateTextToolCall {
+        GenerateTextToolCall {
+            tool_call_id: "call-1".to_string(),
+            tool_name: tool_name.to_string(),
+            input: json!({
+                "city": "Berlin"
+            }),
+            title: None,
+            provider_executed: None,
+            dynamic: None,
+            invalid: None,
+            error: None,
+            provider_metadata: None,
+            tool_metadata: None,
+        }
+    }
+
+    fn approval_tool_schema() -> crate::json::JsonSchema {
+        json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone()
+    }
+
+    #[test]
+    fn tool_approval_configuration_round_trips_static_status_map() {
+        let mut configuration = ToolApprovalConfiguration::new()
+            .with_tool_status("weather", ToolApprovalStatusKind::Denied)
+            .with_tool_status(
+                "search",
+                NormalizedToolApprovalStatus::approved_with_reason("trusted source"),
+            );
+        assert_eq!(
+            configuration.insert_tool_status("weather", ToolApprovalStatusKind::UserApproval),
+            Some(ToolApprovalStatus::Kind(ToolApprovalStatusKind::Denied))
+        );
+
+        assert!(!configuration.is_empty());
+        assert_eq!(
+            configuration.tool_status("weather"),
+            Some(&ToolApprovalStatus::Kind(
+                ToolApprovalStatusKind::UserApproval
+            ))
+        );
+        assert_eq!(configuration.tool_statuses().len(), 2);
+
+        assert_eq!(
+            serde_json::to_value(&configuration).expect("configuration serializes"),
+            json!({
+                "search": {
+                    "type": "approved",
+                    "reason": "trusted source"
+                },
+                "weather": "user-approval"
+            })
+        );
+
+        let round_tripped: ToolApprovalConfiguration = serde_json::from_value(json!({
+            "search": {
+                "type": "approved",
+                "reason": "trusted source"
+            },
+            "weather": "user-approval"
+        }))
+        .expect("configuration deserializes");
+
+        assert_eq!(round_tripped, configuration);
+    }
+
+    #[test]
+    fn resolve_tool_approval_prefers_user_configured_statuses() {
+        let tool_call = approval_tool_call("weather");
+        let tools = vec![Tool::new("weather", approval_tool_schema()).with_needs_approval(true)];
+        let configuration = ToolApprovalConfiguration::new().with_tool_status(
+            "weather",
+            NormalizedToolApprovalStatus::denied_with_reason("policy block"),
+        );
+
+        let status = resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration),
+        );
+
+        assert_eq!(
+            status,
+            NormalizedToolApprovalStatus::denied_with_reason("policy block")
+        );
+    }
+
+    #[test]
+    fn resolve_tool_approval_maps_tool_defined_boolean_approval() {
+        let tool_call = approval_tool_call("weather");
+        let approval_required =
+            vec![Tool::new("weather", approval_tool_schema()).with_needs_approval(true)];
+        let approval_not_required =
+            vec![Tool::new("weather", approval_tool_schema()).with_needs_approval(false)];
+
+        assert_eq!(
+            resolve_tool_approval(
+                ResolveToolApprovalOptions::new(&tool_call).with_tools(&approval_required)
+            ),
+            NormalizedToolApprovalStatus::UserApproval
+        );
+        assert_eq!(
+            resolve_tool_approval(
+                ResolveToolApprovalOptions::new(&tool_call).with_tools(&approval_not_required)
+            ),
+            NormalizedToolApprovalStatus::NotApplicable
+        );
+    }
+
+    #[test]
+    fn resolve_tool_approval_defaults_to_not_applicable() {
+        let tool_call = approval_tool_call("weather");
+
+        assert_eq!(
+            resolve_tool_approval(ResolveToolApprovalOptions::new(&tool_call)),
+            NormalizedToolApprovalStatus::NotApplicable
+        );
+        assert_eq!(
+            resolve_tool_approval(
+                ResolveToolApprovalOptions::new(&tool_call)
+                    .with_tools(&[Tool::new("search", approval_tool_schema())])
+            ),
+            NormalizedToolApprovalStatus::NotApplicable
         );
     }
 

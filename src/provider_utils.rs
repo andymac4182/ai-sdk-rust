@@ -2583,6 +2583,12 @@ pub struct Tool {
     /// tool source such as an MCP server.
     pub metadata: Option<JsonObject>,
 
+    /// Whether this tool requires approval before execution.
+    ///
+    /// This mirrors upstream's deprecated tool-defined `needsApproval` boolean.
+    /// Generate-text-level approval configuration can still override it.
+    pub needs_approval: Option<bool>,
+
     execute: Option<Arc<ToolExecuteFunction>>,
 }
 
@@ -2599,6 +2605,7 @@ impl Tool {
             strict: None,
             provider_options: None,
             metadata: None,
+            needs_approval: None,
             execute: None,
         }
     }
@@ -2619,6 +2626,7 @@ impl Tool {
             strict: None,
             provider_options: None,
             metadata: None,
+            needs_approval: None,
             execute: None,
         }
     }
@@ -2650,6 +2658,7 @@ impl Tool {
             strict: None,
             provider_options: None,
             metadata: None,
+            needs_approval: None,
             execute: None,
         }
     }
@@ -2681,6 +2690,7 @@ impl Tool {
             strict: None,
             provider_options: None,
             metadata: None,
+            needs_approval: None,
             execute: None,
         }
     }
@@ -2746,6 +2756,15 @@ impl Tool {
     /// Sets high-level tool metadata that is not sent to the provider.
     pub fn with_metadata(mut self, metadata: JsonObject) -> Self {
         self.metadata = Some(metadata);
+        self
+    }
+
+    /// Sets whether this tool requires approval before execution.
+    ///
+    /// This is the Rust equivalent of upstream tool-defined `needsApproval`
+    /// when it is configured as a boolean rather than a callback.
+    pub fn with_needs_approval(mut self, needs_approval: bool) -> Self {
+        self.needs_approval = Some(needs_approval);
         self
     }
 
@@ -2832,6 +2851,11 @@ impl Tool {
         self.title.as_deref()
     }
 
+    /// Returns whether this tool requires approval before execution when configured.
+    pub fn needs_approval(&self) -> Option<bool> {
+        self.needs_approval
+    }
+
     /// Executes this tool when an executor is present.
     pub fn execute(
         &self,
@@ -2888,6 +2912,7 @@ impl fmt::Debug for Tool {
             .field("strict", &self.strict)
             .field("provider_options", &self.provider_options)
             .field("metadata", &self.metadata)
+            .field("needs_approval", &self.needs_approval)
             .field("is_executable", &self.is_executable())
             .finish()
     }
