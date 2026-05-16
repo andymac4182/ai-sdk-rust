@@ -60,6 +60,7 @@ pub use image_model_middleware::{
 };
 pub use json::{
     JsonArray, JsonObject, JsonSchema, JsonValue, NonNullJsonValue, NullJsonValueError,
+    is_json_array, is_json_object, is_json_value,
 };
 pub use language_model::{
     FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,

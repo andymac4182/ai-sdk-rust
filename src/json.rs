@@ -20,6 +20,36 @@ pub type JsonSchema = JsonObject;
 /// A JSON array.
 pub type JsonArray = Vec<JsonValue>;
 
+/// Returns whether the supplied value is a valid JSON value.
+///
+/// This mirrors upstream `isJSONValue`. Rust's [`JsonValue`] type is already
+/// JSON by construction, so this helper is primarily useful for API parity and
+/// for code that works uniformly with the adjacent array/object guards.
+pub fn is_json_value(value: &JsonValue) -> bool {
+    let _ = value;
+    true
+}
+
+/// Returns whether the supplied JSON value is an array.
+///
+/// Nested values are JSON by construction in Rust, matching upstream's
+/// recursive `isJSONArray` validation at the serde boundary.
+pub fn is_json_array(value: &JsonValue) -> bool {
+    value
+        .as_array()
+        .is_some_and(|array| array.iter().all(is_json_value))
+}
+
+/// Returns whether the supplied JSON value is an object.
+///
+/// Object keys and nested values are JSON by construction in Rust, matching
+/// upstream's recursive `isJSONObject` validation at the serde boundary.
+pub fn is_json_object(value: &JsonValue) -> bool {
+    value
+        .as_object()
+        .is_some_and(|object| object.values().all(is_json_value))
+}
+
 /// Error returned when a JSON value must not be null.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NullJsonValueError;
@@ -91,7 +121,10 @@ impl<'de> Deserialize<'de> for NonNullJsonValue {
 
 #[cfg(test)]
 mod tests {
-    use super::{JsonArray, JsonObject, JsonValue, NonNullJsonValue};
+    use super::{
+        JsonArray, JsonObject, JsonValue, NonNullJsonValue, is_json_array, is_json_object,
+        is_json_value,
+    };
     use serde_json::json;
 
     #[test]
@@ -106,6 +139,36 @@ mod tests {
 
         assert_eq!(JsonValue::Object(object), json!({ "provider": "openai" }));
         assert_eq!(JsonValue::Array(array), json!([true, null]));
+    }
+
+    #[test]
+    fn json_value_guard_accepts_all_serde_json_values() {
+        for value in [
+            JsonValue::Null,
+            JsonValue::Bool(true),
+            json!(42),
+            json!("text"),
+            json!([null, { "nested": false }]),
+            json!({ "provider": { "enabled": true } }),
+        ] {
+            assert!(is_json_value(&value));
+        }
+    }
+
+    #[test]
+    fn json_array_guard_matches_only_arrays() {
+        assert!(is_json_array(&json!([1, "two", { "three": true }])));
+        assert!(is_json_array(&json!([])));
+        assert!(!is_json_array(&json!({ "not": "array" })));
+        assert!(!is_json_array(&JsonValue::Null));
+    }
+
+    #[test]
+    fn json_object_guard_matches_only_objects() {
+        assert!(is_json_object(&json!({ "items": [1, 2, 3] })));
+        assert!(is_json_object(&json!({})));
+        assert!(!is_json_object(&json!(["not", "object"])));
+        assert!(!is_json_object(&JsonValue::Null));
     }
 
     #[test]
