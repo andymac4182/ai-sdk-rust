@@ -3,7 +3,7 @@ use time::OffsetDateTime;
 use url::Url;
 
 use crate::file_data::FileDataContent;
-use crate::json::JsonObject;
+use crate::json::{JsonObject, NonNullJsonValue};
 use crate::provider::ProviderMetadata;
 
 /// Unified reason why a language model finished generating a response.
@@ -432,6 +432,89 @@ impl LanguageModelToolCall {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelToolResultKind {
+    #[serde(rename = "tool-result")]
+    ToolResult,
+}
+
+/// Result of a provider-executed tool call.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelToolResult {
+    #[serde(rename = "type")]
+    kind: LanguageModelToolResultKind,
+
+    /// Identifier of the tool call this result is associated with.
+    pub tool_call_id: String,
+
+    /// Name of the tool that generated this result.
+    pub tool_name: String,
+
+    /// JSON-serializable, non-null result of the tool call.
+    pub result: NonNullJsonValue,
+
+    /// Whether the result is an error or an error message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_error: Option<bool>,
+
+    /// Whether the tool result is preliminary and may be replaced by a later result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preliminary: Option<bool>,
+
+    /// Whether the tool is dynamic and defined at runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic: Option<bool>,
+
+    /// Optional provider-specific metadata for the tool result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+}
+
+impl LanguageModelToolResult {
+    /// Creates a provider-executed tool result.
+    pub fn new(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        result: NonNullJsonValue,
+    ) -> Self {
+        Self {
+            kind: LanguageModelToolResultKind::ToolResult,
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            result,
+            is_error: None,
+            preliminary: None,
+            dynamic: None,
+            provider_metadata: None,
+        }
+    }
+
+    /// Sets whether this tool result represents an error.
+    pub fn with_is_error(mut self, is_error: bool) -> Self {
+        self.is_error = Some(is_error);
+        self
+    }
+
+    /// Sets whether this tool result is preliminary.
+    pub fn with_preliminary(mut self, preliminary: bool) -> Self {
+        self.preliminary = Some(preliminary);
+        self
+    }
+
+    /// Sets whether this tool result came from a dynamic runtime-defined tool.
+    pub fn with_dynamic(mut self, dynamic: bool) -> Self {
+        self.dynamic = Some(dynamic);
+        self
+    }
+
+    /// Adds provider-specific metadata to this tool result.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+}
+
 /// Strategy for selecting a tool during a language model call.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -460,9 +543,10 @@ mod tests {
         LanguageModelFileData, LanguageModelFinishReason, LanguageModelReasoning,
         LanguageModelReasoningFile, LanguageModelResponseMetadata, LanguageModelText,
         LanguageModelToolApprovalRequest, LanguageModelToolCall, LanguageModelToolChoice,
-        LanguageModelUsage, OutputTokenUsage,
+        LanguageModelToolResult, LanguageModelUsage, OutputTokenUsage,
     };
     use crate::file_data::FileDataContent;
+    use crate::json::NonNullJsonValue;
     use serde_json::json;
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
     use url::Url;
@@ -917,6 +1001,108 @@ mod tests {
         .expect_err("wrong discriminator is rejected");
 
         assert!(error.to_string().contains("unknown variant `tool-result`"));
+    }
+
+    #[test]
+    fn tool_result_serializes_upstream_shape_with_optional_flags_and_metadata() {
+        let tool_result = LanguageModelToolResult::new(
+            "tool_call_123",
+            "weather",
+            NonNullJsonValue::new(json!({
+                "temperatureCelsius": 24
+            }))
+            .expect("tool result is non-null"),
+        )
+        .with_is_error(false)
+        .with_preliminary(true)
+        .with_dynamic(true)
+        .with_provider_metadata(
+            serde_json::from_value(json!({
+                "openai": {
+                    "itemId": "item_456"
+                }
+            }))
+            .expect("provider metadata deserializes"),
+        );
+
+        assert_eq!(
+            serde_json::to_value(tool_result).expect("tool result serializes"),
+            json!({
+                "type": "tool-result",
+                "toolCallId": "tool_call_123",
+                "toolName": "weather",
+                "result": {
+                    "temperatureCelsius": 24
+                },
+                "isError": false,
+                "preliminary": true,
+                "dynamic": true,
+                "providerMetadata": {
+                    "openai": {
+                        "itemId": "item_456"
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn tool_result_deserializes_and_omits_missing_optional_fields() {
+        let tool_result: LanguageModelToolResult = serde_json::from_value(json!({
+            "type": "tool-result",
+            "toolCallId": "tool_call_123",
+            "toolName": "weather",
+            "result": "sunny"
+        }))
+        .expect("tool result deserializes");
+
+        assert_eq!(
+            tool_result,
+            LanguageModelToolResult::new(
+                "tool_call_123",
+                "weather",
+                NonNullJsonValue::new(json!("sunny")).expect("tool result is non-null"),
+            )
+        );
+        assert_eq!(
+            serde_json::to_value(tool_result).expect("tool result serializes"),
+            json!({
+                "type": "tool-result",
+                "toolCallId": "tool_call_123",
+                "toolName": "weather",
+                "result": "sunny"
+            })
+        );
+    }
+
+    #[test]
+    fn tool_result_rejects_null_results() {
+        let error = serde_json::from_value::<LanguageModelToolResult>(json!({
+            "type": "tool-result",
+            "toolCallId": "tool_call_123",
+            "toolName": "weather",
+            "result": null
+        }))
+        .expect_err("null tool results are rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("JSON values cannot be null in this position")
+        );
+    }
+
+    #[test]
+    fn tool_result_rejects_other_content_types() {
+        let error = serde_json::from_value::<LanguageModelToolResult>(json!({
+            "type": "tool-call",
+            "toolCallId": "tool_call_123",
+            "toolName": "weather",
+            "result": {}
+        }))
+        .expect_err("wrong discriminator is rejected");
+
+        assert!(error.to_string().contains("unknown variant `tool-call`"));
     }
 
     #[test]

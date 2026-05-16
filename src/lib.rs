@@ -13,13 +13,13 @@ pub mod warning;
 
 pub use file_data::{FileData, FileDataContent, ProviderReference, ProviderReferenceError};
 pub use headers::Headers;
-pub use json::{JsonArray, JsonObject, JsonValue};
+pub use json::{JsonArray, JsonObject, JsonValue, NonNullJsonValue, NullJsonValueError};
 pub use language_model::{
     FinishReason, InputTokenUsage, LanguageModelCustomContent, LanguageModelFile,
     LanguageModelFileData, LanguageModelFinishReason, LanguageModelReasoning,
     LanguageModelReasoningFile, LanguageModelResponseMetadata, LanguageModelText,
     LanguageModelToolApprovalRequest, LanguageModelToolCall, LanguageModelToolChoice,
-    LanguageModelUsage, OutputTokenUsage,
+    LanguageModelToolResult, LanguageModelUsage, OutputTokenUsage,
 };
 pub use provider::{ProviderMetadata, ProviderOptions};
 pub use warning::Warning;
