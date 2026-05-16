@@ -21,7 +21,8 @@ use crate::language_model::{
     LanguageModelToolInputExample,
 };
 use crate::provider::{
-    LoadApiKeyError, LoadSettingError, ProviderOptions, UnsupportedFunctionalityError,
+    JsonParseError, LoadApiKeyError, LoadSettingError, ProviderOptions,
+    UnsupportedFunctionalityError,
 };
 use crate::warning::Warning;
 
@@ -1022,6 +1023,73 @@ pub fn is_provider_reference(data: &JsonValue) -> bool {
         .is_some_and(|object| !object.contains_key("type"))
 }
 
+/// Parses a JSON string into a JSON value.
+///
+/// This mirrors the no-schema overload of upstream `@ai-sdk/provider-utils`
+/// `parseJSON`, using Rust's JSON representation and wrapping parse failures
+/// in the provider-level [`JsonParseError`].
+pub fn parse_json(text: &str) -> Result<JsonValue, JsonParseError> {
+    secure_json_parse(text).map_err(|cause| JsonParseError::new(text, cause))
+}
+
+/// Returns whether the input can be parsed as JSON.
+pub fn is_parsable_json(input: &str) -> bool {
+    secure_json_parse(input).is_ok()
+}
+
+fn secure_json_parse(text: &str) -> Result<JsonValue, SecureJsonParseError> {
+    let value = serde_json::from_str::<JsonValue>(text).map_err(SecureJsonParseError::Parse)?;
+    reject_forbidden_json_keys(&value)?;
+    Ok(value)
+}
+
+#[derive(Debug)]
+enum SecureJsonParseError {
+    Parse(serde_json::Error),
+    ForbiddenPrototypeProperty,
+}
+
+impl fmt::Display for SecureJsonParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Parse(error) => error.fmt(formatter),
+            Self::ForbiddenPrototypeProperty => {
+                formatter.write_str("Object contains forbidden prototype property")
+            }
+        }
+    }
+}
+
+fn reject_forbidden_json_keys(value: &JsonValue) -> Result<(), SecureJsonParseError> {
+    match value {
+        JsonValue::Array(values) => {
+            for value in values {
+                reject_forbidden_json_keys(value)?;
+            }
+        }
+        JsonValue::Object(object) => {
+            if object.contains_key("__proto__") {
+                return Err(SecureJsonParseError::ForbiddenPrototypeProperty);
+            }
+
+            if object
+                .get("constructor")
+                .and_then(JsonValue::as_object)
+                .is_some_and(|constructor| constructor.contains_key("prototype"))
+            {
+                return Err(SecureJsonParseError::ForbiddenPrototypeProperty);
+            }
+
+            for value in object.values() {
+                reject_forbidden_json_keys(value)?;
+            }
+        }
+        JsonValue::Null | JsonValue::Bool(_) | JsonValue::Number(_) | JsonValue::String(_) => {}
+    }
+
+    Ok(())
+}
+
 /// Converts inline file data into raw bytes.
 ///
 /// This mirrors upstream `@ai-sdk/provider-utils`
@@ -1734,12 +1802,13 @@ mod tests {
         convert_inline_file_data_to_bytes, convert_to_base64, create_tool_name_mapping,
         detect_media_type, filter_nullable, get_top_level_media_type, inject_json_instruction,
         inject_json_instruction_into_messages, is_custom_reasoning, is_full_media_type,
-        is_non_nullable, is_provider_reference, load_api_key, load_api_key_with_env,
-        load_optional_setting_with_env, load_setting, load_setting_with_env,
+        is_non_nullable, is_parsable_json, is_provider_reference, load_api_key,
+        load_api_key_with_env, load_optional_setting_with_env, load_setting, load_setting_with_env,
         map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
-        media_type_to_extension, normalize_headers, prepare_tools, remove_undefined_entries,
-        resolve_full_media_type, resolve_provider_reference, strip_file_extension,
-        validate_download_url, with_user_agent_suffix, without_trailing_slash,
+        media_type_to_extension, normalize_headers, parse_json, prepare_tools,
+        remove_undefined_entries, resolve_full_media_type, resolve_provider_reference,
+        strip_file_extension, validate_download_url, with_user_agent_suffix,
+        without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -2484,6 +2553,84 @@ mod tests {
         assert!(!is_provider_reference(&json!("some-string")));
         assert!(!is_provider_reference(&json!(42)));
         assert!(!is_provider_reference(&json!([1, 2, 3])));
+    }
+
+    #[test]
+    fn parse_json_parses_json_values_without_schema() {
+        assert_eq!(
+            parse_json(r#"{"foo":"bar","items":[1,true,null]}"#).expect("JSON parses"),
+            json!({
+                "foo": "bar",
+                "items": [1, true, null],
+            })
+        );
+        assert_eq!(parse_json("0").expect("number JSON parses"), json!(0));
+        assert_eq!(
+            parse_json(r#""hello""#).expect("string JSON parses"),
+            json!("hello")
+        );
+    }
+
+    #[test]
+    fn parse_json_wraps_invalid_json_in_provider_error() {
+        let error = parse_json("invalid json").expect_err("invalid JSON fails");
+
+        assert_eq!(error.text(), "invalid json");
+        assert!(
+            error
+                .message()
+                .starts_with("JSON parsing failed: Text: invalid json.\nError message:")
+        );
+    }
+
+    #[test]
+    fn parse_json_rejects_proto_properties() {
+        let error = parse_json(r#"{ "a": 5, "c": { "d": 0, "__proto__": { "isAdmin": true } } }"#)
+            .expect_err("prototype keys are rejected");
+
+        assert_eq!(
+            error.cause_message(),
+            "Object contains forbidden prototype property"
+        );
+    }
+
+    #[test]
+    fn parse_json_rejects_constructor_prototype_objects() {
+        let error = parse_json(r#"{ "constructor": { "prototype": { "isAdmin": true } } }"#)
+            .expect_err("constructor prototype objects are rejected");
+
+        assert_eq!(
+            error.cause_message(),
+            "Object contains forbidden prototype property"
+        );
+    }
+
+    #[test]
+    fn parse_json_allows_safe_constructor_properties() {
+        assert_eq!(
+            parse_json(r#"{ "constructor": "string value" }"#).expect("JSON parses"),
+            json!({ "constructor": "string value" })
+        );
+        assert_eq!(
+            parse_json(r#"{ "constructor": null }"#).expect("JSON parses"),
+            json!({ "constructor": null })
+        );
+        assert_eq!(
+            parse_json(r#"{ "constructor": { "safe": true } }"#).expect("JSON parses"),
+            json!({ "constructor": { "safe": true } })
+        );
+    }
+
+    #[test]
+    fn is_parsable_json_matches_secure_parse_result() {
+        assert!(is_parsable_json(r#"{"foo":"bar"}"#));
+        assert!(is_parsable_json("[1,2,3]"));
+        assert!(is_parsable_json(r#""hello""#));
+        assert!(!is_parsable_json("invalid"));
+        assert!(!is_parsable_json(r#"{ "foo": }"#));
+        assert!(!is_parsable_json(
+            r#"{ "\u005f\u005fproto__": { "isAdmin": true } }"#
+        ));
     }
 
     #[test]

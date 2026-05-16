@@ -101,11 +101,11 @@ pub use provider_utils::{
     convert_image_model_file_to_data_uri, convert_inline_file_data_to_bytes, convert_to_base64,
     create_tool_name_mapping, detect_media_type, filter_nullable, get_top_level_media_type,
     inject_json_instruction_into_messages, is_custom_reasoning, is_full_media_type,
-    is_non_nullable, is_provider_reference, load_api_key, load_optional_setting, load_setting,
-    map_reasoning_to_provider_budget, map_reasoning_to_provider_effort, media_type_to_extension,
-    normalize_headers, prepare_tools, remove_undefined_entries, resolve_full_media_type,
-    resolve_provider_reference, strip_file_extension, validate_download_url,
-    with_user_agent_suffix, without_trailing_slash,
+    is_non_nullable, is_parsable_json, is_provider_reference, load_api_key, load_optional_setting,
+    load_setting, map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
+    media_type_to_extension, normalize_headers, parse_json, prepare_tools,
+    remove_undefined_entries, resolve_full_media_type, resolve_provider_reference,
+    strip_file_extension, validate_download_url, with_user_agent_suffix, without_trailing_slash,
 };
 pub use reranking_model::{
     RerankingModel, RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
