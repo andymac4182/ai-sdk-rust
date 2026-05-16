@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+use std::future::Future;
+
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use url::Url;
@@ -5,8 +8,61 @@ use url::Url;
 use crate::file_data::{FileData, FileDataContent};
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonSchema, JsonValue, NonNullJsonValue};
-use crate::provider::{ProviderMetadata, ProviderOptions};
+use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
 use crate::warning::Warning;
+
+/// Supported URL regular-expression patterns by media type for a language model.
+///
+/// Upstream uses JavaScript `RegExp` values. The Rust boundary stores their
+/// regular-expression source strings without choosing a regex engine dependency.
+pub type LanguageModelSupportedUrls = BTreeMap<String, Vec<String>>;
+
+/// A provider-v4 language model.
+///
+/// The upstream TypeScript contract exposes a `supportedUrls` property that may
+/// be `PromiseLike`, plus `doGenerate` and `doStream` methods that return
+/// `PromiseLike` values. This Rust trait maps those boundaries to associated
+/// [`Future`] types without introducing an async-trait or async-stream
+/// dependency.
+pub trait LanguageModel {
+    /// Future returned by [`LanguageModel::supported_urls`].
+    type SupportedUrlsFuture<'a>: Future<Output = LanguageModelSupportedUrls> + Send + 'a
+    where
+        Self: 'a;
+
+    /// Future returned by [`LanguageModel::do_generate`].
+    type GenerateFuture<'a>: Future<Output = LanguageModelGenerateResult> + Send + 'a
+    where
+        Self: 'a;
+
+    /// Stream abstraction returned inside [`LanguageModelStreamResult`].
+    type Stream;
+
+    /// Future returned by [`LanguageModel::do_stream`].
+    type StreamFuture<'a>: Future<Output = LanguageModelStreamResult<Self::Stream>> + Send + 'a
+    where
+        Self: 'a;
+
+    /// Returns the provider/model interface version implemented by this model.
+    fn specification_version(&self) -> SpecificationVersion {
+        SpecificationVersion::V4
+    }
+
+    /// Returns the provider identifier.
+    fn provider(&self) -> &str;
+
+    /// Returns the provider-specific model id.
+    fn model_id(&self) -> &str;
+
+    /// Returns supported URL regular-expression patterns grouped by media type.
+    fn supported_urls(&self) -> Self::SupportedUrlsFuture<'_>;
+
+    /// Generates a language model output without streaming.
+    fn do_generate(&self, options: LanguageModelCallOptions) -> Self::GenerateFuture<'_>;
+
+    /// Generates a language model output stream.
+    fn do_stream(&self, options: LanguageModelCallOptions) -> Self::StreamFuture<'_>;
+}
 
 /// Unified reason why a language model finished generating a response.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2830,7 +2886,7 @@ pub enum LanguageModelToolResultContentPart {
 #[cfg(test)]
 mod tests {
     use super::{
-        FinishReason, InputTokenUsage, LanguageModelAssistantContentPart,
+        FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
         LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
         LanguageModelCustomContent, LanguageModelCustomPart, LanguageModelErrorStreamPart,
         LanguageModelFile, LanguageModelFileData, LanguageModelFilePart, LanguageModelFinishReason,
@@ -2842,24 +2898,148 @@ mod tests {
         LanguageModelResponseFormat, LanguageModelResponseMetadata, LanguageModelSource,
         LanguageModelStreamFinish, LanguageModelStreamPart, LanguageModelStreamResponseMetadata,
         LanguageModelStreamResult, LanguageModelStreamResultResponse, LanguageModelStreamStart,
-        LanguageModelSystemMessage, LanguageModelText, LanguageModelTextDelta,
-        LanguageModelTextEnd, LanguageModelTextPart, LanguageModelTextStart, LanguageModelTool,
-        LanguageModelToolApprovalRequest, LanguageModelToolApprovalResponsePart,
-        LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolChoice,
-        LanguageModelToolContentPart, LanguageModelToolInputDelta, LanguageModelToolInputEnd,
-        LanguageModelToolInputStart, LanguageModelToolMessage, LanguageModelToolResult,
-        LanguageModelToolResultContentPart, LanguageModelToolResultCustomContent,
-        LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUrlSource,
-        LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage,
-        OutputTokenUsage,
+        LanguageModelSupportedUrls, LanguageModelSystemMessage, LanguageModelText,
+        LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextPart,
+        LanguageModelTextStart, LanguageModelTool, LanguageModelToolApprovalRequest,
+        LanguageModelToolApprovalResponsePart, LanguageModelToolCall, LanguageModelToolCallPart,
+        LanguageModelToolChoice, LanguageModelToolContentPart, LanguageModelToolInputDelta,
+        LanguageModelToolInputEnd, LanguageModelToolInputStart, LanguageModelToolMessage,
+        LanguageModelToolResult, LanguageModelToolResultContentPart,
+        LanguageModelToolResultCustomContent, LanguageModelToolResultOutput,
+        LanguageModelToolResultPart, LanguageModelUrlSource, LanguageModelUsage,
+        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::file_data::{FileData, FileDataContent};
     use crate::json::NonNullJsonValue;
-    use crate::provider::{ProviderMetadata, ProviderOptions};
+    use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
     use crate::warning::Warning;
     use serde_json::json;
+    use std::collections::BTreeMap;
+    use std::future::{Future, Ready, ready};
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
     use url::Url;
+
+    struct StaticLanguageModel;
+
+    impl LanguageModel for StaticLanguageModel {
+        type SupportedUrlsFuture<'a>
+            = Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a;
+
+        type GenerateFuture<'a>
+            = Ready<LanguageModelGenerateResult>
+        where
+            Self: 'a;
+
+        type Stream = Vec<LanguageModelStreamPart>;
+
+        type StreamFuture<'a>
+            = Ready<LanguageModelStreamResult<Self::Stream>>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "test-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            "language-test"
+        }
+
+        fn supported_urls(&self) -> Self::SupportedUrlsFuture<'_> {
+            ready(BTreeMap::from([(
+                "image/*".to_string(),
+                vec!["^https://cdn\\.example\\.com/images/".to_string()],
+            )]))
+        }
+
+        fn do_generate(&self, _options: LanguageModelCallOptions) -> Self::GenerateFuture<'_> {
+            ready(LanguageModelGenerateResult::new(
+                vec![LanguageModelContent::Text(LanguageModelText::new(
+                    "generated text",
+                ))],
+                LanguageModelFinishReason {
+                    unified: FinishReason::Stop,
+                    raw: None,
+                },
+                LanguageModelUsage::default(),
+            ))
+        }
+
+        fn do_stream(&self, _options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
+            ready(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+            ]))
+        }
+    }
+
+    fn poll_ready<T>(mut future: Ready<T>) -> T {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+
+        match Pin::new(&mut future).poll(&mut context) {
+            Poll::Ready(value) => value,
+            Poll::Pending => unreachable!("std::future::Ready never returns pending"),
+        }
+    }
+
+    #[test]
+    fn language_model_trait_exposes_upstream_v4_boundaries() {
+        let model = StaticLanguageModel;
+
+        assert_eq!(model.specification_version(), SpecificationVersion::V4);
+        assert_eq!(model.provider(), "test-provider");
+        assert_eq!(model.model_id(), "language-test");
+
+        assert_eq!(
+            poll_ready(model.supported_urls()),
+            BTreeMap::from([(
+                "image/*".to_string(),
+                vec!["^https://cdn\\.example\\.com/images/".to_string()],
+            )])
+        );
+
+        let generate_result =
+            poll_ready(model.do_generate(LanguageModelCallOptions::new(Vec::new())));
+        assert_eq!(generate_result.content.len(), 1);
+        assert_eq!(generate_result.finish_reason.unified, FinishReason::Stop);
+
+        let stream_result = poll_ready(model.do_stream(LanguageModelCallOptions::new(Vec::new())));
+        assert_eq!(stream_result.stream.len(), 1);
+    }
+
+    #[test]
+    fn supported_urls_serializes_as_media_type_pattern_map() {
+        let supported_urls: LanguageModelSupportedUrls = BTreeMap::from([
+            (
+                "application/pdf".to_string(),
+                vec![
+                    "\\.pdf$".to_string(),
+                    "^https://docs\\.example/".to_string(),
+                ],
+            ),
+            (
+                "image/*".to_string(),
+                vec!["^https://cdn\\.example/images/".to_string()],
+            ),
+        ]);
+
+        let value = serde_json::to_value(&supported_urls).expect("supported urls serialize");
+        assert_eq!(
+            value,
+            json!({
+                "application/pdf": ["\\.pdf$", "^https://docs\\.example/"],
+                "image/*": ["^https://cdn\\.example/images/"]
+            })
+        );
+
+        let round_tripped: LanguageModelSupportedUrls =
+            serde_json::from_value(value).expect("supported urls deserialize");
+        assert_eq!(round_tripped, supported_urls);
+    }
 
     #[test]
     fn finish_reason_uses_upstream_kebab_case_names() {
