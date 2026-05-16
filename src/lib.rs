@@ -104,7 +104,7 @@ pub use provider_utils::{
     inject_json_instruction_into_messages, is_custom_reasoning, is_full_media_type,
     is_non_nullable, is_parsable_json, is_provider_reference, load_api_key, load_optional_setting,
     load_setting, map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
-    media_type_to_extension, normalize_headers, parse_json, prepare_tools,
+    media_type_to_extension, normalize_headers, parse_json, parse_provider_options, prepare_tools,
     remove_undefined_entries, resolve_full_media_type, resolve_provider_reference, safe_parse_json,
     safe_validate_types, strip_file_extension, validate_download_url, validate_types,
     with_user_agent_suffix, without_trailing_slash,

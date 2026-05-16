@@ -21,8 +21,8 @@ use crate::language_model::{
     LanguageModelToolInputExample,
 };
 use crate::provider::{
-    JsonParseError, LoadApiKeyError, LoadSettingError, ProviderOptions, TypeValidationContext,
-    TypeValidationError, UnsupportedFunctionalityError,
+    InvalidArgumentError, JsonParseError, LoadApiKeyError, LoadSettingError, ProviderOptions,
+    TypeValidationContext, TypeValidationError, UnsupportedFunctionalityError,
 };
 use crate::warning::Warning;
 
@@ -1256,6 +1256,34 @@ where
     }
 }
 
+/// Parses and validates options for a single provider.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils` `parseProviderOptions`:
+/// missing provider options are ignored, present provider-specific options are
+/// validated, and validation failures become an [`InvalidArgumentError`] for
+/// the `providerOptions` argument.
+pub fn parse_provider_options<T, F, E>(
+    provider: &str,
+    provider_options: Option<&ProviderOptions>,
+    validate: F,
+) -> Result<Option<T>, InvalidArgumentError>
+where
+    F: FnOnce(&JsonValue) -> Result<T, E>,
+    E: fmt::Display,
+{
+    let Some(provider_options) = provider_options.and_then(|options| options.get(provider)) else {
+        return Ok(None);
+    };
+
+    match safe_validate_types(JsonValue::Object(provider_options.clone()), validate, None) {
+        ValidateTypesResult::Success { value, .. } => Ok(Some(value)),
+        ValidateTypesResult::Failure { .. } => Err(InvalidArgumentError::new(
+            "providerOptions",
+            format!("invalid {provider} provider options"),
+        )),
+    }
+}
+
 /// Parses a JSON string into a JSON value.
 ///
 /// This mirrors the no-schema overload of upstream `@ai-sdk/provider-utils`
@@ -2052,10 +2080,10 @@ mod tests {
         is_non_nullable, is_parsable_json, is_provider_reference, load_api_key,
         load_api_key_with_env, load_optional_setting_with_env, load_setting, load_setting_with_env,
         map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
-        media_type_to_extension, normalize_headers, parse_json, prepare_tools,
-        remove_undefined_entries, resolve_full_media_type, resolve_provider_reference,
-        safe_parse_json, safe_validate_types, strip_file_extension, validate_download_url,
-        validate_types, with_user_agent_suffix, without_trailing_slash,
+        media_type_to_extension, normalize_headers, parse_json, parse_provider_options,
+        prepare_tools, remove_undefined_entries, resolve_full_media_type,
+        resolve_provider_reference, safe_parse_json, safe_validate_types, strip_file_extension,
+        validate_download_url, validate_types, with_user_agent_suffix, without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -2902,6 +2930,69 @@ mod tests {
         let error = parsed.error().expect("validation error is returned");
         assert_eq!(error.value(), &value);
         assert_eq!(error.cause_message(), "Invalid input");
+    }
+
+    #[test]
+    fn parse_provider_options_returns_none_for_missing_provider_options() {
+        let provider_options = BTreeMap::from([(
+            "openai".to_string(),
+            json!({ "name": "John", "age": 30 })
+                .as_object()
+                .expect("provider options are an object")
+                .clone(),
+        )]);
+
+        assert_eq!(
+            parse_provider_options("anthropic", Some(&provider_options), |_| {
+                Result::<Person, &'static str>::Err("validator should not run")
+            })
+            .expect("missing provider options are ignored"),
+            None
+        );
+        assert_eq!(
+            parse_provider_options("openai", None, |_| {
+                Result::<Person, &'static str>::Err("validator should not run")
+            })
+            .expect("missing provider options map is ignored"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_provider_options_returns_validated_provider_options() {
+        let provider_options = BTreeMap::from([(
+            "openai".to_string(),
+            json!({ "name": "John", "age": 30 })
+                .as_object()
+                .expect("provider options are an object")
+                .clone(),
+        )]);
+
+        assert_eq!(
+            parse_provider_options("openai", Some(&provider_options), validate_person)
+                .expect("provider options validate"),
+            Some(Person {
+                name: "John".to_string(),
+                age: 30,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_provider_options_reports_invalid_argument_on_validation_failure() {
+        let provider_options = BTreeMap::from([(
+            "openai".to_string(),
+            json!({ "name": "John", "age": "30" })
+                .as_object()
+                .expect("provider options are an object")
+                .clone(),
+        )]);
+
+        let error = parse_provider_options("openai", Some(&provider_options), validate_person)
+            .expect_err("invalid provider options are rejected");
+
+        assert_eq!(error.argument(), "providerOptions");
+        assert_eq!(error.message(), "invalid openai provider options");
     }
 
     #[test]
