@@ -597,6 +597,130 @@ impl fmt::Debug for GenerateTextOnStepStart<'_> {
     }
 }
 
+/// Event sent before a Rust tool executor is invoked by `generate_text`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateTextToolExecutionStartEvent {
+    /// Unique identifier for the generation call.
+    pub call_id: String,
+
+    /// Prompt messages sent to the model for the response that produced the tool call.
+    pub messages: LanguageModelPrompt,
+
+    /// Tool call about to be executed.
+    pub tool_call: GenerateTextToolCall,
+
+    /// Tool-specific context configured for the executed tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_context: Option<JsonValue>,
+}
+
+/// Event sent after a Rust tool executor completes.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateTextToolExecutionEndEvent {
+    /// Unique identifier for the generation call.
+    pub call_id: String,
+
+    /// Prompt messages sent to the model for the response that produced the tool call.
+    pub messages: LanguageModelPrompt,
+
+    /// Tool call that was executed.
+    pub tool_call: GenerateTextToolCall,
+
+    /// Tool-specific context configured for the executed tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_context: Option<JsonValue>,
+
+    /// Execution time of the tool call in milliseconds.
+    pub tool_execution_ms: u64,
+
+    /// Tool result or tool error produced by the execution.
+    pub tool_output: GenerateTextToolResult,
+}
+
+/// Future returned by a high-level tool-execution start callback.
+pub type GenerateTextOnToolExecutionStartFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+/// Callback invoked before a Rust tool executor is invoked.
+pub type GenerateTextOnToolExecutionStartFunction<'a> =
+    dyn Fn(GenerateTextToolExecutionStartEvent) -> GenerateTextOnToolExecutionStartFuture<'a> + 'a;
+
+/// Callback wrapper for upstream `onToolExecutionStart`.
+pub struct GenerateTextOnToolExecutionStart<'a> {
+    on_tool_execution_start: Rc<GenerateTextOnToolExecutionStartFunction<'a>>,
+}
+
+impl<'a> GenerateTextOnToolExecutionStart<'a> {
+    /// Creates a tool-execution start callback.
+    pub fn new<F, Fut>(on_tool_execution_start: F) -> Self
+    where
+        F: Fn(GenerateTextToolExecutionStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        Self {
+            on_tool_execution_start: Rc::new(move |event| Box::pin(on_tool_execution_start(event))),
+        }
+    }
+
+    /// Runs the tool-execution start callback.
+    pub fn start(
+        &self,
+        event: GenerateTextToolExecutionStartEvent,
+    ) -> GenerateTextOnToolExecutionStartFuture<'a> {
+        (self.on_tool_execution_start)(event)
+    }
+}
+
+impl fmt::Debug for GenerateTextOnToolExecutionStart<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GenerateTextOnToolExecutionStart")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Future returned by a high-level tool-execution end callback.
+pub type GenerateTextOnToolExecutionEndFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+/// Callback invoked after a Rust tool executor completes.
+pub type GenerateTextOnToolExecutionEndFunction<'a> =
+    dyn Fn(GenerateTextToolExecutionEndEvent) -> GenerateTextOnToolExecutionEndFuture<'a> + 'a;
+
+/// Callback wrapper for upstream `onToolExecutionEnd`.
+pub struct GenerateTextOnToolExecutionEnd<'a> {
+    on_tool_execution_end: Rc<GenerateTextOnToolExecutionEndFunction<'a>>,
+}
+
+impl<'a> GenerateTextOnToolExecutionEnd<'a> {
+    /// Creates a tool-execution end callback.
+    pub fn new<F, Fut>(on_tool_execution_end: F) -> Self
+    where
+        F: Fn(GenerateTextToolExecutionEndEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        Self {
+            on_tool_execution_end: Rc::new(move |event| Box::pin(on_tool_execution_end(event))),
+        }
+    }
+
+    /// Runs the tool-execution end callback.
+    pub fn end(
+        &self,
+        event: GenerateTextToolExecutionEndEvent,
+    ) -> GenerateTextOnToolExecutionEndFuture<'a> {
+        (self.on_tool_execution_end)(event)
+    }
+}
+
+impl fmt::Debug for GenerateTextOnToolExecutionEnd<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GenerateTextOnToolExecutionEnd")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Future returned by a high-level generate-text step-finish callback.
 pub type GenerateTextOnStepFinishFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
 
@@ -2322,6 +2446,12 @@ pub struct GenerateTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Optional callback invoked before each model step begins.
     pub on_step_start: Option<GenerateTextOnStepStart<'a>>,
 
+    /// Optional callback invoked before a Rust tool executor is invoked.
+    pub on_tool_execution_start: Option<GenerateTextOnToolExecutionStart<'a>>,
+
+    /// Optional callback invoked after a Rust tool executor completes.
+    pub on_tool_execution_end: Option<GenerateTextOnToolExecutionEnd<'a>>,
+
     /// Optional callback invoked after each completed generation step.
     pub on_step_finish: Option<GenerateTextOnStepFinish<'a>>,
 
@@ -2354,6 +2484,8 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             prepare_step: None,
             on_start: None,
             on_step_start: None,
+            on_tool_execution_start: None,
+            on_tool_execution_end: None,
             on_step_finish: None,
             on_finish: None,
             max_steps: DEFAULT_MAX_STEPS,
@@ -2377,6 +2509,8 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             prepare_step: None,
             on_start: None,
             on_step_start: None,
+            on_tool_execution_start: None,
+            on_tool_execution_end: None,
             on_step_finish: None,
             on_finish: None,
             max_steps: DEFAULT_MAX_STEPS,
@@ -2567,6 +2701,47 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
     {
         self.on_step_start = Some(GenerateTextOnStepStart::new(on_step_start));
         self
+    }
+
+    /// Sets a callback that is invoked before each local Rust tool execution.
+    pub fn with_on_tool_execution_start<F, Fut>(mut self, on_tool_execution_start: F) -> Self
+    where
+        F: Fn(GenerateTextToolExecutionStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_tool_execution_start = Some(GenerateTextOnToolExecutionStart::new(
+            on_tool_execution_start,
+        ));
+        self
+    }
+
+    /// Sets a callback that is invoked after each local Rust tool execution completes.
+    pub fn with_on_tool_execution_end<F, Fut>(mut self, on_tool_execution_end: F) -> Self
+    where
+        F: Fn(GenerateTextToolExecutionEndEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_tool_execution_end =
+            Some(GenerateTextOnToolExecutionEnd::new(on_tool_execution_end));
+        self
+    }
+
+    /// Deprecated upstream alias for [`GenerateTextOptions::with_on_tool_execution_start`].
+    pub fn with_experimental_on_tool_call_start<F, Fut>(self, on_tool_execution_start: F) -> Self
+    where
+        F: Fn(GenerateTextToolExecutionStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.with_on_tool_execution_start(on_tool_execution_start)
+    }
+
+    /// Deprecated upstream alias for [`GenerateTextOptions::with_on_tool_execution_end`].
+    pub fn with_experimental_on_tool_call_finish<F, Fut>(self, on_tool_execution_end: F) -> Self
+    where
+        F: Fn(GenerateTextToolExecutionEndEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.with_on_tool_execution_end(on_tool_execution_end)
     }
 
     /// Sets a callback that is invoked after every completed step.
@@ -3510,6 +3685,8 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         prepare_step,
         on_start,
         on_step_start,
+        on_tool_execution_start,
+        on_tool_execution_end,
         on_step_finish,
         on_finish,
         max_steps,
@@ -3560,8 +3737,17 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
     }
 
     let mut initial_response_messages = Vec::new();
-    if let Some(message) =
-        initial_tool_approval_response_message(&current_prompt, &tools, &tools_context).await
+    if let Some(message) = initial_tool_approval_response_message(
+        &call_id,
+        &current_prompt,
+        &tools,
+        &tools_context,
+        (
+            on_tool_execution_start.as_ref(),
+            on_tool_execution_end.as_ref(),
+        ),
+    )
+    .await
     {
         current_prompt.push(message.clone());
         initial_response_messages.push(message);
@@ -3696,11 +3882,16 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
             &step_tools,
         );
         let (tool_results, tool_execution_ms) = execute_tool_calls(
+            &call_id,
             &step_tools,
             &step.tool_calls,
             &step_prompt,
             &tools_context,
             &tool_approvals.blocked_tool_call_ids,
+            (
+                on_tool_execution_start.as_ref(),
+                on_tool_execution_end.as_ref(),
+            ),
         )
         .await;
         let should_continue = should_continue_after_tool_results(
@@ -4012,9 +4203,14 @@ fn update_pending_deferred_provider_tool_calls(
 }
 
 async fn initial_tool_approval_response_message(
+    call_id: &str,
     prompt: &LanguageModelPrompt,
     tools: &[Tool],
     tools_context: &JsonObject,
+    tool_execution_callbacks: (
+        Option<&GenerateTextOnToolExecutionStart<'_>>,
+        Option<&GenerateTextOnToolExecutionEnd<'_>>,
+    ),
 ) -> Option<LanguageModelMessage> {
     let approvals = collect_tool_approvals(prompt).ok()?;
     let mut approved_tool_calls = approvals
@@ -4029,11 +4225,13 @@ async fn initial_tool_approval_response_message(
     mark_tool_call_metadata(&mut approved_tool_calls, tools);
 
     let (tool_results, _) = execute_tool_calls(
+        call_id,
         tools,
         &approved_tool_calls,
         prompt,
         tools_context,
         &BTreeSet::new(),
+        tool_execution_callbacks,
     )
     .await;
 
@@ -4218,14 +4416,20 @@ fn tool_approval_response_part(
 }
 
 async fn execute_tool_calls(
+    call_id: &str,
     tools: &[Tool],
     tool_calls: &[GenerateTextToolCall],
     messages: &LanguageModelPrompt,
     tools_context: &JsonObject,
     blocked_tool_call_ids: &BTreeSet<String>,
+    tool_execution_callbacks: (
+        Option<&GenerateTextOnToolExecutionStart<'_>>,
+        Option<&GenerateTextOnToolExecutionEnd<'_>>,
+    ),
 ) -> (Vec<GenerateTextToolResult>, BTreeMap<String, u64>) {
     let mut tool_results = Vec::new();
     let mut tool_execution_ms = BTreeMap::new();
+    let (on_tool_execution_start, on_tool_execution_end) = tool_execution_callbacks;
 
     for tool_call in tool_calls {
         if tool_call.provider_executed == Some(true) {
@@ -4251,9 +4455,25 @@ async fn execute_tool_calls(
             continue;
         };
 
+        if !tool.is_executable() {
+            continue;
+        }
+
+        let tool_context = tools_context.get(&tool_call.tool_name).cloned();
+        if let Some(on_tool_execution_start) = on_tool_execution_start {
+            on_tool_execution_start
+                .start(GenerateTextToolExecutionStartEvent {
+                    call_id: call_id.to_string(),
+                    messages: messages.clone(),
+                    tool_call: tool_call.clone(),
+                    tool_context: tool_context.clone(),
+                })
+                .await;
+        }
+
         let mut execution_options =
             ToolExecutionOptions::new(tool_call.tool_call_id.clone(), messages.clone());
-        if let Some(context) = tools_context.get(&tool_call.tool_name) {
+        if let Some(context) = &tool_context {
             execution_options = execution_options.with_context(context.clone());
         }
 
@@ -4262,19 +4482,27 @@ async fn execute_tool_calls(
         };
 
         let tool_started_at = Instant::now();
-        match execute.await {
-            Ok(output) => tool_results.push(GenerateTextToolResult::success(tool_call, output)),
-            Err(error) => {
-                tool_results.push(GenerateTextToolResult::error(
-                    tool_call,
-                    error.into_message(),
-                ));
-            }
+        let tool_result = match execute.await {
+            Ok(output) => GenerateTextToolResult::success(tool_call, output),
+            Err(error) => GenerateTextToolResult::error(tool_call, error.into_message()),
+        };
+        let elapsed_ms = duration_ms(tool_started_at.elapsed());
+
+        if let Some(on_tool_execution_end) = on_tool_execution_end {
+            on_tool_execution_end
+                .end(GenerateTextToolExecutionEndEvent {
+                    call_id: call_id.to_string(),
+                    messages: messages.clone(),
+                    tool_call: tool_call.clone(),
+                    tool_context,
+                    tool_execution_ms: elapsed_ms,
+                    tool_output: tool_result.clone(),
+                })
+                .await;
         }
-        tool_execution_ms.insert(
-            tool_call.tool_call_id.clone(),
-            duration_ms(tool_started_at.elapsed()),
-        );
+
+        tool_execution_ms.insert(tool_call.tool_call_id.clone(), elapsed_ms);
+        tool_results.push(tool_result);
     }
 
     (tool_results, tool_execution_ms)
@@ -5331,6 +5559,7 @@ mod tests {
         GenerateTextFinishEvent, GenerateTextInclude, GenerateTextModelInfo, GenerateTextOptions,
         GenerateTextReasoning, GenerateTextResult, GenerateTextStartEvent, GenerateTextStep,
         GenerateTextStepPerformance, GenerateTextStepStartEvent, GenerateTextToolCall,
+        GenerateTextToolExecutionEndEvent, GenerateTextToolExecutionStartEvent,
         GenerateTextToolResult, InvalidStreamPartError, InvalidToolApprovalError,
         InvalidToolInputError, MissingToolResultsError, NoObjectGeneratedError,
         NoOutputGeneratedError, NoSuchToolError, NormalizedToolApprovalStatus, PrepareStepResult,
@@ -6762,6 +6991,150 @@ mod tests {
                 .expect("step-start event deserializes"),
             step_start.clone()
         );
+    }
+
+    #[test]
+    fn tool_execution_events_round_trip_json() {
+        let tool_call = GenerateTextToolCall {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "weather".to_string(),
+            input: json!({ "city": "Brisbane" }),
+            title: Some("Weather".to_string()),
+            provider_executed: None,
+            dynamic: None,
+            invalid: None,
+            error: None,
+            provider_metadata: None,
+            tool_metadata: Some(
+                json!({
+                    "source": "local"
+                })
+                .as_object()
+                .expect("metadata is object")
+                .clone(),
+            ),
+        };
+        let prompt = vec![user_message("Weather?")];
+        let start_event = GenerateTextToolExecutionStartEvent {
+            call_id: "call_123".to_string(),
+            messages: prompt.clone(),
+            tool_call: tool_call.clone(),
+            tool_context: Some(json!({ "unit": "celsius" })),
+        };
+        let start_value = serde_json::to_value(&start_event).expect("start event serializes");
+        assert_eq!(start_value["callId"], json!("call_123"));
+        assert_eq!(start_value["toolContext"]["unit"], json!("celsius"));
+        assert_eq!(
+            serde_json::from_value::<GenerateTextToolExecutionStartEvent>(start_value)
+                .expect("start event deserializes"),
+            start_event
+        );
+
+        let end_event = GenerateTextToolExecutionEndEvent {
+            call_id: "call_123".to_string(),
+            messages: prompt,
+            tool_call: tool_call.clone(),
+            tool_context: None,
+            tool_execution_ms: 25,
+            tool_output: GenerateTextToolResult::success(
+                &tool_call,
+                json!({
+                    "forecast": "sunny"
+                }),
+            ),
+        };
+        let end_value = serde_json::to_value(&end_event).expect("end event serializes");
+        assert_eq!(end_value["toolExecutionMs"], json!(25));
+        assert_eq!(end_value["toolOutput"]["type"], json!("tool-result"));
+        assert!(end_value.get("toolContext").is_none());
+        assert_eq!(
+            serde_json::from_value::<GenerateTextToolExecutionEndEvent>(end_value)
+                .expect("end event deserializes"),
+            end_event
+        );
+    }
+
+    #[test]
+    fn generate_text_invokes_tool_execution_callbacks_around_local_tools() {
+        let model = ToolLoopLanguageModel::new();
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let start_events = Arc::new(Mutex::new(Vec::<GenerateTextToolExecutionStartEvent>::new()));
+        let end_events = Arc::new(Mutex::new(Vec::<GenerateTextToolExecutionEndEvent>::new()));
+        let events_for_start = Arc::clone(&events);
+        let events_for_end = Arc::clone(&events);
+        let start_events_for_callback = Arc::clone(&start_events);
+        let end_events_for_callback = Arc::clone(&end_events);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(
+                    Tool::new("weather", approval_tool_schema())
+                        .with_execute(|input, options| async move {
+                            Ok(json!({
+                                "city": input["city"],
+                                "toolCallId": options.tool_call_id,
+                                "unit": options.context.as_ref().and_then(|context| context["unit"].as_str())
+                            }))
+                        }),
+                )
+                .with_tool_context(
+                    "weather",
+                    json!({
+                        "unit": "celsius"
+                    }),
+                )
+                .with_max_steps(2)
+                .with_on_tool_execution_start(move |event| {
+                    let events = Arc::clone(&events_for_start);
+                    let start_events = Arc::clone(&start_events_for_callback);
+                    async move {
+                        events
+                            .lock()
+                            .expect("events lock")
+                            .push("tool-start".to_string());
+                        start_events.lock().expect("start events lock").push(event);
+                    }
+                })
+                .with_on_tool_execution_end(move |event| {
+                    let events = Arc::clone(&events_for_end);
+                    let end_events = Arc::clone(&end_events_for_callback);
+                    async move {
+                        events
+                            .lock()
+                            .expect("events lock")
+                            .push("tool-end".to_string());
+                        end_events.lock().expect("end events lock").push(event);
+                    }
+                }),
+        ));
+
+        assert_eq!(
+            events.lock().expect("events lock").as_slice(),
+            ["tool-start", "tool-end"]
+        );
+        let start_events = start_events.lock().expect("start events lock");
+        assert_eq!(start_events.len(), 1);
+        assert_eq!(start_events[0].call_id, result.final_step.call_id);
+        assert_eq!(start_events[0].tool_call.tool_call_id, "call-1");
+        assert_eq!(start_events[0].tool_call.tool_name, "weather");
+        assert_eq!(
+            start_events[0].tool_context,
+            Some(json!({ "unit": "celsius" }))
+        );
+        assert_eq!(start_events[0].messages, model.calls.borrow()[0].prompt);
+        drop(start_events);
+
+        let end_events = end_events.lock().expect("end events lock");
+        assert_eq!(end_events.len(), 1);
+        assert_eq!(end_events[0].call_id, result.final_step.call_id);
+        assert_eq!(end_events[0].tool_call.tool_call_id, "call-1");
+        assert_eq!(
+            end_events[0].tool_context,
+            Some(json!({ "unit": "celsius" }))
+        );
+        assert!(end_events[0].tool_execution_ms <= result.steps[0].performance.step_time_ms);
+        assert_eq!(end_events[0].tool_output, result.tool_results[0]);
+        assert_eq!(end_events[0].tool_output.output["unit"], json!("celsius"));
     }
 
     #[test]
@@ -9059,17 +9432,41 @@ mod tests {
             .as_object()
             .expect("schema is an object")
             .clone();
+        let events = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let start_events = Arc::new(Mutex::new(Vec::<GenerateTextToolExecutionStartEvent>::new()));
+        let end_events = Arc::new(Mutex::new(Vec::<GenerateTextToolExecutionEndEvent>::new()));
+        let events_for_start = Arc::clone(&events);
+        let events_for_end = Arc::clone(&events);
+        let start_events_for_callback = Arc::clone(&start_events);
+        let end_events_for_callback = Arc::clone(&end_events);
 
         let result = poll_ready(generate_text(
-            GenerateTextOptions::new(&model, prompt.clone()).with_tool(
-                Tool::new("weather", input_schema).with_execute(|input, options| async move {
-                    Ok(json!({
-                        "forecast": "sunny",
-                        "city": input["city"],
-                        "toolCallId": options.tool_call_id
-                    }))
+            GenerateTextOptions::new(&model, prompt.clone())
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |input, options| async move {
+                        Ok(json!({
+                            "forecast": "sunny",
+                            "city": input["city"],
+                            "toolCallId": options.tool_call_id
+                        }))
+                    },
+                ))
+                .with_on_tool_execution_start(move |event| {
+                    let events = Arc::clone(&events_for_start);
+                    let start_events = Arc::clone(&start_events_for_callback);
+                    async move {
+                        events.lock().expect("events lock").push("start");
+                        start_events.lock().expect("start events lock").push(event);
+                    }
+                })
+                .with_on_tool_execution_end(move |event| {
+                    let events = Arc::clone(&events_for_end);
+                    let end_events = Arc::clone(&end_events_for_callback);
+                    async move {
+                        events.lock().expect("events lock").push("end");
+                        end_events.lock().expect("end events lock").push(event);
+                    }
                 }),
-            ),
         ));
 
         let calls = model.calls.borrow();
@@ -9091,6 +9488,20 @@ mod tests {
         );
         assert!(result.tool_results.is_empty());
         assert_eq!(result.text, "Hello world");
+        assert_eq!(
+            events.lock().expect("events lock").as_slice(),
+            ["start", "end"]
+        );
+        assert_eq!(
+            start_events.lock().expect("start events lock")[0].messages,
+            prompt
+        );
+        assert_eq!(
+            end_events.lock().expect("end events lock")[0]
+                .tool_output
+                .output["forecast"],
+            json!("sunny")
+        );
     }
 
     #[test]
