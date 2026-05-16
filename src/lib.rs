@@ -15,6 +15,7 @@ pub mod image_model_middleware;
 pub mod json;
 pub mod language_model;
 pub mod language_model_middleware;
+pub mod prompt;
 pub mod provider;
 pub mod provider_utils;
 pub mod reranking_model;
@@ -89,6 +90,7 @@ pub use language_model_middleware::{
     LanguageModelTransformParamsOptions, LanguageModelWrapGenerateOptions,
     LanguageModelWrapStreamOptions,
 };
+pub use prompt::InvalidMessageRoleError;
 pub use provider::{
     ApiCallError, EmptyResponseBodyError, InvalidArgumentError, InvalidPromptError,
     InvalidResponseDataError, JsonParseError, LoadApiKeyError, LoadSettingError, ModelType,
