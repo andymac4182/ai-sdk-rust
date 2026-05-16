@@ -31,6 +31,9 @@ const DEFAULT_JSON_SCHEMA_INSTRUCTION_SUFFIX: &str =
     "You MUST answer with a JSON object that matches the JSON schema above.";
 const DEFAULT_JSON_INSTRUCTION_SUFFIX: &str = "You MUST answer with JSON.";
 
+/// Default maximum response download size used by upstream provider-utils: 2 GiB.
+pub const DEFAULT_MAX_DOWNLOAD_SIZE: usize = 2 * 1024 * 1024 * 1024;
+
 /// Error returned when inline file data cannot be converted to raw bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InlineFileDataBytesError {
@@ -1669,6 +1672,81 @@ pub fn is_url_supported(
         })
 }
 
+/// Reads response body chunks with a maximum size limit.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils` `readResponseWithSizeLimit`:
+/// a parseable `Content-Length` header is checked before reading chunks, streamed
+/// bytes are checked as they are accumulated, and limit violations return a
+/// [`DownloadError`] with the upstream message shape.
+pub fn read_response_with_size_limit<I, C>(
+    url: &str,
+    chunks: I,
+    content_length: Option<&str>,
+    max_bytes: Option<usize>,
+) -> Result<Vec<u8>, DownloadError>
+where
+    I: IntoIterator<Item = C>,
+    C: AsRef<[u8]>,
+{
+    let max_bytes = max_bytes.unwrap_or(DEFAULT_MAX_DOWNLOAD_SIZE);
+
+    if let Some(content_length) = content_length.and_then(parse_content_length_header)
+        && content_length > max_bytes as u128
+    {
+        return Err(DownloadError::new(
+            url,
+            format!(
+                "Download of {url} exceeded maximum size of {max_bytes} bytes (Content-Length: {content_length})."
+            ),
+        ));
+    }
+
+    let mut response_body = Vec::new();
+    let mut total_bytes = 0usize;
+
+    for chunk in chunks {
+        let chunk = chunk.as_ref();
+        total_bytes = total_bytes.checked_add(chunk.len()).ok_or_else(|| {
+            DownloadError::new(
+                url,
+                format!("Download of {url} exceeded maximum size of {max_bytes} bytes."),
+            )
+        })?;
+
+        if total_bytes > max_bytes {
+            return Err(DownloadError::new(
+                url,
+                format!("Download of {url} exceeded maximum size of {max_bytes} bytes."),
+            ));
+        }
+
+        response_body.extend_from_slice(chunk);
+    }
+
+    Ok(response_body)
+}
+
+fn parse_content_length_header(content_length: &str) -> Option<u128> {
+    let content_length = content_length.trim_start();
+    let content_length = content_length.strip_prefix('+').unwrap_or(content_length);
+
+    if content_length.starts_with('-') {
+        return None;
+    }
+
+    let mut digits = content_length.bytes().take_while(u8::is_ascii_digit);
+    let first_digit = digits.next()?;
+    let mut length = u128::from(first_digit - b'0');
+
+    for digit in digits {
+        length = length
+            .saturating_mul(10)
+            .saturating_add(u128::from(digit - b'0'));
+    }
+
+    Some(length)
+}
+
 /// Converts an image model file into a URL or data URI string.
 ///
 /// This mirrors upstream `@ai-sdk/provider-utils`
@@ -2111,10 +2189,10 @@ mod tests {
     use url::Url;
 
     use super::{
-        Arrayable, Base64DecodeError, DownloadError, InjectJsonInstructionIntoMessagesOptions,
-        InlineFileDataBytesError, LoadApiKeyOptions, LoadOptionalSettingOptions,
-        LoadSettingOptions, ParseJsonError, ParseJsonResult, ReasoningLevel, Tool,
-        ToolExecutionError, ToolExecutionOptions, ValidateTypesResult,
+        Arrayable, Base64DecodeError, DEFAULT_MAX_DOWNLOAD_SIZE, DownloadError,
+        InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError, LoadApiKeyOptions,
+        LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError, ParseJsonResult,
+        ReasoningLevel, Tool, ToolExecutionError, ToolExecutionOptions, ValidateTypesResult,
         add_additional_properties_to_json_schema, as_array, combine_headers,
         convert_base64_to_bytes, convert_bytes_to_base64, convert_image_model_file_to_data_uri,
         convert_inline_file_data_to_bytes, convert_to_base64, create_tool_name_mapping,
@@ -2124,9 +2202,10 @@ mod tests {
         load_api_key_with_env, load_optional_setting_with_env, load_setting, load_setting_with_env,
         map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
         media_type_to_extension, normalize_headers, parse_json, parse_provider_options,
-        prepare_tools, remove_undefined_entries, resolve_full_media_type,
-        resolve_provider_reference, safe_parse_json, safe_validate_types, strip_file_extension,
-        validate_download_url, validate_types, with_user_agent_suffix, without_trailing_slash,
+        prepare_tools, read_response_with_size_limit, remove_undefined_entries,
+        resolve_full_media_type, resolve_provider_reference, safe_parse_json, safe_validate_types,
+        strip_file_extension, validate_download_url, validate_types, with_user_agent_suffix,
+        without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -3417,6 +3496,77 @@ mod tests {
             "https://another.example.com",
             &supported_urls
         ));
+    }
+
+    #[test]
+    fn read_response_with_size_limit_reads_chunks_within_limit() {
+        let chunks = [b"abcd".as_slice(), b"efgh".as_slice()];
+
+        let body =
+            read_response_with_size_limit("https://example.com/file", chunks, Some("8"), Some(100))
+                .expect("body is within limit");
+
+        assert_eq!(body, b"abcdefgh");
+    }
+
+    #[test]
+    fn read_response_with_size_limit_rejects_large_content_length_early() {
+        let error = read_response_with_size_limit(
+            "https://example.com/large",
+            [b"small".as_slice()],
+            Some("1000 bytes"),
+            Some(100),
+        )
+        .expect_err("content-length exceeds limit");
+
+        assert_eq!(error.url(), "https://example.com/large");
+        assert_eq!(
+            error.message(),
+            "Download of https://example.com/large exceeded maximum size of 100 bytes (Content-Length: 1000)."
+        );
+    }
+
+    #[test]
+    fn read_response_with_size_limit_rejects_streams_that_exceed_limit() {
+        let chunks = [vec![1; 40], vec![2; 40]];
+
+        let error =
+            read_response_with_size_limit("https://example.com/stream", chunks, None, Some(50))
+                .expect_err("streamed bytes exceed limit");
+
+        assert_eq!(
+            error.message(),
+            "Download of https://example.com/stream exceeded maximum size of 50 bytes."
+        );
+    }
+
+    #[test]
+    fn read_response_with_size_limit_checks_larger_actual_body_even_when_length_claims_small() {
+        let chunks = [vec![42; 60]];
+
+        let error =
+            read_response_with_size_limit("https://example.com/liar", chunks, Some("10"), Some(50))
+                .expect_err("actual body still exceeds limit");
+
+        assert_eq!(
+            error.message(),
+            "Download of https://example.com/liar exceeded maximum size of 50 bytes."
+        );
+    }
+
+    #[test]
+    fn read_response_with_size_limit_uses_upstream_default_limit_and_ignores_invalid_lengths() {
+        assert_eq!(DEFAULT_MAX_DOWNLOAD_SIZE, 2 * 1024 * 1024 * 1024);
+
+        let body = read_response_with_size_limit(
+            "https://example.com/empty",
+            [b"ok".as_slice()],
+            Some("not-a-number"),
+            None,
+        )
+        .expect("invalid content-length is ignored");
+
+        assert_eq!(body, b"ok");
     }
 
     #[test]
