@@ -16,6 +16,58 @@ impl fmt::Display for ProviderReferenceError {
 
 impl std::error::Error for ProviderReferenceError {}
 
+/// Error returned when a provider-specific id is missing from a provider reference.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NoSuchProviderReferenceError {
+    provider: String,
+    reference: ProviderReference,
+}
+
+impl NoSuchProviderReferenceError {
+    /// Creates an error for a missing provider reference.
+    pub fn new(provider: impl Into<String>, reference: ProviderReference) -> Self {
+        Self {
+            provider: provider.into(),
+            reference,
+        }
+    }
+
+    /// Returns the provider whose reference was requested.
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    /// Returns the full provider reference that could not satisfy the lookup.
+    pub fn reference(&self) -> &ProviderReference {
+        &self.reference
+    }
+
+    /// Converts this error into the provider reference that failed lookup.
+    pub fn into_reference(self) -> ProviderReference {
+        self.reference
+    }
+}
+
+impl fmt::Display for NoSuchProviderReferenceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let available_providers = self
+            .reference
+            .as_map()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        write!(
+            formatter,
+            "no provider reference found for provider '{}'. Available providers: {}",
+            self.provider, available_providers
+        )
+    }
+}
+
+impl std::error::Error for NoSuchProviderReferenceError {}
+
 /// A mapping of provider names to provider-specific file identifiers.
 ///
 /// This mirrors the AI SDK's `SharedV4ProviderReference` shape while rejecting
@@ -41,6 +93,14 @@ impl ProviderReference {
     /// Converts this provider reference into its provider-to-file-id map.
     pub fn into_map(self) -> BTreeMap<String, String> {
         self.0
+    }
+
+    /// Returns the provider-specific id for the requested provider.
+    pub fn provider_id(&self, provider: &str) -> Result<&str, NoSuchProviderReferenceError> {
+        self.0
+            .get(provider)
+            .map(String::as_str)
+            .ok_or_else(|| NoSuchProviderReferenceError::new(provider.to_string(), self.clone()))
     }
 }
 
@@ -109,7 +169,7 @@ mod tests {
     use serde_json::json;
     use url::Url;
 
-    use super::{FileData, FileDataContent, ProviderReference};
+    use super::{FileData, FileDataContent, NoSuchProviderReferenceError, ProviderReference};
 
     #[test]
     fn file_data_serializes_base64_data_variant() {
@@ -178,5 +238,44 @@ mod tests {
                 .to_string()
                 .contains("provider references cannot contain the reserved `type` key")
         );
+    }
+
+    #[test]
+    fn provider_reference_resolves_provider_specific_id() {
+        let reference = ProviderReference::try_from(BTreeMap::from([
+            ("anthropic".to_string(), "file-xyz789".to_string()),
+            ("openai".to_string(), "file-abc123".to_string()),
+        ]))
+        .expect("provider reference is valid");
+
+        assert_eq!(
+            reference
+                .provider_id("openai")
+                .expect("openai provider id is present"),
+            "file-abc123"
+        );
+    }
+
+    #[test]
+    fn missing_provider_reference_error_matches_upstream_context() {
+        let reference = ProviderReference::try_from(BTreeMap::from([
+            ("anthropic".to_string(), "file-xyz789".to_string()),
+            ("openai".to_string(), "file-abc123".to_string()),
+        ]))
+        .expect("provider reference is valid");
+
+        let error = reference
+            .provider_id("google")
+            .expect_err("google provider id is missing");
+
+        assert_eq!(error.provider(), "google");
+        assert_eq!(error.reference(), &reference);
+        assert_eq!(
+            error.to_string(),
+            "no provider reference found for provider 'google'. Available providers: anthropic, openai"
+        );
+
+        let explicit_error = NoSuchProviderReferenceError::new("google", reference.clone());
+        assert_eq!(explicit_error.into_reference(), reference);
     }
 }

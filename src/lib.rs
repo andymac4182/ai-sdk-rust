@@ -23,7 +23,10 @@ pub use embedding_model::{
     EmbeddingModelCallOptions, EmbeddingModelEmbedding, EmbeddingModelResponse,
     EmbeddingModelResult, EmbeddingModelUsage,
 };
-pub use file_data::{FileData, FileDataContent, ProviderReference, ProviderReferenceError};
+pub use file_data::{
+    FileData, FileDataContent, NoSuchProviderReferenceError, ProviderReference,
+    ProviderReferenceError,
+};
 pub use files::{FilesUploadFileCallOptions, FilesUploadFileData, FilesUploadFileResult};
 pub use headers::Headers;
 pub use image_model::{
