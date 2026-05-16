@@ -420,6 +420,52 @@ impl fmt::Display for ToolCallNotFoundForApprovalError {
 
 impl std::error::Error for ToolCallNotFoundForApprovalError {}
 
+/// Error returned when a high-level generation result has no output.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NoOutputGeneratedError {
+    message: String,
+}
+
+impl NoOutputGeneratedError {
+    /// Creates a no-output error with the upstream default message.
+    pub fn new() -> Self {
+        Self {
+            message: "No output generated.".to_string(),
+        }
+    }
+
+    /// Creates a no-output error with a caller-supplied message.
+    pub fn with_message(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into the human-readable error message.
+    pub fn into_message(self) -> String {
+        self.message
+    }
+}
+
+impl Default for NoOutputGeneratedError {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for NoOutputGeneratedError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for NoOutputGeneratedError {}
+
 /// Reasoning content emitted during a high-level generate-text step.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(untagged)]
@@ -1886,7 +1932,7 @@ mod tests {
     use super::{
         GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning, GenerateTextResult,
         GenerateTextStep, GenerateTextToolCall, GenerateTextToolResult, InvalidToolApprovalError,
-        InvalidToolInputError, MissingToolResultsError, NoSuchToolError,
+        InvalidToolInputError, MissingToolResultsError, NoOutputGeneratedError, NoSuchToolError,
         ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOriginalError,
         generate_text,
     };
@@ -2095,6 +2141,32 @@ mod tests {
                     .to_string()
             )
         );
+    }
+
+    #[test]
+    fn no_output_generated_error_matches_upstream_default_message() {
+        let error = NoOutputGeneratedError::new();
+
+        assert_eq!(error.message(), "No output generated.");
+        assert_eq!(error.to_string(), "No output generated.");
+        assert_eq!(error.into_message(), "No output generated.");
+        assert_eq!(
+            NoOutputGeneratedError::default().to_string(),
+            "No output generated."
+        );
+    }
+
+    #[test]
+    fn no_output_generated_error_accepts_custom_message() {
+        let error = NoOutputGeneratedError::with_message(
+            "No output generated. Check the stream for errors.",
+        );
+
+        assert_eq!(
+            error.message(),
+            "No output generated. Check the stream for errors."
+        );
+        assert_eq!(error.to_string(), error.message());
     }
 
     struct FakeLanguageModel {
