@@ -162,8 +162,9 @@ pub use transcription_model::{
     TranscriptionModelSegment,
 };
 pub use util::{
-    DataUrlTextError, InvalidArgumentError as AiInvalidArgumentError, cosine_similarity,
-    get_text_from_data_url, is_deep_equal_data,
+    DataUrlTextError, InvalidArgumentError as AiInvalidArgumentError, ParsePartialJsonResult,
+    ParsePartialJsonState, cosine_similarity, get_text_from_data_url, is_deep_equal_data,
+    parse_partial_json,
 };
 pub use video_model::{
     NoVideoGeneratedError, VideoModel, VideoModelCallOptions, VideoModelFile, VideoModelResponse,
