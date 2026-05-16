@@ -1,5 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::ser::SerializeStruct;
@@ -34,6 +37,98 @@ const DEFAULT_MAX_STEPS: usize = 1;
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+/// Future returned by a high-level tool input refinement function.
+pub type ToolInputRefinementFuture =
+    Pin<Box<dyn Future<Output = Result<JsonValue, ToolInputRefinementError>> + Send>>;
+
+/// Function used to refine a parsed tool input before execution and result shaping.
+pub type ToolInputRefinementFunction =
+    dyn Fn(JsonValue) -> ToolInputRefinementFuture + Send + Sync + 'static;
+
+/// Error returned by a tool input refinement function.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolInputRefinementError {
+    /// Human-readable refinement failure message.
+    pub message: String,
+}
+
+impl ToolInputRefinementError {
+    /// Creates a tool input refinement error.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    /// Returns the refinement failure message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into its message.
+    pub fn into_message(self) -> String {
+        self.message
+    }
+}
+
+impl fmt::Display for ToolInputRefinementError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ToolInputRefinementError {}
+
+impl From<String> for ToolInputRefinementError {
+    fn from(message: String) -> Self {
+        Self::new(message)
+    }
+}
+
+impl From<&str> for ToolInputRefinementError {
+    fn from(message: &str) -> Self {
+        Self::new(message)
+    }
+}
+
+/// A per-tool input refinement callback.
+///
+/// This is the Rust-native equivalent of upstream
+/// `experimental_refineToolInput`: it receives the parsed JSON input for a
+/// valid tool call and returns the input that should be used for execution,
+/// result records, and continuation messages.
+#[derive(Clone)]
+pub struct ToolInputRefinement {
+    refine: Arc<ToolInputRefinementFunction>,
+}
+
+impl ToolInputRefinement {
+    /// Creates a tool input refinement callback.
+    pub fn new<F, Fut>(refine: F) -> Self
+    where
+        F: Fn(JsonValue) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<JsonValue, ToolInputRefinementError>> + Send + 'static,
+    {
+        Self {
+            refine: Arc::new(move |input| Box::pin(refine(input))),
+        }
+    }
+
+    /// Refines a parsed tool input.
+    pub fn refine(&self, input: JsonValue) -> ToolInputRefinementFuture {
+        (self.refine)(input)
+    }
+}
+
+impl fmt::Debug for ToolInputRefinement {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ToolInputRefinement")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Predicate-style stop condition for high-level generate-text tool loops.
@@ -1646,6 +1741,9 @@ pub struct GenerateTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Static approval configuration for tool calls.
     pub tool_approval: Option<ToolApprovalConfiguration>,
 
+    /// Per-tool input refinements applied after parsing valid tool calls.
+    pub tool_input_refinements: BTreeMap<String, ToolInputRefinement>,
+
     /// Maximum number of model-call steps to run.
     pub max_steps: usize,
 
@@ -1667,6 +1765,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             tools_context: JsonObject::new(),
             active_tools: None,
             tool_approval: None,
+            tool_input_refinements: BTreeMap::new(),
             max_steps: DEFAULT_MAX_STEPS,
             stop_conditions: Vec::new(),
             include: GenerateTextInclude::default(),
@@ -1683,6 +1782,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             tools_context: JsonObject::new(),
             active_tools: None,
             tool_approval: None,
+            tool_input_refinements: BTreeMap::new(),
             max_steps: DEFAULT_MAX_STEPS,
             stop_conditions: Vec::new(),
             include: GenerateTextInclude::default(),
@@ -1803,6 +1903,24 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
     /// Sets static approval configuration for tool calls.
     pub fn with_tool_approval(mut self, tool_approval: ToolApprovalConfiguration) -> Self {
         self.tool_approval = Some(tool_approval);
+        self
+    }
+
+    /// Adds or replaces an input refinement for one tool.
+    ///
+    /// The refinement runs after the model tool input has been parsed and
+    /// before local tool execution, result shaping, and continuation messages.
+    pub fn with_tool_input_refinement<F, Fut>(
+        mut self,
+        tool_name: impl Into<String>,
+        refine: F,
+    ) -> Self
+    where
+        F: Fn(JsonValue) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<JsonValue, ToolInputRefinementError>> + Send + 'static,
+    {
+        self.tool_input_refinements
+            .insert(tool_name.into(), ToolInputRefinement::new(refine));
         self
     }
 
@@ -2566,6 +2684,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         tools_context,
         active_tools,
         tool_approval,
+        tool_input_refinements,
         max_steps,
         stop_conditions,
         include,
@@ -2611,6 +2730,8 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         step.runtime_context = runtime_context.clone();
         step.tools_context = tools_context.clone();
         mark_unavailable_tool_calls(&mut step.tool_calls, call_options.tools.as_deref());
+        refine_tool_inputs(&mut step.tool_calls, &tool_input_refinements).await;
+        sync_tool_result_inputs(&mut step.tool_results, &step.tool_calls);
         mark_runtime_dynamic_tool_calls(&mut step.tool_calls, &tools);
         mark_tool_call_titles(&mut step.tool_calls, &tools);
         mark_tool_call_metadata(&mut step.tool_calls, &tools);
@@ -3557,6 +3678,50 @@ fn mark_unavailable_tool_calls(
     }
 }
 
+async fn refine_tool_inputs(
+    tool_calls: &mut [GenerateTextToolCall],
+    refinements: &BTreeMap<String, ToolInputRefinement>,
+) {
+    if refinements.is_empty() {
+        return;
+    }
+
+    for tool_call in tool_calls {
+        if tool_call.invalid == Some(true) {
+            continue;
+        }
+
+        let Some(refinement) = refinements.get(&tool_call.tool_name) else {
+            continue;
+        };
+
+        match refinement.refine(tool_call.input.clone()).await {
+            Ok(input) => {
+                tool_call.input = input;
+            }
+            Err(error) => {
+                tool_call.dynamic = Some(true);
+                tool_call.invalid = Some(true);
+                tool_call.error = Some(error.into_message());
+            }
+        }
+    }
+}
+
+fn sync_tool_result_inputs(
+    tool_results: &mut [GenerateTextToolResult],
+    tool_calls: &[GenerateTextToolCall],
+) {
+    for tool_result in tool_results {
+        if let Some(tool_call) = tool_calls
+            .iter()
+            .find(|tool_call| tool_call.tool_call_id == tool_result.tool_call_id)
+        {
+            tool_result.input = tool_call.input.clone();
+        }
+    }
+}
+
 fn mark_runtime_dynamic_tool_calls(tool_calls: &mut [GenerateTextToolCall], tools: &[Tool]) {
     for tool_call in tool_calls {
         if tools
@@ -4052,13 +4217,14 @@ mod tests {
         PruneMessagesOptions, PruneReasoning, PruneToolCallRule, PruneToolCallRuleMode,
         PruneToolCalls, ResolveToolApprovalOptions, StopCondition, ToolApprovalConfiguration,
         ToolApprovalStatus, ToolApprovalStatusKind, ToolCallNotFoundForApprovalError,
-        ToolCallRepairError, ToolCallRepairOriginalError, UiMessageStreamError,
-        UnsupportedModelVersionError, collect_tool_approvals, experimental_filter_active_tools,
-        filter_active_tools, generate_text, has_tool_call, is_loop_finished, is_step_count,
-        is_stop_condition_met, normalize_tool_approval_status, prune_messages,
-        resolve_tool_approval, step_count_is,
+        ToolCallRepairError, ToolCallRepairOriginalError, ToolInputRefinementError,
+        UiMessageStreamError, UnsupportedModelVersionError, collect_tool_approvals,
+        experimental_filter_active_tools, filter_active_tools, generate_text, has_tool_call,
+        is_loop_finished, is_step_count, is_stop_condition_met, normalize_tool_approval_status,
+        prune_messages, resolve_tool_approval, step_count_is,
     };
     use crate::file_data::FileDataContent;
+    use crate::json::JsonValue;
     use crate::language_model::{
         FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
         LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
@@ -4231,6 +4397,21 @@ mod tests {
         assert!(!include.request_body);
         assert!(!include.request_messages);
         assert!(include.response_body);
+    }
+
+    #[test]
+    fn tool_input_refinement_error_retains_message() {
+        let error = ToolInputRefinementError::new("refinement failed");
+
+        assert_eq!(error.message(), "refinement failed");
+        assert_eq!(error.to_string(), "refinement failed");
+        assert_eq!(error.clone().into_message(), "refinement failed");
+        assert_eq!(
+            serde_json::to_value(error).expect("refinement error serializes"),
+            json!({
+                "message": "refinement failed"
+            })
+        );
     }
 
     #[test]
@@ -6909,6 +7090,141 @@ mod tests {
     }
 
     #[test]
+    fn generate_text_refines_tool_input_before_execution_results_and_continuation() {
+        let model = ToolLoopLanguageModel::with_tool_call("weather", r#"{ "city": " Brisbane " }"#);
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |input, _options| async move {
+                        Ok(json!({
+                            "city": input["city"],
+                            "forecast": "sunny"
+                        }))
+                    },
+                ))
+                .with_tool_input_refinement("weather", |mut input| async move {
+                    let city = input
+                        .get("city")
+                        .and_then(JsonValue::as_str)
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
+                    if let Some(object) = input.as_object_mut() {
+                        object.insert("city".to_string(), JsonValue::String(city));
+                    }
+
+                    Ok(input)
+                })
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(result.tool_calls[0].input, json!({ "city": "Brisbane" }));
+        assert_eq!(result.tool_results[0].input, json!({ "city": "Brisbane" }));
+        assert_eq!(result.tool_results[0].output["city"], "Brisbane");
+
+        let calls = model.calls.borrow();
+        let LanguageModelMessage::Assistant(assistant_message) = &calls[1].prompt[1] else {
+            panic!("second prompt includes assistant response");
+        };
+        assert_eq!(
+            assistant_message.content[0],
+            LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                "call-1",
+                "weather",
+                json!({ "city": "Brisbane" })
+            ))
+        );
+        let LanguageModelMessage::Tool(tool_message) = &calls[1].prompt[2] else {
+            panic!("second prompt includes tool response");
+        };
+        assert_eq!(
+            tool_message.content[0],
+            LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                "call-1",
+                "weather",
+                LanguageModelToolResultOutput::json(json!({
+                    "city": "Brisbane",
+                    "forecast": "sunny"
+                }))
+            ))
+        );
+    }
+
+    #[test]
+    fn generate_text_turns_failed_tool_input_refinement_into_invalid_tool_result() {
+        let model = ToolLoopLanguageModel::new();
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            }
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let executed = Arc::new(AtomicBool::new(false));
+        let executed_clone = Arc::clone(&executed);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    move |_input, _options| {
+                        let executed = Arc::clone(&executed_clone);
+                        async move {
+                            executed.store(true, Ordering::SeqCst);
+                            Ok(json!("should not run"))
+                        }
+                    },
+                ))
+                .with_tool_input_refinement("weather", |_input| async move {
+                    Err::<JsonValue, ToolInputRefinementError>(ToolInputRefinementError::new(
+                        "city cannot be refined",
+                    ))
+                })
+                .with_max_steps(2),
+        ));
+
+        assert!(!executed.load(Ordering::SeqCst));
+        assert_eq!(result.tool_calls[0].input, json!({ "city": "Brisbane" }));
+        assert_eq!(result.tool_calls[0].dynamic, Some(true));
+        assert_eq!(result.tool_calls[0].invalid, Some(true));
+        assert_eq!(
+            result.tool_calls[0].error.as_deref(),
+            Some("city cannot be refined")
+        );
+        assert_eq!(result.tool_results[0].is_error, Some(true));
+        assert_eq!(
+            result.tool_results[0].output,
+            json!("city cannot be refined")
+        );
+
+        let calls = model.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        let LanguageModelMessage::Tool(tool_message) = &calls[1].prompt[2] else {
+            panic!("second prompt includes tool response");
+        };
+        assert_eq!(
+            tool_message.content[0],
+            LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                "call-1",
+                "weather",
+                LanguageModelToolResultOutput::error_text("city cannot be refined")
+            ))
+        );
+    }
+
+    #[test]
     fn generate_text_auto_approves_tool_calls_and_executes_tools() {
         let model = ToolLoopLanguageModel::new();
         let input_schema = json!({ "type": "object" })
@@ -7752,6 +8068,43 @@ mod tests {
         );
         assert_eq!(result.tool_results[0].provider_executed, Some(true));
         assert_eq!(result.tool_results[0].dynamic, Some(true));
+    }
+
+    #[test]
+    fn generate_text_refines_provider_executed_tool_result_inputs() {
+        let model = ProviderExecutedToolLanguageModel::new();
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("providerTool", input_schema))
+                .with_tool_input_refinement("providerTool", |mut input| async move {
+                    if let Some(object) = input.as_object_mut() {
+                        object.insert("refined".to_string(), json!(true));
+                    }
+
+                    Ok(input)
+                }),
+        ));
+
+        assert_eq!(
+            result.tool_calls[0].input,
+            json!({
+                "city": "Brisbane",
+                "refined": true
+            })
+        );
+        assert_eq!(
+            result.tool_results[0].input,
+            json!({
+                "city": "Brisbane",
+                "refined": true
+            })
+        );
+        assert_eq!(model.calls.borrow().len(), 1);
     }
 
     #[test]
