@@ -95,9 +95,9 @@ pub use provider::{
 pub use provider_utils::{
     Arrayable, LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, Tool,
     ToolExecuteFunction, ToolExecuteFuture, ToolExecutionError, ToolExecutionOptions, as_array,
-    filter_nullable, is_non_nullable, load_api_key, load_optional_setting, load_setting,
-    media_type_to_extension, normalize_headers, prepare_tools, resolve_provider_reference,
-    strip_file_extension, without_trailing_slash,
+    combine_headers, filter_nullable, is_non_nullable, load_api_key, load_optional_setting,
+    load_setting, media_type_to_extension, normalize_headers, prepare_tools,
+    resolve_provider_reference, strip_file_extension, without_trailing_slash,
 };
 pub use reranking_model::{
     RerankingModel, RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env::{self, VarError};
 use std::fmt;
 use std::future::Future;
@@ -284,6 +285,29 @@ pub fn filter_nullable<T>(values: impl IntoIterator<Item = Option<T>>) -> Vec<T>
     values.into_iter().flatten().collect()
 }
 
+/// Combines optional HTTP header maps, with later maps overriding earlier ones.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils` `combineHeaders`: missing
+/// maps are ignored, header names are preserved as supplied, and missing values
+/// are retained so a later `None` can intentionally override an earlier value.
+pub fn combine_headers<K, V, I, H>(headers: H) -> BTreeMap<String, Option<String>>
+where
+    H: IntoIterator<Item = Option<I>>,
+    I: IntoIterator<Item = (K, Option<V>)>,
+    K: Into<String>,
+    V: Into<String>,
+{
+    let mut combined_headers = BTreeMap::new();
+
+    for current_headers in headers.into_iter().flatten() {
+        for (key, value) in current_headers {
+            combined_headers.insert(key.into(), value.map(Into::into));
+        }
+    }
+
+    combined_headers
+}
+
 /// Normalizes optional HTTP header entries into a lower-case header map.
 ///
 /// This mirrors upstream `@ai-sdk/provider-utils` `normalizeHeaders`: missing
@@ -546,10 +570,10 @@ mod tests {
 
     use super::{
         Arrayable, LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, Tool,
-        ToolExecutionError, ToolExecutionOptions, as_array, filter_nullable, is_non_nullable,
-        load_api_key, load_api_key_with_env, load_optional_setting_with_env, load_setting,
-        load_setting_with_env, media_type_to_extension, normalize_headers, prepare_tools,
-        resolve_provider_reference, strip_file_extension, without_trailing_slash,
+        ToolExecutionError, ToolExecutionOptions, as_array, combine_headers, filter_nullable,
+        is_non_nullable, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
+        load_setting, load_setting_with_env, media_type_to_extension, normalize_headers,
+        prepare_tools, resolve_provider_reference, strip_file_extension, without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -639,6 +663,54 @@ mod tests {
         assert_eq!(
             filter_nullable(values),
             vec![json!(0), json!(false), json!("")]
+        );
+    }
+
+    #[test]
+    fn combine_headers_returns_empty_map_for_missing_groups() {
+        assert_eq!(
+            combine_headers::<String, String, Vec<(String, Option<String>)>, _>([None, None,]),
+            BTreeMap::new()
+        );
+    }
+
+    #[test]
+    fn combine_headers_preserves_keys_and_combines_groups() {
+        let headers = combine_headers([
+            Some(vec![
+                ("Authorization", Some("Bearer token")),
+                ("X-Feature", Some("alpha")),
+            ]),
+            None,
+            Some(vec![("X-Feature", Some("beta")), ("X-Disabled", None)]),
+        ]);
+
+        assert_eq!(
+            headers,
+            BTreeMap::from([
+                (
+                    "Authorization".to_string(),
+                    Some("Bearer token".to_string())
+                ),
+                ("X-Disabled".to_string(), None),
+                ("X-Feature".to_string(), Some("beta".to_string())),
+            ])
+        );
+    }
+
+    #[test]
+    fn combine_headers_allows_missing_values_to_override_present_values() {
+        let headers = combine_headers([
+            Some(vec![("x-enabled", Some("true")), ("x-empty", Some(""))]),
+            Some(vec![("x-enabled", None)]),
+        ]);
+
+        assert_eq!(
+            headers,
+            BTreeMap::from([
+                ("x-empty".to_string(), Some("".to_string())),
+                ("x-enabled".to_string(), None),
+            ])
         );
     }
 
