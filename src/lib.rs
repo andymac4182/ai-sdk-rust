@@ -4,6 +4,7 @@
 /// The crate version compiled into the library.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod embed;
 pub mod embedding_model;
 pub mod embedding_model_middleware;
 pub mod file_data;
@@ -28,6 +29,7 @@ pub mod util;
 pub mod video_model;
 pub mod warning;
 
+pub use embed::{EmbedManyResult, EmbedResult, Embedding};
 pub use embedding_model::{
     EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelEmbedding, EmbeddingModelResponse,
     EmbeddingModelResult, EmbeddingModelUsage,
