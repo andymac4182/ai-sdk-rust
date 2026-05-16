@@ -12,8 +12,9 @@ use crate::language_model::{
     LanguageModelReasoningPart, LanguageModelRequest, LanguageModelResponse,
     LanguageModelResponseFormat, LanguageModelText, LanguageModelTextPart, LanguageModelTool,
     LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolChoice,
-    LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultOutput,
-    LanguageModelToolResultPart, LanguageModelUsage, OutputTokenUsage,
+    LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResult,
+    LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
+    OutputTokenUsage,
 };
 use crate::provider::JsonParseError;
 use crate::provider::{ProviderMetadata, ProviderOptions};
@@ -817,7 +818,7 @@ fn assistant_content_part_from_content(
             let mut part = LanguageModelToolResultPart::new(
                 tool_result.tool_call_id.clone(),
                 tool_result.tool_name.clone(),
-                LanguageModelToolResultOutput::json(tool_result.result.as_value().clone()),
+                provider_tool_result_output(tool_result),
             );
 
             if let Some(provider_metadata) = &tool_result.provider_metadata {
@@ -870,6 +871,19 @@ fn tool_result_output(tool_result: &GenerateTextToolResult) -> LanguageModelTool
     }
 
     match &tool_result.output {
+        JsonValue::String(output) => LanguageModelToolResultOutput::text(output.clone()),
+        output => LanguageModelToolResultOutput::json(output.clone()),
+    }
+}
+
+fn provider_tool_result_output(
+    tool_result: &LanguageModelToolResult,
+) -> LanguageModelToolResultOutput {
+    if tool_result.is_error == Some(true) {
+        return LanguageModelToolResultOutput::error_json(tool_result.result.as_value().clone());
+    }
+
+    match tool_result.result.as_value() {
         JsonValue::String(output) => LanguageModelToolResultOutput::text(output.clone()),
         output => LanguageModelToolResultOutput::json(output.clone()),
     }
@@ -1751,6 +1765,98 @@ mod tests {
                     .with_provider_options(provider_metadata)
                 )
             ]))
+        );
+    }
+
+    #[test]
+    fn generate_text_converts_provider_executed_tool_results_for_continuation_messages() {
+        let model = ToolLoopLanguageModel::with_first_step_prefix(
+            "weather",
+            r#"{"city":"Brisbane"}"#,
+            vec![
+                LanguageModelContent::ToolCall(
+                    LanguageModelToolCall::new("provider-call-1", "providerSearch", "{}")
+                        .with_provider_executed(true)
+                        .with_dynamic(true),
+                ),
+                LanguageModelContent::ToolResult(LanguageModelToolResult::new(
+                    "provider-call-1",
+                    "providerSearch",
+                    crate::NonNullJsonValue::new(json!("done"))
+                        .expect("provider result is non-null"),
+                )),
+                LanguageModelContent::ToolCall(
+                    LanguageModelToolCall::new("provider-call-2", "providerCode", "{}")
+                        .with_provider_executed(true)
+                        .with_dynamic(true),
+                ),
+                LanguageModelContent::ToolResult(
+                    LanguageModelToolResult::new(
+                        "provider-call-2",
+                        "providerCode",
+                        crate::NonNullJsonValue::new(json!("failed"))
+                            .expect("provider error is non-null"),
+                    )
+                    .with_is_error(true),
+                ),
+            ],
+        );
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let _ = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(
+                    Tool::new("weather", input_schema)
+                        .with_execute(|_input, _options| async move { Ok(json!("sunny")) }),
+                )
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(model.calls.borrow().len(), 2);
+        assert_eq!(
+            model.calls.borrow()[1].prompt[1],
+            LanguageModelMessage::Assistant(
+                crate::language_model::LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "provider-call-1",
+                            "providerSearch",
+                            json!({})
+                        )
+                        .with_provider_executed(true)
+                    ),
+                    LanguageModelAssistantContentPart::ToolResult(
+                        LanguageModelToolResultPart::new(
+                            "provider-call-1",
+                            "providerSearch",
+                            LanguageModelToolResultOutput::text("done")
+                        )
+                    ),
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "provider-call-2",
+                            "providerCode",
+                            json!({})
+                        )
+                        .with_provider_executed(true)
+                    ),
+                    LanguageModelAssistantContentPart::ToolResult(
+                        LanguageModelToolResultPart::new(
+                            "provider-call-2",
+                            "providerCode",
+                            LanguageModelToolResultOutput::error_json(json!("failed"))
+                        )
+                    ),
+                    LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                        "call-1",
+                        "weather",
+                        json!({ "city": "Brisbane" })
+                    ))
+                ])
+            )
         );
     }
 
