@@ -4,6 +4,7 @@
 /// The crate version compiled into the library.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod embedding_model;
 pub mod file_data;
 pub mod headers;
 pub mod json;
@@ -11,6 +12,10 @@ pub mod language_model;
 pub mod provider;
 pub mod warning;
 
+pub use embedding_model::{
+    EmbeddingModelCallOptions, EmbeddingModelEmbedding, EmbeddingModelResponse,
+    EmbeddingModelResult, EmbeddingModelUsage,
+};
 pub use file_data::{FileData, FileDataContent, ProviderReference, ProviderReferenceError};
 pub use headers::Headers;
 pub use json::{
