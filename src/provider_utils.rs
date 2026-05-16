@@ -5,10 +5,11 @@ use std::future::Future;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::pin::Pin;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicU64, Ordering},
 };
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::task::{Context, Poll, Waker};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use url::{Host, Url};
@@ -54,6 +55,81 @@ static ID_GENERATOR_COUNTER: AtomicU64 = AtomicU64::new(0x9e37_79b9_7f4a_7c15);
 
 /// Default maximum response download size used by upstream provider-utils: 2 GiB.
 pub const DEFAULT_MAX_DOWNLOAD_SIZE: usize = 2 * 1024 * 1024 * 1024;
+
+struct DelayState {
+    completed: bool,
+    waker: Option<Waker>,
+}
+
+struct DelayFuture {
+    delay: Option<Duration>,
+    state: Option<Arc<Mutex<DelayState>>>,
+}
+
+impl DelayFuture {
+    fn new(delay_in_ms: Option<i64>) -> Self {
+        Self {
+            delay: delay_in_ms.map(|delay| Duration::from_millis(delay.max(0) as u64)),
+            state: None,
+        }
+    }
+}
+
+impl Future for DelayFuture {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let Some(delay) = self.delay else {
+            return Poll::Ready(());
+        };
+
+        if let Some(state) = &self.state {
+            let mut state = state.lock().expect("delay state mutex is not poisoned");
+            if state.completed {
+                Poll::Ready(())
+            } else {
+                state.waker = Some(context.waker().clone());
+                Poll::Pending
+            }
+        } else {
+            let state = Arc::new(Mutex::new(DelayState {
+                completed: false,
+                waker: Some(context.waker().clone()),
+            }));
+            let sleeper_state = Arc::clone(&state);
+
+            let _sleeper = std::thread::spawn(move || {
+                if !delay.is_zero() {
+                    std::thread::sleep(delay);
+                }
+
+                let waker = {
+                    let mut state = sleeper_state
+                        .lock()
+                        .expect("delay state mutex is not poisoned");
+                    state.completed = true;
+                    state.waker.take()
+                };
+
+                if let Some(waker) = waker {
+                    waker.wake();
+                }
+            });
+
+            self.state = Some(state);
+            Poll::Pending
+        }
+    }
+}
+
+/// Creates a future that resolves after a delay in milliseconds.
+///
+/// This mirrors upstream provider-utils `delay`: `None` resolves immediately,
+/// while numeric delays use timer-like deferred completion. JavaScript
+/// `AbortSignal` cancellation is intentionally omitted from the Rust boundary.
+pub fn delay(delay_in_ms: Option<i64>) -> impl Future<Output = ()> {
+    DelayFuture::new(delay_in_ms)
+}
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -5689,6 +5765,8 @@ mod tests {
     use std::future::{Future, ready};
     use std::pin::Pin;
     use std::task::{Context, Poll, Waker};
+    use std::thread;
+    use std::time::Duration;
 
     use crate::language_model::{
         LanguageModelFilePart, LanguageModelFunctionTool, LanguageModelMessage,
@@ -5726,7 +5804,7 @@ mod tests {
         create_provider_defined_tool_factory,
         create_provider_defined_tool_factory_with_output_schema,
         create_provider_executed_tool_factory, create_status_code_error_response_handler,
-        create_tool_name_mapping, detect_media_type, download_blob, dynamic_tool,
+        create_tool_name_mapping, delay, detect_media_type, download_blob, dynamic_tool,
         execute_provider_api_request, extract_response_headers, filter_nullable, generate_id,
         get_from_api, get_runtime_environment_user_agent, get_top_level_media_type,
         handle_fetch_error, handle_provider_api_response, inject_json_instruction,
@@ -5752,6 +5830,48 @@ mod tests {
         match Pin::new(&mut future).poll(&mut context) {
             Poll::Ready(value) => value,
             Poll::Pending => unreachable!("test futures should be ready"),
+        }
+    }
+
+    fn poll_once<F: Future>(mut future: Pin<&mut F>) -> Poll<F::Output> {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+
+        Future::poll(future.as_mut(), &mut context)
+    }
+
+    #[test]
+    fn delay_without_duration_resolves_immediately() {
+        poll_ready(delay(None));
+    }
+
+    #[test]
+    fn delay_with_duration_resolves_after_timer_completes() {
+        let mut future = Box::pin(delay(Some(10)));
+
+        assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
+
+        thread::sleep(Duration::from_millis(30));
+
+        assert!(matches!(poll_once(future.as_mut()), Poll::Ready(())));
+    }
+
+    #[test]
+    fn delay_zero_and_negative_values_use_timer_like_deferred_completion() {
+        for delay_in_ms in [0, -10] {
+            let mut future = Box::pin(delay(Some(delay_in_ms)));
+
+            assert!(
+                matches!(poll_once(future.as_mut()), Poll::Pending),
+                "{delay_in_ms}ms delay should be deferred"
+            );
+
+            thread::sleep(Duration::from_millis(5));
+
+            assert!(
+                matches!(poll_once(future.as_mut()), Poll::Ready(())),
+                "{delay_in_ms}ms delay should complete after the timer runs"
+            );
         }
     }
 
