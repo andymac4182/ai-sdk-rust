@@ -301,6 +301,16 @@ where
         .collect()
 }
 
+/// Checks whether a JSON value has the provider-reference record shape.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils` `isProviderReference` at the
+/// JSON boundary: plain objects without a `type` discriminator are treated as
+/// provider references, while tagged file-data objects and non-objects are not.
+pub fn is_provider_reference(data: &JsonValue) -> bool {
+    data.as_object()
+        .is_some_and(|object| !object.contains_key("type"))
+}
+
 /// Combines optional HTTP header maps, with later maps overriding earlier ones.
 ///
 /// This mirrors upstream `@ai-sdk/provider-utils` `combineHeaders`: missing
@@ -615,20 +625,21 @@ mod tests {
     use std::pin::Pin;
     use std::task::{Context, Poll, Waker};
 
-    use crate::ProviderReference;
     use crate::language_model::{
         LanguageModelFunctionTool, LanguageModelMessage, LanguageModelTextPart, LanguageModelTool,
         LanguageModelUserContentPart, LanguageModelUserMessage,
     };
+    use crate::{JsonValue, ProviderReference};
     use serde_json::json;
 
     use super::{
         Arrayable, LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, Tool,
         ToolExecutionError, ToolExecutionOptions, as_array, combine_headers, filter_nullable,
-        is_non_nullable, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
-        load_setting, load_setting_with_env, media_type_to_extension, normalize_headers,
-        prepare_tools, remove_undefined_entries, resolve_provider_reference, strip_file_extension,
-        with_user_agent_suffix, without_trailing_slash,
+        is_non_nullable, is_provider_reference, load_api_key, load_api_key_with_env,
+        load_optional_setting_with_env, load_setting, load_setting_with_env,
+        media_type_to_extension, normalize_headers, prepare_tools, remove_undefined_entries,
+        resolve_provider_reference, strip_file_extension, with_user_agent_suffix,
+        without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -769,6 +780,38 @@ mod tests {
             remove_undefined_entries(record),
             BTreeMap::from([("keep".to_string(), json!("value"))])
         );
+    }
+
+    #[test]
+    fn is_provider_reference_accepts_plain_records() {
+        assert!(is_provider_reference(&json!({
+            "openai": "file-abc123"
+        })));
+        assert!(is_provider_reference(&json!({
+            "fileId": "abc"
+        })));
+    }
+
+    #[test]
+    fn is_provider_reference_rejects_tagged_file_data_objects() {
+        assert!(!is_provider_reference(&json!({
+            "type": "reference",
+            "reference": {
+                "fileId": "abc"
+            }
+        })));
+        assert!(!is_provider_reference(&json!({
+            "type": "data",
+            "data": "x"
+        })));
+    }
+
+    #[test]
+    fn is_provider_reference_rejects_non_objects_and_arrays() {
+        assert!(!is_provider_reference(&JsonValue::Null));
+        assert!(!is_provider_reference(&json!("some-string")));
+        assert!(!is_provider_reference(&json!(42)));
+        assert!(!is_provider_reference(&json!([1, 2, 3])));
     }
 
     #[test]
