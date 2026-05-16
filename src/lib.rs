@@ -94,8 +94,8 @@ pub use provider::{
 };
 pub use provider_utils::{
     Arrayable, Base64DecodeError, BinaryResponseHandlerOptions, DEFAULT_MAX_DOWNLOAD_SIZE,
-    DownloadError, EventSourceResponseHandlerOptions, FetchErrorInfo, HandledFetchError,
-    InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
+    DownloadError, EventSourceResponseHandlerOptions, FetchErrorInfo, GetFromApiOptions,
+    HandledFetchError, InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
     JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, LoadApiKeyOptions,
     LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError, ParseJsonResult,
     ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
@@ -108,7 +108,7 @@ pub use provider_utils::{
     create_binary_response_handler, create_event_source_response_handler,
     create_json_error_response_handler, create_json_response_handler,
     create_status_code_error_response_handler, create_tool_name_mapping, detect_media_type,
-    execute_provider_api_request, extract_response_headers, filter_nullable,
+    execute_provider_api_request, extract_response_headers, filter_nullable, get_from_api,
     get_runtime_environment_user_agent, get_top_level_media_type, handle_fetch_error,
     handle_provider_api_response, inject_json_instruction_into_messages, is_abort_error,
     is_custom_reasoning, is_full_media_type, is_non_nullable, is_parsable_json,

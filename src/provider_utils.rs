@@ -199,6 +199,14 @@ impl RuntimeEnvironment {
         }
     }
 
+    /// Returns whether this environment maps to the upstream unknown runtime.
+    pub fn is_unknown(&self) -> bool {
+        !self.has_window
+            && self.navigator_user_agent.is_none()
+            && self.node_version.is_none()
+            && !self.has_edge_runtime
+    }
+
     /// Creates a browser runtime environment.
     pub const fn browser() -> Self {
         Self {
@@ -342,6 +350,76 @@ impl HandledFetchError {
             Self::Original { error } => Some(error),
             Self::ApiCall { .. } => None,
         }
+    }
+}
+
+/// Options for a dependency-free upstream-style `getFromApi` request.
+///
+/// Rust callers provide an injected transport to [`get_from_api`], so this
+/// struct only carries the request metadata that upstream prepares before
+/// calling `fetch`: URL, optional headers, and the runtime used for the
+/// provider-utils user-agent suffix.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetFromApiOptions {
+    /// Provider API URL.
+    pub url: String,
+
+    /// Optional request headers. `None` values are removed during header
+    /// normalization, matching upstream undefined header entries.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, Option<String>>,
+
+    /// Runtime indicators used to append the provider-utils user-agent suffix.
+    #[serde(default, skip_serializing_if = "RuntimeEnvironment::is_unknown")]
+    pub environment: RuntimeEnvironment,
+}
+
+impl GetFromApiOptions {
+    /// Creates GET API request options for the given URL.
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            headers: BTreeMap::new(),
+            environment: RuntimeEnvironment::unknown(),
+        }
+    }
+
+    /// Adds or replaces request headers.
+    pub fn with_headers<K, V, I>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, Option<V>)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        for (key, value) in headers {
+            self.headers.insert(key.into(), value.map(Into::into));
+        }
+
+        self
+    }
+
+    /// Sets a request header.
+    pub fn with_header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(key.into(), Some(value.into()));
+        self
+    }
+
+    /// Sets the runtime indicators used for request header preparation.
+    pub fn with_environment(mut self, environment: RuntimeEnvironment) -> Self {
+        self.environment = environment;
+        self
+    }
+
+    /// Converts these options into the prepared provider API request.
+    pub fn into_request(self) -> ProviderApiRequest {
+        let Self {
+            url,
+            headers,
+            environment,
+        } = self;
+
+        prepare_get_from_api_request(url, Some(headers), &environment)
     }
 }
 
@@ -3268,6 +3346,39 @@ where
     .map_err(|error| HandledFetchError::ApiCall { error })
 }
 
+/// Runs an upstream-style `getFromApi` request through an injected transport.
+///
+/// This is the public dependency-free orchestration wrapper for upstream
+/// `getFromApi`: request metadata is prepared from [`GetFromApiOptions`], the
+/// caller-supplied transport performs the HTTP work, and response handling plus
+/// fetch-error normalization are delegated to [`execute_provider_api_request`].
+pub async fn get_from_api<T, Transport, TransportFuture, S, F>(
+    options: GetFromApiOptions,
+    transport: Transport,
+    successful_response_handler: S,
+    failed_response_handler: F,
+) -> Result<ResponseHandlerResult<T>, HandledFetchError>
+where
+    Transport: FnOnce(ProviderApiRequest) -> TransportFuture,
+    TransportFuture: Future<Output = Result<ProviderApiResponse, FetchErrorInfo>>,
+    S: FnOnce(
+        &ProviderApiRequest,
+        &ProviderApiResponse,
+    ) -> Result<ResponseHandlerResult<T>, ProviderApiResponseHandlerError>,
+    F: FnOnce(
+        &ProviderApiRequest,
+        &ProviderApiResponse,
+    ) -> Result<ResponseHandlerResult<ApiCallError>, ProviderApiResponseHandlerError>,
+{
+    execute_provider_api_request(
+        options.into_request(),
+        transport,
+        successful_response_handler,
+        failed_response_handler,
+    )
+    .await
+}
+
 fn provider_api_response_handler_error(
     error: ProviderApiResponseHandlerError,
     message: &'static str,
@@ -3818,8 +3929,8 @@ mod tests {
 
     use super::{
         Arrayable, Base64DecodeError, BinaryResponseHandlerOptions, DEFAULT_MAX_DOWNLOAD_SIZE,
-        DownloadError, EventSourceResponseHandlerOptions, FetchErrorInfo, HandledFetchError,
-        InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
+        DownloadError, EventSourceResponseHandlerOptions, FetchErrorInfo, GetFromApiOptions,
+        HandledFetchError, InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
         JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, LoadApiKeyOptions,
         LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError, ParseJsonResult,
         ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
@@ -3832,20 +3943,20 @@ mod tests {
         create_event_source_response_handler, create_json_error_response_handler,
         create_json_response_handler, create_status_code_error_response_handler,
         create_tool_name_mapping, detect_media_type, execute_provider_api_request,
-        extract_response_headers, filter_nullable, get_runtime_environment_user_agent,
-        get_top_level_media_type, handle_fetch_error, handle_provider_api_response,
-        inject_json_instruction, inject_json_instruction_into_messages, is_abort_error,
-        is_custom_reasoning, is_full_media_type, is_non_nullable, is_parsable_json,
-        is_provider_reference, is_url_supported, load_api_key, load_api_key_with_env,
-        load_optional_setting_with_env, load_setting, load_setting_with_env,
-        map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
-        media_type_to_extension, normalize_headers, parse_json, parse_json_event_stream,
-        parse_provider_options, prepare_get_from_api_request, prepare_post_json_to_api_request,
-        prepare_post_to_api_request, prepare_tools, read_response_with_size_limit,
-        remove_undefined_entries, resolve_full_media_type, resolve_provider_reference,
-        safe_parse_json, safe_validate_types, strip_file_extension, validate_download_url,
-        validate_types, with_provider_utils_user_agent, with_user_agent_suffix,
-        without_trailing_slash,
+        extract_response_headers, filter_nullable, get_from_api,
+        get_runtime_environment_user_agent, get_top_level_media_type, handle_fetch_error,
+        handle_provider_api_response, inject_json_instruction,
+        inject_json_instruction_into_messages, is_abort_error, is_custom_reasoning,
+        is_full_media_type, is_non_nullable, is_parsable_json, is_provider_reference,
+        is_url_supported, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
+        load_setting, load_setting_with_env, map_reasoning_to_provider_budget,
+        map_reasoning_to_provider_effort, media_type_to_extension, normalize_headers, parse_json,
+        parse_json_event_stream, parse_provider_options, prepare_get_from_api_request,
+        prepare_post_json_to_api_request, prepare_post_to_api_request, prepare_tools,
+        read_response_with_size_limit, remove_undefined_entries, resolve_full_media_type,
+        resolve_provider_reference, safe_parse_json, safe_validate_types, strip_file_extension,
+        validate_download_url, validate_types, with_provider_utils_user_agent,
+        with_user_agent_suffix, without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -6899,6 +7010,135 @@ mod tests {
         .expect_err("abort failure is preserved");
 
         assert_eq!(error, HandledFetchError::Original { error: abort_error });
+    }
+
+    #[test]
+    fn get_from_api_options_serialize_camel_case_request_metadata() {
+        let options = GetFromApiOptions::new("https://api.example.com/v1/data")
+            .with_headers(vec![
+                ("Authorization", Some("Bearer test")),
+                ("X-Ignore", None),
+            ])
+            .with_environment(RuntimeEnvironment::node_js("v22.0.0"));
+
+        assert_eq!(
+            serde_json::to_value(&options).expect("get-from-api options serialize"),
+            json!({
+                "url": "https://api.example.com/v1/data",
+                "headers": {
+                    "Authorization": "Bearer test",
+                    "X-Ignore": null
+                },
+                "environment": {
+                    "nodeVersion": "v22.0.0"
+                }
+            })
+        );
+
+        let options: GetFromApiOptions = serde_json::from_value(json!({
+            "url": "https://api.example.com/v1/data"
+        }))
+        .expect("minimal get-from-api options deserialize");
+
+        assert_eq!(
+            options,
+            GetFromApiOptions::new("https://api.example.com/v1/data")
+        );
+    }
+
+    #[test]
+    fn get_from_api_prepares_request_and_handles_success() {
+        let options = GetFromApiOptions::new("https://api.example.com/v1/data")
+            .with_header("Authorization", "Bearer test")
+            .with_environment(RuntimeEnvironment::navigator_user_agent("Deno/2.0 TEST"));
+        let expected_response_headers =
+            BTreeMap::from([("x-request-id".to_string(), "req_get".to_string())]);
+        let response_headers = expected_response_headers.clone();
+
+        let result = poll_ready(get_from_api(
+            options,
+            move |request| {
+                assert_eq!(request.method, ProviderApiRequestMethod::Get);
+                assert_eq!(request.url, "https://api.example.com/v1/data");
+                assert_eq!(request.body, None);
+                assert_eq!(request.request_body_values, json!({}));
+                assert_eq!(
+                    request.headers,
+                    BTreeMap::from([
+                        ("authorization".to_string(), "Bearer test".to_string()),
+                        (
+                            "user-agent".to_string(),
+                            format!(
+                                "ai-sdk/provider-utils/{} runtime/deno/2.0 test",
+                                crate::VERSION
+                            )
+                        ),
+                    ])
+                );
+
+                ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    r#"{"name":"Ada","age":36}"#,
+                )
+                .with_headers(response_headers)))
+            },
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    validate_person,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_status_code_error_response_handler(
+                    response.status_code_error_response_handler_options(request),
+                ))
+            },
+        ))
+        .expect("get-from-api request succeeds");
+
+        assert_eq!(
+            result.value(),
+            &Person {
+                name: "Ada".to_string(),
+                age: 36
+            }
+        );
+        assert_eq!(result.response_headers(), Some(&expected_response_headers));
+    }
+
+    #[test]
+    fn get_from_api_normalizes_transport_failures() {
+        let error = poll_ready(get_from_api(
+            GetFromApiOptions::new("https://api.example.com/v1/data"),
+            |_request| {
+                ready(Err(FetchErrorInfo::new("fetch failed")
+                    .with_name("TypeError")
+                    .with_cause_message("Failed to connect")))
+            },
+            |_request, _response| {
+                Ok(ResponseHandlerResult::new(Person {
+                    name: "unused".to_string(),
+                    age: 0,
+                }))
+            },
+            |request, response| {
+                Ok(create_status_code_error_response_handler(
+                    response.status_code_error_response_handler_options(request),
+                ))
+            },
+        ))
+        .expect_err("get-from-api transport failure is normalized");
+
+        let HandledFetchError::ApiCall { error } = error else {
+            panic!("fetch TypeError with a cause should become an API call error");
+        };
+
+        assert_eq!(error.message(), "Cannot connect to API: Failed to connect");
+        assert_eq!(error.url(), "https://api.example.com/v1/data");
+        assert_eq!(error.request_body_values(), &json!({}));
+        assert!(error.is_retryable());
     }
 
     #[test]
