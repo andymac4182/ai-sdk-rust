@@ -1,6 +1,8 @@
 use std::fmt;
 
-use crate::provider::{ModelType, NoSuchModelError, Provider, ProviderWithTranscriptionModel};
+use crate::provider::{
+    ModelType, NoSuchModelError, Provider, ProviderWithSpeechModel, ProviderWithTranscriptionModel,
+};
 
 /// Configuration for a provider registry.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -200,6 +202,16 @@ impl<P: ProviderWithTranscriptionModel> ProviderRegistry<P> {
     }
 }
 
+impl<P: ProviderWithSpeechModel> ProviderRegistry<P> {
+    /// Returns the speech model for a registry id shaped as `providerId:modelId`.
+    pub fn speech_model(&self, id: &str) -> Result<P::SpeechModel, ProviderRegistryError> {
+        let (provider_id, model_id) = self.split_id(id, ModelType::SpeechModel)?;
+        let provider = self.get_provider(provider_id, ModelType::SpeechModel)?;
+
+        provider.speech_model(model_id).map_err(Into::into)
+    }
+}
+
 /// Creates a provider registry with the upstream default separator (`:`).
 pub fn create_provider_registry<I, K, P>(providers: I) -> ProviderRegistry<P>
 where
@@ -365,7 +377,11 @@ mod tests {
         LanguageModelUsage,
     };
     use crate::provider::{
-        ModelType, NoSuchModelError, Provider, ProviderWithTranscriptionModel, SpecificationVersion,
+        ModelType, NoSuchModelError, Provider, ProviderWithSpeechModel,
+        ProviderWithTranscriptionModel, SpecificationVersion,
+    };
+    use crate::speech_model::{
+        SpeechModel, SpeechModelCallOptions, SpeechModelResponse, SpeechModelResult,
     };
     use crate::transcription_model::{
         TranscriptionModel, TranscriptionModelCallOptions, TranscriptionModelResponse,
@@ -530,6 +546,34 @@ mod tests {
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
+    struct StaticSpeechModel {
+        provider: String,
+        model_id: String,
+    }
+
+    impl SpeechModel for StaticSpeechModel {
+        type GenerateFuture<'a>
+            = Ready<SpeechModelResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            &self.provider
+        }
+
+        fn model_id(&self) -> &str {
+            &self.model_id
+        }
+
+        fn do_generate(&self, _options: SpeechModelCallOptions) -> Self::GenerateFuture<'_> {
+            ready(SpeechModelResult::new(
+                FileDataContent::Base64("audio".to_string()),
+                SpeechModelResponse::new(OffsetDateTime::UNIX_EPOCH, self.model_id.clone()),
+            ))
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
     struct StaticProvider {
         id: &'static str,
     }
@@ -576,6 +620,17 @@ mod tests {
                     provider: self.id.to_string(),
                     model_id,
                 }
+            })
+        }
+    }
+
+    impl ProviderWithSpeechModel for StaticProvider {
+        type SpeechModel = StaticSpeechModel;
+
+        fn speech_model(&self, model_id: &str) -> Result<Self::SpeechModel, NoSuchModelError> {
+            lookup_model(model_id, ModelType::SpeechModel).map(|model_id| StaticSpeechModel {
+                provider: self.id.to_string(),
+                model_id,
             })
         }
     }
@@ -669,6 +724,21 @@ mod tests {
     }
 
     #[test]
+    fn create_provider_registry_resolves_speech_model_interface() {
+        let registry = create_provider_registry([("provider", StaticProvider { id: "provider" })]);
+
+        let speech_model = registry
+            .speech_model("provider:tts-1")
+            .expect("speech model resolves");
+        assert_eq!(
+            speech_model.specification_version(),
+            SpecificationVersion::V4
+        );
+        assert_eq!(speech_model.provider(), "provider");
+        assert_eq!(speech_model.model_id(), "tts-1");
+    }
+
+    #[test]
     fn create_provider_registry_supports_custom_separator() {
         let registry = create_provider_registry_with_options(
             [("provider", StaticProvider { id: "provider" })],
@@ -755,6 +825,41 @@ mod tests {
         assert_eq!(model_error.model_id(), "missing");
         assert_eq!(model_error.model_type(), ModelType::TranscriptionModel);
         assert_eq!(error.to_string(), "No such transcriptionModel: missing");
+    }
+
+    #[test]
+    fn provider_registry_reports_missing_speech_provider_context() {
+        let registry =
+            create_provider_registry([("anthropic", StaticProvider { id: "anthropic" })]);
+
+        let error = registry
+            .speech_model("openai:tts-1")
+            .expect_err("provider lookup fails");
+        let provider_error = error
+            .as_no_such_provider()
+            .expect("error is missing provider");
+
+        assert_eq!(provider_error.model_id(), "openai");
+        assert_eq!(provider_error.model_type(), ModelType::SpeechModel);
+        assert_eq!(provider_error.provider_id(), "openai");
+        assert_eq!(
+            error.to_string(),
+            "No such provider: openai (available providers: anthropic)"
+        );
+    }
+
+    #[test]
+    fn provider_registry_reports_missing_speech_model_context() {
+        let registry = create_provider_registry([("provider", StaticProvider { id: "provider" })]);
+
+        let error = registry
+            .speech_model("provider:missing")
+            .expect_err("model lookup fails");
+        let model_error = error.as_no_such_model().expect("error is missing model");
+
+        assert_eq!(model_error.model_id(), "missing");
+        assert_eq!(model_error.model_type(), ModelType::SpeechModel);
+        assert_eq!(error.to_string(), "No such speechModel: missing");
     }
 
     #[test]
