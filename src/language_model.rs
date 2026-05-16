@@ -204,6 +204,10 @@ impl LanguageModelRequest {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LanguageModelResponse {
+    /// Response messages generated during a high-level generation step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages: Option<Vec<LanguageModelMessage>>,
+
     /// Provider response identifier, when one is available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -233,6 +237,12 @@ impl LanguageModelResponse {
     /// Creates empty response metadata.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sets the response messages generated during this step.
+    pub fn with_messages(mut self, messages: Vec<LanguageModelMessage>) -> Self {
+        self.messages = Some(messages);
+        self
     }
 
     /// Sets the provider response identifier.
@@ -3770,6 +3780,60 @@ mod tests {
             serde_json::from_value(json!({})).expect("minimal request metadata deserializes");
         assert_eq!(request.messages, None);
         assert_eq!(request.body, None);
+    }
+
+    #[test]
+    fn response_metadata_serializes_high_level_messages_and_provider_data() {
+        let timestamp =
+            OffsetDateTime::parse("2026-05-16T09:30:00Z", &Rfc3339).expect("timestamp parses");
+        let response = LanguageModelResponse::new()
+            .with_messages(vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![LanguageModelAssistantContentPart::Text(
+                    LanguageModelTextPart::new("Hello"),
+                )]),
+            )])
+            .with_id("resp_123")
+            .with_timestamp(timestamp)
+            .with_model_id("openai/gpt-5")
+            .with_header("x-request-id", "req_123")
+            .with_body(json!({
+                "id": "resp_123"
+            }));
+
+        assert_eq!(
+            serde_json::to_value(response).expect("response metadata serializes"),
+            json!({
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "id": "resp_123",
+                "timestamp": "2026-05-16T09:30:00Z",
+                "modelId": "openai/gpt-5",
+                "headers": {
+                    "x-request-id": "req_123"
+                },
+                "body": {
+                    "id": "resp_123"
+                }
+            })
+        );
+
+        let response: LanguageModelResponse =
+            serde_json::from_value(json!({})).expect("minimal response metadata deserializes");
+        assert_eq!(response.messages, None);
+        assert_eq!(response.id, None);
+        assert_eq!(response.timestamp, None);
+        assert_eq!(response.model_id, None);
+        assert_eq!(response.headers, None);
+        assert_eq!(response.body, None);
     }
 
     #[test]

@@ -25,7 +25,7 @@ use crate::language_model::{
 use crate::provider::{JsonParseError, get_error_message};
 use crate::provider::{ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{
-    IdGeneratorOptions, Tool, ToolExecutionOptions, create_id_generator, prepare_tools,
+    IdGeneratorOptions, Tool, ToolExecutionOptions, create_id_generator, generate_id, prepare_tools,
 };
 use crate::warning::Warning;
 
@@ -1851,6 +1851,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         mark_tool_result_metadata(&mut step.tool_results, &step.tool_calls, &tools);
         refresh_tool_result_views(&mut step);
         step.response_messages = response_messages_for_step(&step).unwrap_or_default();
+        apply_generate_text_response_metadata(&mut step);
         apply_generate_text_include(&mut step, include, &step_prompt);
         step.performance = GenerateTextStepPerformance::from_usage(
             &step.usage,
@@ -1885,6 +1886,24 @@ fn generate_text_call_id() -> String {
             .expect("default generate_text call id configuration is valid");
 
     generate_call_id()
+}
+
+fn apply_generate_text_response_metadata(step: &mut GenerateTextStep) {
+    let response = step.response.get_or_insert_with(LanguageModelResponse::new);
+
+    if response.id.is_none() {
+        response.id = Some(generate_id());
+    }
+
+    if response.timestamp.is_none() {
+        response.timestamp = Some(time::OffsetDateTime::now_utc());
+    }
+
+    if response.model_id.is_none() {
+        response.model_id = Some(step.model.model_id.clone());
+    }
+
+    response.messages = Some(step.response_messages.clone());
 }
 
 fn apply_generate_text_include(
@@ -3395,10 +3414,24 @@ mod tests {
                 ])
             )]
         );
+        let response = result.response.as_ref().expect("response metadata exists");
+        assert_eq!(response.messages.as_ref(), Some(&result.response_messages));
+        assert_eq!(response.model_id.as_deref(), Some("test-model"));
+        assert!(response.id.as_ref().is_some_and(|id| id.len() == 16));
+        assert!(response.timestamp.is_some());
         assert_eq!(result.final_step().expect("step exists").step_number, 0);
         assert_eq!(
             result.final_step().expect("step exists").response_messages,
             result.response_messages
+        );
+        assert_eq!(
+            result
+                .final_step()
+                .expect("step exists")
+                .response
+                .as_ref()
+                .and_then(|response| response.messages.as_ref()),
+            Some(&result.response_messages)
         );
         assert_eq!(
             result.final_step().expect("step exists").model,
