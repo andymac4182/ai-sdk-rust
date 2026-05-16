@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::{Duration, Instant};
 
@@ -135,6 +135,281 @@ pub fn experimental_filter_active_tools(
     active_tools: Option<&[String]>,
 ) -> Option<Vec<Tool>> {
     filter_active_tools(tools, active_tools)
+}
+
+/// How reasoning prompt parts should be removed by [`prune_messages`].
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PruneReasoning {
+    /// Remove reasoning from every assistant message.
+    All,
+
+    /// Remove reasoning from every assistant message except the final message.
+    BeforeLastMessage,
+
+    /// Keep all reasoning parts.
+    #[default]
+    None,
+}
+
+/// How empty messages should be handled by [`prune_messages`].
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PruneEmptyMessages {
+    /// Keep messages whose content is empty after pruning.
+    Keep,
+
+    /// Remove messages whose content is empty after pruning.
+    #[default]
+    Remove,
+}
+
+/// Tool-call pruning scope used inside [`PruneToolCallRule`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PruneToolCallRuleMode {
+    /// Remove matching tool calls/results from all messages.
+    All,
+
+    /// Remove matching tool calls/results before the final message.
+    BeforeLastMessage,
+
+    /// Remove matching tool calls/results before the final `n` messages.
+    BeforeLastMessages(usize),
+}
+
+impl PruneToolCallRuleMode {
+    fn as_str(self) -> String {
+        match self {
+            Self::All => "all".to_string(),
+            Self::BeforeLastMessage => "before-last-message".to_string(),
+            Self::BeforeLastMessages(count) => format!("before-last-{count}-messages"),
+        }
+    }
+
+    fn from_str(value: &str) -> Result<Self, String> {
+        match value {
+            "all" => Ok(Self::All),
+            "before-last-message" => Ok(Self::BeforeLastMessage),
+            value => parse_before_last_messages(value)
+                .map(Self::BeforeLastMessages)
+                .ok_or_else(|| format!("invalid prune tool-call rule mode: {value}")),
+        }
+    }
+
+    fn keep_last_messages_count(self) -> Option<usize> {
+        match self {
+            Self::All => None,
+            Self::BeforeLastMessage => Some(1),
+            Self::BeforeLastMessages(count) => Some(count),
+        }
+    }
+}
+
+impl Serialize for PruneToolCallRuleMode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for PruneToolCallRuleMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_str(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// A single tool-call pruning rule.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PruneToolCallRule {
+    /// Which messages should be pruned.
+    #[serde(rename = "type")]
+    pub mode: PruneToolCallRuleMode,
+
+    /// Optional tool names to prune. Missing means all tool calls/results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
+}
+
+impl PruneToolCallRule {
+    /// Creates a rule that prunes matching tool calls/results from all messages.
+    pub fn all() -> Self {
+        Self {
+            mode: PruneToolCallRuleMode::All,
+            tools: None,
+        }
+    }
+
+    /// Creates a rule that keeps the final message's tool calls/results.
+    pub fn before_last_message() -> Self {
+        Self {
+            mode: PruneToolCallRuleMode::BeforeLastMessage,
+            tools: None,
+        }
+    }
+
+    /// Creates a rule that keeps tool calls/results in the final `count` messages.
+    pub fn before_last_messages(count: usize) -> Self {
+        Self {
+            mode: PruneToolCallRuleMode::BeforeLastMessages(count),
+            tools: None,
+        }
+    }
+
+    /// Restricts this rule to the supplied tool names.
+    pub fn with_tools(mut self, tools: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.tools = Some(tools.into_iter().map(Into::into).collect());
+        self
+    }
+}
+
+/// How tool calls, tool results, and approval responses should be removed.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum PruneToolCalls {
+    /// Keep all tool-call related parts.
+    #[default]
+    None,
+
+    /// Remove all tool-call related parts.
+    All,
+
+    /// Remove tool-call related parts before the final message.
+    BeforeLastMessage,
+
+    /// Remove tool-call related parts before the final `n` messages.
+    BeforeLastMessages(usize),
+
+    /// Apply explicit pruning rules in order.
+    Rules(Vec<PruneToolCallRule>),
+}
+
+impl PruneToolCalls {
+    fn rules(&self) -> Vec<PruneToolCallRule> {
+        match self {
+            Self::None => Vec::new(),
+            Self::All => vec![PruneToolCallRule::all()],
+            Self::BeforeLastMessage => vec![PruneToolCallRule::before_last_message()],
+            Self::BeforeLastMessages(count) => {
+                vec![PruneToolCallRule::before_last_messages(*count)]
+            }
+            Self::Rules(rules) => rules.clone(),
+        }
+    }
+}
+
+impl Serialize for PruneToolCalls {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::None => serializer.serialize_str("none"),
+            Self::All => serializer.serialize_str("all"),
+            Self::BeforeLastMessage => serializer.serialize_str("before-last-message"),
+            Self::BeforeLastMessages(count) => {
+                serializer.serialize_str(&format!("before-last-{count}-messages"))
+            }
+            Self::Rules(rules) => rules.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PruneToolCalls {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum PruneToolCallsWire {
+            String(String),
+            Rules(Vec<PruneToolCallRule>),
+        }
+
+        match PruneToolCallsWire::deserialize(deserializer)? {
+            PruneToolCallsWire::String(value) => parse_prune_tool_calls(&value)
+                .ok_or_else(|| serde::de::Error::custom(format!("invalid toolCalls: {value}"))),
+            PruneToolCallsWire::Rules(rules) => Ok(Self::Rules(rules)),
+        }
+    }
+}
+
+/// Options for pruning model messages before another generation call.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PruneMessagesOptions {
+    /// Messages to prune.
+    pub messages: Vec<LanguageModelMessage>,
+
+    /// Reasoning pruning behavior.
+    #[serde(default)]
+    pub reasoning: PruneReasoning,
+
+    /// Tool-call/result pruning behavior.
+    #[serde(default)]
+    pub tool_calls: PruneToolCalls,
+
+    /// Empty-message pruning behavior.
+    #[serde(default)]
+    pub empty_messages: PruneEmptyMessages,
+}
+
+impl PruneMessagesOptions {
+    /// Creates pruning options with upstream defaults.
+    pub fn new(messages: Vec<LanguageModelMessage>) -> Self {
+        Self {
+            messages,
+            reasoning: PruneReasoning::None,
+            tool_calls: PruneToolCalls::None,
+            empty_messages: PruneEmptyMessages::Remove,
+        }
+    }
+
+    /// Sets reasoning pruning behavior.
+    pub fn with_reasoning(mut self, reasoning: PruneReasoning) -> Self {
+        self.reasoning = reasoning;
+        self
+    }
+
+    /// Sets tool-call/result pruning behavior.
+    pub fn with_tool_calls(mut self, tool_calls: PruneToolCalls) -> Self {
+        self.tool_calls = tool_calls;
+        self
+    }
+
+    /// Sets empty-message pruning behavior.
+    pub fn with_empty_messages(mut self, empty_messages: PruneEmptyMessages) -> Self {
+        self.empty_messages = empty_messages;
+        self
+    }
+}
+
+/// Prunes model messages using the upstream `pruneMessages` behavior.
+pub fn prune_messages(options: PruneMessagesOptions) -> Vec<LanguageModelMessage> {
+    let PruneMessagesOptions {
+        mut messages,
+        reasoning,
+        tool_calls,
+        empty_messages,
+    } = options;
+
+    messages = prune_reasoning_messages(messages, reasoning);
+
+    for rule in tool_calls.rules() {
+        messages = prune_tool_call_messages(messages, &rule);
+    }
+
+    if empty_messages == PruneEmptyMessages::Remove {
+        messages.retain(message_has_content);
+    }
+
+    messages
 }
 
 /// Error returned when a model tries to call a tool that is not available.
@@ -2641,6 +2916,233 @@ fn unsupported_model_version_default_message(
     )
 }
 
+fn parse_prune_tool_calls(value: &str) -> Option<PruneToolCalls> {
+    match value {
+        "none" => Some(PruneToolCalls::None),
+        "all" => Some(PruneToolCalls::All),
+        "before-last-message" => Some(PruneToolCalls::BeforeLastMessage),
+        value => parse_before_last_messages(value).map(PruneToolCalls::BeforeLastMessages),
+    }
+}
+
+fn parse_before_last_messages(value: &str) -> Option<usize> {
+    value
+        .strip_prefix("before-last-")?
+        .strip_suffix("-messages")?
+        .parse()
+        .ok()
+}
+
+fn prune_reasoning_messages(
+    messages: Vec<LanguageModelMessage>,
+    reasoning: PruneReasoning,
+) -> Vec<LanguageModelMessage> {
+    if reasoning == PruneReasoning::None {
+        return messages;
+    }
+
+    let final_index = messages.len().saturating_sub(1);
+
+    messages
+        .into_iter()
+        .enumerate()
+        .map(|(message_index, message)| match message {
+            LanguageModelMessage::Assistant(mut message)
+                if reasoning == PruneReasoning::All || message_index != final_index =>
+            {
+                message.content.retain(|part| {
+                    !matches!(part, LanguageModelAssistantContentPart::Reasoning(_))
+                });
+                LanguageModelMessage::Assistant(message)
+            }
+            message => message,
+        })
+        .collect()
+}
+
+fn prune_tool_call_messages(
+    messages: Vec<LanguageModelMessage>,
+    rule: &PruneToolCallRule,
+) -> Vec<LanguageModelMessage> {
+    let keep_last_messages_count = rule.mode.keep_last_messages_count();
+    let (kept_tool_call_ids, kept_approval_ids) =
+        collect_kept_tool_references(&messages, keep_last_messages_count);
+    let prune_before_index =
+        keep_last_messages_count.map(|count| messages.len().saturating_sub(count));
+
+    messages
+        .into_iter()
+        .enumerate()
+        .map(|(message_index, message)| {
+            if prune_before_index.is_some_and(|index| message_index >= index) {
+                return message;
+            }
+
+            match message {
+                LanguageModelMessage::Assistant(mut message) => {
+                    message.content = prune_assistant_tool_parts(
+                        message.content,
+                        rule,
+                        &kept_tool_call_ids,
+                        &kept_approval_ids,
+                    );
+                    LanguageModelMessage::Assistant(message)
+                }
+                LanguageModelMessage::Tool(mut message) => {
+                    message.content = prune_tool_message_parts(
+                        message.content,
+                        rule,
+                        &kept_tool_call_ids,
+                        &kept_approval_ids,
+                    );
+                    LanguageModelMessage::Tool(message)
+                }
+                message => message,
+            }
+        })
+        .collect()
+}
+
+fn collect_kept_tool_references(
+    messages: &[LanguageModelMessage],
+    keep_last_messages_count: Option<usize>,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut kept_tool_call_ids = BTreeSet::new();
+    let mut kept_approval_ids = BTreeSet::new();
+
+    let Some(keep_last_messages_count) = keep_last_messages_count else {
+        return (kept_tool_call_ids, kept_approval_ids);
+    };
+
+    for message in messages.iter().rev().take(keep_last_messages_count) {
+        match message {
+            LanguageModelMessage::Assistant(message) => {
+                for part in &message.content {
+                    match part {
+                        LanguageModelAssistantContentPart::ToolCall(part) => {
+                            kept_tool_call_ids.insert(part.tool_call_id.clone());
+                        }
+                        LanguageModelAssistantContentPart::ToolResult(part) => {
+                            kept_tool_call_ids.insert(part.tool_call_id.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            LanguageModelMessage::Tool(message) => {
+                for part in &message.content {
+                    match part {
+                        LanguageModelToolContentPart::ToolResult(part) => {
+                            kept_tool_call_ids.insert(part.tool_call_id.clone());
+                        }
+                        LanguageModelToolContentPart::ToolApprovalResponse(part) => {
+                            kept_approval_ids.insert(part.approval_id.clone());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (kept_tool_call_ids, kept_approval_ids)
+}
+
+fn prune_assistant_tool_parts(
+    content: Vec<LanguageModelAssistantContentPart>,
+    rule: &PruneToolCallRule,
+    kept_tool_call_ids: &BTreeSet<String>,
+    kept_approval_ids: &BTreeSet<String>,
+) -> Vec<LanguageModelAssistantContentPart> {
+    content
+        .into_iter()
+        .filter(|part| match part {
+            LanguageModelAssistantContentPart::ToolCall(part) => should_keep_tool_related_part(
+                Some(&part.tool_call_id),
+                None,
+                Some(&part.tool_name),
+                rule,
+                kept_tool_call_ids,
+                kept_approval_ids,
+            ),
+            LanguageModelAssistantContentPart::ToolResult(part) => should_keep_tool_related_part(
+                Some(&part.tool_call_id),
+                None,
+                Some(&part.tool_name),
+                rule,
+                kept_tool_call_ids,
+                kept_approval_ids,
+            ),
+            _ => true,
+        })
+        .collect()
+}
+
+fn prune_tool_message_parts(
+    content: Vec<LanguageModelToolContentPart>,
+    rule: &PruneToolCallRule,
+    kept_tool_call_ids: &BTreeSet<String>,
+    kept_approval_ids: &BTreeSet<String>,
+) -> Vec<LanguageModelToolContentPart> {
+    content
+        .into_iter()
+        .filter(|part| match part {
+            LanguageModelToolContentPart::ToolResult(part) => should_keep_tool_related_part(
+                Some(&part.tool_call_id),
+                None,
+                Some(&part.tool_name),
+                rule,
+                kept_tool_call_ids,
+                kept_approval_ids,
+            ),
+            LanguageModelToolContentPart::ToolApprovalResponse(part) => {
+                should_keep_tool_related_part(
+                    None,
+                    Some(&part.approval_id),
+                    None,
+                    rule,
+                    kept_tool_call_ids,
+                    kept_approval_ids,
+                )
+            }
+        })
+        .collect()
+}
+
+fn should_keep_tool_related_part(
+    tool_call_id: Option<&str>,
+    approval_id: Option<&str>,
+    tool_name: Option<&str>,
+    rule: &PruneToolCallRule,
+    kept_tool_call_ids: &BTreeSet<String>,
+    kept_approval_ids: &BTreeSet<String>,
+) -> bool {
+    if tool_call_id.is_some_and(|id| kept_tool_call_ids.contains(id))
+        || approval_id.is_some_and(|id| kept_approval_ids.contains(id))
+    {
+        return true;
+    }
+
+    let Some(tools) = rule.tools.as_deref() else {
+        return false;
+    };
+
+    let Some(tool_name) = tool_name else {
+        return true;
+    };
+
+    !tools.iter().any(|tool| tool == tool_name)
+}
+
+fn message_has_content(message: &LanguageModelMessage) -> bool {
+    match message {
+        LanguageModelMessage::System(message) => !message.content.is_empty(),
+        LanguageModelMessage::User(message) => !message.content.is_empty(),
+        LanguageModelMessage::Assistant(message) => !message.content.is_empty(),
+        LanguageModelMessage::Tool(message) => !message.content.is_empty(),
+    }
+}
+
 fn duration_ms(duration: Duration) -> u64 {
     duration.as_millis().try_into().unwrap_or(u64::MAX)
 }
@@ -2711,23 +3213,26 @@ mod tests {
         GenerateTextResult, GenerateTextStep, GenerateTextStepPerformance, GenerateTextToolCall,
         GenerateTextToolResult, InvalidStreamPartError, InvalidToolApprovalError,
         InvalidToolInputError, MissingToolResultsError, NoObjectGeneratedError,
-        NoOutputGeneratedError, NoSuchToolError, StopCondition, ToolCallNotFoundForApprovalError,
-        ToolCallRepairError, ToolCallRepairOriginalError, UiMessageStreamError,
-        UnsupportedModelVersionError, experimental_filter_active_tools, filter_active_tools,
-        generate_text, has_tool_call, is_loop_finished, is_step_count, is_stop_condition_met,
-        step_count_is,
+        NoOutputGeneratedError, NoSuchToolError, PruneEmptyMessages, PruneMessagesOptions,
+        PruneReasoning, PruneToolCallRule, PruneToolCallRuleMode, PruneToolCalls, StopCondition,
+        ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOriginalError,
+        UiMessageStreamError, UnsupportedModelVersionError, experimental_filter_active_tools,
+        filter_active_tools, generate_text, has_tool_call, is_loop_finished, is_step_count,
+        is_stop_condition_met, prune_messages, step_count_is,
     };
     use crate::file_data::FileDataContent;
     use crate::language_model::{
         FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
-        LanguageModelCallOptions, LanguageModelContent, LanguageModelFile, LanguageModelFileData,
-        LanguageModelFinishReason, LanguageModelFunctionTool, LanguageModelGenerateResult,
-        LanguageModelMessage, LanguageModelProviderTool, LanguageModelReasoning,
-        LanguageModelReasoningFile, LanguageModelRequest, LanguageModelResponse,
+        LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
+        LanguageModelFile, LanguageModelFileData, LanguageModelFinishReason,
+        LanguageModelFunctionTool, LanguageModelGenerateResult, LanguageModelMessage,
+        LanguageModelProviderTool, LanguageModelReasoning, LanguageModelReasoningFile,
+        LanguageModelReasoningPart, LanguageModelRequest, LanguageModelResponse,
         LanguageModelSource, LanguageModelStreamPart, LanguageModelStreamResult,
         LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextDelta,
-        LanguageModelTextPart, LanguageModelTool, LanguageModelToolCall, LanguageModelToolCallPart,
-        LanguageModelToolContentPart, LanguageModelToolResult, LanguageModelToolResultOutput,
+        LanguageModelTextPart, LanguageModelTool, LanguageModelToolApprovalResponsePart,
+        LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolContentPart,
+        LanguageModelToolMessage, LanguageModelToolResult, LanguageModelToolResultOutput,
         LanguageModelToolResultPart, LanguageModelUsage, LanguageModelUserContentPart,
         LanguageModelUserMessage, OutputTokenUsage,
     };
@@ -4505,6 +5010,253 @@ mod tests {
         );
         assert_eq!(aliased.len(), 1);
         assert_eq!(aliased[0].name, "weather");
+    }
+
+    #[test]
+    fn prune_messages_options_round_trip_upstream_json() {
+        let options: PruneMessagesOptions = serde_json::from_value(json!({
+            "messages": [],
+            "reasoning": "before-last-message",
+            "toolCalls": [
+                {
+                    "type": "before-last-2-messages",
+                    "tools": ["weather"]
+                }
+            ],
+            "emptyMessages": "keep"
+        }))
+        .expect("prune options deserialize");
+
+        assert_eq!(options.reasoning, PruneReasoning::BeforeLastMessage);
+        assert_eq!(
+            options.tool_calls,
+            PruneToolCalls::Rules(vec![
+                PruneToolCallRule::before_last_messages(2).with_tools(["weather"])
+            ])
+        );
+        assert_eq!(options.empty_messages, PruneEmptyMessages::Keep);
+
+        let serialized = serde_json::to_value(
+            PruneMessagesOptions::new(Vec::new())
+                .with_reasoning(PruneReasoning::All)
+                .with_tool_calls(PruneToolCalls::BeforeLastMessages(3)),
+        )
+        .expect("prune options serialize");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "messages": [],
+                "reasoning": "all",
+                "toolCalls": "before-last-3-messages",
+                "emptyMessages": "remove"
+            })
+        );
+
+        let rule_json = serde_json::to_value(PruneToolCallRule {
+            mode: PruneToolCallRuleMode::BeforeLastMessage,
+            tools: Some(vec!["weather".to_string()]),
+        })
+        .expect("tool-call rule serializes");
+
+        assert_eq!(
+            rule_json,
+            json!({
+                "type": "before-last-message",
+                "tools": ["weather"]
+            })
+        );
+    }
+
+    #[test]
+    fn prune_messages_removes_reasoning_before_last_message() {
+        let messages = vec![
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::Reasoning(LanguageModelReasoningPart::new(
+                    "hidden",
+                )),
+                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new("visible")),
+            ])),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::Reasoning(LanguageModelReasoningPart::new(
+                    "final reasoning",
+                )),
+                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new("final")),
+            ])),
+        ];
+
+        let pruned = prune_messages(
+            PruneMessagesOptions::new(messages).with_reasoning(PruneReasoning::BeforeLastMessage),
+        );
+
+        let LanguageModelMessage::Assistant(first) = &pruned[0] else {
+            panic!("first message is assistant");
+        };
+        let LanguageModelMessage::Assistant(second) = &pruned[1] else {
+            panic!("second message is assistant");
+        };
+
+        assert_eq!(first.content.len(), 1);
+        assert!(matches!(
+            &first.content[0],
+            LanguageModelAssistantContentPart::Text(_)
+        ));
+        assert_eq!(second.content.len(), 2);
+        assert!(matches!(
+            &second.content[0],
+            LanguageModelAssistantContentPart::Reasoning(_)
+        ));
+    }
+
+    #[test]
+    fn prune_messages_removes_all_tool_parts_and_empty_messages_by_default() {
+        let messages = vec![
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call-weather",
+                    "weather",
+                    json!({ "city": "Brisbane" }),
+                )),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call-weather",
+                    "weather",
+                    LanguageModelToolResultOutput::text("sunny"),
+                )),
+            ])),
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("next")),
+            ])),
+        ];
+
+        let pruned = prune_messages(
+            PruneMessagesOptions::new(messages).with_tool_calls(PruneToolCalls::All),
+        );
+
+        assert_eq!(pruned.len(), 1);
+        assert!(matches!(&pruned[0], LanguageModelMessage::User(_)));
+    }
+
+    #[test]
+    fn prune_messages_keeps_tool_references_needed_by_trailing_messages() {
+        let messages = vec![
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call-old",
+                    "weather",
+                    json!({}),
+                )),
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call-keep",
+                    "search",
+                    json!({}),
+                )),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call-old",
+                    "weather",
+                    LanguageModelToolResultOutput::text("old"),
+                )),
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call-keep",
+                    "search",
+                    LanguageModelToolResultOutput::text("keep"),
+                )),
+            ])),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new("latest")),
+                LanguageModelAssistantContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call-keep",
+                    "search",
+                    LanguageModelToolResultOutput::text("latest"),
+                )),
+            ])),
+        ];
+
+        let pruned = prune_messages(
+            PruneMessagesOptions::new(messages).with_tool_calls(PruneToolCalls::BeforeLastMessage),
+        );
+
+        let LanguageModelMessage::Assistant(first) = &pruned[0] else {
+            panic!("first message is assistant");
+        };
+        let LanguageModelMessage::Tool(second) = &pruned[1] else {
+            panic!("second message is tool");
+        };
+        let LanguageModelMessage::Assistant(third) = &pruned[2] else {
+            panic!("third message is assistant");
+        };
+
+        assert_eq!(first.content.len(), 1);
+        assert!(matches!(
+            &first.content[0],
+            LanguageModelAssistantContentPart::ToolCall(part)
+                if part.tool_call_id == "call-keep"
+        ));
+        assert_eq!(second.content.len(), 1);
+        assert!(matches!(
+            &second.content[0],
+            LanguageModelToolContentPart::ToolResult(part)
+                if part.tool_call_id == "call-keep"
+        ));
+        assert_eq!(third.content.len(), 2);
+    }
+
+    #[test]
+    fn prune_messages_tool_specific_rules_preserve_other_tools() {
+        let messages = vec![
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call-weather",
+                    "weather",
+                    json!({}),
+                )),
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call-search",
+                    "search",
+                    json!({}),
+                )),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call-weather",
+                    "weather",
+                    LanguageModelToolResultOutput::text("sunny"),
+                )),
+                LanguageModelToolContentPart::ToolApprovalResponse(
+                    LanguageModelToolApprovalResponsePart::new("approval-search", true),
+                ),
+            ])),
+        ];
+
+        let pruned = prune_messages(
+            PruneMessagesOptions::new(messages)
+                .with_tool_calls(PruneToolCalls::Rules(vec![
+                    PruneToolCallRule::all().with_tools(["weather"]),
+                ]))
+                .with_empty_messages(PruneEmptyMessages::Keep),
+        );
+
+        let LanguageModelMessage::Assistant(first) = &pruned[0] else {
+            panic!("first message is assistant");
+        };
+        let LanguageModelMessage::Tool(second) = &pruned[1] else {
+            panic!("second message is tool");
+        };
+
+        assert_eq!(first.content.len(), 1);
+        assert!(matches!(
+            &first.content[0],
+            LanguageModelAssistantContentPart::ToolCall(part)
+                if part.tool_name == "search"
+        ));
+        assert_eq!(second.content.len(), 1);
+        assert!(matches!(
+            &second.content[0],
+            LanguageModelToolContentPart::ToolApprovalResponse(_)
+        ));
     }
 
     #[test]
