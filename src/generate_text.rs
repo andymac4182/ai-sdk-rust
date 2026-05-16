@@ -467,6 +467,128 @@ impl fmt::Display for NoOutputGeneratedError {
 
 impl std::error::Error for NoOutputGeneratedError {}
 
+/// Error returned when high-level object generation produces no object.
+///
+/// Upstream uses this for responses that are missing text, cannot be parsed, or
+/// fail schema validation. The Rust contract retains the generated text when it
+/// exists, response metadata, usage, finish reason, and an optional cause
+/// message for parse or validation failures.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NoObjectGeneratedError {
+    message: String,
+    cause_message: Option<String>,
+    text: Option<String>,
+    response: LanguageModelResponse,
+    usage: LanguageModelUsage,
+    finish_reason: FinishReason,
+}
+
+impl NoObjectGeneratedError {
+    /// Creates a no-object error with the upstream default message.
+    pub fn new(
+        response: LanguageModelResponse,
+        usage: LanguageModelUsage,
+        finish_reason: FinishReason,
+    ) -> Self {
+        Self {
+            message: "No object generated.".to_string(),
+            cause_message: None,
+            text: None,
+            response,
+            usage,
+            finish_reason,
+        }
+    }
+
+    /// Creates a no-object error with a caller-supplied message.
+    pub fn with_message(
+        message: impl Into<String>,
+        response: LanguageModelResponse,
+        usage: LanguageModelUsage,
+        finish_reason: FinishReason,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            cause_message: None,
+            text: None,
+            response,
+            usage,
+            finish_reason,
+        }
+    }
+
+    /// Adds the generated text that failed parsing or validation.
+    pub fn with_text(mut self, text: impl Into<String>) -> Self {
+        self.text = Some(text.into());
+        self
+    }
+
+    /// Adds the parse or validation failure cause message.
+    pub fn with_cause(mut self, cause: impl fmt::Display) -> Self {
+        self.cause_message = Some(get_error_message(Some(&cause)));
+        self
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Returns the parse or validation cause message, when available.
+    pub fn cause_message(&self) -> Option<&str> {
+        self.cause_message.as_deref()
+    }
+
+    /// Returns the generated text that failed parsing or validation, when available.
+    pub fn text(&self) -> Option<&str> {
+        self.text.as_deref()
+    }
+
+    /// Returns response metadata for the model call.
+    pub fn response(&self) -> &LanguageModelResponse {
+        &self.response
+    }
+
+    /// Returns usage reported for the model call.
+    pub fn usage(&self) -> &LanguageModelUsage {
+        &self.usage
+    }
+
+    /// Returns the unified finish reason for the model call.
+    pub fn finish_reason(&self) -> &FinishReason {
+        &self.finish_reason
+    }
+
+    /// Converts this error into its retained parts.
+    pub fn into_parts(
+        self,
+    ) -> (
+        String,
+        Option<String>,
+        Option<String>,
+        LanguageModelResponse,
+        LanguageModelUsage,
+        FinishReason,
+    ) {
+        (
+            self.message,
+            self.cause_message,
+            self.text,
+            self.response,
+            self.usage,
+            self.finish_reason,
+        )
+    }
+}
+
+impl fmt::Display for NoObjectGeneratedError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for NoObjectGeneratedError {}
+
 /// Error returned when a language model stream emits an invalid part.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InvalidStreamPartError {
@@ -1974,8 +2096,9 @@ mod tests {
         GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning, GenerateTextResult,
         GenerateTextStep, GenerateTextToolCall, GenerateTextToolResult, InvalidStreamPartError,
         InvalidToolApprovalError, InvalidToolInputError, MissingToolResultsError,
-        NoOutputGeneratedError, NoSuchToolError, ToolCallNotFoundForApprovalError,
-        ToolCallRepairError, ToolCallRepairOriginalError, generate_text,
+        NoObjectGeneratedError, NoOutputGeneratedError, NoSuchToolError,
+        ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOriginalError,
+        generate_text,
     };
     use crate::file_data::FileDataContent;
     use crate::language_model::{
@@ -1983,12 +2106,13 @@ mod tests {
         LanguageModelCallOptions, LanguageModelContent, LanguageModelFile, LanguageModelFileData,
         LanguageModelFinishReason, LanguageModelFunctionTool, LanguageModelGenerateResult,
         LanguageModelMessage, LanguageModelProviderTool, LanguageModelReasoning,
-        LanguageModelReasoningFile, LanguageModelSource, LanguageModelStreamPart,
-        LanguageModelStreamResult, LanguageModelSupportedUrls, LanguageModelText,
-        LanguageModelTextDelta, LanguageModelTextPart, LanguageModelTool, LanguageModelToolCall,
-        LanguageModelToolCallPart, LanguageModelToolContentPart, LanguageModelToolResult,
-        LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
-        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelReasoningFile, LanguageModelResponse, LanguageModelSource,
+        LanguageModelStreamPart, LanguageModelStreamResult, LanguageModelSupportedUrls,
+        LanguageModelText, LanguageModelTextDelta, LanguageModelTextPart, LanguageModelTool,
+        LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolContentPart,
+        LanguageModelToolResult, LanguageModelToolResultOutput, LanguageModelToolResultPart,
+        LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage,
+        OutputTokenUsage,
     };
     use crate::provider::{JsonParseError, ProviderMetadata, SpecificationVersion};
     use crate::provider_utils::{Tool, ToolExecutionError, dynamic_tool};
@@ -2002,6 +2126,43 @@ mod tests {
         atomic::{AtomicBool, Ordering},
     };
     use std::task::{Context, Poll, Waker};
+    use time::OffsetDateTime;
+
+    fn no_object_response() -> LanguageModelResponse {
+        let timestamp = OffsetDateTime::parse(
+            "2024-01-02T03:04:05Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .expect("timestamp parses");
+
+        LanguageModelResponse::new()
+            .with_id("resp_123")
+            .with_timestamp(timestamp)
+            .with_model_id("language-test")
+            .with_header("x-request-id", "req_123")
+            .with_body(json!({ "raw": true }))
+    }
+
+    fn no_object_usage() -> LanguageModelUsage {
+        LanguageModelUsage {
+            input_tokens: InputTokenUsage {
+                total: Some(11),
+                cache_read: Some(3),
+                ..InputTokenUsage::default()
+            },
+            output_tokens: OutputTokenUsage {
+                total: Some(7),
+                text: Some(5),
+                ..OutputTokenUsage::default()
+            },
+            raw: Some(
+                serde_json::from_value(json!({
+                    "providerTokens": 18
+                }))
+                .expect("raw usage is an object"),
+            ),
+        }
+    }
 
     #[test]
     fn no_such_tool_error_matches_upstream_default_messages() {
@@ -2208,6 +2369,106 @@ mod tests {
             "No output generated. Check the stream for errors."
         );
         assert_eq!(error.to_string(), error.message());
+    }
+
+    #[test]
+    fn no_object_generated_error_matches_upstream_default_context() {
+        let response = no_object_response();
+        let usage = no_object_usage();
+        let error =
+            NoObjectGeneratedError::new(response.clone(), usage.clone(), FinishReason::Stop);
+
+        assert_eq!(error.message(), "No object generated.");
+        assert_eq!(error.to_string(), "No object generated.");
+        assert_eq!(error.cause_message(), None);
+        assert_eq!(error.text(), None);
+        assert_eq!(error.response(), &response);
+        assert_eq!(error.usage(), &usage);
+        assert_eq!(error.finish_reason(), &FinishReason::Stop);
+    }
+
+    #[test]
+    fn no_object_generated_error_retains_text_cause_and_custom_message() {
+        let response = no_object_response();
+        let usage = no_object_usage();
+        let cause = JsonParseError::new("{ bad", "expected value at line 1 column 1");
+        let error = NoObjectGeneratedError::with_message(
+            "No object generated: could not parse the response.",
+            response.clone(),
+            usage.clone(),
+            FinishReason::Other,
+        )
+        .with_text("{ bad")
+        .with_cause(&cause);
+
+        assert_eq!(
+            error.message(),
+            "No object generated: could not parse the response."
+        );
+        assert_eq!(error.text(), Some("{ bad"));
+        assert_eq!(
+            error.cause_message(),
+            Some(
+                "JSON parsing failed: Text: { bad.\nError message: expected value at line 1 column 1"
+            )
+        );
+        assert_eq!(
+            error.into_parts(),
+            (
+                "No object generated: could not parse the response.".to_string(),
+                Some(
+                    "JSON parsing failed: Text: { bad.\nError message: expected value at line 1 column 1"
+                        .to_string()
+                ),
+                Some("{ bad".to_string()),
+                response,
+                usage,
+                FinishReason::Other
+            )
+        );
+    }
+
+    #[test]
+    fn no_object_generated_error_context_uses_existing_json_boundaries() {
+        let response = no_object_response();
+        let usage = no_object_usage();
+
+        assert_eq!(
+            serde_json::to_value(&response).expect("response serializes"),
+            json!({
+                "id": "resp_123",
+                "timestamp": "2024-01-02T03:04:05Z",
+                "modelId": "language-test",
+                "headers": {
+                    "x-request-id": "req_123"
+                },
+                "body": {
+                    "raw": true
+                }
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(&usage).expect("usage serializes"),
+            json!({
+                "inputTokens": {
+                    "total": 11,
+                    "cacheRead": 3
+                },
+                "outputTokens": {
+                    "total": 7,
+                    "text": 5
+                },
+                "raw": {
+                    "providerTokens": 18
+                }
+            })
+        );
+
+        let error =
+            NoObjectGeneratedError::new(response.clone(), usage.clone(), FinishReason::Length);
+        assert_eq!(error.response(), &response);
+        assert_eq!(error.usage(), &usage);
     }
 
     #[test]

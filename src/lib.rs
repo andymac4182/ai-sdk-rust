@@ -41,7 +41,7 @@ pub use generate_text::{
     GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning, GenerateTextResult,
     GenerateTextStep, GenerateTextTool, GenerateTextToolCall, GenerateTextToolResult,
     InvalidStreamPartError, InvalidToolApprovalError, InvalidToolInputError,
-    MissingToolResultsError, NoOutputGeneratedError, NoSuchToolError,
+    MissingToolResultsError, NoObjectGeneratedError, NoOutputGeneratedError, NoSuchToolError,
     ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOriginalError,
     generate_text,
 };
