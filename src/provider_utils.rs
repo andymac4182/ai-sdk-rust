@@ -2186,13 +2186,94 @@ impl PostJsonToApiOptions {
     }
 }
 
+/// Options for a dependency-free upstream-style `postFormDataToApi` request.
+///
+/// Rust callers provide an injected transport to [`post_form_data_to_api`], so
+/// this struct carries the request metadata that upstream prepares before
+/// calling `fetch`: URL, optional headers, form data, and the runtime used for
+/// the provider-utils user-agent suffix.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostFormDataToApiOptions {
+    /// Provider API URL.
+    pub url: String,
+
+    /// Optional request headers. `None` values are removed during header
+    /// normalization, matching upstream undefined header entries.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, Option<String>>,
+
+    /// Multipart form data request body.
+    pub form_data: FormData,
+
+    /// Runtime indicators used to append the provider-utils user-agent suffix.
+    #[serde(default, skip_serializing_if = "RuntimeEnvironment::is_unknown")]
+    pub environment: RuntimeEnvironment,
+}
+
+impl PostFormDataToApiOptions {
+    /// Creates form-data POST API request options for the given URL and form data.
+    pub fn new(url: impl Into<String>, form_data: FormData) -> Self {
+        Self {
+            url: url.into(),
+            headers: BTreeMap::new(),
+            form_data,
+            environment: RuntimeEnvironment::unknown(),
+        }
+    }
+
+    /// Adds or replaces request headers.
+    pub fn with_headers<K, V, I>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, Option<V>)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        for (key, value) in headers {
+            self.headers.insert(key.into(), value.map(Into::into));
+        }
+
+        self
+    }
+
+    /// Sets a request header.
+    pub fn with_header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(key.into(), Some(value.into()));
+        self
+    }
+
+    /// Sets the form-data request body.
+    pub fn with_form_data(mut self, form_data: FormData) -> Self {
+        self.form_data = form_data;
+        self
+    }
+
+    /// Sets the runtime indicators used for request header preparation.
+    pub fn with_environment(mut self, environment: RuntimeEnvironment) -> Self {
+        self.environment = environment;
+        self
+    }
+
+    /// Converts these options into the prepared provider API request.
+    pub fn into_request(self) -> ProviderApiRequest {
+        let Self {
+            url,
+            headers,
+            form_data,
+            environment,
+        } = self;
+
+        prepare_post_form_data_to_api_request(url, Some(headers), form_data, &environment)
+    }
+}
+
 /// Options for a dependency-free upstream-style `postToApi` request.
 ///
 /// Rust callers provide an injected transport to [`post_to_api`], so this
 /// struct carries the request metadata that upstream prepares before calling
 /// `fetch`: URL, optional headers, text or binary body content, body values for
 /// response handlers, and the runtime used for the provider-utils user-agent
-/// suffix. JavaScript-only `FormData` remains outside this Rust boundary.
+/// suffix.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PostToApiOptions {
@@ -2312,6 +2393,13 @@ pub enum ProviderApiRequestBody {
         /// Binary body content.
         content: Vec<u8>,
     },
+
+    /// Multipart form data request body content.
+    #[serde(rename = "form-data")]
+    FormData {
+        /// Ordered multipart form-data entries.
+        content: FormData,
+    },
 }
 
 impl ProviderApiRequestBody {
@@ -2329,19 +2417,32 @@ impl ProviderApiRequestBody {
         }
     }
 
+    /// Creates form-data request body content.
+    pub fn form_data(content: FormData) -> Self {
+        Self::FormData { content }
+    }
+
     /// Returns text request body content when this body is text.
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Self::Text { content } => Some(content),
-            Self::Bytes { .. } => None,
+            Self::Bytes { .. } | Self::FormData { .. } => None,
         }
     }
 
     /// Returns binary request body content when this body is bytes.
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
-            Self::Text { .. } => None,
+            Self::Text { .. } | Self::FormData { .. } => None,
             Self::Bytes { content } => Some(content),
+        }
+    }
+
+    /// Returns form-data request body content when this body is form data.
+    pub fn as_form_data(&self) -> Option<&FormData> {
+        match self {
+            Self::FormData { content } => Some(content),
+            Self::Text { .. } | Self::Bytes { .. } => None,
         }
     }
 }
@@ -5915,6 +6016,40 @@ where
     .await
 }
 
+/// Runs an upstream-style `postFormDataToApi` request through an injected transport.
+///
+/// This is the public dependency-free orchestration wrapper for upstream
+/// `postFormDataToApi`: form-data request metadata is prepared from
+/// [`PostFormDataToApiOptions`], the caller-supplied transport performs the
+/// HTTP work, and response handling plus fetch-error normalization are
+/// delegated to [`execute_provider_api_request`].
+pub async fn post_form_data_to_api<T, Transport, TransportFuture, S, F>(
+    options: PostFormDataToApiOptions,
+    transport: Transport,
+    successful_response_handler: S,
+    failed_response_handler: F,
+) -> Result<ResponseHandlerResult<T>, HandledFetchError>
+where
+    Transport: FnOnce(ProviderApiRequest) -> TransportFuture,
+    TransportFuture: Future<Output = Result<ProviderApiResponse, FetchErrorInfo>>,
+    S: FnOnce(
+        &ProviderApiRequest,
+        &ProviderApiResponse,
+    ) -> Result<ResponseHandlerResult<T>, ProviderApiResponseHandlerError>,
+    F: FnOnce(
+        &ProviderApiRequest,
+        &ProviderApiResponse,
+    ) -> Result<ResponseHandlerResult<ApiCallError>, ProviderApiResponseHandlerError>,
+{
+    execute_provider_api_request(
+        options.into_request(),
+        transport,
+        successful_response_handler,
+        failed_response_handler,
+    )
+    .await
+}
+
 /// Runs an upstream-style `postToApi` request through an injected transport.
 ///
 /// This is the public dependency-free orchestration wrapper for upstream
@@ -6156,6 +6291,61 @@ where
         body_values,
         environment,
     )
+}
+
+/// Prepares the form-data request metadata used by upstream `postFormDataToApi`.
+///
+/// Upstream `postFormDataToApi` sends the form data directly and preserves
+/// `Object.fromEntries(formData.entries())` as response-handler
+/// `requestBodyValues`. Rust keeps the dependency-free [`FormData`] body and
+/// converts text entries to JSON strings plus byte entries to byte arrays for
+/// the JSON request-body-values boundary.
+pub fn prepare_post_form_data_to_api_request<K, V, I>(
+    url: impl Into<String>,
+    headers: Option<I>,
+    form_data: FormData,
+    environment: &RuntimeEnvironment,
+) -> ProviderApiRequest
+where
+    I: IntoIterator<Item = (K, Option<V>)>,
+    K: AsRef<str>,
+    V: Into<String>,
+{
+    let request_body_values = form_data_request_body_values(&form_data);
+
+    prepare_post_to_api_request(
+        url,
+        headers,
+        ProviderApiRequestBody::form_data(form_data),
+        request_body_values,
+        environment,
+    )
+}
+
+fn form_data_request_body_values(form_data: &FormData) -> JsonValue {
+    let mut values = JsonObject::new();
+
+    for entry in &form_data.entries {
+        values.insert(
+            entry.name.clone(),
+            form_data_value_to_request_body_value(&entry.value),
+        );
+    }
+
+    JsonValue::Object(values)
+}
+
+fn form_data_value_to_request_body_value(value: &FormDataValue) -> JsonValue {
+    match value {
+        FormDataValue::Text { value } => JsonValue::String(value.clone()),
+        FormDataValue::Bytes { value } => JsonValue::Array(
+            value
+                .iter()
+                .copied()
+                .map(JsonValue::from)
+                .collect::<Vec<_>>(),
+        ),
+    }
 }
 
 /// Returns an upstream-style runtime user-agent suffix for provider utilities.
@@ -6512,19 +6702,19 @@ mod tests {
         InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
         JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, LazySchema, LoadApiKeyOptions,
         LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError, ParseJsonResult,
-        PostJsonToApiOptions, PostToApiOptions, ProviderApiRequest, ProviderApiRequestBody,
-        ProviderApiRequestMethod, ProviderApiResponse, ProviderApiResponseBody,
-        ProviderApiResponseHandlerError, ProviderDefinedToolFactory, ProviderExecutedToolFactory,
-        ReasoningLevel, Resolvable, ResponseHandlerResult, RuntimeEnvironment, Schema,
-        SerializedModelOptions, StatusCodeErrorResponseHandlerOptions, StreamingToolCallDelta,
-        StreamingToolCallDeltaFunction, StreamingToolCallTracker, StreamingToolCallTrackerOptions,
-        StreamingToolCallTypeValidation, Tool, ToolExecutionError, ToolExecutionOptions,
-        ValidateTypesResult, ValidationResult, add_additional_properties_to_json_schema, as_array,
-        as_flexible_schema, as_schema, combine_headers, convert_base64_to_bytes,
-        convert_bytes_to_base64, convert_image_model_file_to_data_uri,
-        convert_inline_file_data_to_bytes, convert_to_base64, convert_to_form_data,
-        create_binary_response_handler, create_event_source_response_handler, create_id_generator,
-        create_json_error_response_handler, create_json_response_handler,
+        PostFormDataToApiOptions, PostJsonToApiOptions, PostToApiOptions, ProviderApiRequest,
+        ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+        ProviderApiResponseBody, ProviderApiResponseHandlerError, ProviderDefinedToolFactory,
+        ProviderExecutedToolFactory, ReasoningLevel, Resolvable, ResponseHandlerResult,
+        RuntimeEnvironment, Schema, SerializedModelOptions, StatusCodeErrorResponseHandlerOptions,
+        StreamingToolCallDelta, StreamingToolCallDeltaFunction, StreamingToolCallTracker,
+        StreamingToolCallTrackerOptions, StreamingToolCallTypeValidation, Tool, ToolExecutionError,
+        ToolExecutionOptions, ValidateTypesResult, ValidationResult,
+        add_additional_properties_to_json_schema, as_array, as_flexible_schema, as_schema,
+        combine_headers, convert_base64_to_bytes, convert_bytes_to_base64,
+        convert_image_model_file_to_data_uri, convert_inline_file_data_to_bytes, convert_to_base64,
+        convert_to_form_data, create_binary_response_handler, create_event_source_response_handler,
+        create_id_generator, create_json_error_response_handler, create_json_response_handler,
         create_provider_defined_tool_factory,
         create_provider_defined_tool_factory_with_output_schema,
         create_provider_executed_tool_factory, create_status_code_error_response_handler,
@@ -6538,13 +6728,14 @@ mod tests {
         load_api_key, load_api_key_with_env, load_optional_setting_with_env, load_setting,
         load_setting_with_env, map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
         media_type_to_extension, normalize_headers, parse_json, parse_json_event_stream,
-        parse_json_with_schema, parse_provider_options, post_json_to_api, post_to_api,
-        prepare_get_from_api_request, prepare_post_json_to_api_request,
-        prepare_post_to_api_request, prepare_tools, read_response_with_size_limit,
-        remove_undefined_entries, resolve, resolve_full_media_type, resolve_provider_reference,
-        safe_parse_json, safe_parse_json_with_schema, safe_validate_types, serialize_model_options,
-        strip_file_extension, validate_download_url, validate_types,
-        with_provider_utils_user_agent, with_user_agent_suffix, without_trailing_slash,
+        parse_json_with_schema, parse_provider_options, post_form_data_to_api, post_json_to_api,
+        post_to_api, prepare_get_from_api_request, prepare_post_form_data_to_api_request,
+        prepare_post_json_to_api_request, prepare_post_to_api_request, prepare_tools,
+        read_response_with_size_limit, remove_undefined_entries, resolve, resolve_full_media_type,
+        resolve_provider_reference, safe_parse_json, safe_parse_json_with_schema,
+        safe_validate_types, serialize_model_options, strip_file_extension, validate_download_url,
+        validate_types, with_provider_utils_user_agent, with_user_agent_suffix,
+        without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -10415,6 +10606,48 @@ mod tests {
     }
 
     #[test]
+    fn provider_api_request_body_supports_form_data_content() {
+        let form_data = FormData {
+            entries: vec![
+                FormDataEntry::new("model", FormDataValue::text("gpt-image-1")),
+                FormDataEntry::new("image", FormDataValue::bytes([1_u8, 2, 3])),
+            ],
+        };
+        let body = ProviderApiRequestBody::form_data(form_data.clone());
+        let serialized = serde_json::to_value(&body).expect("form-data body serializes");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "type": "form-data",
+                "content": {
+                    "entries": [
+                        {
+                            "name": "model",
+                            "value": {
+                                "type": "text",
+                                "value": "gpt-image-1"
+                            }
+                        },
+                        {
+                            "name": "image",
+                            "value": {
+                                "type": "bytes",
+                                "value": [1, 2, 3]
+                            }
+                        }
+                    ]
+                }
+            })
+        );
+
+        let deserialized: ProviderApiRequestBody =
+            serde_json::from_value(serialized).expect("form-data body deserializes");
+
+        assert_eq!(deserialized.as_form_data(), Some(&form_data));
+    }
+
+    #[test]
     fn provider_api_response_serializes_upstream_response_metadata_shape() {
         let response = ProviderApiResponse::text(201, "Created", r#"{"ok":true}"#).with_headers(
             BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
@@ -11111,6 +11344,166 @@ mod tests {
     }
 
     #[test]
+    fn post_form_data_to_api_options_serialize_camel_case_request_metadata() {
+        let form_data = FormData {
+            entries: vec![
+                FormDataEntry::new("model", FormDataValue::text("gpt-image-1")),
+                FormDataEntry::new("image", FormDataValue::bytes([1_u8, 2, 3])),
+            ],
+        };
+        let options =
+            PostFormDataToApiOptions::new("https://api.example.com/v1/images", form_data.clone())
+                .with_headers(vec![
+                    ("Authorization", Some("Bearer test")),
+                    ("X-Ignore", None),
+                ])
+                .with_environment(RuntimeEnvironment::vercel_edge());
+
+        assert_eq!(
+            serde_json::to_value(&options).expect("post-form-data-to-api options serialize"),
+            json!({
+                "url": "https://api.example.com/v1/images",
+                "headers": {
+                    "Authorization": "Bearer test",
+                    "X-Ignore": null
+                },
+                "formData": {
+                    "entries": [
+                        {
+                            "name": "model",
+                            "value": {
+                                "type": "text",
+                                "value": "gpt-image-1"
+                            }
+                        },
+                        {
+                            "name": "image",
+                            "value": {
+                                "type": "bytes",
+                                "value": [1, 2, 3]
+                            }
+                        }
+                    ]
+                },
+                "environment": {
+                    "hasEdgeRuntime": true
+                }
+            })
+        );
+
+        let options: PostFormDataToApiOptions = serde_json::from_value(json!({
+            "url": "https://api.example.com/v1/images",
+            "formData": {
+                "entries": [
+                    {
+                        "name": "model",
+                        "value": {
+                            "type": "text",
+                            "value": "gpt-image-1"
+                        }
+                    }
+                ]
+            }
+        }))
+        .expect("minimal post-form-data-to-api options deserialize");
+
+        assert_eq!(
+            options,
+            PostFormDataToApiOptions::new(
+                "https://api.example.com/v1/images",
+                FormData {
+                    entries: vec![FormDataEntry::new(
+                        "model",
+                        FormDataValue::text("gpt-image-1")
+                    )]
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn post_form_data_to_api_prepares_request_and_handles_success() {
+        let form_data = FormData {
+            entries: vec![
+                FormDataEntry::new("model", FormDataValue::text("gpt-image-1")),
+                FormDataEntry::new("image", FormDataValue::bytes([1_u8])),
+                FormDataEntry::new("image", FormDataValue::bytes([2_u8])),
+            ],
+        };
+        let options =
+            PostFormDataToApiOptions::new("https://api.example.com/v1/images", form_data.clone())
+                .with_header("Authorization", "Bearer test")
+                .with_environment(RuntimeEnvironment::node_js("v22.0.0"));
+        let expected_response_headers =
+            BTreeMap::from([("x-request-id".to_string(), "req_post_form".to_string())]);
+        let response_headers = expected_response_headers.clone();
+
+        let result = poll_ready(post_form_data_to_api(
+            options,
+            move |request| {
+                assert_eq!(request.method, ProviderApiRequestMethod::Post);
+                assert_eq!(request.url, "https://api.example.com/v1/images");
+                assert_eq!(
+                    request.request_body_values,
+                    json!({
+                        "model": "gpt-image-1",
+                        "image": [2]
+                    })
+                );
+                assert_eq!(
+                    request
+                        .body
+                        .as_ref()
+                        .and_then(ProviderApiRequestBody::as_form_data),
+                    Some(&form_data)
+                );
+                assert_eq!(
+                    request.headers,
+                    BTreeMap::from([
+                        ("authorization".to_string(), "Bearer test".to_string()),
+                        (
+                            "user-agent".to_string(),
+                            format!(
+                                "ai-sdk/provider-utils/{} runtime/node.js/v22.0.0",
+                                crate::VERSION
+                            )
+                        ),
+                    ])
+                );
+
+                ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    r#"{"name":"Ada","age":36}"#,
+                )
+                .with_headers(response_headers)))
+            },
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    validate_person,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_status_code_error_response_handler(
+                    response.status_code_error_response_handler_options(request),
+                ))
+            },
+        ))
+        .expect("post-form-data-to-api request succeeds");
+
+        assert_eq!(
+            result.value(),
+            &Person {
+                name: "Ada".to_string(),
+                age: 36
+            }
+        );
+        assert_eq!(result.response_headers(), Some(&expected_response_headers));
+    }
+
+    #[test]
     fn post_to_api_options_serialize_camel_case_request_metadata() {
         let options = PostToApiOptions::new(
             "https://api.example.com/v1/upload",
@@ -11416,6 +11809,56 @@ mod tests {
                     "user-agent".to_string(),
                     format!(
                         "MyApp/1.0 ai-sdk/provider-utils/{} runtime/unknown",
+                        crate::VERSION
+                    ),
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn prepare_post_form_data_to_api_request_matches_upstream_request_setup() {
+        let form_data = FormData {
+            entries: vec![
+                FormDataEntry::new("model", FormDataValue::text("gpt-image-1")),
+                FormDataEntry::new("image", FormDataValue::bytes([1_u8])),
+                FormDataEntry::new("image", FormDataValue::bytes([2_u8])),
+            ],
+        };
+        let request = prepare_post_form_data_to_api_request(
+            "https://api.example.com/images",
+            Some(vec![
+                ("Authorization", Some("Bearer test")),
+                ("X-Ignore", None),
+            ]),
+            form_data.clone(),
+            &RuntimeEnvironment::navigator_user_agent("Bun/1.2 TEST"),
+        );
+
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://api.example.com/images");
+        assert_eq!(
+            request.request_body_values,
+            json!({
+                "model": "gpt-image-1",
+                "image": [2]
+            })
+        );
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_form_data),
+            Some(&form_data)
+        );
+        assert_eq!(
+            request.headers,
+            BTreeMap::from([
+                ("authorization".to_string(), "Bearer test".to_string()),
+                (
+                    "user-agent".to_string(),
+                    format!(
+                        "ai-sdk/provider-utils/{} runtime/bun/1.2 test",
                         crate::VERSION
                     ),
                 ),
