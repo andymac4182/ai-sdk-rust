@@ -14,11 +14,13 @@ use crate::headers::Headers;
 use crate::json::{JsonObject, JsonSchema, JsonValue};
 use crate::language_model::{
     LanguageModelFilePart, LanguageModelFunctionTool, LanguageModelMessage, LanguageModelPrompt,
-    LanguageModelSystemMessage, LanguageModelTool, LanguageModelToolInputExample,
+    LanguageModelReasoningEffort, LanguageModelSystemMessage, LanguageModelTool,
+    LanguageModelToolInputExample,
 };
 use crate::provider::{
     LoadApiKeyError, LoadSettingError, ProviderOptions, UnsupportedFunctionalityError,
 };
+use crate::warning::Warning;
 
 const DEFAULT_JSON_SCHEMA_INSTRUCTION_PREFIX: &str = "JSON schema:";
 const DEFAULT_JSON_SCHEMA_INSTRUCTION_SUFFIX: &str =
@@ -691,6 +693,146 @@ fn is_object_json_schema(json_schema: &JsonSchema) -> bool {
     }
 }
 
+/// Top-level reasoning effort levels that can be mapped to provider-specific settings.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReasoningLevel {
+    /// Use minimal reasoning effort.
+    Minimal,
+    /// Use low reasoning effort.
+    Low,
+    /// Use medium reasoning effort.
+    Medium,
+    /// Use high reasoning effort.
+    High,
+    /// Use extra-high reasoning effort.
+    Xhigh,
+}
+
+impl ReasoningLevel {
+    /// Returns the upstream provider-v4 string for this reasoning level.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+        }
+    }
+}
+
+impl TryFrom<LanguageModelReasoningEffort> for ReasoningLevel {
+    type Error = LanguageModelReasoningEffort;
+
+    fn try_from(value: LanguageModelReasoningEffort) -> Result<Self, Self::Error> {
+        match value {
+            LanguageModelReasoningEffort::Minimal => Ok(Self::Minimal),
+            LanguageModelReasoningEffort::Low => Ok(Self::Low),
+            LanguageModelReasoningEffort::Medium => Ok(Self::Medium),
+            LanguageModelReasoningEffort::High => Ok(Self::High),
+            LanguageModelReasoningEffort::Xhigh => Ok(Self::Xhigh),
+            value => Err(value),
+        }
+    }
+}
+
+/// Returns whether a reasoning request should override the provider default.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils` `isCustomReasoning`: missing
+/// reasoning and `provider-default` are not custom, while `none` and all effort
+/// levels are custom reasoning settings.
+pub fn is_custom_reasoning(reasoning: Option<&LanguageModelReasoningEffort>) -> bool {
+    !matches!(
+        reasoning,
+        None | Some(LanguageModelReasoningEffort::ProviderDefault)
+    )
+}
+
+/// Maps a top-level reasoning effort level to a provider-specific effort value.
+///
+/// This mirrors upstream `mapReasoningToProviderEffort`: unsupported levels add
+/// an unsupported warning, and renamed levels add a compatibility warning.
+pub fn map_reasoning_to_provider_effort<T>(
+    reasoning: ReasoningLevel,
+    effort_map: &BTreeMap<ReasoningLevel, T>,
+    warnings: &mut Vec<Warning>,
+) -> Option<T>
+where
+    T: AsRef<str> + Clone,
+{
+    let Some(mapped) = effort_map.get(&reasoning) else {
+        warnings.push(Warning::Unsupported {
+            feature: "reasoning".to_string(),
+            details: Some(format!(
+                "reasoning \"{}\" is not supported by this model.",
+                reasoning.as_str()
+            )),
+        });
+        return None;
+    };
+
+    if mapped.as_ref() != reasoning.as_str() {
+        warnings.push(Warning::Compatibility {
+            feature: "reasoning".to_string(),
+            details: Some(format!(
+                "reasoning \"{}\" is not directly supported by this model. mapped to effort \"{}\".",
+                reasoning.as_str(),
+                mapped.as_ref()
+            )),
+        });
+    }
+
+    Some(mapped.clone())
+}
+
+/// Maps a top-level reasoning effort level to a provider-specific token budget.
+///
+/// The budget is the rounded product of max output tokens and the configured
+/// percentage, clamped between the minimum and maximum reasoning budgets.
+pub fn map_reasoning_to_provider_budget(
+    reasoning: ReasoningLevel,
+    max_output_tokens: u64,
+    max_reasoning_budget: u64,
+    min_reasoning_budget: Option<u64>,
+    budget_percentages: Option<&BTreeMap<ReasoningLevel, f64>>,
+    warnings: &mut Vec<Warning>,
+) -> Option<u64> {
+    let percentage = match budget_percentages {
+        Some(percentages) => percentages.get(&reasoning).copied(),
+        None => Some(default_reasoning_budget_percentage(reasoning)),
+    };
+
+    let Some(percentage) = percentage else {
+        warnings.push(Warning::Unsupported {
+            feature: "reasoning".to_string(),
+            details: Some(format!(
+                "reasoning \"{}\" is not supported by this model.",
+                reasoning.as_str()
+            )),
+        });
+        return None;
+    };
+
+    let requested_budget = ((max_output_tokens as f64) * percentage).round() as u64;
+
+    Some(
+        requested_budget
+            .max(min_reasoning_budget.unwrap_or(1024))
+            .min(max_reasoning_budget),
+    )
+}
+
+fn default_reasoning_budget_percentage(reasoning: ReasoningLevel) -> f64 {
+    match reasoning {
+        ReasoningLevel::Minimal => 0.02,
+        ReasoningLevel::Low => 0.1,
+        ReasoningLevel::Medium => 0.3,
+        ReasoningLevel::High => 0.6,
+        ReasoningLevel::Xhigh => 0.9,
+    }
+}
+
 /// A value that can be supplied as either one item or an array of items.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(untagged)]
@@ -1260,21 +1402,23 @@ mod tests {
 
     use crate::language_model::{
         LanguageModelFilePart, LanguageModelFunctionTool, LanguageModelMessage,
-        LanguageModelProviderTool, LanguageModelSystemMessage, LanguageModelTextPart,
-        LanguageModelTool, LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelProviderTool, LanguageModelReasoningEffort, LanguageModelSystemMessage,
+        LanguageModelTextPart, LanguageModelTool, LanguageModelUserContentPart,
+        LanguageModelUserMessage,
     };
-    use crate::{FileData, FileDataContent, JsonObject, JsonValue, ProviderReference};
+    use crate::{FileData, FileDataContent, JsonObject, JsonValue, ProviderReference, Warning};
     use serde_json::json;
     use url::Url;
 
     use super::{
         Arrayable, InjectJsonInstructionIntoMessagesOptions, LoadApiKeyOptions,
-        LoadOptionalSettingOptions, LoadSettingOptions, Tool, ToolExecutionError,
+        LoadOptionalSettingOptions, LoadSettingOptions, ReasoningLevel, Tool, ToolExecutionError,
         ToolExecutionOptions, add_additional_properties_to_json_schema, as_array, combine_headers,
         create_tool_name_mapping, detect_media_type, filter_nullable, get_top_level_media_type,
-        inject_json_instruction, inject_json_instruction_into_messages, is_full_media_type,
-        is_non_nullable, is_provider_reference, load_api_key, load_api_key_with_env,
-        load_optional_setting_with_env, load_setting, load_setting_with_env,
+        inject_json_instruction, inject_json_instruction_into_messages, is_custom_reasoning,
+        is_full_media_type, is_non_nullable, is_provider_reference, load_api_key,
+        load_api_key_with_env, load_optional_setting_with_env, load_setting, load_setting_with_env,
+        map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
         media_type_to_extension, normalize_headers, prepare_tools, remove_undefined_entries,
         resolve_full_media_type, resolve_provider_reference, strip_file_extension,
         with_user_agent_suffix, without_trailing_slash,
@@ -1447,6 +1591,234 @@ mod tests {
                     object_schema_json()
                 ))
             )]
+        );
+    }
+
+    #[test]
+    fn reasoning_level_serializes_upstream_strings() {
+        assert_eq!(
+            serde_json::to_value(ReasoningLevel::Xhigh).expect("reasoning level serializes"),
+            json!("xhigh")
+        );
+        assert_eq!(
+            serde_json::from_value::<ReasoningLevel>(json!("minimal"))
+                .expect("reasoning level deserializes"),
+            ReasoningLevel::Minimal
+        );
+    }
+
+    #[test]
+    fn reasoning_level_converts_from_custom_reasoning_efforts() {
+        assert_eq!(
+            ReasoningLevel::try_from(LanguageModelReasoningEffort::High),
+            Ok(ReasoningLevel::High)
+        );
+        assert_eq!(
+            ReasoningLevel::try_from(LanguageModelReasoningEffort::ProviderDefault),
+            Err(LanguageModelReasoningEffort::ProviderDefault)
+        );
+        assert_eq!(
+            ReasoningLevel::try_from(LanguageModelReasoningEffort::None),
+            Err(LanguageModelReasoningEffort::None)
+        );
+    }
+
+    #[test]
+    fn is_custom_reasoning_matches_upstream_default_handling() {
+        assert!(!is_custom_reasoning(None));
+        assert!(!is_custom_reasoning(Some(
+            &LanguageModelReasoningEffort::ProviderDefault
+        )));
+        assert!(is_custom_reasoning(Some(
+            &LanguageModelReasoningEffort::None
+        )));
+        assert!(is_custom_reasoning(Some(
+            &LanguageModelReasoningEffort::Minimal
+        )));
+        assert!(is_custom_reasoning(Some(
+            &LanguageModelReasoningEffort::Low
+        )));
+        assert!(is_custom_reasoning(Some(
+            &LanguageModelReasoningEffort::Medium
+        )));
+        assert!(is_custom_reasoning(Some(
+            &LanguageModelReasoningEffort::High
+        )));
+        assert!(is_custom_reasoning(Some(
+            &LanguageModelReasoningEffort::Xhigh
+        )));
+    }
+
+    #[test]
+    fn map_reasoning_to_provider_effort_returns_direct_match_without_warning() {
+        let effort_map = BTreeMap::from([
+            (ReasoningLevel::Minimal, "low".to_string()),
+            (ReasoningLevel::Low, "low".to_string()),
+            (ReasoningLevel::Medium, "medium".to_string()),
+            (ReasoningLevel::High, "high".to_string()),
+            (ReasoningLevel::Xhigh, "max".to_string()),
+        ]);
+        let mut warnings = Vec::new();
+
+        assert_eq!(
+            map_reasoning_to_provider_effort(ReasoningLevel::Medium, &effort_map, &mut warnings),
+            Some("medium".to_string())
+        );
+        assert_eq!(warnings, Vec::new());
+    }
+
+    #[test]
+    fn map_reasoning_to_provider_effort_warns_for_renamed_match() {
+        let effort_map = BTreeMap::from([
+            (ReasoningLevel::Minimal, "low".to_string()),
+            (ReasoningLevel::Xhigh, "max".to_string()),
+        ]);
+        let mut warnings = Vec::new();
+
+        assert_eq!(
+            map_reasoning_to_provider_effort(ReasoningLevel::Minimal, &effort_map, &mut warnings),
+            Some("low".to_string())
+        );
+        assert_eq!(
+            warnings,
+            vec![Warning::Compatibility {
+                feature: "reasoning".to_string(),
+                details: Some(
+                    "reasoning \"minimal\" is not directly supported by this model. mapped to effort \"low\"."
+                        .to_string()
+                ),
+            }]
+        );
+
+        warnings.clear();
+        assert_eq!(
+            map_reasoning_to_provider_effort(ReasoningLevel::Xhigh, &effort_map, &mut warnings),
+            Some("max".to_string())
+        );
+        assert_eq!(
+            warnings,
+            vec![Warning::Compatibility {
+                feature: "reasoning".to_string(),
+                details: Some(
+                    "reasoning \"xhigh\" is not directly supported by this model. mapped to effort \"max\"."
+                        .to_string()
+                ),
+            }]
+        );
+    }
+
+    #[test]
+    fn map_reasoning_to_provider_effort_warns_for_missing_level() {
+        let effort_map = BTreeMap::from([(ReasoningLevel::Medium, "medium".to_string())]);
+        let mut warnings = Vec::new();
+
+        assert_eq!(
+            map_reasoning_to_provider_effort(ReasoningLevel::High, &effort_map, &mut warnings),
+            None
+        );
+        assert_eq!(
+            warnings,
+            vec![Warning::Unsupported {
+                feature: "reasoning".to_string(),
+                details: Some("reasoning \"high\" is not supported by this model.".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn map_reasoning_to_provider_budget_uses_default_percentages_and_clamps() {
+        let mut warnings = Vec::new();
+
+        assert_eq!(
+            map_reasoning_to_provider_budget(
+                ReasoningLevel::Medium,
+                64_000,
+                64_000,
+                None,
+                None,
+                &mut warnings,
+            ),
+            Some(19_200)
+        );
+        assert_eq!(warnings, Vec::new());
+
+        assert_eq!(
+            map_reasoning_to_provider_budget(
+                ReasoningLevel::Xhigh,
+                64_000,
+                50_000,
+                None,
+                None,
+                &mut warnings,
+            ),
+            Some(50_000)
+        );
+        assert_eq!(
+            map_reasoning_to_provider_budget(
+                ReasoningLevel::Minimal,
+                10_000,
+                10_000,
+                None,
+                None,
+                &mut warnings,
+            ),
+            Some(1024)
+        );
+        assert_eq!(
+            map_reasoning_to_provider_budget(
+                ReasoningLevel::Minimal,
+                10_000,
+                10_000,
+                Some(512),
+                None,
+                &mut warnings,
+            ),
+            Some(512)
+        );
+        assert_eq!(warnings, Vec::new());
+    }
+
+    #[test]
+    fn map_reasoning_to_provider_budget_uses_custom_percentages() {
+        let budget_percentages = BTreeMap::from([(ReasoningLevel::Medium, 0.5)]);
+        let mut warnings = Vec::new();
+
+        assert_eq!(
+            map_reasoning_to_provider_budget(
+                ReasoningLevel::Medium,
+                10_000,
+                10_000,
+                None,
+                Some(&budget_percentages),
+                &mut warnings,
+            ),
+            Some(5000)
+        );
+        assert_eq!(warnings, Vec::new());
+    }
+
+    #[test]
+    fn map_reasoning_to_provider_budget_warns_for_missing_custom_percentage() {
+        let budget_percentages = BTreeMap::from([(ReasoningLevel::Medium, 0.5)]);
+        let mut warnings = Vec::new();
+
+        assert_eq!(
+            map_reasoning_to_provider_budget(
+                ReasoningLevel::High,
+                64_000,
+                64_000,
+                None,
+                Some(&budget_percentages),
+                &mut warnings,
+            ),
+            None
+        );
+        assert_eq!(
+            warnings,
+            vec![Warning::Unsupported {
+                feature: "reasoning".to_string(),
+                details: Some("reasoning \"high\" is not supported by this model.".to_string()),
+            }]
         );
     }
 

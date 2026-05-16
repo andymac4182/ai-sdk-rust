@@ -94,15 +94,16 @@ pub use provider::{
 };
 pub use provider_utils::{
     Arrayable, InjectJsonInstructionIntoMessagesOptions, LoadApiKeyOptions,
-    LoadOptionalSettingOptions, LoadSettingOptions, Tool, ToolExecuteFunction, ToolExecuteFuture,
-    ToolExecutionError, ToolExecutionOptions, ToolNameMapping,
+    LoadOptionalSettingOptions, LoadSettingOptions, ReasoningLevel, Tool, ToolExecuteFunction,
+    ToolExecuteFuture, ToolExecutionError, ToolExecutionOptions, ToolNameMapping,
     add_additional_properties_to_json_schema, as_array, combine_headers, create_tool_name_mapping,
     detect_media_type, filter_nullable, get_top_level_media_type,
-    inject_json_instruction_into_messages, is_full_media_type, is_non_nullable,
-    is_provider_reference, load_api_key, load_optional_setting, load_setting,
-    media_type_to_extension, normalize_headers, prepare_tools, remove_undefined_entries,
-    resolve_full_media_type, resolve_provider_reference, strip_file_extension,
-    with_user_agent_suffix, without_trailing_slash,
+    inject_json_instruction_into_messages, is_custom_reasoning, is_full_media_type,
+    is_non_nullable, is_provider_reference, load_api_key, load_optional_setting, load_setting,
+    map_reasoning_to_provider_budget, map_reasoning_to_provider_effort, media_type_to_extension,
+    normalize_headers, prepare_tools, remove_undefined_entries, resolve_full_media_type,
+    resolve_provider_reference, strip_file_extension, with_user_agent_suffix,
+    without_trailing_slash,
 };
 pub use reranking_model::{
     RerankingModel, RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
