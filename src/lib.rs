@@ -13,6 +13,7 @@ pub mod json;
 pub mod language_model;
 pub mod provider;
 pub mod reranking_model;
+pub mod skills;
 pub mod speech_model;
 pub mod transcription_model;
 pub mod video_model;
@@ -59,6 +60,9 @@ pub use provider::{ProviderMetadata, ProviderOptions};
 pub use reranking_model::{
     RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
     RerankingModelResponse, RerankingModelResult,
+};
+pub use skills::{
+    SkillsFile, SkillsFileData, SkillsUploadSkillCallOptions, SkillsUploadSkillResult,
 };
 pub use speech_model::{
     SpeechModelAudio, SpeechModelCallOptions, SpeechModelRequest, SpeechModelResponse,
