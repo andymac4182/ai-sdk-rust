@@ -77,6 +77,11 @@ pub fn is_step_count(step_count: usize) -> StopCondition {
     StopCondition::StepCount(step_count)
 }
 
+/// Deprecated upstream alias for [`is_step_count`].
+pub fn step_count_is(step_count: usize) -> StopCondition {
+    is_step_count(step_count)
+}
+
 /// Creates a stop condition that never stops the loop by itself.
 pub fn is_loop_finished() -> StopCondition {
     StopCondition::LoopFinished
@@ -122,6 +127,14 @@ pub fn filter_active_tools(
             })
             .collect(),
     )
+}
+
+/// Experimental upstream alias for [`filter_active_tools`].
+pub fn experimental_filter_active_tools(
+    tools: Option<Vec<Tool>>,
+    active_tools: Option<&[String]>,
+) -> Option<Vec<Tool>> {
+    filter_active_tools(tools, active_tools)
 }
 
 /// Error returned when a model tries to call a tool that is not available.
@@ -2700,8 +2713,9 @@ mod tests {
         InvalidToolInputError, MissingToolResultsError, NoObjectGeneratedError,
         NoOutputGeneratedError, NoSuchToolError, StopCondition, ToolCallNotFoundForApprovalError,
         ToolCallRepairError, ToolCallRepairOriginalError, UiMessageStreamError,
-        UnsupportedModelVersionError, filter_active_tools, generate_text, has_tool_call,
-        is_loop_finished, is_step_count, is_stop_condition_met,
+        UnsupportedModelVersionError, experimental_filter_active_tools, filter_active_tools,
+        generate_text, has_tool_call, is_loop_finished, is_step_count, is_stop_condition_met,
+        step_count_is,
     };
     use crate::file_data::FileDataContent;
     use crate::language_model::{
@@ -2819,6 +2833,15 @@ mod tests {
 
         assert!(has_tool_call(["search", "weather"]).is_met(std::slice::from_ref(&weather)));
         assert!(!has_tool_call(["search", "finalAnswer"]).is_met(&[empty]));
+    }
+
+    #[test]
+    fn step_count_is_alias_matches_is_step_count() {
+        let steps = [stop_condition_step(&[]), stop_condition_step(&["weather"])];
+
+        assert_eq!(step_count_is(2), is_step_count(2));
+        assert!(step_count_is(2).is_met(&steps));
+        assert!(!step_count_is(1).is_met(&steps));
     }
 
     #[test]
@@ -4451,6 +4474,37 @@ mod tests {
                 .expect("empty active tools produce an empty tool set")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn experimental_filter_active_tools_alias_matches_filter_active_tools() {
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let tools = vec![
+            Tool::new("weather", input_schema.clone()),
+            dynamic_tool("forecast", input_schema),
+        ];
+        let active_tools = vec!["weather".to_string()];
+
+        let direct = filter_active_tools(Some(tools.clone()), Some(&active_tools))
+            .expect("direct filter keeps tools");
+        let aliased = experimental_filter_active_tools(Some(tools), Some(&active_tools))
+            .expect("alias filter keeps tools");
+
+        assert_eq!(
+            aliased
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            direct
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(aliased.len(), 1);
+        assert_eq!(aliased[0].name, "weather");
     }
 
     #[test]
