@@ -45,6 +45,10 @@ const BUN_NETWORK_ERROR_CODES: [&str; 7] = [
 /// Default maximum response download size used by upstream provider-utils: 2 GiB.
 pub const DEFAULT_MAX_DOWNLOAD_SIZE: usize = 2 * 1024 * 1024 * 1024;
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Error returned when inline file data cannot be converted to raw bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InlineFileDataBytesError {
@@ -158,6 +162,83 @@ impl fmt::Display for DownloadError {
 }
 
 impl std::error::Error for DownloadError {}
+
+/// Runtime indicators used to build the provider-utils user-agent suffix.
+///
+/// Upstream `getRuntimeEnvironmentUserAgent` probes JavaScript globals in a
+/// fixed order. Rust callers can supply equivalent indicators explicitly while
+/// the default unknown environment maps to the upstream fallback.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeEnvironment {
+    /// Whether a browser-like `window` global is present.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_window: bool,
+
+    /// Browser, worker, Deno, Bun, or Node >= 21.1 navigator user agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub navigator_user_agent: Option<String>,
+
+    /// Node.js `process.version` value for Node runtimes without navigator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_version: Option<String>,
+
+    /// Whether Vercel Edge Runtime is present.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_edge_runtime: bool,
+}
+
+impl RuntimeEnvironment {
+    /// Creates an unknown runtime environment.
+    pub const fn unknown() -> Self {
+        Self {
+            has_window: false,
+            navigator_user_agent: None,
+            node_version: None,
+            has_edge_runtime: false,
+        }
+    }
+
+    /// Creates a browser runtime environment.
+    pub const fn browser() -> Self {
+        Self {
+            has_window: true,
+            navigator_user_agent: None,
+            node_version: None,
+            has_edge_runtime: false,
+        }
+    }
+
+    /// Creates a navigator-backed runtime environment.
+    pub fn navigator_user_agent(user_agent: impl Into<String>) -> Self {
+        Self {
+            has_window: false,
+            navigator_user_agent: Some(user_agent.into()),
+            node_version: None,
+            has_edge_runtime: false,
+        }
+    }
+
+    /// Creates a Node.js runtime environment.
+    pub fn node_js(version: impl Into<String>) -> Self {
+        Self {
+            has_window: false,
+            navigator_user_agent: None,
+            node_version: Some(version.into()),
+            has_edge_runtime: false,
+        }
+    }
+
+    /// Creates a Vercel Edge runtime environment.
+    pub const fn vercel_edge() -> Self {
+        Self {
+            has_window: false,
+            navigator_user_agent: None,
+            node_version: None,
+            has_edge_runtime: true,
+        }
+    }
+}
 
 /// Runtime-independent fetch error information for request error normalization.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2727,6 +2808,40 @@ where
     headers
 }
 
+/// Returns an upstream-style runtime user-agent suffix for provider utilities.
+///
+/// This mirrors upstream `getRuntimeEnvironmentUserAgent`: browser indicators
+/// win first, navigator user agents are lowercased, Node.js versions are
+/// included as supplied, Vercel Edge is detected next, and unknown runtimes use
+/// the upstream fallback string.
+pub fn get_runtime_environment_user_agent(environment: &RuntimeEnvironment) -> String {
+    if environment.has_window {
+        return "runtime/browser".to_string();
+    }
+
+    if let Some(user_agent) = environment
+        .navigator_user_agent
+        .as_deref()
+        .filter(|user_agent| !user_agent.is_empty())
+    {
+        return format!("runtime/{}", user_agent.to_ascii_lowercase());
+    }
+
+    if let Some(version) = environment
+        .node_version
+        .as_deref()
+        .filter(|version| !version.is_empty())
+    {
+        return format!("runtime/node.js/{version}");
+    }
+
+    if environment.has_edge_runtime {
+        return "runtime/vercel-edge".to_string();
+    }
+
+    "runtime/unknown".to_string()
+}
+
 /// Returns whether an error name represents an aborted request.
 ///
 /// This mirrors upstream `@ai-sdk/provider-utils` `isAbortError`: JavaScript
@@ -3038,24 +3153,25 @@ mod tests {
         InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
         JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, LoadApiKeyOptions,
         LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError, ParseJsonResult,
-        ReasoningLevel, ResponseHandlerResult, StatusCodeErrorResponseHandlerOptions, Tool,
-        ToolExecutionError, ToolExecutionOptions, ValidateTypesResult,
-        add_additional_properties_to_json_schema, as_array, combine_headers,
+        ReasoningLevel, ResponseHandlerResult, RuntimeEnvironment,
+        StatusCodeErrorResponseHandlerOptions, Tool, ToolExecutionError, ToolExecutionOptions,
+        ValidateTypesResult, add_additional_properties_to_json_schema, as_array, combine_headers,
         convert_base64_to_bytes, convert_bytes_to_base64, convert_image_model_file_to_data_uri,
         convert_inline_file_data_to_bytes, convert_to_base64, create_binary_response_handler,
         create_event_source_response_handler, create_json_error_response_handler,
         create_json_response_handler, create_status_code_error_response_handler,
         create_tool_name_mapping, detect_media_type, extract_response_headers, filter_nullable,
-        get_top_level_media_type, handle_fetch_error, inject_json_instruction,
-        inject_json_instruction_into_messages, is_abort_error, is_custom_reasoning,
-        is_full_media_type, is_non_nullable, is_parsable_json, is_provider_reference,
-        is_url_supported, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
-        load_setting, load_setting_with_env, map_reasoning_to_provider_budget,
-        map_reasoning_to_provider_effort, media_type_to_extension, normalize_headers, parse_json,
-        parse_json_event_stream, parse_provider_options, prepare_tools,
-        read_response_with_size_limit, remove_undefined_entries, resolve_full_media_type,
-        resolve_provider_reference, safe_parse_json, safe_validate_types, strip_file_extension,
-        validate_download_url, validate_types, with_user_agent_suffix, without_trailing_slash,
+        get_runtime_environment_user_agent, get_top_level_media_type, handle_fetch_error,
+        inject_json_instruction, inject_json_instruction_into_messages, is_abort_error,
+        is_custom_reasoning, is_full_media_type, is_non_nullable, is_parsable_json,
+        is_provider_reference, is_url_supported, load_api_key, load_api_key_with_env,
+        load_optional_setting_with_env, load_setting, load_setting_with_env,
+        map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
+        media_type_to_extension, normalize_headers, parse_json, parse_json_event_stream,
+        parse_provider_options, prepare_tools, read_response_with_size_limit,
+        remove_undefined_entries, resolve_full_media_type, resolve_provider_reference,
+        safe_parse_json, safe_validate_types, strip_file_extension, validate_download_url,
+        validate_types, with_user_agent_suffix, without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -5574,6 +5690,112 @@ mod tests {
                 Vec::new(),
             ),
             BTreeMap::from([("user-agent".to_string(), String::new())])
+        );
+    }
+
+    #[test]
+    fn runtime_environment_serializes_camel_case_shape() {
+        let environment = RuntimeEnvironment {
+            has_window: true,
+            navigator_user_agent: Some("Node/Test".to_string()),
+            node_version: Some("v22.0.0".to_string()),
+            has_edge_runtime: true,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&environment).expect("runtime environment serializes"),
+            json!({
+                "hasWindow": true,
+                "navigatorUserAgent": "Node/Test",
+                "nodeVersion": "v22.0.0",
+                "hasEdgeRuntime": true
+            })
+        );
+
+        let environment: RuntimeEnvironment = serde_json::from_value(json!({
+            "navigatorUserAgent": "Deno/2.0",
+        }))
+        .expect("runtime environment deserializes");
+
+        assert_eq!(
+            environment,
+            RuntimeEnvironment {
+                has_window: false,
+                navigator_user_agent: Some("Deno/2.0".to_string()),
+                node_version: None,
+                has_edge_runtime: false,
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_environment_omits_unknown_indicators() {
+        assert_eq!(
+            serde_json::to_value(RuntimeEnvironment::unknown())
+                .expect("unknown runtime environment serializes"),
+            json!({})
+        );
+    }
+
+    #[test]
+    fn get_runtime_environment_user_agent_matches_upstream_branches() {
+        assert_eq!(
+            get_runtime_environment_user_agent(&RuntimeEnvironment::browser()),
+            "runtime/browser"
+        );
+        assert_eq!(
+            get_runtime_environment_user_agent(&RuntimeEnvironment::navigator_user_agent(
+                "Deno/2.0 TEST"
+            )),
+            "runtime/deno/2.0 test"
+        );
+        assert_eq!(
+            get_runtime_environment_user_agent(&RuntimeEnvironment::node_js("v22.0.0")),
+            "runtime/node.js/v22.0.0"
+        );
+        assert_eq!(
+            get_runtime_environment_user_agent(&RuntimeEnvironment::vercel_edge()),
+            "runtime/vercel-edge"
+        );
+        assert_eq!(
+            get_runtime_environment_user_agent(&RuntimeEnvironment::unknown()),
+            "runtime/unknown"
+        );
+    }
+
+    #[test]
+    fn get_runtime_environment_user_agent_uses_upstream_probe_precedence() {
+        let browser_environment = RuntimeEnvironment {
+            has_window: true,
+            navigator_user_agent: Some("Bun/1.2".to_string()),
+            node_version: Some("v22.0.0".to_string()),
+            has_edge_runtime: true,
+        };
+        assert_eq!(
+            get_runtime_environment_user_agent(&browser_environment),
+            "runtime/browser"
+        );
+
+        let navigator_environment = RuntimeEnvironment {
+            has_window: false,
+            navigator_user_agent: Some("Bun/1.2".to_string()),
+            node_version: Some("v22.0.0".to_string()),
+            has_edge_runtime: true,
+        };
+        assert_eq!(
+            get_runtime_environment_user_agent(&navigator_environment),
+            "runtime/bun/1.2"
+        );
+
+        let node_environment = RuntimeEnvironment {
+            has_window: false,
+            navigator_user_agent: Some(String::new()),
+            node_version: Some("v20.11.1".to_string()),
+            has_edge_runtime: true,
+        };
+        assert_eq!(
+            get_runtime_environment_user_agent(&node_environment),
+            "runtime/node.js/v20.11.1"
         );
     }
 
