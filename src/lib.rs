@@ -12,6 +12,7 @@ pub mod json;
 pub mod language_model;
 pub mod provider;
 pub mod reranking_model;
+pub mod speech_model;
 pub mod transcription_model;
 pub mod warning;
 
@@ -55,6 +56,10 @@ pub use provider::{ProviderMetadata, ProviderOptions};
 pub use reranking_model::{
     RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
     RerankingModelResponse, RerankingModelResult,
+};
+pub use speech_model::{
+    SpeechModelAudio, SpeechModelCallOptions, SpeechModelRequest, SpeechModelResponse,
+    SpeechModelResult,
 };
 pub use transcription_model::{
     TranscriptionModelCallOptions, TranscriptionModelRequest, TranscriptionModelResponse,
