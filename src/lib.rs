@@ -43,8 +43,8 @@ pub use file_data::{
 pub use files::{Files, FilesUploadFileCallOptions, FilesUploadFileData, FilesUploadFileResult};
 pub use generate_text::{
     GenerateTextInclude, GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning,
-    GenerateTextResult, GenerateTextStep, GenerateTextTool, GenerateTextToolCall,
-    GenerateTextToolResult, InvalidStreamPartError, InvalidToolApprovalError,
+    GenerateTextResult, GenerateTextStep, GenerateTextStepPerformance, GenerateTextTool,
+    GenerateTextToolCall, GenerateTextToolResult, InvalidStreamPartError, InvalidToolApprovalError,
     InvalidToolInputError, MissingToolResultsError, NoObjectGeneratedError, NoOutputGeneratedError,
     NoSuchToolError, StopCondition, ToolCallNotFoundForApprovalError, ToolCallRepairError,
     ToolCallRepairOriginalError, UiMessageStreamError, UnsupportedModelVersionError,

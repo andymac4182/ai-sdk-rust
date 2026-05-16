@@ -1,4 +1,6 @@
+use std::collections::BTreeMap;
 use std::fmt;
+use std::time::{Duration, Instant};
 
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
@@ -1381,8 +1383,80 @@ impl GenerateTextModelInfo {
     }
 }
 
+/// Performance metrics for a single generate-text step.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateTextStepPerformance {
+    /// Effective number of output tokens per second over the full model response.
+    pub effective_output_tokens_per_second: f64,
+
+    /// Output tokens per second after the first output token was received.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens_per_second: Option<f64>,
+
+    /// Input tokens per second before the first output token was received.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens_per_second: Option<f64>,
+
+    /// Effective input and output tokens per second over the full model response.
+    pub effective_total_tokens_per_second: f64,
+
+    /// Total time spent on the step in milliseconds.
+    pub step_time_ms: u64,
+
+    /// Time spent waiting for the language model response in milliseconds.
+    pub response_time_ms: u64,
+
+    /// Time spent executing each client-side tool call, keyed by tool call id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_execution_ms: BTreeMap<String, u64>,
+
+    /// Time until the first text, reasoning, or tool input delta was received.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_to_first_output_token_ms: Option<u64>,
+}
+
+impl Default for GenerateTextStepPerformance {
+    fn default() -> Self {
+        Self {
+            effective_output_tokens_per_second: 0.0,
+            output_tokens_per_second: None,
+            input_tokens_per_second: None,
+            effective_total_tokens_per_second: 0.0,
+            step_time_ms: 0,
+            response_time_ms: 0,
+            tool_execution_ms: BTreeMap::new(),
+            time_to_first_output_token_ms: None,
+        }
+    }
+}
+
+impl GenerateTextStepPerformance {
+    fn from_usage(
+        usage: &LanguageModelUsage,
+        response_time_ms: u64,
+        step_time_ms: u64,
+        tool_execution_ms: BTreeMap<String, u64>,
+    ) -> Self {
+        Self {
+            effective_output_tokens_per_second: calculate_tokens_per_second(
+                usage.output_tokens.total,
+                response_time_ms,
+            ),
+            effective_total_tokens_per_second: calculate_tokens_per_second(
+                sum_token_counts(usage.input_tokens.total, usage.output_tokens.total),
+                response_time_ms,
+            ),
+            step_time_ms,
+            response_time_ms,
+            tool_execution_ms,
+            ..Self::default()
+        }
+    }
+}
+
 /// Result of a single non-streaming generate-text step.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateTextStep {
     /// Unique identifier for the generation call this step belongs to.
@@ -1454,6 +1528,10 @@ pub struct GenerateTextStep {
     /// Usage reported for this step.
     pub usage: LanguageModelUsage,
 
+    /// Performance metrics for this step.
+    #[serde(default)]
+    pub performance: GenerateTextStepPerformance,
+
     /// Warnings reported by the provider for this step.
     pub warnings: Vec<Warning>,
 
@@ -1524,6 +1602,7 @@ impl GenerateTextStep {
             finish_reason: unified,
             raw_finish_reason,
             usage,
+            performance: GenerateTextStepPerformance::default(),
             warnings,
             request,
             response,
@@ -1533,7 +1612,7 @@ impl GenerateTextStep {
 }
 
 /// Result of a high-level non-streaming text generation call.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateTextResult {
     /// Content generated across all steps.
@@ -1750,7 +1829,9 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
 
     for step_number in 0..max_steps {
         let step_prompt = call_options.prompt.clone();
+        let step_started_at = Instant::now();
         let result = model.do_generate(call_options.clone()).await;
+        let response_time_ms = duration_ms(step_started_at.elapsed());
         let mut step = GenerateTextStep::from_language_model_result(
             call_id.clone(),
             step_number,
@@ -1763,13 +1844,20 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         mark_tool_call_metadata(&mut step.tool_calls, &tools);
         mark_tool_result_metadata(&mut step.tool_results, &step.tool_calls, &tools);
         refresh_tool_call_views(&mut step);
-        let tool_results = execute_tool_calls(&tools, &step.tool_calls, &step_prompt).await;
+        let (tool_results, tool_execution_ms) =
+            execute_tool_calls(&tools, &step.tool_calls, &step_prompt).await;
         let should_continue = should_continue_after_tool_results(&step, &tool_results);
         step.tool_results.extend(tool_results);
         mark_tool_result_metadata(&mut step.tool_results, &step.tool_calls, &tools);
         refresh_tool_result_views(&mut step);
         step.response_messages = response_messages_for_step(&step).unwrap_or_default();
         apply_generate_text_include(&mut step, include, &step_prompt);
+        step.performance = GenerateTextStepPerformance::from_usage(
+            &step.usage,
+            response_time_ms,
+            duration_ms(step_started_at.elapsed()),
+            tool_execution_ms,
+        );
 
         let response_messages = step.response_messages.clone();
         steps.push(step);
@@ -1969,8 +2057,9 @@ async fn execute_tool_calls(
     tools: &[Tool],
     tool_calls: &[GenerateTextToolCall],
     messages: &LanguageModelPrompt,
-) -> Vec<GenerateTextToolResult> {
+) -> (Vec<GenerateTextToolResult>, BTreeMap<String, u64>) {
     let mut tool_results = Vec::new();
+    let mut tool_execution_ms = BTreeMap::new();
 
     for tool_call in tool_calls {
         if tool_call.provider_executed == Some(true) {
@@ -1999,6 +2088,7 @@ async fn execute_tool_calls(
             continue;
         };
 
+        let tool_started_at = Instant::now();
         match execute.await {
             Ok(output) => tool_results.push(GenerateTextToolResult::success(tool_call, output)),
             Err(error) => {
@@ -2008,9 +2098,13 @@ async fn execute_tool_calls(
                 ));
             }
         }
+        tool_execution_ms.insert(
+            tool_call.tool_call_id.clone(),
+            duration_ms(tool_started_at.elapsed()),
+        );
     }
 
-    tool_results
+    (tool_results, tool_execution_ms)
 }
 
 fn should_continue_after_tool_results(
@@ -2465,6 +2559,31 @@ fn unsupported_model_version_default_message(
     )
 }
 
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+fn calculate_tokens_per_second(tokens: Option<u64>, duration_ms: u64) -> f64 {
+    if duration_ms == 0 {
+        return 0.0;
+    }
+
+    let token_rate = (1000.0 * tokens.unwrap_or(0) as f64) / duration_ms as f64;
+
+    if token_rate.is_finite() {
+        token_rate
+    } else {
+        0.0
+    }
+}
+
+fn sum_token_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (None, None) => None,
+        (left, right) => Some(left.unwrap_or(0) + right.unwrap_or(0)),
+    }
+}
+
 fn add_step_usage(steps: &[GenerateTextStep]) -> LanguageModelUsage {
     steps
         .iter()
@@ -2507,13 +2626,13 @@ fn add_optional_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 mod tests {
     use super::{
         GenerateTextInclude, GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning,
-        GenerateTextResult, GenerateTextStep, GenerateTextToolCall, GenerateTextToolResult,
-        InvalidStreamPartError, InvalidToolApprovalError, InvalidToolInputError,
-        MissingToolResultsError, NoObjectGeneratedError, NoOutputGeneratedError, NoSuchToolError,
-        StopCondition, ToolCallNotFoundForApprovalError, ToolCallRepairError,
-        ToolCallRepairOriginalError, UiMessageStreamError, UnsupportedModelVersionError,
-        filter_active_tools, generate_text, has_tool_call, is_loop_finished, is_step_count,
-        is_stop_condition_met,
+        GenerateTextResult, GenerateTextStep, GenerateTextStepPerformance, GenerateTextToolCall,
+        GenerateTextToolResult, InvalidStreamPartError, InvalidToolApprovalError,
+        InvalidToolInputError, MissingToolResultsError, NoObjectGeneratedError,
+        NoOutputGeneratedError, NoSuchToolError, StopCondition, ToolCallNotFoundForApprovalError,
+        ToolCallRepairError, ToolCallRepairOriginalError, UiMessageStreamError,
+        UnsupportedModelVersionError, filter_active_tools, generate_text, has_tool_call,
+        is_loop_finished, is_step_count, is_stop_condition_met,
     };
     use crate::file_data::FileDataContent;
     use crate::language_model::{
@@ -2676,6 +2795,59 @@ mod tests {
         assert!(!include.request_body);
         assert!(!include.request_messages);
         assert!(include.response_body);
+    }
+
+    #[test]
+    fn generate_text_step_performance_serializes_as_upstream_camel_case_shape() {
+        let performance = GenerateTextStepPerformance {
+            effective_output_tokens_per_second: 20.0,
+            output_tokens_per_second: Some(24.5),
+            input_tokens_per_second: Some(40.0),
+            effective_total_tokens_per_second: 60.0,
+            step_time_ms: 750,
+            response_time_ms: 500,
+            tool_execution_ms: BTreeMap::from([
+                ("call-1".to_string(), 25),
+                ("call-2".to_string(), 50),
+            ]),
+            time_to_first_output_token_ms: Some(100),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&performance).expect("performance serializes"),
+            json!({
+                "effectiveOutputTokensPerSecond": 20.0,
+                "outputTokensPerSecond": 24.5,
+                "inputTokensPerSecond": 40.0,
+                "effectiveTotalTokensPerSecond": 60.0,
+                "stepTimeMs": 750,
+                "responseTimeMs": 500,
+                "toolExecutionMs": {
+                    "call-1": 25,
+                    "call-2": 50
+                },
+                "timeToFirstOutputTokenMs": 100
+            })
+        );
+
+        assert_eq!(
+            serde_json::from_value::<GenerateTextStepPerformance>(
+                serde_json::to_value(&performance).expect("performance serializes")
+            )
+            .expect("performance deserializes"),
+            performance
+        );
+
+        assert_eq!(
+            serde_json::to_value(GenerateTextStepPerformance::default())
+                .expect("default performance serializes"),
+            json!({
+                "effectiveOutputTokensPerSecond": 0.0,
+                "effectiveTotalTokensPerSecond": 0.0,
+                "stepTimeMs": 0,
+                "responseTimeMs": 0
+            })
+        );
     }
 
     #[test]
@@ -3235,6 +3407,14 @@ mod tests {
         let call_id = &result.final_step().expect("step exists").call_id;
         assert!(call_id.starts_with("call-"));
         assert_eq!(call_id.len(), "call-".len() + 24);
+        let performance = &result.final_step().expect("step exists").performance;
+        assert!(performance.response_time_ms <= performance.step_time_ms);
+        assert!(performance.effective_output_tokens_per_second.is_finite());
+        assert!(performance.effective_total_tokens_per_second.is_finite());
+        assert_eq!(performance.output_tokens_per_second, None);
+        assert_eq!(performance.input_tokens_per_second, None);
+        assert_eq!(performance.tool_execution_ms, BTreeMap::new());
+        assert_eq!(performance.time_to_first_output_token_ms, None);
     }
 
     #[test]
@@ -3371,6 +3551,14 @@ mod tests {
                 },
                 raw: None,
             },
+            performance: GenerateTextStepPerformance {
+                effective_output_tokens_per_second: 2.5,
+                effective_total_tokens_per_second: 10.0,
+                step_time_ms: 750,
+                response_time_ms: 400,
+                tool_execution_ms: BTreeMap::from([("call-1".to_string(), 25)]),
+                ..GenerateTextStepPerformance::default()
+            },
             warnings: Vec::new(),
             request: None,
             response: None,
@@ -3454,6 +3642,15 @@ mod tests {
                                 "total": 1
                             }
                         },
+                        "performance": {
+                            "effectiveOutputTokensPerSecond": 2.5,
+                            "effectiveTotalTokensPerSecond": 10.0,
+                            "stepTimeMs": 750,
+                            "responseTimeMs": 400,
+                            "toolExecutionMs": {
+                                "call-1": 25
+                            }
+                        },
                         "warnings": []
                     }
                 ],
@@ -3490,6 +3687,15 @@ mod tests {
                         },
                         "outputTokens": {
                             "total": 1
+                        }
+                    },
+                    "performance": {
+                        "effectiveOutputTokensPerSecond": 2.5,
+                        "effectiveTotalTokensPerSecond": 10.0,
+                        "stepTimeMs": 750,
+                        "responseTimeMs": 400,
+                        "toolExecutionMs": {
+                            "call-1": 25
                         }
                     },
                     "warnings": []
@@ -4465,6 +4671,16 @@ mod tests {
         assert_eq!(result.usage.input_tokens.total, Some(13));
         assert_eq!(result.usage.output_tokens.total, Some(8));
         assert_eq!(result.usage.output_tokens.text, Some(7));
+        assert!(
+            result.steps[0]
+                .performance
+                .tool_execution_ms
+                .contains_key("call-1")
+        );
+        assert_eq!(
+            result.steps[1].performance.tool_execution_ms,
+            BTreeMap::new()
+        );
     }
 
     #[test]
