@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +25,89 @@ use crate::provider_utils::{Tool, ToolExecutionOptions, prepare_tools};
 use crate::warning::Warning;
 
 const DEFAULT_MAX_STEPS: usize = 1;
+
+/// Error returned when a model tries to call a tool that is not available.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NoSuchToolError {
+    tool_name: String,
+    available_tools: Option<Vec<String>>,
+    message: String,
+}
+
+impl NoSuchToolError {
+    /// Creates an unavailable-tool error when no tool list was available.
+    pub fn new(tool_name: impl Into<String>) -> Self {
+        Self::from_available_tools(tool_name, None)
+    }
+
+    /// Creates an unavailable-tool error with the known available tools.
+    pub fn with_available_tools(
+        tool_name: impl Into<String>,
+        available_tools: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        let available_tools = available_tools
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<_>>();
+
+        Self::from_available_tools(tool_name, Some(available_tools))
+    }
+
+    /// Creates an unavailable-tool error with a caller-supplied message.
+    pub fn with_message(
+        tool_name: impl Into<String>,
+        available_tools: Option<Vec<String>>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            tool_name: tool_name.into(),
+            available_tools,
+            message: message.into(),
+        }
+    }
+
+    fn from_available_tools(
+        tool_name: impl Into<String>,
+        available_tools: Option<Vec<String>>,
+    ) -> Self {
+        let tool_name = tool_name.into();
+        let message = no_such_tool_default_message(&tool_name, available_tools.as_deref());
+
+        Self {
+            tool_name,
+            available_tools,
+            message,
+        }
+    }
+
+    /// Returns the missing tool name.
+    pub fn tool_name(&self) -> &str {
+        &self.tool_name
+    }
+
+    /// Returns the available tools when the caller had a concrete tool list.
+    pub fn available_tools(&self) -> Option<&[String]> {
+        self.available_tools.as_deref()
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into its parts.
+    pub fn into_parts(self) -> (String, Option<Vec<String>>, String) {
+        (self.tool_name, self.available_tools, self.message)
+    }
+}
+
+impl fmt::Display for NoSuchToolError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for NoSuchToolError {}
 
 /// Reasoning content emitted during a high-level generate-text step.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1287,18 +1372,20 @@ fn mark_unavailable_tool_calls(
     tool_calls: &mut [GenerateTextToolCall],
     available_tools: Option<&[LanguageModelTool]>,
 ) {
-    let available_tool_names = available_tools
-        .unwrap_or_default()
-        .iter()
-        .map(language_model_tool_name)
-        .collect::<Vec<_>>();
+    let available_tool_names = available_tools.map(|tools| {
+        tools
+            .iter()
+            .map(language_model_tool_name)
+            .collect::<Vec<_>>()
+    });
+    let available_tool_names_slice = available_tool_names.as_deref().unwrap_or_default();
 
     for tool_call in tool_calls {
         if tool_call.provider_executed == Some(true) || tool_call.invalid == Some(true) {
             continue;
         }
 
-        if available_tool_names
+        if available_tool_names_slice
             .iter()
             .any(|tool_name| tool_name == &tool_call.tool_name)
         {
@@ -1309,7 +1396,7 @@ fn mark_unavailable_tool_calls(
         tool_call.invalid = Some(true);
         tool_call.error = Some(no_such_tool_message(
             &tool_call.tool_name,
-            &available_tool_names,
+            available_tool_names.as_deref(),
         ));
     }
 }
@@ -1390,14 +1477,28 @@ fn language_model_tool_name(tool: &LanguageModelTool) -> String {
     }
 }
 
-fn no_such_tool_message(tool_name: &str, available_tool_names: &[String]) -> String {
-    if available_tool_names.is_empty() {
-        format!("Model tried to call unavailable tool '{tool_name}'. No tools are available.")
-    } else {
-        format!(
+fn no_such_tool_message(tool_name: &str, available_tool_names: Option<&[String]>) -> String {
+    match available_tool_names {
+        Some(available_tool_names) => {
+            NoSuchToolError::with_available_tools(tool_name, available_tool_names.iter().cloned())
+                .to_string()
+        }
+        None => NoSuchToolError::new(tool_name).to_string(),
+    }
+}
+
+fn no_such_tool_default_message(
+    tool_name: &str,
+    available_tool_names: Option<&[String]>,
+) -> String {
+    match available_tool_names {
+        Some(available_tool_names) => format!(
             "Model tried to call unavailable tool '{tool_name}'. Available tools: {}.",
             available_tool_names.join(", ")
-        )
+        ),
+        None => {
+            format!("Model tried to call unavailable tool '{tool_name}'. No tools are available.")
+        }
     }
 }
 
@@ -1443,7 +1544,8 @@ fn add_optional_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 mod tests {
     use super::{
         GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning, GenerateTextResult,
-        GenerateTextStep, GenerateTextToolCall, GenerateTextToolResult, generate_text,
+        GenerateTextStep, GenerateTextToolCall, GenerateTextToolResult, NoSuchToolError,
+        generate_text,
     };
     use crate::file_data::FileDataContent;
     use crate::language_model::{
@@ -1470,6 +1572,46 @@ mod tests {
         atomic::{AtomicBool, Ordering},
     };
     use std::task::{Context, Poll, Waker};
+
+    #[test]
+    fn no_such_tool_error_matches_upstream_default_messages() {
+        let missing = NoSuchToolError::new("forecast");
+        assert_eq!(missing.tool_name(), "forecast");
+        assert_eq!(missing.available_tools(), None);
+        assert_eq!(
+            missing.message(),
+            "Model tried to call unavailable tool 'forecast'. No tools are available."
+        );
+        assert_eq!(missing.to_string(), missing.message());
+
+        let with_tools = NoSuchToolError::with_available_tools(
+            "forecast",
+            ["weather".to_string(), "webSearch".to_string()],
+        );
+        assert_eq!(
+            with_tools.available_tools(),
+            Some(["weather".to_string(), "webSearch".to_string()].as_slice())
+        );
+        assert_eq!(
+            with_tools.to_string(),
+            "Model tried to call unavailable tool 'forecast'. Available tools: weather, webSearch."
+        );
+
+        let custom = NoSuchToolError::with_message(
+            "forecast",
+            Some(vec!["weather".to_string()]),
+            "custom unavailable-tool message",
+        );
+        assert_eq!(custom.message(), "custom unavailable-tool message");
+        assert_eq!(
+            custom.into_parts(),
+            (
+                "forecast".to_string(),
+                Some(vec!["weather".to_string()]),
+                "custom unavailable-tool message".to_string()
+            )
+        );
+    }
 
     struct FakeLanguageModel {
         calls: RefCell<Vec<LanguageModelCallOptions>>,
