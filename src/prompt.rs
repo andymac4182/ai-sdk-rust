@@ -1,8 +1,192 @@
+use std::collections::BTreeMap;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use crate::file_data::FileDataContent;
+use crate::headers::Headers;
 use crate::json::JsonValue;
 use crate::provider_utils::convert_to_base64;
+
+/// Timeout configuration for high-level model and tool requests.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum TimeoutConfiguration {
+    /// A single total request timeout in milliseconds.
+    TotalMs(u64),
+
+    /// Granular timeout settings for individual request phases.
+    Detailed(TimeoutConfigurationOptions),
+}
+
+impl TimeoutConfiguration {
+    /// Creates a total timeout configuration in milliseconds.
+    pub const fn total_ms(total_ms: u64) -> Self {
+        Self::TotalMs(total_ms)
+    }
+
+    /// Creates a detailed timeout configuration.
+    pub const fn detailed(options: TimeoutConfigurationOptions) -> Self {
+        Self::Detailed(options)
+    }
+}
+
+impl From<u64> for TimeoutConfiguration {
+    fn from(total_ms: u64) -> Self {
+        Self::TotalMs(total_ms)
+    }
+}
+
+impl From<TimeoutConfigurationOptions> for TimeoutConfiguration {
+    fn from(options: TimeoutConfigurationOptions) -> Self {
+        Self::Detailed(options)
+    }
+}
+
+/// Granular request timeout settings.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimeoutConfigurationOptions {
+    /// Total request timeout in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_ms: Option<u64>,
+
+    /// Timeout for each model step in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_ms: Option<u64>,
+
+    /// Timeout between stream chunks in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_ms: Option<u64>,
+
+    /// Default timeout for each tool execution in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_ms: Option<u64>,
+
+    /// Per-tool timeout overrides keyed as `{toolName}Ms`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tools: BTreeMap<String, u64>,
+}
+
+impl TimeoutConfigurationOptions {
+    /// Creates an empty detailed timeout configuration.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the total request timeout in milliseconds.
+    pub const fn with_total_ms(mut self, total_ms: u64) -> Self {
+        self.total_ms = Some(total_ms);
+        self
+    }
+
+    /// Sets the per-step timeout in milliseconds.
+    pub const fn with_step_ms(mut self, step_ms: u64) -> Self {
+        self.step_ms = Some(step_ms);
+        self
+    }
+
+    /// Sets the stream chunk timeout in milliseconds.
+    pub const fn with_chunk_ms(mut self, chunk_ms: u64) -> Self {
+        self.chunk_ms = Some(chunk_ms);
+        self
+    }
+
+    /// Sets the default per-tool timeout in milliseconds.
+    pub const fn with_tool_ms(mut self, tool_ms: u64) -> Self {
+        self.tool_ms = Some(tool_ms);
+        self
+    }
+
+    /// Sets a per-tool timeout override in milliseconds.
+    pub fn with_tool_timeout(mut self, tool_name: impl Into<String>, timeout_ms: u64) -> Self {
+        self.tools
+            .insert(format!("{}Ms", tool_name.into()), timeout_ms);
+        self
+    }
+}
+
+/// Request-facing controls for high-level SDK calls.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestOptions {
+    /// Maximum number of retries. Set to 0 to disable retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<usize>,
+
+    /// Additional HTTP headers sent by HTTP-based providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Headers>,
+
+    /// Timeout configuration for the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<TimeoutConfiguration>,
+}
+
+impl RequestOptions {
+    /// Creates empty request options.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the maximum number of retries.
+    pub const fn with_max_retries(mut self, max_retries: usize) -> Self {
+        self.max_retries = Some(max_retries);
+        self
+    }
+
+    /// Adds an HTTP header.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers
+            .get_or_insert_with(Headers::new)
+            .insert(name.into(), value.into());
+        self
+    }
+
+    /// Sets the timeout configuration.
+    pub fn with_timeout(mut self, timeout: impl Into<TimeoutConfiguration>) -> Self {
+        self.timeout = Some(timeout.into());
+        self
+    }
+}
+
+/// Extracts the total timeout in milliseconds from a timeout configuration.
+pub const fn get_total_timeout_ms(timeout: Option<&TimeoutConfiguration>) -> Option<u64> {
+    match timeout {
+        None => None,
+        Some(TimeoutConfiguration::TotalMs(total_ms)) => Some(*total_ms),
+        Some(TimeoutConfiguration::Detailed(options)) => options.total_ms,
+    }
+}
+
+/// Extracts the step timeout in milliseconds from a timeout configuration.
+pub const fn get_step_timeout_ms(timeout: Option<&TimeoutConfiguration>) -> Option<u64> {
+    match timeout {
+        Some(TimeoutConfiguration::Detailed(options)) => options.step_ms,
+        Some(TimeoutConfiguration::TotalMs(_)) | None => None,
+    }
+}
+
+/// Extracts the chunk timeout in milliseconds from a timeout configuration.
+pub const fn get_chunk_timeout_ms(timeout: Option<&TimeoutConfiguration>) -> Option<u64> {
+    match timeout {
+        Some(TimeoutConfiguration::Detailed(options)) => options.chunk_ms,
+        Some(TimeoutConfiguration::TotalMs(_)) | None => None,
+    }
+}
+
+/// Extracts a tool-specific timeout in milliseconds from a timeout configuration.
+pub fn get_tool_timeout_ms(timeout: Option<&TimeoutConfiguration>, tool_name: &str) -> Option<u64> {
+    let Some(TimeoutConfiguration::Detailed(options)) = timeout else {
+        return None;
+    };
+
+    options
+        .tools
+        .get(&format!("{tool_name}Ms"))
+        .copied()
+        .or(options.tool_ms)
+}
 
 /// Converts prompt data content to a base64-encoded string.
 ///
@@ -172,15 +356,132 @@ fn json_value_js_typeof(content: &JsonValue) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use serde_json::json;
 
     use crate::file_data::FileDataContent;
     use crate::json::JsonValue;
 
     use super::{
-        InvalidDataContentError, InvalidMessageRoleError, MessageConversionError,
-        convert_data_content_to_base64_string,
+        InvalidDataContentError, InvalidMessageRoleError, MessageConversionError, RequestOptions,
+        TimeoutConfiguration, TimeoutConfigurationOptions, convert_data_content_to_base64_string,
+        get_chunk_timeout_ms, get_step_timeout_ms, get_tool_timeout_ms, get_total_timeout_ms,
     };
+
+    #[test]
+    fn timeout_configuration_serializes_number_form() {
+        let timeout = TimeoutConfiguration::total_ms(5_000);
+
+        assert_eq!(
+            serde_json::to_value(timeout).expect("timeout serialize"),
+            json!(5000)
+        );
+    }
+
+    #[test]
+    fn timeout_configuration_serializes_detailed_form() {
+        let timeout = TimeoutConfiguration::detailed(
+            TimeoutConfigurationOptions::new()
+                .with_total_ms(30_000)
+                .with_step_ms(10_000)
+                .with_chunk_ms(2_000)
+                .with_tool_ms(5_000)
+                .with_tool_timeout("search", 1_000),
+        );
+
+        assert_eq!(
+            serde_json::to_value(timeout).expect("timeout serialize"),
+            json!({
+                "totalMs": 30000,
+                "stepMs": 10000,
+                "chunkMs": 2000,
+                "toolMs": 5000,
+                "tools": {
+                    "searchMs": 1000
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn timeout_configuration_deserializes_detailed_form() {
+        let timeout: TimeoutConfiguration = serde_json::from_value(json!({
+            "totalMs": 10000,
+            "tools": {
+                "weatherMs": 2500
+            }
+        }))
+        .expect("timeout deserialize");
+
+        assert_eq!(
+            timeout,
+            TimeoutConfiguration::Detailed(TimeoutConfigurationOptions {
+                total_ms: Some(10_000),
+                step_ms: None,
+                chunk_ms: None,
+                tool_ms: None,
+                tools: BTreeMap::from([("weatherMs".to_string(), 2_500)])
+            })
+        );
+    }
+
+    #[test]
+    fn request_options_serializes_upstream_shape_without_abort_signal() {
+        let options = RequestOptions::new()
+            .with_max_retries(3)
+            .with_header("x-api-key", "sk-test")
+            .with_timeout(TimeoutConfigurationOptions::new().with_step_ms(4_000));
+
+        assert_eq!(
+            serde_json::to_value(options).expect("request options serialize"),
+            json!({
+                "maxRetries": 3,
+                "headers": {
+                    "x-api-key": "sk-test"
+                },
+                "timeout": {
+                    "stepMs": 4000
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn request_options_deserializes_minimal_shape() {
+        let options: RequestOptions = serde_json::from_value(json!({})).expect("deserialize");
+
+        assert_eq!(options, RequestOptions::new());
+    }
+
+    #[test]
+    fn timeout_helpers_match_upstream_number_and_missing_behavior() {
+        let total = TimeoutConfiguration::total_ms(5_000);
+
+        assert_eq!(get_total_timeout_ms(None), None);
+        assert_eq!(get_total_timeout_ms(Some(&total)), Some(5_000));
+        assert_eq!(get_step_timeout_ms(Some(&total)), None);
+        assert_eq!(get_chunk_timeout_ms(Some(&total)), None);
+        assert_eq!(get_tool_timeout_ms(Some(&total), "search"), None);
+    }
+
+    #[test]
+    fn timeout_helpers_read_detailed_timeouts() {
+        let timeout = TimeoutConfiguration::detailed(
+            TimeoutConfigurationOptions::new()
+                .with_total_ms(30_000)
+                .with_step_ms(10_000)
+                .with_chunk_ms(2_000)
+                .with_tool_ms(5_000)
+                .with_tool_timeout("search", 1_000),
+        );
+
+        assert_eq!(get_total_timeout_ms(Some(&timeout)), Some(30_000));
+        assert_eq!(get_step_timeout_ms(Some(&timeout)), Some(10_000));
+        assert_eq!(get_chunk_timeout_ms(Some(&timeout)), Some(2_000));
+        assert_eq!(get_tool_timeout_ms(Some(&timeout), "search"), Some(1_000));
+        assert_eq!(get_tool_timeout_ms(Some(&timeout), "weather"), Some(5_000));
+    }
 
     #[test]
     fn convert_data_content_to_base64_string_passes_base64_strings_through() {
