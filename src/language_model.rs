@@ -678,6 +678,38 @@ impl LanguageModelToolResult {
     }
 }
 
+/// A generated content part returned by a language model.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum LanguageModelContent {
+    /// Generated text content.
+    Text(LanguageModelText),
+
+    /// Generated reasoning content.
+    Reasoning(LanguageModelReasoning),
+
+    /// Provider-specific generated content.
+    Custom(LanguageModelCustomContent),
+
+    /// Generated reasoning file content.
+    ReasoningFile(LanguageModelReasoningFile),
+
+    /// Generated file content.
+    File(LanguageModelFile),
+
+    /// Tool approval request content.
+    ToolApprovalRequest(LanguageModelToolApprovalRequest),
+
+    /// Source content used to generate the response.
+    Source(LanguageModelSource),
+
+    /// Generated tool call content.
+    ToolCall(LanguageModelToolCall),
+
+    /// Provider-executed tool result content.
+    ToolResult(LanguageModelToolResult),
+}
+
 /// Strategy for selecting a tool during a language model call.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -702,12 +734,12 @@ pub enum LanguageModelToolChoice {
 #[cfg(test)]
 mod tests {
     use super::{
-        FinishReason, InputTokenUsage, LanguageModelCustomContent, LanguageModelFile,
-        LanguageModelFileData, LanguageModelFinishReason, LanguageModelReasoning,
-        LanguageModelReasoningFile, LanguageModelResponseMetadata, LanguageModelSource,
-        LanguageModelText, LanguageModelToolApprovalRequest, LanguageModelToolCall,
-        LanguageModelToolChoice, LanguageModelToolResult, LanguageModelUrlSource,
-        LanguageModelUsage, OutputTokenUsage,
+        FinishReason, InputTokenUsage, LanguageModelContent, LanguageModelCustomContent,
+        LanguageModelFile, LanguageModelFileData, LanguageModelFinishReason,
+        LanguageModelReasoning, LanguageModelReasoningFile, LanguageModelResponseMetadata,
+        LanguageModelSource, LanguageModelText, LanguageModelToolApprovalRequest,
+        LanguageModelToolCall, LanguageModelToolChoice, LanguageModelToolResult,
+        LanguageModelUrlSource, LanguageModelUsage, OutputTokenUsage,
     };
     use crate::file_data::FileDataContent;
     use crate::json::NonNullJsonValue;
@@ -1335,6 +1367,66 @@ mod tests {
         .expect_err("wrong discriminator is rejected");
 
         assert!(error.to_string().contains("unknown variant `tool-call`"));
+    }
+
+    #[test]
+    fn content_union_serializes_upstream_generated_content_shapes() {
+        assert_eq!(
+            serde_json::to_value(LanguageModelContent::Text(LanguageModelText::new("Hello")))
+                .expect("content serializes"),
+            json!({
+                "type": "text",
+                "text": "Hello"
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(LanguageModelContent::Source(LanguageModelSource::url(
+                "source_123",
+                "https://example.com"
+            )))
+            .expect("content serializes"),
+            json!({
+                "type": "source",
+                "sourceType": "url",
+                "id": "source_123",
+                "url": "https://example.com"
+            })
+        );
+    }
+
+    #[test]
+    fn content_union_deserializes_tool_result_variant() {
+        let content: LanguageModelContent = serde_json::from_value(json!({
+            "type": "tool-result",
+            "toolCallId": "tool_call_123",
+            "toolName": "weather",
+            "result": {
+                "temperatureCelsius": 24
+            }
+        }))
+        .expect("content deserializes");
+
+        assert_eq!(
+            content,
+            LanguageModelContent::ToolResult(LanguageModelToolResult::new(
+                "tool_call_123",
+                "weather",
+                NonNullJsonValue::new(json!({
+                    "temperatureCelsius": 24
+                }))
+                .expect("tool result is non-null"),
+            ))
+        );
+    }
+
+    #[test]
+    fn content_union_rejects_unknown_content_types() {
+        serde_json::from_value::<LanguageModelContent>(json!({
+            "type": "unsupported",
+            "text": "No matching content variant"
+        }))
+        .expect_err("unsupported content variant is rejected");
     }
 
     #[test]
