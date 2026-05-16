@@ -2423,6 +2423,112 @@ enum ToolKind {
     },
 }
 
+/// Factory for creating provider-defined tools from shared provider metadata.
+///
+/// This mirrors upstream `createProviderDefinedToolFactory`: the factory owns
+/// the provider tool id and schemas, while Rust callers supply the model-call
+/// tool name explicitly because there is no JavaScript object key to infer it
+/// from.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderDefinedToolFactory {
+    /// Provider tool identifier, typically `<provider-id>.<unique-tool-name>`.
+    pub id: String,
+
+    /// JSON Schema 7 object describing the provider tool input.
+    pub input_schema: JsonSchema,
+
+    /// Optional JSON Schema 7 object describing the provider tool output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<JsonSchema>,
+}
+
+impl ProviderDefinedToolFactory {
+    /// Creates a provider-defined tool factory.
+    pub fn new(id: impl Into<String>, input_schema: JsonSchema) -> Self {
+        Self {
+            id: id.into(),
+            input_schema,
+            output_schema: None,
+        }
+    }
+
+    /// Sets the expected output schema shared by tools created from this factory.
+    pub fn with_output_schema(mut self, output_schema: JsonSchema) -> Self {
+        self.output_schema = Some(output_schema);
+        self
+    }
+
+    /// Creates a provider-defined tool from this factory.
+    pub fn tool(&self, name: impl Into<String>, args: JsonObject) -> Tool {
+        let mut tool =
+            Tool::provider_defined(name, self.id.clone(), args, self.input_schema.clone());
+
+        if let Some(output_schema) = &self.output_schema {
+            tool = tool.with_output_schema(output_schema.clone());
+        }
+
+        tool
+    }
+}
+
+/// Factory for creating provider-executed tools from shared provider metadata.
+///
+/// This mirrors upstream `createProviderExecutedToolFactory` while keeping the
+/// runtime-independent Rust tool boundary free of JavaScript callback-only
+/// streaming hooks.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderExecutedToolFactory {
+    /// Provider tool identifier, typically `<provider-id>.<unique-tool-name>`.
+    pub id: String,
+
+    /// JSON Schema 7 object describing the provider tool input.
+    pub input_schema: JsonSchema,
+
+    /// JSON Schema 7 object describing the provider tool output.
+    pub output_schema: JsonSchema,
+
+    /// Whether this provider-executed tool supports deferred results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_deferred_results: Option<bool>,
+}
+
+impl ProviderExecutedToolFactory {
+    /// Creates a provider-executed tool factory.
+    pub fn new(id: impl Into<String>, input_schema: JsonSchema, output_schema: JsonSchema) -> Self {
+        Self {
+            id: id.into(),
+            input_schema,
+            output_schema,
+            supports_deferred_results: None,
+        }
+    }
+
+    /// Sets whether created provider-executed tools support deferred results.
+    pub fn with_supports_deferred_results(mut self, supports_deferred_results: bool) -> Self {
+        self.supports_deferred_results = Some(supports_deferred_results);
+        self
+    }
+
+    /// Creates a provider-executed tool from this factory.
+    pub fn tool(&self, name: impl Into<String>, args: JsonObject) -> Tool {
+        let mut tool = Tool::provider_executed(
+            name,
+            self.id.clone(),
+            args,
+            self.input_schema.clone(),
+            self.output_schema.clone(),
+        );
+
+        if let Some(supports_deferred_results) = self.supports_deferred_results {
+            tool = tool.with_supports_deferred_results(supports_deferred_results);
+        }
+
+        tool
+    }
+}
+
 /// User-defined Rust or provider-defined tool made available to a language model call.
 ///
 /// This mirrors the function-tool branch of upstream `@ai-sdk/provider-utils`
@@ -2704,6 +2810,32 @@ impl fmt::Debug for Tool {
             .field("is_executable", &self.is_executable())
             .finish()
     }
+}
+
+/// Creates a provider-defined tool factory with an input schema.
+pub fn create_provider_defined_tool_factory(
+    id: impl Into<String>,
+    input_schema: JsonSchema,
+) -> ProviderDefinedToolFactory {
+    ProviderDefinedToolFactory::new(id, input_schema)
+}
+
+/// Creates a provider-defined tool factory with input and output schemas.
+pub fn create_provider_defined_tool_factory_with_output_schema(
+    id: impl Into<String>,
+    input_schema: JsonSchema,
+    output_schema: JsonSchema,
+) -> ProviderDefinedToolFactory {
+    ProviderDefinedToolFactory::new(id, input_schema).with_output_schema(output_schema)
+}
+
+/// Creates a provider-executed tool factory with input and output schemas.
+pub fn create_provider_executed_tool_factory(
+    id: impl Into<String>,
+    input_schema: JsonSchema,
+    output_schema: JsonSchema,
+) -> ProviderExecutedToolFactory {
+    ProviderExecutedToolFactory::new(id, input_schema, output_schema)
 }
 
 /// Bidirectional mapping between caller-facing and provider-facing tool names.
@@ -5023,9 +5155,9 @@ mod tests {
         LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError,
         ParseJsonResult, PostJsonToApiOptions, PostToApiOptions, ProviderApiRequest,
         ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
-        ProviderApiResponseBody, ProviderApiResponseHandlerError, ReasoningLevel,
-        ResponseHandlerResult, RuntimeEnvironment, SerializedModelOptions,
-        StatusCodeErrorResponseHandlerOptions, StreamingToolCallDelta,
+        ProviderApiResponseBody, ProviderApiResponseHandlerError, ProviderDefinedToolFactory,
+        ProviderExecutedToolFactory, ReasoningLevel, ResponseHandlerResult, RuntimeEnvironment,
+        SerializedModelOptions, StatusCodeErrorResponseHandlerOptions, StreamingToolCallDelta,
         StreamingToolCallDeltaFunction, StreamingToolCallTracker, StreamingToolCallTrackerOptions,
         StreamingToolCallTypeValidation, Tool, ToolExecutionError, ToolExecutionOptions,
         ValidateTypesResult, add_additional_properties_to_json_schema, as_array, combine_headers,
@@ -5033,10 +5165,13 @@ mod tests {
         convert_inline_file_data_to_bytes, convert_to_base64, create_binary_response_handler,
         create_event_source_response_handler, create_id_generator,
         create_json_error_response_handler, create_json_response_handler,
-        create_status_code_error_response_handler, create_tool_name_mapping, detect_media_type,
-        execute_provider_api_request, extract_response_headers, filter_nullable, generate_id,
-        get_from_api, get_runtime_environment_user_agent, get_top_level_media_type,
-        handle_fetch_error, handle_provider_api_response, inject_json_instruction,
+        create_provider_defined_tool_factory,
+        create_provider_defined_tool_factory_with_output_schema,
+        create_provider_executed_tool_factory, create_status_code_error_response_handler,
+        create_tool_name_mapping, detect_media_type, execute_provider_api_request,
+        extract_response_headers, filter_nullable, generate_id, get_from_api,
+        get_runtime_environment_user_agent, get_top_level_media_type, handle_fetch_error,
+        handle_provider_api_response, inject_json_instruction,
         inject_json_instruction_into_messages, is_abort_error, is_custom_reasoning,
         is_full_media_type, is_non_nullable, is_parsable_json, is_provider_reference,
         is_url_supported, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
@@ -9670,6 +9805,262 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn provider_defined_tool_factory_round_trips_upstream_config_shape() {
+        let output_schema = json!({
+            "type": "object",
+            "properties": {
+                "results": { "type": "array" }
+            }
+        })
+        .as_object()
+        .expect("output schema is an object")
+        .clone();
+        let factory = create_provider_defined_tool_factory_with_output_schema(
+            "provider.web_search",
+            object_schema(),
+            output_schema.clone(),
+        );
+
+        assert_eq!(
+            serde_json::to_value(&factory).expect("factory serializes"),
+            json!({
+                "id": "provider.web_search",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    },
+                    "required": ["city"]
+                },
+                "outputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "results": { "type": "array" }
+                    }
+                }
+            })
+        );
+
+        let deserialized: ProviderDefinedToolFactory = serde_json::from_value(json!({
+            "id": "provider.web_search",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "city": { "type": "string" }
+                },
+                "required": ["city"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "results": { "type": "array" }
+                }
+            }
+        }))
+        .expect("factory deserializes");
+
+        assert_eq!(
+            deserialized,
+            ProviderDefinedToolFactory::new("provider.web_search", object_schema())
+                .with_output_schema(output_schema)
+        );
+    }
+
+    #[test]
+    fn provider_defined_tool_factory_creates_provider_tool() {
+        let args = json!({ "maxResults": 3 })
+            .as_object()
+            .expect("args are an object")
+            .clone();
+        let output_schema = json!({ "type": "string" })
+            .as_object()
+            .expect("output schema is an object")
+            .clone();
+        let tool = create_provider_defined_tool_factory_with_output_schema(
+            "provider.web_search",
+            object_schema(),
+            output_schema.clone(),
+        )
+        .tool("webSearch", args.clone());
+
+        assert!(tool.is_provider_tool());
+        assert!(!tool.is_provider_executed());
+        assert_eq!(tool.provider_tool_id(), Some("provider.web_search"));
+        assert_eq!(tool.provider_tool_args(), Some(&args));
+        assert_eq!(tool.output_schema(), Some(&output_schema));
+        assert_eq!(
+            tool.to_language_model_tool(),
+            LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                "provider.web_search",
+                "webSearch",
+                args
+            ))
+        );
+    }
+
+    #[test]
+    fn provider_executed_tool_factory_round_trips_upstream_config_and_creates_tool() {
+        let output_schema = json!({
+            "type": "object",
+            "properties": {
+                "result": { "type": "string" }
+            }
+        })
+        .as_object()
+        .expect("output schema is an object")
+        .clone();
+        let args = json!({ "region": "au" })
+            .as_object()
+            .expect("args are an object")
+            .clone();
+        let factory = create_provider_executed_tool_factory(
+            "provider.code_interpreter",
+            object_schema(),
+            output_schema.clone(),
+        )
+        .with_supports_deferred_results(true);
+
+        assert_eq!(
+            serde_json::to_value(&factory).expect("factory serializes"),
+            json!({
+                "id": "provider.code_interpreter",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    },
+                    "required": ["city"]
+                },
+                "outputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "result": { "type": "string" }
+                    }
+                },
+                "supportsDeferredResults": true
+            })
+        );
+
+        let deserialized: ProviderExecutedToolFactory = serde_json::from_value(json!({
+            "id": "provider.code_interpreter",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "city": { "type": "string" }
+                },
+                "required": ["city"]
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "result": { "type": "string" }
+                }
+            },
+            "supportsDeferredResults": true
+        }))
+        .expect("factory deserializes");
+
+        assert_eq!(deserialized, factory);
+
+        let tool = factory.tool("codeInterpreter", args.clone());
+
+        assert!(tool.is_provider_tool());
+        assert!(tool.is_provider_executed());
+        assert_eq!(tool.provider_tool_id(), Some("provider.code_interpreter"));
+        assert_eq!(tool.provider_tool_args(), Some(&args));
+        assert_eq!(tool.output_schema(), Some(&output_schema));
+        assert_eq!(tool.supports_deferred_results(), Some(true));
+        assert_eq!(
+            tool.to_language_model_tool(),
+            LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                "provider.code_interpreter",
+                "codeInterpreter",
+                args
+            ))
+        );
+    }
+
+    #[test]
+    fn provider_defined_tool_factory_omits_missing_output_schema() {
+        let factory = create_provider_defined_tool_factory("provider.web_search", object_schema());
+
+        assert_eq!(
+            serde_json::to_value(&factory).expect("factory serializes"),
+            json!({
+                "id": "provider.web_search",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    },
+                    "required": ["city"]
+                }
+            })
+        );
+
+        let deserialized: ProviderDefinedToolFactory = serde_json::from_value(json!({
+            "id": "provider.web_search",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "city": { "type": "string" }
+                },
+                "required": ["city"]
+            }
+        }))
+        .expect("factory deserializes");
+
+        assert_eq!(deserialized, factory);
+    }
+
+    #[test]
+    fn provider_executed_tool_factory_omits_missing_deferred_results_support() {
+        let output_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("output schema is an object")
+            .clone();
+        let factory = create_provider_executed_tool_factory(
+            "provider.code_interpreter",
+            object_schema(),
+            output_schema,
+        );
+
+        assert_eq!(
+            serde_json::to_value(&factory).expect("factory serializes"),
+            json!({
+                "id": "provider.code_interpreter",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    },
+                    "required": ["city"]
+                },
+                "outputSchema": {
+                    "type": "object"
+                }
+            })
+        );
+
+        let deserialized: ProviderExecutedToolFactory = serde_json::from_value(json!({
+            "id": "provider.code_interpreter",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "city": { "type": "string" }
+                },
+                "required": ["city"]
+            },
+            "outputSchema": {
+                "type": "object"
+            }
+        }))
+        .expect("factory deserializes");
+
+        assert_eq!(deserialized, factory);
     }
 
     #[test]
