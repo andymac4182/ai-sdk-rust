@@ -242,7 +242,10 @@ pub use speech_model::{
     NoSpeechGeneratedError, SpeechModel, SpeechModelAudio, SpeechModelCallOptions,
     SpeechModelRequest, SpeechModelResponse, SpeechModelResult,
 };
-pub use transcribe::{ExperimentalTranscriptionResult, TranscriptionResult};
+pub use transcribe::{
+    ExperimentalTranscriptionResult, TranscribeOptions, TranscriptionResult,
+    experimental_transcribe, transcribe,
+};
 pub use transcription_model::{
     NoTranscriptGeneratedError, TranscriptionModel, TranscriptionModelCallOptions,
     TranscriptionModelRequest, TranscriptionModelResponse, TranscriptionModelResult,
