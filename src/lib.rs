@@ -18,19 +18,20 @@ pub use json::{
 };
 pub use language_model::{
     FinishReason, InputTokenUsage, LanguageModelAssistantContentPart,
-    LanguageModelAssistantMessage, LanguageModelContent, LanguageModelCustomContent,
-    LanguageModelCustomPart, LanguageModelDocumentSource, LanguageModelFile, LanguageModelFileData,
-    LanguageModelFilePart, LanguageModelFinishReason, LanguageModelFunctionTool,
-    LanguageModelMessage, LanguageModelPrompt, LanguageModelProviderTool, LanguageModelReasoning,
+    LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
+    LanguageModelCustomContent, LanguageModelCustomPart, LanguageModelDocumentSource,
+    LanguageModelFile, LanguageModelFileData, LanguageModelFilePart, LanguageModelFinishReason,
+    LanguageModelFunctionTool, LanguageModelMessage, LanguageModelPrompt,
+    LanguageModelProviderTool, LanguageModelReasoning, LanguageModelReasoningEffort,
     LanguageModelReasoningFile, LanguageModelReasoningFilePart, LanguageModelReasoningPart,
-    LanguageModelResponseMetadata, LanguageModelSource, LanguageModelSystemMessage,
-    LanguageModelText, LanguageModelTextPart, LanguageModelTool, LanguageModelToolApprovalRequest,
-    LanguageModelToolApprovalResponsePart, LanguageModelToolCall, LanguageModelToolCallPart,
-    LanguageModelToolChoice, LanguageModelToolContentPart, LanguageModelToolInputExample,
-    LanguageModelToolMessage, LanguageModelToolResult, LanguageModelToolResultContentPart,
-    LanguageModelToolResultCustomContent, LanguageModelToolResultOutput,
-    LanguageModelToolResultPart, LanguageModelUrlSource, LanguageModelUsage,
-    LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
+    LanguageModelResponseFormat, LanguageModelResponseMetadata, LanguageModelSource,
+    LanguageModelSystemMessage, LanguageModelText, LanguageModelTextPart, LanguageModelTool,
+    LanguageModelToolApprovalRequest, LanguageModelToolApprovalResponsePart, LanguageModelToolCall,
+    LanguageModelToolCallPart, LanguageModelToolChoice, LanguageModelToolContentPart,
+    LanguageModelToolInputExample, LanguageModelToolMessage, LanguageModelToolResult,
+    LanguageModelToolResultContentPart, LanguageModelToolResultCustomContent,
+    LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUrlSource,
+    LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
 };
 pub use provider::{ProviderMetadata, ProviderOptions};
 pub use warning::Warning;

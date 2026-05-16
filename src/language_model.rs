@@ -3,6 +3,7 @@ use time::OffsetDateTime;
 use url::Url;
 
 use crate::file_data::{FileData, FileDataContent};
+use crate::headers::Headers;
 use crate::json::{JsonObject, JsonSchema, JsonValue, NonNullJsonValue};
 use crate::provider::{ProviderMetadata, ProviderOptions};
 
@@ -868,6 +869,297 @@ pub enum LanguageModelToolChoice {
     },
 }
 
+/// Requested output format for a language model call.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "type",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase"
+)]
+pub enum LanguageModelResponseFormat {
+    /// Plain text output.
+    Text,
+
+    /// JSON output, optionally constrained by a schema.
+    Json {
+        /// JSON schema that the generated output should conform to.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<JsonSchema>,
+
+        /// Name of the output used by providers for additional guidance.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+
+        /// Description of the output used by providers for additional guidance.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+}
+
+impl LanguageModelResponseFormat {
+    /// Creates a plain text response format.
+    pub fn text() -> Self {
+        Self::Text
+    }
+
+    /// Creates a JSON response format.
+    pub fn json() -> Self {
+        Self::Json {
+            schema: None,
+            name: None,
+            description: None,
+        }
+    }
+
+    /// Sets the JSON schema for a JSON response format.
+    pub fn with_schema(self, schema: JsonSchema) -> Self {
+        match self {
+            Self::Json {
+                name, description, ..
+            } => Self::Json {
+                schema: Some(schema),
+                name,
+                description,
+            },
+            other => other,
+        }
+    }
+
+    /// Sets the JSON response name for a JSON response format.
+    pub fn with_name(self, name: impl Into<String>) -> Self {
+        match self {
+            Self::Json {
+                schema,
+                description,
+                ..
+            } => Self::Json {
+                schema,
+                name: Some(name.into()),
+                description,
+            },
+            other => other,
+        }
+    }
+
+    /// Sets the JSON response description for a JSON response format.
+    pub fn with_description(self, description: impl Into<String>) -> Self {
+        match self {
+            Self::Json { schema, name, .. } => Self::Json {
+                schema,
+                name,
+                description: Some(description.into()),
+            },
+            other => other,
+        }
+    }
+}
+
+/// Reasoning effort requested for a language model call.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LanguageModelReasoningEffort {
+    /// Use the provider's default reasoning effort.
+    ProviderDefault,
+    /// Disable reasoning when supported.
+    None,
+    /// Use minimal reasoning effort.
+    Minimal,
+    /// Use low reasoning effort.
+    Low,
+    /// Use medium reasoning effort.
+    Medium,
+    /// Use high reasoning effort.
+    High,
+    /// Use extra-high reasoning effort.
+    Xhigh,
+}
+
+/// Options passed to a language model provider call.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelCallOptions {
+    /// Standardized prompt sent to the provider.
+    pub prompt: LanguageModelPrompt,
+
+    /// Maximum number of tokens to generate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
+
+    /// Temperature setting. The range depends on the provider and model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+
+    /// Stop sequences that stop generation when emitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_sequences: Option<Vec<String>>,
+
+    /// Nucleus sampling setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+
+    /// Top-k sampling setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u64>,
+
+    /// Presence penalty setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f64>,
+
+    /// Frequency penalty setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f64>,
+
+    /// Requested response format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<LanguageModelResponseFormat>,
+
+    /// Seed used for deterministic sampling when supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+
+    /// Tools available to the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<LanguageModelTool>>,
+
+    /// Tool selection strategy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<LanguageModelToolChoice>,
+
+    /// Whether raw chunks should be included in streamed responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_raw_chunks: Option<bool>,
+
+    /// Additional HTTP headers for HTTP-based providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Headers>,
+
+    /// Reasoning effort requested for the model call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<LanguageModelReasoningEffort>,
+
+    /// Provider-specific options passed through to the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+}
+
+impl LanguageModelCallOptions {
+    /// Creates language model call options with the required standardized prompt.
+    pub fn new(prompt: LanguageModelPrompt) -> Self {
+        Self {
+            prompt,
+            max_output_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            top_p: None,
+            top_k: None,
+            presence_penalty: None,
+            frequency_penalty: None,
+            response_format: None,
+            seed: None,
+            tools: None,
+            tool_choice: None,
+            include_raw_chunks: None,
+            headers: None,
+            reasoning: None,
+            provider_options: None,
+        }
+    }
+
+    /// Sets the maximum number of output tokens.
+    pub fn with_max_output_tokens(mut self, max_output_tokens: u64) -> Self {
+        self.max_output_tokens = Some(max_output_tokens);
+        self
+    }
+
+    /// Sets the sampling temperature.
+    pub fn with_temperature(mut self, temperature: f64) -> Self {
+        self.temperature = Some(temperature);
+        self
+    }
+
+    /// Adds a stop sequence.
+    pub fn with_stop_sequence(mut self, stop_sequence: impl Into<String>) -> Self {
+        self.stop_sequences
+            .get_or_insert_with(Vec::new)
+            .push(stop_sequence.into());
+        self
+    }
+
+    /// Sets nucleus sampling.
+    pub fn with_top_p(mut self, top_p: f64) -> Self {
+        self.top_p = Some(top_p);
+        self
+    }
+
+    /// Sets top-k sampling.
+    pub fn with_top_k(mut self, top_k: u64) -> Self {
+        self.top_k = Some(top_k);
+        self
+    }
+
+    /// Sets the presence penalty.
+    pub fn with_presence_penalty(mut self, presence_penalty: f64) -> Self {
+        self.presence_penalty = Some(presence_penalty);
+        self
+    }
+
+    /// Sets the frequency penalty.
+    pub fn with_frequency_penalty(mut self, frequency_penalty: f64) -> Self {
+        self.frequency_penalty = Some(frequency_penalty);
+        self
+    }
+
+    /// Sets the response format.
+    pub fn with_response_format(mut self, response_format: LanguageModelResponseFormat) -> Self {
+        self.response_format = Some(response_format);
+        self
+    }
+
+    /// Sets the deterministic sampling seed.
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
+    /// Adds a tool that is available to the model.
+    pub fn with_tool(mut self, tool: LanguageModelTool) -> Self {
+        self.tools.get_or_insert_with(Vec::new).push(tool);
+        self
+    }
+
+    /// Sets the tool selection strategy.
+    pub fn with_tool_choice(mut self, tool_choice: LanguageModelToolChoice) -> Self {
+        self.tool_choice = Some(tool_choice);
+        self
+    }
+
+    /// Sets whether raw stream chunks should be included.
+    pub fn with_include_raw_chunks(mut self, include_raw_chunks: bool) -> Self {
+        self.include_raw_chunks = Some(include_raw_chunks);
+        self
+    }
+
+    /// Adds an HTTP header.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers
+            .get_or_insert_with(Headers::new)
+            .insert(name.into(), value.into());
+        self
+    }
+
+    /// Sets the reasoning effort.
+    pub fn with_reasoning(mut self, reasoning: LanguageModelReasoningEffort) -> Self {
+        self.reasoning = Some(reasoning);
+        self
+    }
+
+    /// Adds provider-specific options.
+    pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
+        self.provider_options = Some(provider_options);
+        self
+    }
+}
+
 /// A standardized prompt passed to a language model provider.
 pub type LanguageModelPrompt = Vec<LanguageModelMessage>;
 
@@ -1668,13 +1960,15 @@ pub enum LanguageModelToolResultContentPart {
 mod tests {
     use super::{
         FinishReason, InputTokenUsage, LanguageModelAssistantContentPart,
-        LanguageModelAssistantMessage, LanguageModelContent, LanguageModelCustomContent,
-        LanguageModelCustomPart, LanguageModelFile, LanguageModelFileData, LanguageModelFilePart,
-        LanguageModelFinishReason, LanguageModelFunctionTool, LanguageModelMessage,
-        LanguageModelPrompt, LanguageModelProviderTool, LanguageModelReasoning,
-        LanguageModelReasoningFile, LanguageModelReasoningPart, LanguageModelResponseMetadata,
-        LanguageModelSource, LanguageModelSystemMessage, LanguageModelText, LanguageModelTextPart,
-        LanguageModelTool, LanguageModelToolApprovalRequest, LanguageModelToolApprovalResponsePart,
+        LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
+        LanguageModelCustomContent, LanguageModelCustomPart, LanguageModelFile,
+        LanguageModelFileData, LanguageModelFilePart, LanguageModelFinishReason,
+        LanguageModelFunctionTool, LanguageModelMessage, LanguageModelPrompt,
+        LanguageModelProviderTool, LanguageModelReasoning, LanguageModelReasoningEffort,
+        LanguageModelReasoningFile, LanguageModelReasoningPart, LanguageModelResponseFormat,
+        LanguageModelResponseMetadata, LanguageModelSource, LanguageModelSystemMessage,
+        LanguageModelText, LanguageModelTextPart, LanguageModelTool,
+        LanguageModelToolApprovalRequest, LanguageModelToolApprovalResponsePart,
         LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolChoice,
         LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResult,
         LanguageModelToolResultContentPart, LanguageModelToolResultCustomContent,
@@ -2564,6 +2858,173 @@ mod tests {
             LanguageModelToolChoice::Tool {
                 tool_name: "weather".to_string()
             }
+        );
+    }
+
+    #[test]
+    fn call_options_serializes_upstream_shape_with_generation_controls() {
+        let input_schema =
+            serde_json::from_value(json!({ "type": "object" })).expect("schema is object");
+        let response_schema = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string"
+                }
+            }
+        }))
+        .expect("response schema is object");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "anthropic": {
+                "cacheControl": {
+                    "type": "ephemeral"
+                }
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let options = LanguageModelCallOptions::new(vec![LanguageModelMessage::System(
+            LanguageModelSystemMessage::new("Return compact JSON."),
+        )])
+        .with_max_output_tokens(256)
+        .with_temperature(0.2)
+        .with_stop_sequence("</json>")
+        .with_top_p(0.95)
+        .with_top_k(40)
+        .with_presence_penalty(0.1)
+        .with_frequency_penalty(0.2)
+        .with_response_format(
+            LanguageModelResponseFormat::json()
+                .with_schema(response_schema)
+                .with_name("summary")
+                .with_description("A short summary object."),
+        )
+        .with_seed(1234)
+        .with_tool(LanguageModelTool::Function(LanguageModelFunctionTool::new(
+            "weather",
+            input_schema,
+        )))
+        .with_tool_choice(LanguageModelToolChoice::Tool {
+            tool_name: "weather".to_string(),
+        })
+        .with_include_raw_chunks(true)
+        .with_header("x-request-id", "req_123")
+        .with_reasoning(LanguageModelReasoningEffort::High)
+        .with_provider_options(provider_options);
+
+        assert_eq!(
+            serde_json::to_value(options).expect("call options serialize"),
+            json!({
+                "prompt": [
+                    {
+                        "role": "system",
+                        "content": "Return compact JSON."
+                    }
+                ],
+                "maxOutputTokens": 256,
+                "temperature": 0.2,
+                "stopSequences": ["</json>"],
+                "topP": 0.95,
+                "topK": 40,
+                "presencePenalty": 0.1,
+                "frequencyPenalty": 0.2,
+                "responseFormat": {
+                    "type": "json",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "summary": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "name": "summary",
+                    "description": "A short summary object."
+                },
+                "seed": 1234,
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "weather",
+                        "inputSchema": {
+                            "type": "object"
+                        }
+                    }
+                ],
+                "toolChoice": {
+                    "type": "tool",
+                    "toolName": "weather"
+                },
+                "includeRawChunks": true,
+                "headers": {
+                    "x-request-id": "req_123"
+                },
+                "reasoning": "high",
+                "providerOptions": {
+                    "anthropic": {
+                        "cacheControl": {
+                            "type": "ephemeral"
+                        }
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn call_options_deserializes_minimal_prompt_and_omits_missing_options() {
+        let options: LanguageModelCallOptions = serde_json::from_value(json!({
+            "prompt": [
+                {
+                    "role": "system",
+                    "content": "Be concise."
+                }
+            ]
+        }))
+        .expect("call options deserialize");
+
+        assert_eq!(
+            options,
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::System(
+                LanguageModelSystemMessage::new("Be concise."),
+            )])
+        );
+        assert_eq!(
+            serde_json::to_value(options).expect("call options serialize"),
+            json!({
+                "prompt": [
+                    {
+                        "role": "system",
+                        "content": "Be concise."
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn call_options_deserializes_text_format_and_provider_default_reasoning() {
+        let options: LanguageModelCallOptions = serde_json::from_value(json!({
+            "prompt": [
+                {
+                    "role": "system",
+                    "content": "Answer plainly."
+                }
+            ],
+            "responseFormat": {
+                "type": "text"
+            },
+            "reasoning": "provider-default"
+        }))
+        .expect("call options deserialize");
+
+        assert_eq!(
+            options.response_format,
+            Some(LanguageModelResponseFormat::Text)
+        );
+        assert_eq!(
+            options.reasoning,
+            Some(LanguageModelReasoningEffort::ProviderDefault)
         );
     }
 
