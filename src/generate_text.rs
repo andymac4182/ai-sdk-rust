@@ -33,8 +33,9 @@ use crate::provider::{
 };
 use crate::provider::{ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{
-    Base64DecodeError, IdGeneratorOptions, Tool, ToolExecutionOptions, convert_base64_to_bytes,
-    convert_bytes_to_base64, create_id_generator, generate_id, prepare_tools,
+    Base64DecodeError, ExperimentalSandbox, IdGeneratorOptions, Tool, ToolExecutionOptions,
+    convert_base64_to_bytes, convert_bytes_to_base64, create_id_generator, generate_id,
+    prepare_tools,
 };
 use crate::warning::Warning;
 
@@ -262,6 +263,9 @@ pub struct PrepareStepOptions<'a, M: LanguageModel + ?Sized> {
 
     /// Tool context carried by the generation loop.
     pub tools_context: JsonObject,
+
+    /// Experimental sandbox environment available for this generation step.
+    pub experimental_sandbox: Option<Arc<dyn ExperimentalSandbox>>,
 }
 
 /// Per-step settings returned by a preparation callback.
@@ -291,6 +295,9 @@ pub struct PrepareStepResult<'a, M: LanguageModel + ?Sized> {
 
     /// Optional provider-specific option override for this step.
     pub provider_options: Option<ProviderOptions>,
+
+    /// Optional sandbox override for this step only.
+    pub experimental_sandbox: Option<Arc<dyn ExperimentalSandbox>>,
 }
 
 impl<'a, M: LanguageModel + ?Sized> PrepareStepResult<'a, M> {
@@ -343,6 +350,15 @@ impl<'a, M: LanguageModel + ?Sized> PrepareStepResult<'a, M> {
         self.provider_options = Some(provider_options);
         self
     }
+
+    /// Overrides the experimental sandbox for this step only.
+    pub fn with_experimental_sandbox(
+        mut self,
+        experimental_sandbox: Arc<dyn ExperimentalSandbox>,
+    ) -> Self {
+        self.experimental_sandbox = Some(experimental_sandbox);
+        self
+    }
 }
 
 impl<M: LanguageModel + ?Sized> Default for PrepareStepResult<'_, M> {
@@ -355,6 +371,7 @@ impl<M: LanguageModel + ?Sized> Default for PrepareStepResult<'_, M> {
             runtime_context: None,
             tools_context: None,
             provider_options: None,
+            experimental_sandbox: None,
         }
     }
 }
@@ -3328,6 +3345,9 @@ pub struct GenerateTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Tool-specific context keyed by tool name.
     pub tools_context: JsonObject,
 
+    /// Experimental sandbox environment passed through to Rust tool execution.
+    pub experimental_sandbox: Option<Arc<dyn ExperimentalSandbox>>,
+
     /// Optional active tool names used to restrict the available tool set.
     pub active_tools: ActiveTools,
 
@@ -3386,6 +3406,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             tools: Vec::new(),
             runtime_context: JsonObject::new(),
             tools_context: JsonObject::new(),
+            experimental_sandbox: None,
             active_tools: None,
             tool_approval: None,
             tool_input_refinements: BTreeMap::new(),
@@ -3413,6 +3434,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             tools: Vec::new(),
             runtime_context: JsonObject::new(),
             tools_context: JsonObject::new(),
+            experimental_sandbox: None,
             active_tools: None,
             tool_approval: None,
             tool_input_refinements: BTreeMap::new(),
@@ -3512,6 +3534,15 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
     /// Sets the tool-specific context map keyed by tool name.
     pub fn with_tools_context(mut self, tools_context: JsonObject) -> Self {
         self.tools_context = tools_context;
+        self
+    }
+
+    /// Sets the experimental sandbox available to Rust tool executors.
+    pub fn with_experimental_sandbox(
+        mut self,
+        experimental_sandbox: Arc<dyn ExperimentalSandbox>,
+    ) -> Self {
+        self.experimental_sandbox = Some(experimental_sandbox);
         self
     }
 
@@ -5007,6 +5038,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         tools,
         mut runtime_context,
         mut tools_context,
+        experimental_sandbox,
         active_tools,
         tool_approval,
         tool_input_refinements,
@@ -5073,6 +5105,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         &current_prompt,
         &tools,
         &tools_context,
+        experimental_sandbox.as_ref(),
         (
             on_tool_execution_start.as_ref(),
             on_tool_execution_end.as_ref(),
@@ -5101,6 +5134,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
                     response_messages: accumulated_response_messages,
                     runtime_context: runtime_context.clone(),
                     tools_context: tools_context.clone(),
+                    experimental_sandbox: experimental_sandbox.clone(),
                 })
                 .await
         } else {
@@ -5115,6 +5149,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
             runtime_context: step_runtime_context,
             tools_context: step_tools_context,
             provider_options: step_provider_options,
+            experimental_sandbox: step_experimental_sandbox,
         } = prepare_step_result;
 
         if let Some(runtime_context_override) = step_runtime_context {
@@ -5130,6 +5165,8 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         }
 
         let step_model = step_model.unwrap_or(model);
+        let step_experimental_sandbox =
+            step_experimental_sandbox.or_else(|| experimental_sandbox.clone());
         let step_model_info =
             GenerateTextModelInfo::new(step_model.provider(), step_model.model_id());
         let step_active_tools = step_active_tools.as_deref().or(active_tools);
@@ -5251,6 +5288,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
             &tools_context,
             &tool_approvals.blocked_tool_call_ids,
             (
+                step_experimental_sandbox.as_ref(),
                 on_tool_execution_start.as_ref(),
                 on_tool_execution_end.as_ref(),
             ),
@@ -5795,6 +5833,7 @@ async fn initial_tool_approval_response_message(
     prompt: &LanguageModelPrompt,
     tools: &[Tool],
     tools_context: &JsonObject,
+    experimental_sandbox: Option<&Arc<dyn ExperimentalSandbox>>,
     tool_execution_callbacks: (
         Option<&GenerateTextOnToolExecutionStart<'_>>,
         Option<&GenerateTextOnToolExecutionEnd<'_>>,
@@ -5819,7 +5858,11 @@ async fn initial_tool_approval_response_message(
         prompt,
         tools_context,
         &BTreeSet::new(),
-        tool_execution_callbacks,
+        (
+            experimental_sandbox,
+            tool_execution_callbacks.0,
+            tool_execution_callbacks.1,
+        ),
     )
     .await;
 
@@ -6017,14 +6060,16 @@ async fn execute_tool_calls(
     messages: &LanguageModelPrompt,
     tools_context: &JsonObject,
     blocked_tool_call_ids: &BTreeSet<String>,
-    tool_execution_callbacks: (
+    tool_execution_context: (
+        Option<&Arc<dyn ExperimentalSandbox>>,
         Option<&GenerateTextOnToolExecutionStart<'_>>,
         Option<&GenerateTextOnToolExecutionEnd<'_>>,
     ),
 ) -> (Vec<GenerateTextToolResult>, BTreeMap<String, u64>) {
     let mut tool_results = Vec::new();
     let mut tool_execution_ms = BTreeMap::new();
-    let (on_tool_execution_start, on_tool_execution_end) = tool_execution_callbacks;
+    let (experimental_sandbox, on_tool_execution_start, on_tool_execution_end) =
+        tool_execution_context;
 
     for tool_call in tool_calls {
         if tool_call.provider_executed == Some(true) {
@@ -6077,6 +6122,10 @@ async fn execute_tool_calls(
             ToolExecutionOptions::new(tool_call.tool_call_id.clone(), messages.clone());
         if let Some(context) = &tool_context {
             execution_options = execution_options.with_context(context.clone());
+        }
+        if let Some(experimental_sandbox) = experimental_sandbox {
+            execution_options =
+                execution_options.with_experimental_sandbox(Arc::clone(experimental_sandbox));
         }
 
         let Some(execute) = tool.execute(tool_call.input.clone(), execution_options) else {
@@ -7248,7 +7297,10 @@ mod tests {
     use crate::provider::{
         JsonParseError, ProviderMetadata, ProviderOptions, SpecificationVersion,
     };
-    use crate::provider_utils::{Schema, Tool, ToolExecutionError, ValidationResult, dynamic_tool};
+    use crate::provider_utils::{
+        ExperimentalSandbox, SandboxCommandOptions, SandboxCommandResult, SandboxRunCommandFuture,
+        Schema, Tool, ToolExecutionError, ValidationResult, dynamic_tool,
+    };
     use serde_json::json;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
@@ -8462,6 +8514,31 @@ mod tests {
         match Pin::new(&mut future).poll(&mut context) {
             Poll::Ready(value) => value,
             Poll::Pending => unreachable!("test futures should be ready"),
+        }
+    }
+
+    #[derive(Debug)]
+    struct TestSandbox {
+        description: String,
+    }
+
+    impl TestSandbox {
+        fn new(description: impl Into<String>) -> Self {
+            Self {
+                description: description.into(),
+            }
+        }
+    }
+
+    impl ExperimentalSandbox for TestSandbox {
+        fn description(&self) -> &str {
+            &self.description
+        }
+
+        fn run_command(&self, options: SandboxCommandOptions) -> SandboxRunCommandFuture {
+            Box::pin(ready(
+                SandboxCommandResult::new(0).with_stdout(options.command),
+            ))
         }
     }
 
@@ -12126,6 +12203,76 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn generate_text_passes_experimental_sandbox_to_prepare_step_and_tool_execution() {
+        let model = ToolLoopLanguageModel::new();
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let default_sandbox: Arc<dyn ExperimentalSandbox> =
+            Arc::new(TestSandbox::new("default sandbox"));
+        let step_sandbox: Arc<dyn ExperimentalSandbox> = Arc::new(TestSandbox::new("step sandbox"));
+        let prepare_sandbox_descriptions = Arc::new(Mutex::new(Vec::new()));
+        let prepare_sandbox_descriptions_clone = Arc::clone(&prepare_sandbox_descriptions);
+        let step_sandbox_clone = Arc::clone(&step_sandbox);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_experimental_sandbox(Arc::clone(&default_sandbox))
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |_input, options| async move {
+                        let sandbox = options
+                            .experimental_sandbox
+                            .expect("sandbox is passed to tool execution");
+                        let command_result =
+                            sandbox.run_command(SandboxCommandOptions::new("pwd")).await;
+
+                        Ok(json!({
+                            "description": sandbox.description(),
+                            "stdout": command_result.stdout
+                        }))
+                    },
+                ))
+                .with_prepare_step(move |options| {
+                    let descriptions = Arc::clone(&prepare_sandbox_descriptions_clone);
+                    let step_sandbox = Arc::clone(&step_sandbox_clone);
+
+                    async move {
+                        descriptions.lock().expect("lock succeeds").push(
+                            options
+                                .experimental_sandbox
+                                .as_ref()
+                                .map(|sandbox| sandbox.description().to_string()),
+                        );
+
+                        if options.step_number == 0 {
+                            PrepareStepResult::new().with_experimental_sandbox(step_sandbox)
+                        } else {
+                            PrepareStepResult::new()
+                        }
+                    }
+                })
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(
+            *prepare_sandbox_descriptions.lock().expect("lock succeeds"),
+            vec![
+                Some("default sandbox".to_string()),
+                Some("default sandbox".to_string())
+            ]
+        );
+        assert_eq!(result.tool_results[0].output["description"], "step sandbox");
+        assert_eq!(result.tool_results[0].output["stdout"], "pwd");
     }
 
     #[test]

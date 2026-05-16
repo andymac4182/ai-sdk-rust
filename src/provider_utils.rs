@@ -3553,8 +3553,92 @@ pub type ToolExecuteFuture =
 pub type ToolExecuteFunction =
     dyn Fn(JsonValue, ToolExecutionOptions) -> ToolExecuteFuture + Send + Sync + 'static;
 
+/// Future returned by a sandbox command runner.
+pub type SandboxRunCommandFuture = Pin<Box<dyn Future<Output = SandboxCommandResult> + Send>>;
+
+/// Options passed to an experimental sandbox command runner.
+///
+/// This mirrors upstream `Experimental_Sandbox.runCommand` options while
+/// intentionally omitting JavaScript-only `AbortSignal` cancellation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxCommandOptions {
+    /// Command to execute in the sandbox.
+    pub command: String,
+
+    /// Working directory used for the command, when supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
+}
+
+impl SandboxCommandOptions {
+    /// Creates sandbox command options with the required command.
+    pub fn new(command: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+            working_directory: None,
+        }
+    }
+
+    /// Sets the sandbox working directory for the command.
+    pub fn with_working_directory(mut self, working_directory: impl Into<String>) -> Self {
+        self.working_directory = Some(working_directory.into());
+        self
+    }
+}
+
+/// Result returned by an experimental sandbox command runner.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxCommandResult {
+    /// Exit code returned by the command.
+    pub exit_code: i32,
+
+    /// Standard output produced by the command.
+    pub stdout: String,
+
+    /// Standard error produced by the command.
+    pub stderr: String,
+}
+
+impl SandboxCommandResult {
+    /// Creates an empty sandbox command result for an exit code.
+    pub fn new(exit_code: i32) -> Self {
+        Self {
+            exit_code,
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
+
+    /// Sets standard output for the command result.
+    pub fn with_stdout(mut self, stdout: impl Into<String>) -> Self {
+        self.stdout = stdout.into();
+        self
+    }
+
+    /// Sets standard error for the command result.
+    pub fn with_stderr(mut self, stderr: impl Into<String>) -> Self {
+        self.stderr = stderr.into();
+        self
+    }
+}
+
+/// Experimental sandbox environment available to Rust tool executors.
+///
+/// Upstream exposes a description plus a `runCommand` callback. Rust keeps the
+/// same runtime boundary through an object-safe trait so callers can provide
+/// their own sandbox implementation without selecting a process runtime here.
+pub trait ExperimentalSandbox: fmt::Debug + Send + Sync {
+    /// Returns a human-readable sandbox description for model/tool instructions.
+    fn description(&self) -> &str;
+
+    /// Runs a command in the sandbox.
+    fn run_command(&self, options: SandboxCommandOptions) -> SandboxRunCommandFuture;
+}
+
 /// Options passed to a tool execution function.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolExecutionOptions {
     /// Identifier of the model tool call being executed.
@@ -3566,6 +3650,10 @@ pub struct ToolExecutionOptions {
     /// Tool-specific context configured for the executed tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<JsonValue>,
+
+    /// Experimental sandbox environment available to the tool executor.
+    #[serde(skip)]
+    pub experimental_sandbox: Option<Arc<dyn ExperimentalSandbox>>,
 }
 
 impl ToolExecutionOptions {
@@ -3575,6 +3663,7 @@ impl ToolExecutionOptions {
             tool_call_id: tool_call_id.into(),
             messages,
             context: None,
+            experimental_sandbox: None,
         }
     }
 
@@ -3582,6 +3671,25 @@ impl ToolExecutionOptions {
     pub fn with_context(mut self, context: impl Into<JsonValue>) -> Self {
         self.context = Some(context.into());
         self
+    }
+
+    /// Sets the experimental sandbox available to this tool execution.
+    pub fn with_experimental_sandbox(mut self, sandbox: Arc<dyn ExperimentalSandbox>) -> Self {
+        self.experimental_sandbox = Some(sandbox);
+        self
+    }
+}
+
+impl PartialEq for ToolExecutionOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.tool_call_id == other.tool_call_id
+            && self.messages == other.messages
+            && self.context == other.context
+            && match (&self.experimental_sandbox, &other.experimental_sandbox) {
+                (None, None) => true,
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                _ => false,
+            }
     }
 }
 
@@ -6721,8 +6829,8 @@ mod tests {
     use super::{
         Arrayable, Base64DecodeError, BinaryResponseHandlerOptions, ConvertToFormDataOptions,
         DEFAULT_MAX_DOWNLOAD_SIZE, DelayedPromise, DownloadBlobOptions, DownloadBlobResponse,
-        DownloadError, DownloadedBlob, EventSourceResponseHandlerOptions, FetchErrorInfo,
-        FlexibleSchema, FormData, FormDataEntry, FormDataInputValue, FormDataValue,
+        DownloadError, DownloadedBlob, EventSourceResponseHandlerOptions, ExperimentalSandbox,
+        FetchErrorInfo, FlexibleSchema, FormData, FormDataEntry, FormDataInputValue, FormDataValue,
         GetFromApiOptions, HandledFetchError, IdGeneratorOptions,
         InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
         JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, LazySchema, LoadApiKeyOptions,
@@ -6731,7 +6839,8 @@ mod tests {
         ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
         ProviderApiResponseBody, ProviderApiResponseHandlerError, ProviderDefinedToolFactory,
         ProviderExecutedToolFactory, ReasoningLevel, Resolvable, ResponseHandlerResult,
-        RuntimeEnvironment, Schema, SerializedModelOptions, StatusCodeErrorResponseHandlerOptions,
+        RuntimeEnvironment, SandboxCommandOptions, SandboxCommandResult, SandboxRunCommandFuture,
+        Schema, SerializedModelOptions, StatusCodeErrorResponseHandlerOptions,
         StreamingToolCallDelta, StreamingToolCallDeltaFunction, StreamingToolCallTracker,
         StreamingToolCallTrackerOptions, StreamingToolCallTypeValidation, Tool, ToolExecutionError,
         ToolExecutionOptions, ValidateTypesResult, ValidationResult,
@@ -6779,6 +6888,31 @@ mod tests {
         let mut context = Context::from_waker(waker);
 
         Future::poll(future.as_mut(), &mut context)
+    }
+
+    #[derive(Debug)]
+    struct StaticSandbox {
+        description: String,
+    }
+
+    impl StaticSandbox {
+        fn new(description: impl Into<String>) -> Self {
+            Self {
+                description: description.into(),
+            }
+        }
+    }
+
+    impl ExperimentalSandbox for StaticSandbox {
+        fn description(&self) -> &str {
+            &self.description
+        }
+
+        fn run_command(&self, options: SandboxCommandOptions) -> SandboxRunCommandFuture {
+            Box::pin(ready(
+                SandboxCommandResult::new(0).with_stdout(options.command),
+            ))
+        }
     }
 
     #[test]
@@ -12869,6 +13003,83 @@ mod tests {
                 "context": {
                     "apiKey": "secret"
                 }
+            })
+        );
+    }
+
+    #[test]
+    fn sandbox_command_contracts_round_trip_upstream_shape() {
+        let options = SandboxCommandOptions::new("pwd").with_working_directory("/workspace");
+
+        assert_eq!(
+            serde_json::to_value(&options).expect("command options serialize"),
+            json!({
+                "command": "pwd",
+                "workingDirectory": "/workspace"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<SandboxCommandOptions>(json!({
+                "command": "pwd",
+                "workingDirectory": "/workspace"
+            }))
+            .expect("command options deserialize"),
+            options
+        );
+
+        let result = SandboxCommandResult::new(2)
+            .with_stdout("out")
+            .with_stderr("err");
+
+        assert_eq!(
+            serde_json::to_value(&result).expect("command result serializes"),
+            json!({
+                "exitCode": 2,
+                "stdout": "out",
+                "stderr": "err"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<SandboxCommandResult>(json!({
+                "exitCode": 2,
+                "stdout": "out",
+                "stderr": "err"
+            }))
+            .expect("command result deserializes"),
+            result
+        );
+    }
+
+    #[test]
+    fn tool_execution_options_carry_runtime_sandbox_without_serializing_it() {
+        let sandbox: Arc<dyn ExperimentalSandbox> =
+            Arc::new(StaticSandbox::new("workspace sandbox"));
+        let options = ToolExecutionOptions::new("call-1", Vec::new())
+            .with_experimental_sandbox(Arc::clone(&sandbox));
+
+        assert_eq!(
+            options
+                .experimental_sandbox
+                .as_ref()
+                .expect("sandbox is present")
+                .description(),
+            "workspace sandbox"
+        );
+        assert_eq!(
+            poll_ready(
+                options
+                    .experimental_sandbox
+                    .as_ref()
+                    .expect("sandbox is present")
+                    .run_command(SandboxCommandOptions::new("echo hi"))
+            ),
+            SandboxCommandResult::new(0).with_stdout("echo hi")
+        );
+        assert_eq!(
+            serde_json::to_value(options).expect("execution options serialize"),
+            json!({
+                "toolCallId": "call-1",
+                "messages": []
             })
         );
     }
