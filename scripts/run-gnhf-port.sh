@@ -20,7 +20,8 @@ Priorities:
 6. When adding a new surface, consider whether it belongs in the current crate or should start/move into a workspace crate that matches the upstream package it came from.
 7. Build `generate_text(...)` against a deterministic fake/test `LanguageModel` before adding real provider networking. Prove the high-level loop can accept prompts/settings, call a model, detect tool calls, execute typed Rust tools, append tool results, continue until final text or max steps, and return `GenerateTextResult`.
 8. Add deterministic end-to-end tests for plain text generation, single tool call, multi-step tool call, tool error, unknown tool, invalid tool args, and max-step exhaustion.
-9. Do not churn dependencies or CI unless the next SDK slice genuinely requires it.
+9. Ban vague generic naming such as helpers, utils, common, misc, stuff, shared, and similar buckets in source paths, module names, crate names, public APIs, and docs; prefer precise responsibility names, and add a custom check to enforce this convention. Document explicit exceptions when mirroring upstream package names.
+10. Do not churn dependencies or CI unless the next SDK slice genuinely requires it.
 
 Update notes.md with the slice completed, upstream facts learned, and the next likely surface to port.
 PROMPT
