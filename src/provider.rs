@@ -207,6 +207,46 @@ impl fmt::Display for LoadSettingError {
 
 impl std::error::Error for LoadSettingError {}
 
+/// Error returned when a provider or provider utility receives an invalid argument.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvalidArgumentError {
+    argument: String,
+    message: String,
+}
+
+impl InvalidArgumentError {
+    /// Creates an invalid argument error with the upstream provider message.
+    pub fn new(argument: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            argument: argument.into(),
+            message: message.into(),
+        }
+    }
+
+    /// Returns the invalid argument name.
+    pub fn argument(&self) -> &str {
+        &self.argument
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into the invalid argument name and message.
+    pub fn into_parts(self) -> (String, String) {
+        (self.argument, self.message)
+    }
+}
+
+impl fmt::Display for InvalidArgumentError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for InvalidArgumentError {}
+
 /// Error returned when a provider response has no body to parse.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EmptyResponseBodyError {
@@ -436,8 +476,8 @@ pub type ProviderMetadata = BTreeMap<String, JsonObject>;
 #[cfg(test)]
 mod tests {
     use super::{
-        EmptyResponseBodyError, InvalidResponseDataError, LoadApiKeyError, LoadSettingError,
-        ModelType, NoContentGeneratedError, NoSuchModelError, ProviderOptions,
+        EmptyResponseBodyError, InvalidArgumentError, InvalidResponseDataError, LoadApiKeyError,
+        LoadSettingError, ModelType, NoContentGeneratedError, NoSuchModelError, ProviderOptions,
         TooManyEmbeddingValuesForCallError, UnsupportedFunctionalityError,
     };
     use serde_json::json;
@@ -535,6 +575,20 @@ mod tests {
         assert_eq!(error.message(), message);
         assert_eq!(error.to_string(), message);
         assert_eq!(error.into_message(), message);
+    }
+
+    #[test]
+    fn invalid_argument_error_uses_upstream_message_contract() {
+        let message = "The separator \"-\" must not be part of the alphabet \"0123456789-\".";
+        let error = InvalidArgumentError::new("separator", message);
+
+        assert_eq!(error.argument(), "separator");
+        assert_eq!(error.message(), message);
+        assert_eq!(error.to_string(), message);
+        assert_eq!(
+            error.into_parts(),
+            ("separator".to_string(), message.to_string())
+        );
     }
 
     #[test]
