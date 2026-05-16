@@ -20,7 +20,7 @@ pub mod video_model;
 pub mod warning;
 
 pub use embedding_model::{
-    EmbeddingModelCallOptions, EmbeddingModelEmbedding, EmbeddingModelResponse,
+    EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelEmbedding, EmbeddingModelResponse,
     EmbeddingModelResult, EmbeddingModelUsage,
 };
 pub use file_data::{

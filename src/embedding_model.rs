@@ -1,12 +1,58 @@
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 
 use crate::headers::Headers;
 use crate::json::JsonValue;
-use crate::provider::{ProviderMetadata, ProviderOptions};
+use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
 use crate::warning::Warning;
 
 /// A text embedding vector returned by an embedding model.
 pub type EmbeddingModelEmbedding = Vec<f64>;
+
+/// A provider-v4 embedding model.
+///
+/// The upstream TypeScript contract exposes capability properties that may be
+/// `PromiseLike` plus a `doEmbed` method returning a
+/// `PromiseLike<EmbeddingModelV4Result>`. This Rust trait maps those boundaries
+/// to associated [`Future`] types without introducing an async-trait dependency.
+pub trait EmbeddingModel {
+    /// Future returned by [`EmbeddingModel::max_embeddings_per_call`].
+    type MaxEmbeddingsPerCallFuture<'a>: Future<Output = Option<usize>> + Send + 'a
+    where
+        Self: 'a;
+
+    /// Future returned by [`EmbeddingModel::supports_parallel_calls`].
+    type SupportsParallelCallsFuture<'a>: Future<Output = bool> + Send + 'a
+    where
+        Self: 'a;
+
+    /// Future returned by [`EmbeddingModel::do_embed`].
+    type EmbedFuture<'a>: Future<Output = EmbeddingModelResult> + Send + 'a
+    where
+        Self: 'a;
+
+    /// Returns the provider/model interface version implemented by this model.
+    fn specification_version(&self) -> SpecificationVersion {
+        SpecificationVersion::V4
+    }
+
+    /// Returns the provider identifier.
+    fn provider(&self) -> &str;
+
+    /// Returns the provider-specific model id.
+    fn model_id(&self) -> &str;
+
+    /// Returns the maximum number of embeddings supported in one call.
+    ///
+    /// `None` represents the upstream `undefined` or unbounded case.
+    fn max_embeddings_per_call(&self) -> Self::MaxEmbeddingsPerCallFuture<'_>;
+
+    /// Returns whether the model can handle multiple embedding calls in parallel.
+    fn supports_parallel_calls(&self) -> Self::SupportsParallelCallsFuture<'_>;
+
+    /// Generates embeddings for the supplied text values.
+    fn do_embed(&self, options: EmbeddingModelCallOptions) -> Self::EmbedFuture<'_>;
+}
 
 /// Options passed to an embedding model provider call.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -160,12 +206,64 @@ impl EmbeddingModelResult {
 #[cfg(test)]
 mod tests {
     use super::{
-        EmbeddingModelCallOptions, EmbeddingModelResponse, EmbeddingModelResult,
+        EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelResponse, EmbeddingModelResult,
         EmbeddingModelUsage,
     };
-    use crate::provider::{ProviderMetadata, ProviderOptions};
+    use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
     use crate::warning::Warning;
     use serde_json::json;
+    use std::future::{Future, Ready, ready};
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
+
+    struct StaticEmbeddingModel;
+
+    impl EmbeddingModel for StaticEmbeddingModel {
+        type MaxEmbeddingsPerCallFuture<'a>
+            = Ready<Option<usize>>
+        where
+            Self: 'a;
+
+        type SupportsParallelCallsFuture<'a>
+            = Ready<bool>
+        where
+            Self: 'a;
+
+        type EmbedFuture<'a>
+            = Ready<EmbeddingModelResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "test-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            "embedding-test"
+        }
+
+        fn max_embeddings_per_call(&self) -> Self::MaxEmbeddingsPerCallFuture<'_> {
+            ready(Some(2))
+        }
+
+        fn supports_parallel_calls(&self) -> Self::SupportsParallelCallsFuture<'_> {
+            ready(true)
+        }
+
+        fn do_embed(&self, _options: EmbeddingModelCallOptions) -> Self::EmbedFuture<'_> {
+            ready(EmbeddingModelResult::new(vec![vec![0.1, 0.2]]))
+        }
+    }
+
+    fn poll_ready<T>(mut future: Ready<T>) -> T {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+
+        match Pin::new(&mut future).poll(&mut context) {
+            Poll::Ready(value) => value,
+            Poll::Pending => unreachable!("std::future::Ready never returns pending"),
+        }
+    }
 
     #[test]
     fn call_options_serializes_upstream_shape_with_headers_and_provider_options() {
@@ -216,6 +314,21 @@ mod tests {
                 "values": ["search query"]
             })
         );
+    }
+
+    #[test]
+    fn embedding_model_trait_exposes_upstream_v4_identity_capabilities_and_embed_boundary() {
+        let model = StaticEmbeddingModel;
+        let options = EmbeddingModelCallOptions::new(vec!["search query".to_string()]);
+
+        let result = poll_ready(model.do_embed(options));
+
+        assert_eq!(model.specification_version(), SpecificationVersion::V4);
+        assert_eq!(model.provider(), "test-provider");
+        assert_eq!(model.model_id(), "embedding-test");
+        assert_eq!(poll_ready(model.max_embeddings_per_call()), Some(2));
+        assert!(poll_ready(model.supports_parallel_calls()));
+        assert_eq!(result.embeddings, vec![vec![0.1, 0.2]]);
     }
 
     #[test]
