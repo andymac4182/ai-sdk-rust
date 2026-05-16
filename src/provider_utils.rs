@@ -3220,6 +3220,32 @@ where
     ProviderApiRequest::get(url, with_provider_utils_user_agent(headers, environment))
 }
 
+/// Prepares the request metadata used by upstream `postToApi`.
+///
+/// Upstream `postToApi` applies the shared provider-utils user-agent headers,
+/// sends the supplied body content, and preserves separate body values for
+/// response-handler `requestBodyValues`. The Rust boundary supports text and
+/// byte bodies and leaves JavaScript-only `FormData` handling to HTTP adapters.
+pub fn prepare_post_to_api_request<K, V, I>(
+    url: impl Into<String>,
+    headers: Option<I>,
+    body: ProviderApiRequestBody,
+    request_body_values: impl Into<JsonValue>,
+    environment: &RuntimeEnvironment,
+) -> ProviderApiRequest
+where
+    I: IntoIterator<Item = (K, Option<V>)>,
+    K: AsRef<str>,
+    V: Into<String>,
+{
+    ProviderApiRequest::post(
+        url,
+        with_provider_utils_user_agent(headers, environment),
+        body,
+        request_body_values,
+    )
+}
+
 /// Prepares the JSON request metadata used by upstream `postJsonToApi`.
 ///
 /// Upstream `postJsonToApi` adds `Content-Type: application/json`, allows caller
@@ -3249,11 +3275,12 @@ where
         }
     }
 
-    ProviderApiRequest::post(
+    prepare_post_to_api_request(
         url,
-        with_provider_utils_user_agent(Some(combined_headers), environment),
+        Some(combined_headers),
         ProviderApiRequestBody::text(body_content),
         body_values,
+        environment,
     )
 }
 
@@ -3619,10 +3646,11 @@ mod tests {
         map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
         media_type_to_extension, normalize_headers, parse_json, parse_json_event_stream,
         parse_provider_options, prepare_get_from_api_request, prepare_post_json_to_api_request,
-        prepare_tools, read_response_with_size_limit, remove_undefined_entries,
-        resolve_full_media_type, resolve_provider_reference, safe_parse_json, safe_validate_types,
-        strip_file_extension, validate_download_url, validate_types,
-        with_provider_utils_user_agent, with_user_agent_suffix, without_trailing_slash,
+        prepare_post_to_api_request, prepare_tools, read_response_with_size_limit,
+        remove_undefined_entries, resolve_full_media_type, resolve_provider_reference,
+        safe_parse_json, safe_validate_types, strip_file_extension, validate_download_url,
+        validate_types, with_provider_utils_user_agent, with_user_agent_suffix,
+        without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -6424,6 +6452,47 @@ mod tests {
                     "user-agent".to_string(),
                     format!(
                         "ai-sdk/provider-utils/{} runtime/deno/2.0 test",
+                        crate::VERSION
+                    ),
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn prepare_post_to_api_request_matches_upstream_binary_request_setup() {
+        let request = prepare_post_to_api_request(
+            "https://api.example.com/upload",
+            Some(vec![
+                ("Authorization", Some("Bearer test")),
+                ("X-Ignore", None),
+            ]),
+            ProviderApiRequestBody::bytes([1_u8, 2, 3]),
+            json!({ "filename": "image.png" }),
+            &RuntimeEnvironment::vercel_edge(),
+        );
+
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://api.example.com/upload");
+        assert_eq!(
+            request.request_body_values,
+            json!({ "filename": "image.png" })
+        );
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_bytes),
+            Some([1_u8, 2, 3].as_slice())
+        );
+        assert_eq!(
+            request.headers,
+            BTreeMap::from([
+                ("authorization".to_string(), "Bearer test".to_string()),
+                (
+                    "user-agent".to_string(),
+                    format!(
+                        "ai-sdk/provider-utils/{} runtime/vercel-edge",
                         crate::VERSION
                     ),
                 ),

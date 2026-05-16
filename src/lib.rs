@@ -114,10 +114,11 @@ pub use provider_utils::{
     load_optional_setting, load_setting, map_reasoning_to_provider_budget,
     map_reasoning_to_provider_effort, media_type_to_extension, normalize_headers, parse_json,
     parse_json_event_stream, parse_provider_options, prepare_get_from_api_request,
-    prepare_post_json_to_api_request, prepare_tools, read_response_with_size_limit,
-    remove_undefined_entries, resolve_full_media_type, resolve_provider_reference, safe_parse_json,
-    safe_validate_types, strip_file_extension, validate_download_url, validate_types,
-    with_provider_utils_user_agent, with_user_agent_suffix, without_trailing_slash,
+    prepare_post_json_to_api_request, prepare_post_to_api_request, prepare_tools,
+    read_response_with_size_limit, remove_undefined_entries, resolve_full_media_type,
+    resolve_provider_reference, safe_parse_json, safe_validate_types, strip_file_extension,
+    validate_download_url, validate_types, with_provider_utils_user_agent, with_user_agent_suffix,
+    without_trailing_slash,
 };
 pub use reranking_model::{
     RerankingModel, RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
