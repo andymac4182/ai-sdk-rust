@@ -30,7 +30,11 @@ pub mod video_model;
 pub mod warning;
 
 pub use embed::{
-    EmbedManyOptions, EmbedManyResult, EmbedOptions, EmbedResult, Embedding, embed, embed_many,
+    EmbedEndEvent, EmbedEventEmbedding, EmbedEventResponse, EmbedEventValue, EmbedManyOptions,
+    EmbedManyResult, EmbedOnEnd, EmbedOnEndCallback, EmbedOnEndFunction, EmbedOnEndFuture,
+    EmbedOnStart, EmbedOnStartCallback, EmbedOnStartFunction, EmbedOnStartFuture, EmbedOptions,
+    EmbedResult, EmbedStartEvent, Embedding, EmbeddingModelCallEndEvent,
+    EmbeddingModelCallStartEvent, embed, embed_many,
 };
 pub use embedding_model::{
     EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelEmbedding, EmbeddingModelResponse,

@@ -1,3 +1,8 @@
+use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
+use std::rc::Rc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::VERSION;
@@ -8,11 +13,243 @@ use crate::embedding_model::{
 use crate::headers::Headers;
 use crate::provider::ProviderMetadata;
 use crate::provider::ProviderOptions;
-use crate::provider_utils::with_user_agent_suffix;
+use crate::provider_utils::{IdGeneratorOptions, create_id_generator, with_user_agent_suffix};
+use crate::retry::DEFAULT_MAX_RETRIES;
 use crate::warning::Warning;
 
 /// Embedding vector returned by high-level embed operations.
 pub type Embedding = EmbeddingModelEmbedding;
+
+/// Value payload used by high-level embed lifecycle events.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum EmbedEventValue {
+    /// One value for `embed`.
+    One(String),
+
+    /// Multiple values for `embedMany`.
+    Many(Vec<String>),
+}
+
+/// Embedding payload used by high-level embed lifecycle events.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum EmbedEventEmbedding {
+    /// One embedding vector for `embed`.
+    One(Embedding),
+
+    /// Multiple embedding vectors for `embedMany`.
+    Many(Vec<Embedding>),
+}
+
+/// Response payload used by high-level embed lifecycle events.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum EmbedEventResponse {
+    /// One provider response for `embed`.
+    One(EmbeddingModelResponse),
+
+    /// Per-call provider responses for `embedMany`.
+    Many(Vec<Option<EmbeddingModelResponse>>),
+}
+
+/// Event passed to the start callback for `embed` and `embed_many`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbedStartEvent {
+    /// Unique identifier for this high-level embed call.
+    pub call_id: String,
+
+    /// Upstream operation identifier, such as `ai.embed` or `ai.embedMany`.
+    pub operation_id: String,
+
+    /// Provider identifier.
+    pub provider: String,
+
+    /// Provider-specific model identifier.
+    pub model_id: String,
+
+    /// Value or values being embedded.
+    pub value: EmbedEventValue,
+
+    /// Maximum number of retries configured for failed requests.
+    pub max_retries: usize,
+
+    /// Additional HTTP headers sent to the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Headers>,
+
+    /// Additional provider-specific options.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+}
+
+/// Event passed to the end callback for `embed` and `embed_many`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbedEndEvent {
+    /// Unique identifier for this high-level embed call.
+    pub call_id: String,
+
+    /// Upstream operation identifier, such as `ai.embed` or `ai.embedMany`.
+    pub operation_id: String,
+
+    /// Provider identifier.
+    pub provider: String,
+
+    /// Provider-specific model identifier.
+    pub model_id: String,
+
+    /// Value or values that were embedded.
+    pub value: EmbedEventValue,
+
+    /// Embedding or embeddings returned by the model.
+    pub embedding: EmbedEventEmbedding,
+
+    /// Token usage for the embedding operation.
+    pub usage: EmbeddingModelUsage,
+
+    /// Warnings returned by the model.
+    pub warnings: Vec<Warning>,
+
+    /// Optional provider-specific metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+
+    /// Optional response data from the provider call or calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<EmbedEventResponse>,
+}
+
+/// Event fired when an individual embedding model call starts.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingModelCallStartEvent {
+    /// Unique identifier for the high-level embed call.
+    pub call_id: String,
+
+    /// Unique identifier for this individual model invocation.
+    pub embed_call_id: String,
+
+    /// Upstream inner operation identifier.
+    pub operation_id: String,
+
+    /// Provider identifier.
+    pub provider: String,
+
+    /// Provider-specific model identifier.
+    pub model_id: String,
+
+    /// Values being embedded in this model call.
+    pub values: Vec<String>,
+}
+
+/// Event fired when an individual embedding model call ends.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingModelCallEndEvent {
+    /// Unique identifier for the high-level embed call.
+    pub call_id: String,
+
+    /// Unique identifier for this individual model invocation.
+    pub embed_call_id: String,
+
+    /// Upstream inner operation identifier.
+    pub operation_id: String,
+
+    /// Provider identifier.
+    pub provider: String,
+
+    /// Provider-specific model identifier.
+    pub model_id: String,
+
+    /// Values embedded in this model call.
+    pub values: Vec<String>,
+
+    /// Embeddings returned by this model call.
+    pub embeddings: Vec<Embedding>,
+
+    /// Token usage for this model call.
+    pub usage: EmbeddingModelUsage,
+}
+
+/// Future returned by a high-level embed start callback.
+pub type EmbedOnStartFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+/// Callback invoked before a high-level embed operation calls the model.
+pub type EmbedOnStartFunction<'a> = dyn Fn(EmbedStartEvent) -> EmbedOnStartFuture<'a> + 'a;
+
+/// Upstream callback alias for [`EmbedOnStartFunction`].
+pub type EmbedOnStartCallback<'a> = EmbedOnStartFunction<'a>;
+
+/// Callback wrapper for upstream embed `experimental_onStart`.
+pub struct EmbedOnStart<'a> {
+    on_start: Rc<EmbedOnStartFunction<'a>>,
+}
+
+impl<'a> EmbedOnStart<'a> {
+    /// Creates an embed start callback.
+    pub fn new<F, Fut>(on_start: F) -> Self
+    where
+        F: Fn(EmbedStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        Self {
+            on_start: Rc::new(move |event| Box::pin(on_start(event))),
+        }
+    }
+
+    /// Runs the embed start callback.
+    pub fn start(&self, event: EmbedStartEvent) -> EmbedOnStartFuture<'a> {
+        (self.on_start)(event)
+    }
+}
+
+impl fmt::Debug for EmbedOnStart<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EmbedOnStart")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Future returned by a high-level embed end callback.
+pub type EmbedOnEndFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+/// Callback invoked after a high-level embed operation receives model output.
+pub type EmbedOnEndFunction<'a> = dyn Fn(EmbedEndEvent) -> EmbedOnEndFuture<'a> + 'a;
+
+/// Upstream callback alias for [`EmbedOnEndFunction`].
+pub type EmbedOnEndCallback<'a> = EmbedOnEndFunction<'a>;
+
+/// Callback wrapper for upstream embed `experimental_onEnd`.
+pub struct EmbedOnEnd<'a> {
+    on_end: Rc<EmbedOnEndFunction<'a>>,
+}
+
+impl<'a> EmbedOnEnd<'a> {
+    /// Creates an embed end callback.
+    pub fn new<F, Fut>(on_end: F) -> Self
+    where
+        F: Fn(EmbedEndEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        Self {
+            on_end: Rc::new(move |event| Box::pin(on_end(event))),
+        }
+    }
+
+    /// Runs the embed end callback.
+    pub fn end(&self, event: EmbedEndEvent) -> EmbedOnEndFuture<'a> {
+        (self.on_end)(event)
+    }
+}
+
+impl fmt::Debug for EmbedOnEnd<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("EmbedOnEnd").finish_non_exhaustive()
+    }
+}
 
 /// Options for a high-level `embed` call.
 pub struct EmbedOptions<'a, M: EmbeddingModel + ?Sized> {
@@ -27,6 +264,12 @@ pub struct EmbedOptions<'a, M: EmbeddingModel + ?Sized> {
 
     /// Additional HTTP headers for HTTP-based providers.
     pub headers: Option<Headers>,
+
+    /// Callback invoked before the model is called.
+    pub on_start: Option<EmbedOnStart<'a>>,
+
+    /// Callback invoked after the model returns.
+    pub on_end: Option<EmbedOnEnd<'a>>,
 }
 
 impl<'a, M: EmbeddingModel + ?Sized> EmbedOptions<'a, M> {
@@ -37,6 +280,8 @@ impl<'a, M: EmbeddingModel + ?Sized> EmbedOptions<'a, M> {
             value: value.into(),
             provider_options: None,
             headers: None,
+            on_start: None,
+            on_end: None,
         }
     }
 
@@ -58,6 +303,44 @@ impl<'a, M: EmbeddingModel + ?Sized> EmbedOptions<'a, M> {
             .get_or_insert_with(Headers::new)
             .insert(name.into(), value.into());
         self
+    }
+
+    /// Sets a callback that is invoked before the embedding model is called.
+    pub fn with_on_start<F, Fut>(mut self, on_start: F) -> Self
+    where
+        F: Fn(EmbedStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_start = Some(EmbedOnStart::new(on_start));
+        self
+    }
+
+    /// Upstream experimental alias for [`EmbedOptions::with_on_start`].
+    pub fn with_experimental_on_start<F, Fut>(self, on_start: F) -> Self
+    where
+        F: Fn(EmbedStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.with_on_start(on_start)
+    }
+
+    /// Sets a callback that is invoked after the embedding model returns.
+    pub fn with_on_end<F, Fut>(mut self, on_end: F) -> Self
+    where
+        F: Fn(EmbedEndEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_end = Some(EmbedOnEnd::new(on_end));
+        self
+    }
+
+    /// Upstream experimental alias for [`EmbedOptions::with_on_end`].
+    pub fn with_experimental_on_end<F, Fut>(self, on_end: F) -> Self
+    where
+        F: Fn(EmbedEndEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.with_on_end(on_end)
     }
 }
 
@@ -74,6 +357,12 @@ pub struct EmbedManyOptions<'a, M: EmbeddingModel + ?Sized> {
 
     /// Additional HTTP headers for HTTP-based providers.
     pub headers: Option<Headers>,
+
+    /// Callback invoked before embedding begins.
+    pub on_start: Option<EmbedOnStart<'a>>,
+
+    /// Callback invoked after all model calls return.
+    pub on_end: Option<EmbedOnEnd<'a>>,
 }
 
 impl<'a, M: EmbeddingModel + ?Sized> EmbedManyOptions<'a, M> {
@@ -88,6 +377,8 @@ impl<'a, M: EmbeddingModel + ?Sized> EmbedManyOptions<'a, M> {
             values: values.into_iter().map(Into::into).collect(),
             provider_options: None,
             headers: None,
+            on_start: None,
+            on_end: None,
         }
     }
 
@@ -109,6 +400,44 @@ impl<'a, M: EmbeddingModel + ?Sized> EmbedManyOptions<'a, M> {
             .get_or_insert_with(Headers::new)
             .insert(name.into(), value.into());
         self
+    }
+
+    /// Sets a callback that is invoked before embedding begins.
+    pub fn with_on_start<F, Fut>(mut self, on_start: F) -> Self
+    where
+        F: Fn(EmbedStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_start = Some(EmbedOnStart::new(on_start));
+        self
+    }
+
+    /// Upstream experimental alias for [`EmbedManyOptions::with_on_start`].
+    pub fn with_experimental_on_start<F, Fut>(self, on_start: F) -> Self
+    where
+        F: Fn(EmbedStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.with_on_start(on_start)
+    }
+
+    /// Sets a callback that is invoked after all embeddings are available.
+    pub fn with_on_end<F, Fut>(mut self, on_end: F) -> Self
+    where
+        F: Fn(EmbedEndEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_end = Some(EmbedOnEnd::new(on_end));
+        self
+    }
+
+    /// Upstream experimental alias for [`EmbedManyOptions::with_on_end`].
+    pub fn with_experimental_on_end<F, Fut>(self, on_end: F) -> Self
+    where
+        F: Fn(EmbedEndEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.with_on_end(on_end)
     }
 }
 
@@ -176,8 +505,27 @@ pub async fn embed<M: EmbeddingModel + ?Sized>(options: EmbedOptions<'_, M>) -> 
         value,
         provider_options,
         headers,
+        on_start,
+        on_end,
     } = options;
     let headers = headers_with_ai_user_agent(headers);
+    let call_id = embed_call_id();
+
+    if let Some(on_start) = &on_start {
+        on_start
+            .start(EmbedStartEvent {
+                call_id: call_id.clone(),
+                operation_id: "ai.embed".to_string(),
+                provider: model.provider().to_string(),
+                model_id: model.model_id().to_string(),
+                value: EmbedEventValue::One(value.clone()),
+                max_retries: DEFAULT_MAX_RETRIES,
+                headers: Some(headers.clone()),
+                provider_options: provider_options.clone(),
+            })
+            .await;
+    }
+
     let EmbeddingModelResult {
         embeddings,
         usage,
@@ -192,14 +540,33 @@ pub async fn embed<M: EmbeddingModel + ?Sized>(options: EmbedOptions<'_, M>) -> 
         ))
         .await;
 
-    EmbedResult {
+    let result = EmbedResult {
         value,
         embedding: embeddings.into_iter().next().unwrap_or_default(),
         usage: usage.unwrap_or_else(|| EmbeddingModelUsage::new(0)),
         warnings,
         provider_metadata,
         response,
+    };
+
+    if let Some(on_end) = &on_end {
+        on_end
+            .end(EmbedEndEvent {
+                call_id,
+                operation_id: "ai.embed".to_string(),
+                provider: model.provider().to_string(),
+                model_id: model.model_id().to_string(),
+                value: EmbedEventValue::One(result.value.clone()),
+                embedding: EmbedEventEmbedding::One(result.embedding.clone()),
+                usage: result.usage.clone(),
+                warnings: result.warnings.clone(),
+                provider_metadata: result.provider_metadata.clone(),
+                response: result.response.clone().map(EmbedEventResponse::One),
+            })
+            .await;
     }
+
+    result
 }
 
 /// Result of a high-level `embedMany` call.
@@ -276,8 +643,27 @@ pub async fn embed_many<M: EmbeddingModel + ?Sized>(
         values,
         provider_options,
         headers,
+        on_start,
+        on_end,
     } = options;
     let headers = headers_with_ai_user_agent(headers);
+    let call_id = embed_call_id();
+
+    if let Some(on_start) = &on_start {
+        on_start
+            .start(EmbedStartEvent {
+                call_id: call_id.clone(),
+                operation_id: "ai.embedMany".to_string(),
+                provider: model.provider().to_string(),
+                model_id: model.model_id().to_string(),
+                value: EmbedEventValue::Many(values.clone()),
+                max_retries: DEFAULT_MAX_RETRIES,
+                headers: Some(headers.clone()),
+                provider_options: provider_options.clone(),
+            })
+            .await;
+    }
+
     let max_embeddings_per_call = model.max_embeddings_per_call().await;
     // Upstream resolves this capability before deciding whether chunking is
     // needed. Parallel scheduling can be layered on without changing the public
@@ -299,7 +685,7 @@ pub async fn embed_many<M: EmbeddingModel + ?Sized>(
             ))
             .await;
 
-        return EmbedManyResult {
+        let result = EmbedManyResult {
             values,
             embeddings,
             usage: usage.unwrap_or_else(|| EmbeddingModelUsage::new(0)),
@@ -307,6 +693,19 @@ pub async fn embed_many<M: EmbeddingModel + ?Sized>(
             provider_metadata,
             responses: Some(vec![response]),
         };
+
+        if let Some(on_end) = &on_end {
+            on_end
+                .end(embed_many_end_event(
+                    call_id,
+                    model.provider(),
+                    model.model_id(),
+                    &result,
+                ))
+                .await;
+        }
+
+        return result;
     };
 
     let mut embeddings = Vec::new();
@@ -340,14 +739,27 @@ pub async fn embed_many<M: EmbeddingModel + ?Sized>(
         }
     }
 
-    EmbedManyResult {
+    let result = EmbedManyResult {
         values,
         embeddings,
         usage: EmbeddingModelUsage::new(tokens),
         warnings,
         provider_metadata,
         responses: Some(responses),
+    };
+
+    if let Some(on_end) = &on_end {
+        on_end
+            .end(embed_many_end_event(
+                call_id,
+                model.provider(),
+                model.model_id(),
+                &result,
+            ))
+            .await;
     }
+
+    result
 }
 
 fn embedding_call_options(
@@ -394,19 +806,55 @@ fn merge_provider_metadata(
     }
 }
 
+fn embed_call_id() -> String {
+    let generate_call_id =
+        create_id_generator(IdGeneratorOptions::new().with_prefix("call").with_size(24))
+            .expect("default embed call id configuration is valid");
+
+    generate_call_id()
+}
+
+fn embed_many_end_event(
+    call_id: String,
+    provider: &str,
+    model_id: &str,
+    result: &EmbedManyResult,
+) -> EmbedEndEvent {
+    EmbedEndEvent {
+        call_id,
+        operation_id: "ai.embedMany".to_string(),
+        provider: provider.to_string(),
+        model_id: model_id.to_string(),
+        value: EmbedEventValue::Many(result.values.clone()),
+        embedding: EmbedEventEmbedding::Many(result.embeddings.clone()),
+        usage: result.usage.clone(),
+        warnings: result.warnings.clone(),
+        provider_metadata: result.provider_metadata.clone(),
+        response: result.responses.clone().map(EmbedEventResponse::Many),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{EmbedManyOptions, EmbedManyResult, EmbedOptions, EmbedResult, Embedding};
+    use super::{
+        EmbedEndEvent, EmbedEventEmbedding, EmbedEventResponse, EmbedEventValue, EmbedManyOptions,
+        EmbedManyResult, EmbedOptions, EmbedResult, EmbedStartEvent, Embedding,
+        EmbeddingModelCallEndEvent, EmbeddingModelCallStartEvent,
+    };
     use crate::embedding_model::{
         EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelResponse, EmbeddingModelResult,
         EmbeddingModelUsage,
     };
+    use crate::headers::Headers;
     use crate::provider::{ProviderMetadata, ProviderOptions};
+    use crate::retry::DEFAULT_MAX_RETRIES;
     use crate::warning::Warning;
     use serde_json::json;
+    use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::future::{Future, Ready, ready};
     use std::pin::Pin;
+    use std::rc::Rc;
     use std::sync::Mutex;
     use std::task::{Context, Poll, Waker};
 
@@ -688,6 +1136,299 @@ mod tests {
                 .as_ref()
                 .is_some_and(|headers| headers.get("x-trace").map(String::as_str) == Some("1"))
         }));
+    }
+
+    #[test]
+    fn embed_lifecycle_events_serialize_upstream_shapes() {
+        let start = EmbedStartEvent {
+            call_id: "call_123".to_string(),
+            operation_id: "ai.embed".to_string(),
+            provider: "openai".to_string(),
+            model_id: "text-embedding-3-small".to_string(),
+            value: EmbedEventValue::One("sunrise".to_string()),
+            max_retries: DEFAULT_MAX_RETRIES,
+            headers: Some(Headers::from([(
+                "user-agent".to_string(),
+                "ai-sdk-rust-test".to_string(),
+            )])),
+            provider_options: Some(
+                serde_json::from_value(json!({
+                    "openai": {
+                        "dimensions": 3
+                    }
+                }))
+                .expect("provider options deserialize"),
+            ),
+        };
+
+        assert_eq!(
+            serde_json::to_value(start).expect("start event serializes"),
+            json!({
+                "callId": "call_123",
+                "operationId": "ai.embed",
+                "provider": "openai",
+                "modelId": "text-embedding-3-small",
+                "value": "sunrise",
+                "maxRetries": 2,
+                "headers": {
+                    "user-agent": "ai-sdk-rust-test"
+                },
+                "providerOptions": {
+                    "openai": {
+                        "dimensions": 3
+                    }
+                }
+            })
+        );
+
+        let end = EmbedEndEvent {
+            call_id: "call_123".to_string(),
+            operation_id: "ai.embedMany".to_string(),
+            provider: "openai".to_string(),
+            model_id: "text-embedding-3-small".to_string(),
+            value: EmbedEventValue::Many(vec!["sunrise".to_string(), "sunset".to_string()]),
+            embedding: EmbedEventEmbedding::Many(vec![vec![0.1, 0.2], vec![0.3, 0.4]]),
+            usage: EmbeddingModelUsage::new(12),
+            warnings: vec![Warning::Other {
+                message: "chunked".to_string(),
+            }],
+            provider_metadata: Some(
+                serde_json::from_value(json!({
+                    "openai": {
+                        "dimensions": 2
+                    }
+                }))
+                .expect("provider metadata deserialize"),
+            ),
+            response: Some(EmbedEventResponse::Many(vec![
+                Some(EmbeddingModelResponse::new().with_header("x-request-id", "req_123")),
+                None,
+            ])),
+        };
+
+        assert_eq!(
+            serde_json::to_value(end).expect("end event serializes"),
+            json!({
+                "callId": "call_123",
+                "operationId": "ai.embedMany",
+                "provider": "openai",
+                "modelId": "text-embedding-3-small",
+                "value": ["sunrise", "sunset"],
+                "embedding": [
+                    [0.1, 0.2],
+                    [0.3, 0.4]
+                ],
+                "usage": {
+                    "tokens": 12
+                },
+                "warnings": [
+                    {
+                        "type": "other",
+                        "message": "chunked"
+                    }
+                ],
+                "providerMetadata": {
+                    "openai": {
+                        "dimensions": 2
+                    }
+                },
+                "response": [
+                    {
+                        "headers": {
+                            "x-request-id": "req_123"
+                        }
+                    },
+                    null
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn embedding_model_call_events_round_trip_upstream_shapes() {
+        let start = EmbeddingModelCallStartEvent {
+            call_id: "call_123".to_string(),
+            embed_call_id: "call_456".to_string(),
+            operation_id: "ai.embedMany.doEmbed".to_string(),
+            provider: "openai".to_string(),
+            model_id: "text-embedding-3-small".to_string(),
+            values: vec!["sunrise".to_string(), "sunset".to_string()],
+        };
+
+        let serialized = serde_json::to_value(&start).expect("start event serializes");
+        assert_eq!(
+            serialized,
+            json!({
+                "callId": "call_123",
+                "embedCallId": "call_456",
+                "operationId": "ai.embedMany.doEmbed",
+                "provider": "openai",
+                "modelId": "text-embedding-3-small",
+                "values": ["sunrise", "sunset"]
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<EmbeddingModelCallStartEvent>(serialized)
+                .expect("start event deserializes"),
+            start
+        );
+
+        let end = EmbeddingModelCallEndEvent {
+            call_id: "call_123".to_string(),
+            embed_call_id: "call_456".to_string(),
+            operation_id: "ai.embedMany.doEmbed".to_string(),
+            provider: "openai".to_string(),
+            model_id: "text-embedding-3-small".to_string(),
+            values: vec!["sunrise".to_string(), "sunset".to_string()],
+            embeddings: vec![vec![0.1, 0.2], vec![0.3, 0.4]],
+            usage: EmbeddingModelUsage::new(12),
+        };
+
+        let serialized = serde_json::to_value(&end).expect("end event serializes");
+        assert_eq!(
+            serialized,
+            json!({
+                "callId": "call_123",
+                "embedCallId": "call_456",
+                "operationId": "ai.embedMany.doEmbed",
+                "provider": "openai",
+                "modelId": "text-embedding-3-small",
+                "values": ["sunrise", "sunset"],
+                "embeddings": [
+                    [0.1, 0.2],
+                    [0.3, 0.4]
+                ],
+                "usage": {
+                    "tokens": 12
+                }
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<EmbeddingModelCallEndEvent>(serialized)
+                .expect("end event deserializes"),
+            end
+        );
+    }
+
+    #[test]
+    fn embed_invokes_start_and_end_callbacks() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let start_events = Rc::clone(&events);
+        let end_events = Rc::clone(&events);
+        let response = EmbeddingModelResponse::new().with_header("x-request-id", "embed-callback");
+        let model = RecordingEmbeddingModel::new(
+            None,
+            true,
+            vec![
+                EmbeddingModelResult::new(vec![vec![0.1, 0.2, 0.3]])
+                    .with_usage(EmbeddingModelUsage::new(7))
+                    .with_response(response.clone()),
+            ],
+        );
+
+        let result = poll_ready(super::embed(
+            EmbedOptions::new(&model, "sunrise")
+                .with_header("User-Agent", "caller/1")
+                .with_experimental_on_start(move |event| {
+                    start_events
+                        .borrow_mut()
+                        .push(serde_json::to_value(event).expect("event serializes"));
+                    ready(())
+                })
+                .with_experimental_on_end(move |event| {
+                    end_events
+                        .borrow_mut()
+                        .push(serde_json::to_value(event).expect("event serializes"));
+                    ready(())
+                }),
+        ));
+
+        assert_eq!(result.embedding, vec![0.1, 0.2, 0.3]);
+
+        let events = events.borrow();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["operationId"], "ai.embed");
+        assert_eq!(events[0]["provider"], "test-provider");
+        assert_eq!(events[0]["modelId"], "embedding-test");
+        assert_eq!(events[0]["value"], "sunrise");
+        assert_eq!(events[0]["maxRetries"], json!(DEFAULT_MAX_RETRIES));
+        assert!(
+            events[0]["callId"]
+                .as_str()
+                .expect("call id is a string")
+                .starts_with("call-")
+        );
+        assert_eq!(
+            events[0]["headers"]["user-agent"],
+            concat!("caller/1 ai/", env!("CARGO_PKG_VERSION"))
+        );
+
+        assert_eq!(events[1]["operationId"], "ai.embed");
+        assert_eq!(events[1]["value"], "sunrise");
+        assert_eq!(events[1]["embedding"], json!([0.1, 0.2, 0.3]));
+        assert_eq!(events[1]["usage"], json!({ "tokens": 7 }));
+        assert_eq!(
+            events[1]["response"],
+            json!({
+                "headers": {
+                    "x-request-id": "embed-callback"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn embed_many_invokes_start_and_end_callbacks_with_array_payloads() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let start_events = Rc::clone(&events);
+        let end_events = Rc::clone(&events);
+        let response =
+            EmbeddingModelResponse::new().with_header("x-request-id", "embed-many-callback");
+        let model = RecordingEmbeddingModel::new(
+            None,
+            true,
+            vec![
+                EmbeddingModelResult::new(vec![vec![0.1], vec![0.2]])
+                    .with_usage(EmbeddingModelUsage::new(11))
+                    .with_response(response),
+            ],
+        );
+
+        let result = poll_ready(super::embed_many(
+            EmbedManyOptions::new(&model, ["alpha", "beta"])
+                .with_on_start(move |event| {
+                    start_events
+                        .borrow_mut()
+                        .push(serde_json::to_value(event).expect("event serializes"));
+                    ready(())
+                })
+                .with_on_end(move |event| {
+                    end_events
+                        .borrow_mut()
+                        .push(serde_json::to_value(event).expect("event serializes"));
+                    ready(())
+                }),
+        ));
+
+        assert_eq!(result.embeddings, vec![vec![0.1], vec![0.2]]);
+
+        let events = events.borrow();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["operationId"], "ai.embedMany");
+        assert_eq!(events[0]["value"], json!(["alpha", "beta"]));
+        assert_eq!(events[1]["operationId"], "ai.embedMany");
+        assert_eq!(events[1]["value"], json!(["alpha", "beta"]));
+        assert_eq!(events[1]["embedding"], json!([[0.1], [0.2]]));
+        assert_eq!(
+            events[1]["response"],
+            json!([
+                {
+                    "headers": {
+                        "x-request-id": "embed-many-callback"
+                    }
+                }
+            ])
+        );
     }
 
     #[test]
