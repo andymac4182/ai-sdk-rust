@@ -174,6 +174,39 @@ impl fmt::Display for LoadApiKeyError {
 
 impl std::error::Error for LoadApiKeyError {}
 
+/// Error returned when a provider setting cannot be loaded.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LoadSettingError {
+    message: String,
+}
+
+impl LoadSettingError {
+    /// Creates a provider setting loading error with the upstream provider message.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into the human-readable error message.
+    pub fn into_message(self) -> String {
+        self.message
+    }
+}
+
+impl fmt::Display for LoadSettingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for LoadSettingError {}
+
 /// Error returned when an embedding model call contains too many values.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TooManyEmbeddingValuesForCallError {
@@ -264,7 +297,7 @@ pub type ProviderMetadata = BTreeMap<String, JsonObject>;
 #[cfg(test)]
 mod tests {
     use super::{
-        LoadApiKeyError, ModelType, NoSuchModelError, ProviderOptions,
+        LoadApiKeyError, LoadSettingError, ModelType, NoSuchModelError, ProviderOptions,
         TooManyEmbeddingValuesForCallError, UnsupportedFunctionalityError,
     };
     use serde_json::json;
@@ -348,6 +381,16 @@ mod tests {
     fn load_api_key_error_uses_upstream_message_contract() {
         let message = "OpenAI API key is missing. Pass it using the 'apiKey' parameter or the OPENAI_API_KEY environment variable.";
         let error = LoadApiKeyError::new(message);
+
+        assert_eq!(error.message(), message);
+        assert_eq!(error.to_string(), message);
+        assert_eq!(error.into_message(), message);
+    }
+
+    #[test]
+    fn load_setting_error_uses_upstream_message_contract() {
+        let message = "Base URL setting is missing. Pass it using the 'baseURL' parameter or the OPENAI_BASE_URL environment variable.";
+        let error = LoadSettingError::new(message);
 
         assert_eq!(error.message(), message);
         assert_eq!(error.to_string(), message);
