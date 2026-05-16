@@ -60,10 +60,11 @@ pub use language_model::{
     LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
 };
 pub use provider::{
-    EmptyResponseBodyError, InvalidArgumentError, InvalidPromptError, InvalidResponseDataError,
-    JsonParseError, LoadApiKeyError, LoadSettingError, ModelType, NoContentGeneratedError,
-    NoSuchModelError, ProviderMetadata, ProviderOptions, TooManyEmbeddingValuesForCallError,
-    TypeValidationContext, TypeValidationError, UnsupportedFunctionalityError,
+    ApiCallError, EmptyResponseBodyError, InvalidArgumentError, InvalidPromptError,
+    InvalidResponseDataError, JsonParseError, LoadApiKeyError, LoadSettingError, ModelType,
+    NoContentGeneratedError, NoSuchModelError, ProviderMetadata, ProviderOptions,
+    TooManyEmbeddingValuesForCallError, TypeValidationContext, TypeValidationError,
+    UnsupportedFunctionalityError,
 };
 pub use reranking_model::{
     RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,

@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
 
 /// The upstream provider model categories used when reporting missing models.
@@ -435,6 +436,195 @@ impl fmt::Display for TypeValidationError {
 
 impl std::error::Error for TypeValidationError {}
 
+/// Error returned when an HTTP provider API call fails.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiCallError {
+    message: String,
+    url: String,
+    request_body_values: JsonValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    status_code: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    response_headers: Option<Headers>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    response_body: Option<String>,
+    is_retryable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    data: Option<JsonValue>,
+}
+
+impl ApiCallError {
+    /// Creates an API call error with the required upstream context.
+    pub fn new(
+        message: impl Into<String>,
+        url: impl Into<String>,
+        request_body_values: impl Into<JsonValue>,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            url: url.into(),
+            request_body_values: request_body_values.into(),
+            status_code: None,
+            response_headers: None,
+            response_body: None,
+            is_retryable: false,
+            data: None,
+        }
+    }
+
+    /// Returns whether the upstream default retry rule marks this status as retryable.
+    pub const fn is_retryable_status_code(status_code: u16) -> bool {
+        matches!(status_code, 408 | 409 | 429 | 500..=599)
+    }
+
+    /// Sets the provider response status code and applies the upstream default retry rule.
+    pub fn with_status_code(mut self, status_code: u16) -> Self {
+        self.is_retryable = Self::is_retryable_status_code(status_code);
+        self.status_code = Some(status_code);
+        self
+    }
+
+    /// Sets response headers returned by the provider.
+    pub fn with_response_headers(mut self, response_headers: Headers) -> Self {
+        self.response_headers = Some(response_headers);
+        self
+    }
+
+    /// Adds a response header returned by the provider.
+    pub fn with_response_header(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.response_headers
+            .get_or_insert_with(Headers::new)
+            .insert(name.into(), value.into());
+        self
+    }
+
+    /// Sets the raw response body returned by the provider.
+    pub fn with_response_body(mut self, response_body: impl Into<String>) -> Self {
+        self.response_body = Some(response_body.into());
+        self
+    }
+
+    /// Overrides whether the failed API call should be retried.
+    pub fn with_is_retryable(mut self, is_retryable: bool) -> Self {
+        self.is_retryable = is_retryable;
+        self
+    }
+
+    /// Sets parsed provider error data.
+    pub fn with_data(mut self, data: impl Into<JsonValue>) -> Self {
+        self.data = Some(data.into());
+        self
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Returns the URL that was called.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Returns the provider request body values.
+    pub fn request_body_values(&self) -> &JsonValue {
+        &self.request_body_values
+    }
+
+    /// Returns the provider response status code.
+    pub fn status_code(&self) -> Option<u16> {
+        self.status_code
+    }
+
+    /// Returns the provider response headers.
+    pub fn response_headers(&self) -> Option<&Headers> {
+        self.response_headers.as_ref()
+    }
+
+    /// Returns the raw provider response body.
+    pub fn response_body(&self) -> Option<&str> {
+        self.response_body.as_deref()
+    }
+
+    /// Returns whether the failed API call should be retried.
+    pub fn is_retryable(&self) -> bool {
+        self.is_retryable
+    }
+
+    /// Returns parsed provider error data.
+    pub fn data(&self) -> Option<&JsonValue> {
+        self.data.as_ref()
+    }
+
+    /// Converts this error into the provider request body values.
+    pub fn into_request_body_values(self) -> JsonValue {
+        self.request_body_values
+    }
+}
+
+impl<'de> Deserialize<'de> for ApiCallError {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct ApiCallErrorFields {
+            message: String,
+            url: String,
+            request_body_values: JsonValue,
+            #[serde(default)]
+            status_code: Option<u16>,
+            #[serde(default)]
+            response_headers: Option<Headers>,
+            #[serde(default)]
+            response_body: Option<String>,
+            #[serde(default)]
+            is_retryable: Option<bool>,
+            #[serde(default, deserialize_with = "deserialize_optional_json_value")]
+            data: Option<JsonValue>,
+        }
+
+        let fields = ApiCallErrorFields::deserialize(deserializer)?;
+        let is_retryable = fields.is_retryable.unwrap_or_else(|| {
+            fields
+                .status_code
+                .is_some_and(Self::is_retryable_status_code)
+        });
+
+        Ok(Self {
+            message: fields.message,
+            url: fields.url,
+            request_body_values: fields.request_body_values,
+            status_code: fields.status_code,
+            response_headers: fields.response_headers,
+            response_body: fields.response_body,
+            is_retryable,
+            data: fields.data,
+        })
+    }
+}
+
+impl fmt::Display for ApiCallError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ApiCallError {}
+
+fn deserialize_optional_json_value<'de, D>(deserializer: D) -> Result<Option<JsonValue>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    JsonValue::deserialize(deserializer).map(Some)
+}
+
 /// Error returned when provider JSON parsing fails.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JsonParseError {
@@ -719,10 +909,11 @@ pub type ProviderMetadata = BTreeMap<String, JsonObject>;
 #[cfg(test)]
 mod tests {
     use super::{
-        EmptyResponseBodyError, InvalidArgumentError, InvalidPromptError, InvalidResponseDataError,
-        JsonParseError, LoadApiKeyError, LoadSettingError, ModelType, NoContentGeneratedError,
-        NoSuchModelError, ProviderOptions, TooManyEmbeddingValuesForCallError,
-        TypeValidationContext, TypeValidationError, UnsupportedFunctionalityError,
+        ApiCallError, EmptyResponseBodyError, InvalidArgumentError, InvalidPromptError,
+        InvalidResponseDataError, JsonParseError, LoadApiKeyError, LoadSettingError, ModelType,
+        NoContentGeneratedError, NoSuchModelError, ProviderOptions,
+        TooManyEmbeddingValuesForCallError, TypeValidationContext, TypeValidationError,
+        UnsupportedFunctionalityError,
     };
     use serde_json::json;
 
@@ -958,6 +1149,151 @@ mod tests {
                 cause
             )
         );
+    }
+
+    #[test]
+    fn api_call_error_serializes_upstream_shape_and_retains_context() {
+        let error = ApiCallError::new(
+            "Rate limit exceeded",
+            "https://api.example.com/v1/responses",
+            json!({
+                "model": "gpt-4.1",
+                "input": "Hello"
+            }),
+        )
+        .with_status_code(429)
+        .with_response_header("retry-after", "2")
+        .with_response_body("{\"error\":\"rate_limit\"}")
+        .with_data(json!({
+            "error": {
+                "type": "rate_limit"
+            }
+        }));
+
+        assert_eq!(error.message(), "Rate limit exceeded");
+        assert_eq!(error.to_string(), "Rate limit exceeded");
+        assert_eq!(error.url(), "https://api.example.com/v1/responses");
+        assert_eq!(
+            error.request_body_values(),
+            &json!({
+                "model": "gpt-4.1",
+                "input": "Hello"
+            })
+        );
+        assert_eq!(error.status_code(), Some(429));
+        assert_eq!(error.response_body(), Some("{\"error\":\"rate_limit\"}"));
+        assert!(error.is_retryable());
+        assert_eq!(
+            error
+                .response_headers()
+                .and_then(|headers| headers.get("retry-after")),
+            Some(&"2".to_string())
+        );
+        assert_eq!(
+            error.data(),
+            Some(&json!({
+                "error": {
+                    "type": "rate_limit"
+                }
+            }))
+        );
+
+        let serialized = serde_json::to_value(&error).expect("API call error serializes");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "message": "Rate limit exceeded",
+                "url": "https://api.example.com/v1/responses",
+                "requestBodyValues": {
+                    "input": "Hello",
+                    "model": "gpt-4.1"
+                },
+                "statusCode": 429,
+                "responseHeaders": {
+                    "retry-after": "2"
+                },
+                "responseBody": "{\"error\":\"rate_limit\"}",
+                "isRetryable": true,
+                "data": {
+                    "error": {
+                        "type": "rate_limit"
+                    }
+                }
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ApiCallError>(serialized)
+                .expect("API call error deserializes"),
+            error
+        );
+    }
+
+    #[test]
+    fn api_call_error_uses_upstream_default_retry_rule() {
+        for (status_code, expected) in [
+            (400, false),
+            (408, true),
+            (409, true),
+            (429, true),
+            (499, false),
+            (500, true),
+            (599, true),
+        ] {
+            let error = ApiCallError::new("Request failed", "https://api.example.com", json!({}))
+                .with_status_code(status_code);
+
+            assert_eq!(
+                ApiCallError::is_retryable_status_code(status_code),
+                expected
+            );
+            assert_eq!(error.is_retryable(), expected);
+        }
+
+        let error: ApiCallError = serde_json::from_value(json!({
+            "message": "Internal Server Error",
+            "url": "https://api.example.com",
+            "requestBodyValues": {},
+            "statusCode": 500
+        }))
+        .expect("API call error deserializes without explicit retry flag");
+
+        assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn api_call_error_allows_retry_override_and_explicit_null_data() {
+        let error = ApiCallError::new("Request failed", "https://api.example.com", json!({}))
+            .with_status_code(500)
+            .with_is_retryable(false)
+            .with_data(json!(null));
+
+        assert!(!error.is_retryable());
+        assert_eq!(error.data(), Some(&json!(null)));
+        assert_eq!(
+            serde_json::to_value(&error).expect("API call error serializes"),
+            json!({
+                "message": "Request failed",
+                "url": "https://api.example.com",
+                "requestBodyValues": {},
+                "statusCode": 500,
+                "isRetryable": false,
+                "data": null
+            })
+        );
+
+        let deserialized: ApiCallError = serde_json::from_value(json!({
+            "message": "Request failed",
+            "url": "https://api.example.com",
+            "requestBodyValues": {},
+            "statusCode": 500,
+            "isRetryable": false,
+            "data": null
+        }))
+        .expect("API call error with null data deserializes");
+
+        assert_eq!(deserialized.data(), Some(&json!(null)));
+        assert!(!deserialized.is_retryable());
     }
 
     #[test]
