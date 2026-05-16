@@ -25,7 +25,7 @@ PROMPT
 )"
 
 if [ "$#" -eq 0 ]; then
-  set -- --worktree --max-iterations "${GNHF_MAX_ITERATIONS:-10}"
+  set -- --current-branch --push
 fi
 
 exec "$script_dir/gnhf-codex-xhigh.sh" "$@" "$prompt"

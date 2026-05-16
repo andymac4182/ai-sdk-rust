@@ -23,7 +23,19 @@ reasoning, without changing your global `~/.gnhf/config.yml`.
 npm install -g gnhf
 codex login
 
-scripts/gnhf-codex-xhigh.sh --worktree --max-iterations 10 "port the next small SDK slice"
+scripts/run-gnhf-port.sh
 ```
 
-All arguments after `scripts/gnhf-codex-xhigh.sh` are passed through to `gnhf`.
+By default this runs:
+
+```sh
+--current-branch --push
+```
+
+That keeps going until you stop it, gnhf reaches its failure limit, the agent
+runs out of usable quota, or you pass your own stop condition. Pass custom gnhf
+flags to override the defaults:
+
+```sh
+scripts/run-gnhf-port.sh --current-branch --push --max-tokens 50000000
+```
