@@ -30,7 +30,7 @@ pub use file_data::{
 pub use files::{FilesUploadFileCallOptions, FilesUploadFileData, FilesUploadFileResult};
 pub use headers::Headers;
 pub use image_model::{
-    ImageModelCallOptions, ImageModelFile, ImageModelImage, ImageModelProviderMetadata,
+    ImageModel, ImageModelCallOptions, ImageModelFile, ImageModelImage, ImageModelProviderMetadata,
     ImageModelProviderMetadataEntry, ImageModelResponse, ImageModelResult, ImageModelUsage,
 };
 pub use json::{
