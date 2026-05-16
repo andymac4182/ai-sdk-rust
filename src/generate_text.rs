@@ -1578,6 +1578,13 @@ pub struct GenerateTextResult {
     /// Text generated in the final step.
     pub text: String,
 
+    /// Parsed high-level output from the final step.
+    ///
+    /// The current Rust surface has only the upstream default text output mode,
+    /// so successful stop completions expose the final text as a JSON string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<JsonValue>,
+
     /// Unified reason why the final step finished.
     pub finish_reason: FinishReason,
 
@@ -1620,6 +1627,8 @@ impl GenerateTextResult {
             .last()
             .expect("generate_text always creates at least one step");
         let total_usage = add_step_usage(&steps);
+        let output = (final_step.finish_reason == FinishReason::Stop)
+            .then(|| JsonValue::String(final_step.text.clone()));
 
         Self {
             content: steps
@@ -1627,6 +1636,7 @@ impl GenerateTextResult {
                 .flat_map(|step| step.content.iter().cloned())
                 .collect(),
             text: final_step.text.clone(),
+            output,
             finish_reason: final_step.finish_reason.clone(),
             raw_finish_reason: final_step.raw_finish_reason.clone(),
             usage: total_usage.clone(),
@@ -1684,6 +1694,16 @@ impl GenerateTextResult {
     /// Returns the final step recorded on this result.
     pub fn final_step(&self) -> Option<&GenerateTextStep> {
         Some(&self.final_step)
+    }
+
+    /// Returns the generated output or an upstream-aligned error when none was produced.
+    pub fn output(&self) -> Result<&JsonValue, NoOutputGeneratedError> {
+        self.output.as_ref().ok_or_else(NoOutputGeneratedError::new)
+    }
+
+    /// Consumes the result and returns the generated output.
+    pub fn into_output(self) -> Result<JsonValue, NoOutputGeneratedError> {
+        self.output.ok_or_else(NoOutputGeneratedError::new)
     }
 }
 
@@ -3160,6 +3180,18 @@ mod tests {
         assert_eq!(result.content.len(), 2);
         assert_eq!(result.steps.len(), 1);
         assert_eq!(result.final_step, result.steps[0]);
+        assert_eq!(result.output, Some(json!("Hello world")));
+        assert_eq!(
+            result.output().expect("default text output exists"),
+            &json!("Hello world")
+        );
+        assert_eq!(
+            result
+                .clone()
+                .into_output()
+                .expect("default text output exists"),
+            json!("Hello world")
+        );
         assert_eq!(
             result.response_messages,
             vec![LanguageModelMessage::Assistant(
@@ -3340,6 +3372,7 @@ mod tests {
                     }
                 ],
                 "text": "Hello",
+                "output": "Hello",
                 "finishReason": "stop",
                 "rawFinishReason": "stop",
                 "usage": {
@@ -3671,6 +3704,13 @@ mod tests {
         assert_eq!(result.raw_finish_reason, None);
         assert_eq!(result.total_usage.input_tokens.total, Some(12));
         assert_eq!(result.total_usage.output_tokens.total, Some(4));
+        assert_eq!(result.output, None);
+        assert_eq!(
+            result
+                .output()
+                .expect_err("length finish has no parsed output"),
+            NoOutputGeneratedError::new()
+        );
         assert_eq!(result.static_tool_calls, Vec::new());
         assert_eq!(result.dynamic_tool_calls, Vec::new());
         assert_eq!(result.static_tool_results, Vec::new());
