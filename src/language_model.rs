@@ -874,6 +874,73 @@ impl LanguageModelGenerateResult {
     }
 }
 
+/// Optional response information for a streaming language model call.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelStreamResultResponse {
+    /// Response headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Headers>,
+}
+
+impl LanguageModelStreamResultResponse {
+    /// Creates empty stream result response metadata.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds a response header.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers
+            .get_or_insert_with(Headers::new)
+            .insert(name.into(), value.into());
+        self
+    }
+}
+
+/// Result of a streaming language model provider call.
+///
+/// The upstream TypeScript contract uses a `ReadableStream` for `stream`. This
+/// Rust wrapper keeps that field generic so callers can use their own stream
+/// abstraction while preserving the provider-v4 metadata envelope.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelStreamResult<S> {
+    /// Stream of language model output parts.
+    pub stream: S,
+
+    /// Optional request information for telemetry and debugging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<LanguageModelRequest>,
+
+    /// Optional response information for telemetry and debugging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<LanguageModelStreamResultResponse>,
+}
+
+impl<S> LanguageModelStreamResult<S> {
+    /// Creates a language model stream result.
+    pub fn new(stream: S) -> Self {
+        Self {
+            stream,
+            request: None,
+            response: None,
+        }
+    }
+
+    /// Sets optional request information.
+    pub fn with_request(mut self, request: LanguageModelRequest) -> Self {
+        self.request = Some(request);
+        self
+    }
+
+    /// Sets optional response information.
+    pub fn with_response(mut self, response: LanguageModelStreamResultResponse) -> Self {
+        self.response = Some(response);
+        self
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 enum LanguageModelTextStartKind {
     #[serde(rename = "text-start")]
@@ -2774,16 +2841,17 @@ mod tests {
         LanguageModelReasoningStart, LanguageModelRequest, LanguageModelResponse,
         LanguageModelResponseFormat, LanguageModelResponseMetadata, LanguageModelSource,
         LanguageModelStreamFinish, LanguageModelStreamPart, LanguageModelStreamResponseMetadata,
-        LanguageModelStreamStart, LanguageModelSystemMessage, LanguageModelText,
-        LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextPart,
-        LanguageModelTextStart, LanguageModelTool, LanguageModelToolApprovalRequest,
-        LanguageModelToolApprovalResponsePart, LanguageModelToolCall, LanguageModelToolCallPart,
-        LanguageModelToolChoice, LanguageModelToolContentPart, LanguageModelToolInputDelta,
-        LanguageModelToolInputEnd, LanguageModelToolInputStart, LanguageModelToolMessage,
-        LanguageModelToolResult, LanguageModelToolResultContentPart,
-        LanguageModelToolResultCustomContent, LanguageModelToolResultOutput,
-        LanguageModelToolResultPart, LanguageModelUrlSource, LanguageModelUsage,
-        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelStreamResult, LanguageModelStreamResultResponse, LanguageModelStreamStart,
+        LanguageModelSystemMessage, LanguageModelText, LanguageModelTextDelta,
+        LanguageModelTextEnd, LanguageModelTextPart, LanguageModelTextStart, LanguageModelTool,
+        LanguageModelToolApprovalRequest, LanguageModelToolApprovalResponsePart,
+        LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolChoice,
+        LanguageModelToolContentPart, LanguageModelToolInputDelta, LanguageModelToolInputEnd,
+        LanguageModelToolInputStart, LanguageModelToolMessage, LanguageModelToolResult,
+        LanguageModelToolResultContentPart, LanguageModelToolResultCustomContent,
+        LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUrlSource,
+        LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage,
+        OutputTokenUsage,
     };
     use crate::file_data::{FileData, FileDataContent};
     use crate::json::NonNullJsonValue;
@@ -3645,6 +3713,89 @@ mod tests {
                     "outputTokens": {}
                 },
                 "warnings": []
+            })
+        );
+    }
+
+    #[test]
+    fn stream_result_serializes_upstream_metadata_envelope() {
+        let result = LanguageModelStreamResult::new(vec![
+            LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text_1", "Hello")),
+        ])
+        .with_request(LanguageModelRequest::new().with_body(json!({
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Hello"
+                }
+            ]
+        })))
+        .with_response(
+            LanguageModelStreamResultResponse::new().with_header("x-request-id", "req_123"),
+        );
+
+        assert_eq!(
+            serde_json::to_value(result).expect("stream result serializes"),
+            json!({
+                "stream": [
+                    {
+                        "type": "stream-start",
+                        "warnings": []
+                    },
+                    {
+                        "type": "text-delta",
+                        "id": "text_1",
+                        "delta": "Hello"
+                    }
+                ],
+                "request": {
+                    "body": {
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": "Hello"
+                            }
+                        ]
+                    }
+                },
+                "response": {
+                    "headers": {
+                        "x-request-id": "req_123"
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn stream_result_deserializes_minimal_stream_and_omits_metadata() {
+        let result: LanguageModelStreamResult<Vec<LanguageModelStreamPart>> =
+            serde_json::from_value(json!({
+                "stream": [
+                    {
+                        "type": "text-start",
+                        "id": "text_1"
+                    }
+                ]
+            }))
+            .expect("stream result deserializes");
+
+        assert_eq!(
+            result,
+            LanguageModelStreamResult::new(vec![LanguageModelStreamPart::TextStart(
+                LanguageModelTextStart::new("text_1"),
+            )])
+        );
+        assert_eq!(
+            serde_json::to_value(result).expect("stream result serializes"),
+            json!({
+                "stream": [
+                    {
+                        "type": "text-start",
+                        "id": "text_1"
+                    }
+                ]
             })
         );
     }
