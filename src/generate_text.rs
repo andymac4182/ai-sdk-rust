@@ -326,6 +326,49 @@ impl fmt::Display for MissingToolResultsError {
 
 impl std::error::Error for MissingToolResultsError {}
 
+/// Error returned when a tool approval response references an unknown approval request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvalidToolApprovalError {
+    approval_id: String,
+    message: String,
+}
+
+impl InvalidToolApprovalError {
+    /// Creates an invalid-tool-approval error with the upstream default message.
+    pub fn new(approval_id: impl Into<String>) -> Self {
+        let approval_id = approval_id.into();
+        let message = invalid_tool_approval_default_message(&approval_id);
+
+        Self {
+            approval_id,
+            message,
+        }
+    }
+
+    /// Returns the unknown approval request ID.
+    pub fn approval_id(&self) -> &str {
+        &self.approval_id
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into its parts.
+    pub fn into_parts(self) -> (String, String) {
+        (self.approval_id, self.message)
+    }
+}
+
+impl fmt::Display for InvalidToolApprovalError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for InvalidToolApprovalError {}
+
 /// Reasoning content emitted during a high-level generate-text step.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(untagged)]
@@ -1735,6 +1778,13 @@ fn missing_tool_results_default_message(tool_call_ids: &[String]) -> String {
     )
 }
 
+fn invalid_tool_approval_default_message(approval_id: &str) -> String {
+    format!(
+        "Tool approval response references unknown approvalId: \"{approval_id}\". \
+         No matching tool-approval-request found in message history."
+    )
+}
+
 fn add_step_usage(steps: &[GenerateTextStep]) -> LanguageModelUsage {
     steps
         .iter()
@@ -1777,9 +1827,9 @@ fn add_optional_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 mod tests {
     use super::{
         GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning, GenerateTextResult,
-        GenerateTextStep, GenerateTextToolCall, GenerateTextToolResult, InvalidToolInputError,
-        MissingToolResultsError, NoSuchToolError, ToolCallRepairError, ToolCallRepairOriginalError,
-        generate_text,
+        GenerateTextStep, GenerateTextToolCall, GenerateTextToolResult, InvalidToolApprovalError,
+        InvalidToolInputError, MissingToolResultsError, NoSuchToolError, ToolCallRepairError,
+        ToolCallRepairOriginalError, generate_text,
     };
     use crate::file_data::FileDataContent;
     use crate::language_model::{
@@ -1942,6 +1992,26 @@ mod tests {
             (
                 vec!["call-1".to_string(), "call-2".to_string()],
                 "Tool results are missing for tool calls call-1, call-2.".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn invalid_tool_approval_error_matches_upstream_default_message() {
+        let error = InvalidToolApprovalError::new("approval-1");
+
+        assert_eq!(error.approval_id(), "approval-1");
+        assert_eq!(
+            error.message(),
+            "Tool approval response references unknown approvalId: \"approval-1\". No matching tool-approval-request found in message history."
+        );
+        assert_eq!(error.to_string(), error.message());
+        assert_eq!(
+            error.into_parts(),
+            (
+                "approval-1".to_string(),
+                "Tool approval response references unknown approvalId: \"approval-1\". No matching tool-approval-request found in message history."
+                    .to_string()
             )
         );
     }
