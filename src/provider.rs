@@ -207,6 +207,50 @@ impl fmt::Display for LoadSettingError {
 
 impl std::error::Error for LoadSettingError {}
 
+/// Error returned when a provider response has no body to parse.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmptyResponseBodyError {
+    message: String,
+}
+
+impl EmptyResponseBodyError {
+    /// Creates an empty response body error with the upstream default message.
+    pub fn new() -> Self {
+        Self::with_message("Empty response body")
+    }
+
+    /// Creates an empty response body error with a provider-specific message.
+    pub fn with_message(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into the human-readable error message.
+    pub fn into_message(self) -> String {
+        self.message
+    }
+}
+
+impl Default for EmptyResponseBodyError {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for EmptyResponseBodyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for EmptyResponseBodyError {}
+
 /// Error returned when an embedding model call contains too many values.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TooManyEmbeddingValuesForCallError {
@@ -297,8 +341,8 @@ pub type ProviderMetadata = BTreeMap<String, JsonObject>;
 #[cfg(test)]
 mod tests {
     use super::{
-        LoadApiKeyError, LoadSettingError, ModelType, NoSuchModelError, ProviderOptions,
-        TooManyEmbeddingValuesForCallError, UnsupportedFunctionalityError,
+        EmptyResponseBodyError, LoadApiKeyError, LoadSettingError, ModelType, NoSuchModelError,
+        ProviderOptions, TooManyEmbeddingValuesForCallError, UnsupportedFunctionalityError,
     };
     use serde_json::json;
 
@@ -395,6 +439,28 @@ mod tests {
         assert_eq!(error.message(), message);
         assert_eq!(error.to_string(), message);
         assert_eq!(error.into_message(), message);
+    }
+
+    #[test]
+    fn empty_response_body_error_matches_upstream_default_message() {
+        let error = EmptyResponseBodyError::new();
+
+        assert_eq!(error.message(), "Empty response body");
+        assert_eq!(error.to_string(), "Empty response body");
+        assert_eq!(error.into_message(), "Empty response body");
+        assert_eq!(
+            EmptyResponseBodyError::default().to_string(),
+            "Empty response body"
+        );
+    }
+
+    #[test]
+    fn empty_response_body_error_accepts_provider_specific_message() {
+        let message = "Amazon Bedrock event stream response body is empty.";
+        let error = EmptyResponseBodyError::with_message(message);
+
+        assert_eq!(error.message(), message);
+        assert_eq!(error.to_string(), message);
     }
 
     #[test]
