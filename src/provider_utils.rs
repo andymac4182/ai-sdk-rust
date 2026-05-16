@@ -4,7 +4,11 @@ use std::fmt;
 use std::future::Future;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use url::{Host, Url};
@@ -41,6 +45,10 @@ const BUN_NETWORK_ERROR_CODES: [&str; 7] = [
     "ETIMEDOUT",
     "EPIPE",
 ];
+const DEFAULT_ID_ALPHABET: &str = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const DEFAULT_ID_SEPARATOR: &str = "-";
+const DEFAULT_ID_SIZE: usize = 16;
+static ID_GENERATOR_COUNTER: AtomicU64 = AtomicU64::new(0x9e37_79b9_7f4a_7c15);
 
 /// Default maximum response download size used by upstream provider-utils: 2 GiB.
 pub const DEFAULT_MAX_DOWNLOAD_SIZE: usize = 2 * 1024 * 1024 * 1024;
@@ -162,6 +170,86 @@ impl fmt::Display for DownloadError {
 }
 
 impl std::error::Error for DownloadError {}
+
+/// Options for creating upstream-style provider-utils ID generators.
+///
+/// Upstream `createIdGenerator` creates non-cryptographic random IDs with an
+/// optional prefix. Rust represents the generator configuration as explicit
+/// data, while [`create_id_generator`] returns the callable generator.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdGeneratorOptions {
+    /// Optional ID prefix. When present, generated IDs are
+    /// `{prefix}{separator}{random_part}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+
+    /// Separator between the prefix and random part.
+    #[serde(default = "default_id_separator")]
+    pub separator: String,
+
+    /// Length of the random ID part.
+    #[serde(default = "default_id_size")]
+    pub size: usize,
+
+    /// Alphabet used for the random ID part.
+    #[serde(default = "default_id_alphabet")]
+    pub alphabet: String,
+}
+
+impl Default for IdGeneratorOptions {
+    fn default() -> Self {
+        Self {
+            prefix: None,
+            separator: default_id_separator(),
+            size: DEFAULT_ID_SIZE,
+            alphabet: default_id_alphabet(),
+        }
+    }
+}
+
+impl IdGeneratorOptions {
+    /// Creates ID generator options with upstream defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the optional generated ID prefix.
+    pub fn with_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.prefix = Some(prefix.into());
+        self
+    }
+
+    /// Sets the separator between the prefix and random part.
+    pub fn with_separator(mut self, separator: impl Into<String>) -> Self {
+        self.separator = separator.into();
+        self
+    }
+
+    /// Sets the length of the random ID part.
+    pub fn with_size(mut self, size: usize) -> Self {
+        self.size = size;
+        self
+    }
+
+    /// Sets the alphabet used for the random ID part.
+    pub fn with_alphabet(mut self, alphabet: impl Into<String>) -> Self {
+        self.alphabet = alphabet.into();
+        self
+    }
+}
+
+fn default_id_alphabet() -> String {
+    DEFAULT_ID_ALPHABET.to_string()
+}
+
+fn default_id_separator() -> String {
+    DEFAULT_ID_SEPARATOR.to_string()
+}
+
+const fn default_id_size() -> usize {
+    DEFAULT_ID_SIZE
+}
 
 /// Runtime indicators used to build the provider-utils user-agent suffix.
 ///
@@ -2440,6 +2528,87 @@ where
         .collect()
 }
 
+/// Creates a non-cryptographic ID generator using upstream provider-utils rules.
+///
+/// The total ID length is the optional prefix length plus separator length plus
+/// the configured random part length. When a prefix is present, the separator
+/// must not occur in the alphabet so generated IDs can be parsed reliably.
+pub fn create_id_generator(
+    options: IdGeneratorOptions,
+) -> Result<impl Fn() -> String + Send + Sync + 'static, InvalidArgumentError> {
+    let IdGeneratorOptions {
+        prefix,
+        separator,
+        size,
+        alphabet,
+    } = options;
+
+    if prefix.is_some() && alphabet.contains(&separator) {
+        return Err(InvalidArgumentError::new(
+            "separator",
+            format!(
+                "The separator \"{separator}\" must not be part of the alphabet \"{alphabet}\"."
+            ),
+        ));
+    }
+
+    let alphabet: Vec<char> = alphabet.chars().collect();
+
+    Ok(move || {
+        let random_part = generate_random_id_part(&alphabet, size);
+
+        if let Some(prefix) = &prefix {
+            let mut id = String::with_capacity(prefix.len() + separator.len() + random_part.len());
+            id.push_str(prefix);
+            id.push_str(&separator);
+            id.push_str(&random_part);
+            id
+        } else {
+            random_part
+        }
+    })
+}
+
+/// Generates a 16-character non-cryptographic random ID using upstream defaults.
+pub fn generate_id() -> String {
+    let alphabet: Vec<char> = DEFAULT_ID_ALPHABET.chars().collect();
+    generate_random_id_part(&alphabet, DEFAULT_ID_SIZE)
+}
+
+fn generate_random_id_part(alphabet: &[char], size: usize) -> String {
+    if alphabet.is_empty() || size == 0 {
+        return String::new();
+    }
+
+    let mut seed = random_id_seed() | 1;
+    let mut id = String::with_capacity(size);
+
+    for _ in 0..size {
+        let random = next_id_random(&mut seed);
+        id.push(alphabet[random as usize % alphabet.len()]);
+    }
+
+    id
+}
+
+fn random_id_seed() -> u64 {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let nanos = duration.as_nanos();
+    let time_seed = (nanos as u64) ^ ((nanos >> 64) as u64);
+    let counter = ID_GENERATOR_COUNTER.fetch_add(0x9e37_79b9_7f4a_7c15, Ordering::Relaxed);
+
+    time_seed ^ counter.rotate_left(17)
+}
+
+fn next_id_random(seed: &mut u64) -> u64 {
+    *seed ^= *seed << 13;
+    *seed ^= *seed >> 7;
+    *seed ^= *seed << 17;
+    *seed
+}
+
 /// Checks whether a JSON value has the provider-reference record shape.
 ///
 /// This mirrors upstream `@ai-sdk/provider-utils` `isProviderReference` at the
@@ -4178,22 +4347,23 @@ mod tests {
     use super::{
         Arrayable, Base64DecodeError, BinaryResponseHandlerOptions, DEFAULT_MAX_DOWNLOAD_SIZE,
         DownloadError, EventSourceResponseHandlerOptions, FetchErrorInfo, GetFromApiOptions,
-        HandledFetchError, InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
-        JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, LoadApiKeyOptions,
-        LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError, ParseJsonResult,
-        PostJsonToApiOptions, PostToApiOptions, ProviderApiRequest, ProviderApiRequestBody,
-        ProviderApiRequestMethod, ProviderApiResponse, ProviderApiResponseBody,
-        ProviderApiResponseHandlerError, ReasoningLevel, ResponseHandlerResult, RuntimeEnvironment,
-        StatusCodeErrorResponseHandlerOptions, Tool, ToolExecutionError, ToolExecutionOptions,
-        ValidateTypesResult, add_additional_properties_to_json_schema, as_array, combine_headers,
+        HandledFetchError, IdGeneratorOptions, InjectJsonInstructionIntoMessagesOptions,
+        InlineFileDataBytesError, JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions,
+        LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError,
+        ParseJsonResult, PostJsonToApiOptions, PostToApiOptions, ProviderApiRequest,
+        ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+        ProviderApiResponseBody, ProviderApiResponseHandlerError, ReasoningLevel,
+        ResponseHandlerResult, RuntimeEnvironment, StatusCodeErrorResponseHandlerOptions, Tool,
+        ToolExecutionError, ToolExecutionOptions, ValidateTypesResult,
+        add_additional_properties_to_json_schema, as_array, combine_headers,
         convert_base64_to_bytes, convert_bytes_to_base64, convert_image_model_file_to_data_uri,
         convert_inline_file_data_to_bytes, convert_to_base64, create_binary_response_handler,
-        create_event_source_response_handler, create_json_error_response_handler,
-        create_json_response_handler, create_status_code_error_response_handler,
-        create_tool_name_mapping, detect_media_type, execute_provider_api_request,
-        extract_response_headers, filter_nullable, get_from_api,
-        get_runtime_environment_user_agent, get_top_level_media_type, handle_fetch_error,
-        handle_provider_api_response, inject_json_instruction,
+        create_event_source_response_handler, create_id_generator,
+        create_json_error_response_handler, create_json_response_handler,
+        create_status_code_error_response_handler, create_tool_name_mapping, detect_media_type,
+        execute_provider_api_request, extract_response_headers, filter_nullable, generate_id,
+        get_from_api, get_runtime_environment_user_agent, get_top_level_media_type,
+        handle_fetch_error, handle_provider_api_response, inject_json_instruction,
         inject_json_instruction_into_messages, is_abort_error, is_custom_reasoning,
         is_full_media_type, is_non_nullable, is_parsable_json, is_provider_reference,
         is_url_supported, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
@@ -4964,6 +5134,102 @@ mod tests {
             remove_undefined_entries(record),
             BTreeMap::from([("keep".to_string(), json!("value"))])
         );
+    }
+
+    #[test]
+    fn id_generator_options_serialize_and_deserialize_camel_case_shape() {
+        let options = IdGeneratorOptions::new()
+            .with_prefix("msg")
+            .with_separator("_")
+            .with_size(8)
+            .with_alphabet("abc");
+
+        assert_eq!(
+            serde_json::to_value(&options).expect("options serialize"),
+            json!({
+                "prefix": "msg",
+                "separator": "_",
+                "size": 8,
+                "alphabet": "abc"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<IdGeneratorOptions>(json!({}))
+                .expect("default options deserialize"),
+            IdGeneratorOptions::default()
+        );
+    }
+
+    #[test]
+    fn create_id_generator_creates_random_part_with_configured_size_and_alphabet() {
+        let generator =
+            create_id_generator(IdGeneratorOptions::new().with_size(12).with_alphabet("ab"))
+                .expect("generator is valid");
+
+        let id = generator();
+
+        assert_eq!(id.len(), 12);
+        assert!(id.chars().all(|character| "ab".contains(character)));
+    }
+
+    #[test]
+    fn create_id_generator_adds_prefix_and_separator() {
+        let generator = create_id_generator(
+            IdGeneratorOptions::new()
+                .with_prefix("msg")
+                .with_separator("_")
+                .with_size(6)
+                .with_alphabet("xyz"),
+        )
+        .expect("generator is valid");
+
+        let id = generator();
+        let random_part = id
+            .strip_prefix("msg_")
+            .expect("prefix and separator are present");
+
+        assert_eq!(random_part.len(), 6);
+        assert!(
+            random_part
+                .chars()
+                .all(|character| "xyz".contains(character))
+        );
+    }
+
+    #[test]
+    fn create_id_generator_rejects_separator_inside_alphabet_when_prefixed() {
+        let error = match create_id_generator(
+            IdGeneratorOptions::new()
+                .with_prefix("tool")
+                .with_separator("a"),
+        ) {
+            Ok(_) => panic!("separator in alphabet is invalid when prefixed"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.argument(), "separator");
+        assert_eq!(
+            error.message(),
+            "The separator \"a\" must not be part of the alphabet \"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz\"."
+        );
+    }
+
+    #[test]
+    fn create_id_generator_allows_default_separator_without_prefix() {
+        let generator = create_id_generator(IdGeneratorOptions::new())
+            .expect("default unprefixed generator is valid");
+
+        assert_eq!(generator().len(), 16);
+    }
+
+    #[test]
+    fn generate_id_uses_upstream_default_random_part_length() {
+        let id = generate_id();
+
+        assert_eq!(id.len(), 16);
+        assert!(id.chars().all(|character| {
+            "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".contains(character)
+        }));
     }
 
     #[test]
