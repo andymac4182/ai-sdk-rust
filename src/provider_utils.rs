@@ -239,6 +239,32 @@ impl IdGeneratorOptions {
     }
 }
 
+/// Serialized provider model options for workflow step boundaries.
+///
+/// This mirrors the upstream `serializeModelOptions` result shape: the model
+/// identifier is preserved and the config contains only JSON-serializable
+/// entries. Rust callers represent non-serializable JavaScript values such as
+/// functions as `None` when using [`serialize_model_options`].
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SerializedModelOptions {
+    /// Provider model identifier.
+    pub model_id: String,
+
+    /// JSON-serializable provider configuration.
+    pub config: JsonObject,
+}
+
+impl SerializedModelOptions {
+    /// Creates serialized model options.
+    pub fn new(model_id: impl Into<String>, config: JsonObject) -> Self {
+        Self {
+            model_id: model_id.into(),
+            config,
+        }
+    }
+}
+
 fn default_id_alphabet() -> String {
     DEFAULT_ID_ALPHABET.to_string()
 }
@@ -2528,6 +2554,33 @@ where
         .collect()
 }
 
+/// Serializes provider model options for workflow step boundaries.
+///
+/// Upstream `serializeModelOptions` keeps JSON-serializable config values and
+/// filters out functions, class instances, and other JavaScript-only
+/// non-serializable values. Rust's JSON value type cannot hold those values, so
+/// callers can pass `None` for config entries that should be omitted; present
+/// JSON values, including `null`, are preserved.
+pub fn serialize_model_options<K, V, I>(
+    model_id: impl Into<String>,
+    config: I,
+) -> SerializedModelOptions
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<String>,
+    V: Into<Option<JsonValue>>,
+{
+    let config = config
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let value: Option<JsonValue> = value.into();
+            value.map(|value| (key.into(), value))
+        })
+        .collect();
+
+    SerializedModelOptions::new(model_id, config)
+}
+
 /// Creates a non-cryptographic ID generator using upstream provider-utils rules.
 ///
 /// The total ID length is the optional prefix length plus separator length plus
@@ -4353,9 +4406,9 @@ mod tests {
         ParseJsonResult, PostJsonToApiOptions, PostToApiOptions, ProviderApiRequest,
         ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
         ProviderApiResponseBody, ProviderApiResponseHandlerError, ReasoningLevel,
-        ResponseHandlerResult, RuntimeEnvironment, StatusCodeErrorResponseHandlerOptions, Tool,
-        ToolExecutionError, ToolExecutionOptions, ValidateTypesResult,
-        add_additional_properties_to_json_schema, as_array, combine_headers,
+        ResponseHandlerResult, RuntimeEnvironment, SerializedModelOptions,
+        StatusCodeErrorResponseHandlerOptions, Tool, ToolExecutionError, ToolExecutionOptions,
+        ValidateTypesResult, add_additional_properties_to_json_schema, as_array, combine_headers,
         convert_base64_to_bytes, convert_bytes_to_base64, convert_image_model_file_to_data_uri,
         convert_inline_file_data_to_bytes, convert_to_base64, create_binary_response_handler,
         create_event_source_response_handler, create_id_generator,
@@ -4373,9 +4426,9 @@ mod tests {
         prepare_get_from_api_request, prepare_post_json_to_api_request,
         prepare_post_to_api_request, prepare_tools, read_response_with_size_limit,
         remove_undefined_entries, resolve_full_media_type, resolve_provider_reference,
-        safe_parse_json, safe_validate_types, strip_file_extension, validate_download_url,
-        validate_types, with_provider_utils_user_agent, with_user_agent_suffix,
-        without_trailing_slash,
+        safe_parse_json, safe_validate_types, serialize_model_options, strip_file_extension,
+        validate_download_url, validate_types, with_provider_utils_user_agent,
+        with_user_agent_suffix, without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -5133,6 +5186,102 @@ mod tests {
         assert_eq!(
             remove_undefined_entries(record),
             BTreeMap::from([("keep".to_string(), json!("value"))])
+        );
+    }
+
+    #[test]
+    fn serialized_model_options_round_trips_upstream_shape() {
+        let options = SerializedModelOptions::new(
+            "claude-sonnet-4-20250514",
+            json!({
+                "provider": "anthropic.messages",
+                "baseURL": "https://api.anthropic.com/v1",
+                "headers": { "x-api-key": "sk-test" },
+                "supportsNativeStructuredOutput": true,
+                "supportsStrictTools": false
+            })
+            .as_object()
+            .expect("config is an object")
+            .clone(),
+        );
+
+        let serialized = serde_json::to_value(&options).expect("model options serialize");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "modelId": "claude-sonnet-4-20250514",
+                "config": {
+                    "provider": "anthropic.messages",
+                    "baseURL": "https://api.anthropic.com/v1",
+                    "headers": { "x-api-key": "sk-test" },
+                    "supportsNativeStructuredOutput": true,
+                    "supportsStrictTools": false
+                }
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<SerializedModelOptions>(serialized)
+                .expect("model options deserialize"),
+            options
+        );
+    }
+
+    #[test]
+    fn serialize_model_options_filters_missing_entries_and_preserves_json_null() {
+        let result = serialize_model_options(
+            "gpt-4",
+            [
+                ("provider", Some(json!("openai"))),
+                (
+                    "headers",
+                    Some(json!({ "authorization": "Bearer sk-test" })),
+                ),
+                ("metadata", Some(JsonValue::Null)),
+                ("fetch", None),
+                ("generateId", None),
+            ],
+        );
+
+        assert_eq!(
+            serde_json::to_value(&result).expect("result serializes"),
+            json!({
+                "modelId": "gpt-4",
+                "config": {
+                    "provider": "openai",
+                    "headers": { "authorization": "Bearer sk-test" },
+                    "metadata": null
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn serialize_model_options_accepts_already_json_config_objects() {
+        let config = json!({
+            "provider": "test",
+            "tags": ["a", "b"],
+            "supportsStrictTools": false
+        })
+        .as_object()
+        .expect("config is an object")
+        .clone();
+
+        let result = serialize_model_options("model", config);
+
+        assert_eq!(
+            result,
+            SerializedModelOptions::new(
+                "model",
+                json!({
+                    "provider": "test",
+                    "tags": ["a", "b"],
+                    "supportsStrictTools": false
+                })
+                .as_object()
+                .expect("config is an object")
+                .clone()
+            )
         );
     }
 
