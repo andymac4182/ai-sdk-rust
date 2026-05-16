@@ -331,6 +331,44 @@ where
         .collect()
 }
 
+/// Appends suffix parts to the normalized `user-agent` header.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils` `withUserAgentSuffix`: input
+/// headers are normalized first, missing header values are removed, and empty
+/// user-agent parts are skipped before joining with spaces.
+pub fn with_user_agent_suffix<K, V, I, S, P>(
+    headers: Option<I>,
+    user_agent_suffix_parts: P,
+) -> Headers
+where
+    I: IntoIterator<Item = (K, Option<V>)>,
+    K: AsRef<str>,
+    V: Into<String>,
+    P: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut headers = normalize_headers(headers);
+    let current_user_agent = headers.get("user-agent").map(String::as_str).unwrap_or("");
+
+    let mut user_agent_parts = Vec::new();
+
+    if !current_user_agent.is_empty() {
+        user_agent_parts.push(current_user_agent.to_string());
+    }
+
+    for part in user_agent_suffix_parts {
+        let part = part.as_ref();
+        if !part.is_empty() {
+            user_agent_parts.push(part.to_string());
+        }
+    }
+
+    let user_agent = user_agent_parts.join(" ");
+
+    headers.insert("user-agent".to_string(), user_agent);
+    headers
+}
+
 /// Options for loading a provider API key from an explicit value or environment variable.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoadApiKeyOptions {
@@ -573,7 +611,8 @@ mod tests {
         ToolExecutionError, ToolExecutionOptions, as_array, combine_headers, filter_nullable,
         is_non_nullable, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
         load_setting, load_setting_with_env, media_type_to_extension, normalize_headers,
-        prepare_tools, resolve_provider_reference, strip_file_extension, without_trailing_slash,
+        prepare_tools, resolve_provider_reference, strip_file_extension, with_user_agent_suffix,
+        without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -753,6 +792,88 @@ mod tests {
                 ("content-type".to_string(), "application/json".to_string()),
                 ("x-empty".to_string(), "".to_string()),
             ])
+        );
+    }
+
+    #[test]
+    fn with_user_agent_suffix_creates_user_agent_header() {
+        let headers = with_user_agent_suffix(
+            Some(vec![
+                ("Content-Type", Some("application/json")),
+                ("Authorization", Some("Bearer token")),
+            ]),
+            ["ai-sdk/0.0.0-test", "provider/test-openai"],
+        );
+
+        assert_eq!(
+            headers,
+            BTreeMap::from([
+                ("authorization".to_string(), "Bearer token".to_string()),
+                ("content-type".to_string(), "application/json".to_string()),
+                (
+                    "user-agent".to_string(),
+                    "ai-sdk/0.0.0-test provider/test-openai".to_string(),
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn with_user_agent_suffix_appends_to_existing_header_and_filters_empty_parts() {
+        let headers = with_user_agent_suffix(
+            Some(vec![
+                ("User-Agent", Some("TestApp/0.0.0-test")),
+                ("Accept", Some("application/json")),
+            ]),
+            ["", "ai-sdk/0.0.0-test", "provider/test-anthropic"],
+        );
+
+        assert_eq!(
+            headers,
+            BTreeMap::from([
+                ("accept".to_string(), "application/json".to_string()),
+                (
+                    "user-agent".to_string(),
+                    "TestApp/0.0.0-test ai-sdk/0.0.0-test provider/test-anthropic".to_string(),
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn with_user_agent_suffix_removes_missing_headers_before_appending() {
+        let headers = with_user_agent_suffix(
+            Some(vec![
+                ("Content-Type", Some("application/json")),
+                ("Authorization", None),
+                ("User-Agent", Some("TestApp/0.0.0-test")),
+                ("Accept", Some("application/json")),
+                ("Cache-Control", None),
+            ]),
+            ["ai-sdk/0.0.0-test"],
+        );
+
+        assert_eq!(
+            headers,
+            BTreeMap::from([
+                ("accept".to_string(), "application/json".to_string()),
+                ("content-type".to_string(), "application/json".to_string()),
+                (
+                    "user-agent".to_string(),
+                    "TestApp/0.0.0-test ai-sdk/0.0.0-test".to_string(),
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn with_user_agent_suffix_sets_empty_user_agent_when_no_parts_exist() {
+        assert_eq!(
+            with_user_agent_suffix::<String, String, Vec<(String, Option<String>)>, String, _>(
+                None,
+                Vec::new(),
+            ),
+            BTreeMap::from([("user-agent".to_string(), String::new())])
         );
     }
 
