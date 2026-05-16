@@ -10,6 +10,7 @@ pub mod file_data;
 pub mod files;
 pub mod headers;
 pub mod image_model;
+pub mod image_model_middleware;
 pub mod json;
 pub mod language_model;
 pub mod provider;
@@ -37,6 +38,10 @@ pub use headers::Headers;
 pub use image_model::{
     ImageModel, ImageModelCallOptions, ImageModelFile, ImageModelImage, ImageModelProviderMetadata,
     ImageModelProviderMetadataEntry, ImageModelResponse, ImageModelResult, ImageModelUsage,
+};
+pub use image_model_middleware::{
+    ImageModelDoGenerate, ImageModelMiddleware, ImageModelMiddlewareModelOptions,
+    ImageModelTransformParamsOptions, ImageModelWrapGenerateOptions,
 };
 pub use json::{
     JsonArray, JsonObject, JsonSchema, JsonValue, NonNullJsonValue, NullJsonValueError,
