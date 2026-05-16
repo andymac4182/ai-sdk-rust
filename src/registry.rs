@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::provider::{
     ModelType, NoSuchModelError, Provider, ProviderWithFiles, ProviderWithRerankingModel,
-    ProviderWithSpeechModel, ProviderWithTranscriptionModel,
+    ProviderWithSkills, ProviderWithSpeechModel, ProviderWithTranscriptionModel,
 };
 
 /// Configuration for a provider registry.
@@ -232,6 +232,15 @@ impl<P: ProviderWithFiles> ProviderRegistry<P> {
     }
 }
 
+impl<P: ProviderWithSkills> ProviderRegistry<P> {
+    /// Returns the skills interface for a registered provider id.
+    pub fn skills(&self, id: &str) -> Result<P::Skills, ProviderRegistryError> {
+        let provider = self.get_provider(id, ModelType::LanguageModel)?;
+
+        Ok(provider.skills())
+    }
+}
+
 /// Creates a provider registry with the upstream default separator (`:`).
 pub fn create_provider_registry<I, K, P>(providers: I) -> ProviderRegistry<P>
 where
@@ -399,11 +408,13 @@ mod tests {
     };
     use crate::provider::{
         ModelType, NoSuchModelError, Provider, ProviderWithFiles, ProviderWithRerankingModel,
-        ProviderWithSpeechModel, ProviderWithTranscriptionModel, SpecificationVersion,
+        ProviderWithSkills, ProviderWithSpeechModel, ProviderWithTranscriptionModel,
+        SpecificationVersion,
     };
     use crate::reranking_model::{
         RerankingModel, RerankingModelCallOptions, RerankingModelRanking, RerankingModelResult,
     };
+    use crate::skills::{Skills, SkillsUploadSkillCallOptions, SkillsUploadSkillResult};
     use crate::speech_model::{
         SpeechModel, SpeechModelCallOptions, SpeechModelResponse, SpeechModelResult,
     };
@@ -649,6 +660,32 @@ mod tests {
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
+    struct StaticSkills {
+        provider: String,
+    }
+
+    impl Skills for StaticSkills {
+        type UploadSkillFuture<'a>
+            = Ready<SkillsUploadSkillResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            &self.provider
+        }
+
+        fn upload_skill(
+            &self,
+            _options: SkillsUploadSkillCallOptions,
+        ) -> Self::UploadSkillFuture<'_> {
+            ready(SkillsUploadSkillResult::new(provider_reference(
+                &self.provider,
+                "skill-123",
+            )))
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
     struct StaticProvider {
         id: &'static str,
     }
@@ -729,6 +766,16 @@ mod tests {
 
         fn files(&self) -> Self::Files {
             StaticFiles {
+                provider: self.id.to_string(),
+            }
+        }
+    }
+
+    impl ProviderWithSkills for StaticProvider {
+        type Skills = StaticSkills;
+
+        fn skills(&self) -> Self::Skills {
+            StaticSkills {
                 provider: self.id.to_string(),
             }
         }
@@ -867,6 +914,18 @@ mod tests {
 
         assert_eq!(files.specification_version(), SpecificationVersion::V4);
         assert_eq!(files.provider(), "provider");
+    }
+
+    #[test]
+    fn create_provider_registry_resolves_skills_interface() {
+        let registry = create_provider_registry([("provider", StaticProvider { id: "provider" })]);
+
+        let skills = registry
+            .skills("provider")
+            .expect("skills interface resolves");
+
+        assert_eq!(skills.specification_version(), SpecificationVersion::V4);
+        assert_eq!(skills.provider(), "provider");
     }
 
     #[test]
@@ -1034,6 +1093,27 @@ mod tests {
             create_provider_registry([("anthropic", StaticProvider { id: "anthropic" })]);
 
         let error = registry.files("openai").expect_err("provider lookup fails");
+        let provider_error = error
+            .as_no_such_provider()
+            .expect("error is missing provider");
+
+        assert_eq!(provider_error.model_id(), "openai");
+        assert_eq!(provider_error.model_type(), ModelType::LanguageModel);
+        assert_eq!(provider_error.provider_id(), "openai");
+        assert_eq!(
+            error.to_string(),
+            "No such provider: openai (available providers: anthropic)"
+        );
+    }
+
+    #[test]
+    fn provider_registry_reports_missing_skills_provider_context() {
+        let registry =
+            create_provider_registry([("anthropic", StaticProvider { id: "anthropic" })]);
+
+        let error = registry
+            .skills("openai")
+            .expect_err("provider lookup fails");
         let provider_error = error
             .as_no_such_provider()
             .expect("error is missing provider");
