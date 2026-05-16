@@ -629,6 +629,57 @@ impl fmt::Display for InvalidStreamPartError {
 
 impl std::error::Error for InvalidStreamPartError {}
 
+/// Error returned when a UI message stream emits an invalid or out-of-sequence chunk.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiMessageStreamError {
+    chunk_type: String,
+    chunk_id: String,
+    message: String,
+}
+
+impl UiMessageStreamError {
+    /// Creates a UI message stream error with the failing chunk context and message.
+    pub fn new(
+        chunk_type: impl Into<String>,
+        chunk_id: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            chunk_type: chunk_type.into(),
+            chunk_id: chunk_id.into(),
+            message: message.into(),
+        }
+    }
+
+    /// Returns the type of stream chunk that caused the error.
+    pub fn chunk_type(&self) -> &str {
+        &self.chunk_type
+    }
+
+    /// Returns the part ID or tool call ID associated with the failing chunk.
+    pub fn chunk_id(&self) -> &str {
+        &self.chunk_id
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into its retained chunk context and message.
+    pub fn into_parts(self) -> (String, String, String) {
+        (self.chunk_type, self.chunk_id, self.message)
+    }
+}
+
+impl fmt::Display for UiMessageStreamError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for UiMessageStreamError {}
+
 /// Error returned when a high-level API receives an unsupported model version.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UnsupportedModelVersionError {
@@ -2172,7 +2223,7 @@ mod tests {
         InvalidToolApprovalError, InvalidToolInputError, MissingToolResultsError,
         NoObjectGeneratedError, NoOutputGeneratedError, NoSuchToolError,
         ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOriginalError,
-        UnsupportedModelVersionError, generate_text,
+        UiMessageStreamError, UnsupportedModelVersionError, generate_text,
     };
     use crate::file_data::FileDataContent;
     use crate::language_model::{
@@ -2564,6 +2615,31 @@ mod tests {
             error.into_parts(),
             (
                 chunk,
+                "text-delta chunk arrived without a matching text-start".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn ui_message_stream_error_retains_chunk_context_and_message() {
+        let error = UiMessageStreamError::new(
+            "text-delta",
+            "text-1",
+            "text-delta chunk arrived without a matching text-start",
+        );
+
+        assert_eq!(error.chunk_type(), "text-delta");
+        assert_eq!(error.chunk_id(), "text-1");
+        assert_eq!(
+            error.message(),
+            "text-delta chunk arrived without a matching text-start"
+        );
+        assert_eq!(error.to_string(), error.message());
+        assert_eq!(
+            error.into_parts(),
+            (
+                "text-delta".to_string(),
+                "text-1".to_string(),
                 "text-delta chunk arrived without a matching text-start".to_string()
             )
         );
