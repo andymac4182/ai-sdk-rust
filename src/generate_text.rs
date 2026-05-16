@@ -279,6 +279,22 @@ pub struct GenerateTextToolResult {
     /// Whether this result represents a tool execution error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
+
+    /// Whether the provider executed this tool call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_executed: Option<bool>,
+
+    /// Whether the tool was dynamically defined by the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic: Option<bool>,
+
+    /// Whether this provider tool result is preliminary and may be replaced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preliminary: Option<bool>,
+
+    /// Provider-specific metadata returned with the tool result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
 }
 
 impl GenerateTextToolResult {
@@ -289,6 +305,10 @@ impl GenerateTextToolResult {
             input: tool_call.input.clone(),
             output,
             is_error: None,
+            provider_executed: tool_call.provider_executed,
+            dynamic: tool_call.dynamic,
+            preliminary: None,
+            provider_metadata: tool_call.provider_metadata.clone(),
         }
     }
 
@@ -299,6 +319,10 @@ impl GenerateTextToolResult {
             input: tool_call.input.clone(),
             output: JsonValue::String(message),
             is_error: Some(true),
+            provider_executed: tool_call.provider_executed,
+            dynamic: tool_call.dynamic,
+            preliminary: None,
+            provider_metadata: tool_call.provider_metadata.clone(),
         }
     }
 }
@@ -396,13 +420,14 @@ impl GenerateTextStep {
 
         let text = extract_text(&content);
         let tool_calls = extract_tool_calls(&content);
+        let tool_results = extract_provider_tool_results(&content, &tool_calls);
 
         Self {
             step_number,
             model,
             content,
             tool_calls,
-            tool_results: Vec::new(),
+            tool_results,
             text,
             finish_reason: unified,
             raw_finish_reason,
@@ -532,7 +557,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         mark_unavailable_tool_calls(&mut step.tool_calls, call_options.tools.as_deref());
         let tool_results = execute_tool_calls(&tools, &step.tool_calls, &step_prompt).await;
         let should_continue = should_continue_after_tool_results(&step, &tool_results);
-        step.tool_results = tool_results;
+        step.tool_results.extend(tool_results);
 
         if should_continue && step_number + 1 < max_steps {
             if let Some(messages) = response_messages_for_step(&step) {
@@ -569,6 +594,36 @@ fn extract_tool_calls(content: &[LanguageModelContent]) -> Vec<GenerateTextToolC
             LanguageModelContent::ToolCall(tool_call) => Some(
                 GenerateTextToolCall::from_language_model_tool_call(tool_call),
             ),
+            _ => None,
+        })
+        .collect()
+}
+
+fn extract_provider_tool_results(
+    content: &[LanguageModelContent],
+    tool_calls: &[GenerateTextToolCall],
+) -> Vec<GenerateTextToolResult> {
+    content
+        .iter()
+        .filter_map(|part| match part {
+            LanguageModelContent::ToolResult(tool_result) => {
+                let input = tool_calls
+                    .iter()
+                    .find(|tool_call| tool_call.tool_call_id == tool_result.tool_call_id)
+                    .map_or(JsonValue::Null, |tool_call| tool_call.input.clone());
+
+                Some(GenerateTextToolResult {
+                    tool_call_id: tool_result.tool_call_id.clone(),
+                    tool_name: tool_result.tool_name.clone(),
+                    input,
+                    output: tool_result.result.as_value().clone(),
+                    is_error: tool_result.is_error,
+                    provider_executed: Some(true),
+                    dynamic: tool_result.dynamic,
+                    preliminary: tool_result.preliminary,
+                    provider_metadata: tool_result.provider_metadata.clone(),
+                })
+            }
             _ => None,
         })
         .collect()
@@ -642,7 +697,14 @@ fn response_messages_for_step(step: &GenerateTextStep) -> Option<Vec<LanguageMod
         messages.push(message);
     }
 
-    if let Some(message) = tool_message_from_results(&step.tool_results) {
+    let client_tool_results = step
+        .tool_results
+        .iter()
+        .filter(|tool_result| tool_result.provider_executed != Some(true))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if let Some(message) = tool_message_from_results(&client_tool_results) {
         messages.push(message);
     }
 
@@ -925,9 +987,9 @@ mod tests {
         LanguageModelFunctionTool, LanguageModelGenerateResult, LanguageModelMessage,
         LanguageModelStreamPart, LanguageModelStreamResult, LanguageModelSupportedUrls,
         LanguageModelText, LanguageModelTextPart, LanguageModelTool, LanguageModelToolCall,
-        LanguageModelToolCallPart, LanguageModelToolContentPart, LanguageModelToolResultOutput,
-        LanguageModelToolResultPart, LanguageModelUsage, LanguageModelUserContentPart,
-        LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelToolCallPart, LanguageModelToolContentPart, LanguageModelToolResult,
+        LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
+        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::provider::SpecificationVersion;
     use crate::provider_utils::Tool;
@@ -936,6 +998,10 @@ mod tests {
     use std::collections::BTreeMap;
     use std::future::{Future, Ready, ready};
     use std::pin::Pin;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
     use std::task::{Context, Poll, Waker};
 
     struct FakeLanguageModel {
@@ -1159,6 +1225,10 @@ mod tests {
             input: json!({ "city": "Brisbane" }),
             output: json!({ "forecast": "sunny" }),
             is_error: None,
+            provider_executed: None,
+            dynamic: None,
+            preliminary: None,
+            provider_metadata: None,
         };
 
         assert_eq!(
@@ -1524,6 +1594,128 @@ mod tests {
         assert_eq!(result.usage.input_tokens.total, Some(13));
         assert_eq!(result.usage.output_tokens.total, Some(8));
         assert_eq!(result.usage.output_tokens.text, Some(7));
+    }
+
+    struct ProviderExecutedToolLanguageModel {
+        calls: RefCell<Vec<LanguageModelCallOptions>>,
+    }
+
+    impl ProviderExecutedToolLanguageModel {
+        fn new() -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl LanguageModel for ProviderExecutedToolLanguageModel {
+        type SupportedUrlsFuture<'a>
+            = Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a;
+
+        type GenerateFuture<'a>
+            = Ready<LanguageModelGenerateResult>
+        where
+            Self: 'a;
+
+        type Stream = Vec<LanguageModelStreamPart>;
+
+        type StreamFuture<'a>
+            = Ready<LanguageModelStreamResult<Self::Stream>>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "test-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+
+        fn supported_urls(&self) -> Self::SupportedUrlsFuture<'_> {
+            ready(BTreeMap::new())
+        }
+
+        fn do_generate(&self, options: LanguageModelCallOptions) -> Self::GenerateFuture<'_> {
+            self.calls.borrow_mut().push(options);
+
+            ready(LanguageModelGenerateResult::new(
+                vec![
+                    LanguageModelContent::ToolCall(
+                        LanguageModelToolCall::new(
+                            "provider-call-1",
+                            "providerTool",
+                            r#"{"city":"Brisbane"}"#,
+                        )
+                        .with_provider_executed(true)
+                        .with_dynamic(true),
+                    ),
+                    LanguageModelContent::ToolResult(
+                        LanguageModelToolResult::new(
+                            "provider-call-1",
+                            "providerTool",
+                            crate::NonNullJsonValue::new(json!({
+                                "forecast": "sunny"
+                            }))
+                            .expect("provider tool result is non-null"),
+                        )
+                        .with_dynamic(true),
+                    ),
+                ],
+                LanguageModelFinishReason {
+                    unified: FinishReason::Stop,
+                    raw: Some("stop".to_string()),
+                },
+                LanguageModelUsage::default(),
+            ))
+        }
+
+        fn do_stream(&self, _options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
+            ready(LanguageModelStreamResult::new(Vec::new()))
+        }
+    }
+
+    #[test]
+    fn generate_text_surfaces_provider_executed_tool_results_without_local_execution() {
+        let model = ProviderExecutedToolLanguageModel::new();
+        let tool_executed = Arc::new(AtomicBool::new(false));
+        let tool_executed_for_closure = Arc::clone(&tool_executed);
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("providerTool", input_schema).with_execute(
+                    move |_input, _options| {
+                        let tool_executed = Arc::clone(&tool_executed_for_closure);
+                        async move {
+                            tool_executed.store(true, Ordering::SeqCst);
+                            Ok(json!("should not execute"))
+                        }
+                    },
+                ))
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(model.calls.borrow().len(), 1);
+        assert!(!tool_executed.load(Ordering::SeqCst));
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].provider_executed, Some(true));
+        assert_eq!(result.tool_calls[0].dynamic, Some(true));
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_call_id, "provider-call-1");
+        assert_eq!(result.tool_results[0].tool_name, "providerTool");
+        assert_eq!(result.tool_results[0].input, json!({ "city": "Brisbane" }));
+        assert_eq!(
+            result.tool_results[0].output,
+            json!({ "forecast": "sunny" })
+        );
+        assert_eq!(result.tool_results[0].provider_executed, Some(true));
+        assert_eq!(result.tool_results[0].dynamic, Some(true));
     }
 
     #[test]
