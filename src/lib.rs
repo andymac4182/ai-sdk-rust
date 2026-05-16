@@ -9,6 +9,7 @@ pub mod embedding_model;
 pub mod embedding_model_middleware;
 pub mod file_data;
 pub mod files;
+pub mod generate_image;
 pub mod generate_text;
 pub mod headers;
 pub mod image_model;
@@ -50,6 +51,11 @@ pub use file_data::{
     ProviderReferenceError,
 };
 pub use files::{Files, FilesUploadFileCallOptions, FilesUploadFileData, FilesUploadFileResult};
+pub use generate_image::{
+    ExperimentalGenerateImageResult, GenerateImageOptions, GenerateImagePrompt,
+    GenerateImagePromptImage, GenerateImagePromptImages, GenerateImageResult,
+    experimental_generate_image, generate_image,
+};
 pub use generate_text::{
     ActiveTools, CollectToolApprovalsError, CollectedToolApproval, CollectedToolApprovals,
     ContentPart, DefaultGeneratedFile, DynamicToolCall, DynamicToolError, DynamicToolResult,
