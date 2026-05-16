@@ -59,7 +59,9 @@ pub use language_model::{
     LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUrlSource,
     LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
 };
-pub use provider::{ModelType, NoSuchModelError, ProviderMetadata, ProviderOptions};
+pub use provider::{
+    ModelType, NoSuchModelError, ProviderMetadata, ProviderOptions, UnsupportedFunctionalityError,
+};
 pub use reranking_model::{
     RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
     RerankingModelResponse, RerankingModelResult,

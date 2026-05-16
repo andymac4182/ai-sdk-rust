@@ -92,6 +92,55 @@ impl fmt::Display for NoSuchModelError {
 
 impl std::error::Error for NoSuchModelError {}
 
+/// Error returned when a provider cannot support requested functionality.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnsupportedFunctionalityError {
+    functionality: String,
+    message: String,
+}
+
+impl UnsupportedFunctionalityError {
+    /// Creates an error with the upstream default unsupported-functionality message.
+    pub fn new(functionality: impl Into<String>) -> Self {
+        let functionality = functionality.into();
+        Self {
+            message: format!("'{functionality}' functionality not supported."),
+            functionality,
+        }
+    }
+
+    /// Creates an error with a provider-specific message.
+    pub fn with_message(functionality: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            functionality: functionality.into(),
+            message: message.into(),
+        }
+    }
+
+    /// Returns the unsupported functionality identifier.
+    pub fn functionality(&self) -> &str {
+        &self.functionality
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into the unsupported functionality identifier.
+    pub fn into_functionality(self) -> String {
+        self.functionality
+    }
+}
+
+impl fmt::Display for UnsupportedFunctionalityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for UnsupportedFunctionalityError {}
+
 /// Additional provider-specific options passed through to a model provider.
 ///
 /// The outer map is keyed by provider name and the inner object contains
@@ -106,7 +155,7 @@ pub type ProviderMetadata = BTreeMap<String, JsonObject>;
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelType, NoSuchModelError, ProviderOptions};
+    use super::{ModelType, NoSuchModelError, ProviderOptions, UnsupportedFunctionalityError};
     use serde_json::json;
 
     #[test]
@@ -152,6 +201,36 @@ mod tests {
         assert_eq!(error.model_type(), ModelType::LanguageModel);
         assert_eq!(error.to_string(), "No such languageModel: gpt-4.1");
         assert_eq!(error.into_model_id(), "gpt-4.1");
+    }
+
+    #[test]
+    fn unsupported_functionality_error_matches_upstream_default_message() {
+        let error = UnsupportedFunctionalityError::new("File URL data");
+
+        assert_eq!(error.functionality(), "File URL data");
+        assert_eq!(
+            error.message(),
+            "'File URL data' functionality not supported."
+        );
+        assert_eq!(
+            error.to_string(),
+            "'File URL data' functionality not supported."
+        );
+        assert_eq!(error.into_functionality(), "File URL data");
+    }
+
+    #[test]
+    fn unsupported_functionality_error_accepts_provider_specific_message() {
+        let error = UnsupportedFunctionalityError::with_message(
+            "image/avif",
+            "Unsupported image mime type: image/avif, expected one of: image/jpeg, image/png.",
+        );
+
+        assert_eq!(error.functionality(), "image/avif");
+        assert_eq!(
+            error.to_string(),
+            "Unsupported image mime type: image/avif, expected one of: image/jpeg, image/png."
+        );
     }
 
     #[test]
