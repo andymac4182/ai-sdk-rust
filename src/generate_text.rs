@@ -1794,15 +1794,125 @@ pub fn normalize_tool_approval_status(
     )
 }
 
-/// Static per-tool approval configuration for high-level generate-text calls.
+/// Future returned by a generate-text approval callback.
+pub type ToolApprovalFuture = Pin<Box<dyn Future<Output = Option<ToolApprovalStatus>> + Send>>;
+
+/// Options passed to a per-tool approval callback.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SingleToolApprovalOptions {
+    /// Identifier of the model tool call being approved.
+    pub tool_call_id: String,
+
+    /// Prompt messages sent to the model for the step that produced the tool call.
+    pub messages: LanguageModelPrompt,
+
+    /// Tool-specific context configured for the called tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_context: Option<JsonValue>,
+
+    /// User-defined runtime context for the generation.
+    pub runtime_context: JsonObject,
+}
+
+impl SingleToolApprovalOptions {
+    /// Creates per-tool approval callback options.
+    pub fn new(tool_call_id: impl Into<String>, messages: LanguageModelPrompt) -> Self {
+        Self {
+            tool_call_id: tool_call_id.into(),
+            messages,
+            tool_context: None,
+            runtime_context: JsonObject::new(),
+        }
+    }
+
+    /// Sets tool-specific context for the approval callback.
+    pub fn with_tool_context(mut self, tool_context: impl Into<JsonValue>) -> Self {
+        self.tool_context = Some(tool_context.into());
+        self
+    }
+
+    /// Sets runtime context for the approval callback.
+    pub fn with_runtime_context(mut self, runtime_context: JsonObject) -> Self {
+        self.runtime_context = runtime_context;
+        self
+    }
+}
+
+/// Options passed to a generic approval callback.
+#[derive(Clone, Debug)]
+pub struct GenericToolApprovalOptions {
+    /// Valid high-level tool call whose approval status should be resolved.
+    pub tool_call: GenerateTextToolCall,
+
+    /// Tools available to the model for the step.
+    pub tools: Option<Vec<Tool>>,
+
+    /// Prompt messages sent to the model for the step that produced the tool call.
+    pub messages: LanguageModelPrompt,
+
+    /// Tool-specific context keyed by tool name.
+    pub tools_context: JsonObject,
+
+    /// User-defined runtime context for the generation.
+    pub runtime_context: JsonObject,
+}
+
+impl GenericToolApprovalOptions {
+    /// Creates generic approval callback options.
+    pub fn new(tool_call: GenerateTextToolCall) -> Self {
+        Self {
+            tool_call,
+            tools: None,
+            messages: Vec::new(),
+            tools_context: JsonObject::new(),
+            runtime_context: JsonObject::new(),
+        }
+    }
+
+    /// Sets the tools available to the model for the step.
+    pub fn with_tools(mut self, tools: impl IntoIterator<Item = Tool>) -> Self {
+        self.tools = Some(tools.into_iter().collect());
+        self
+    }
+
+    /// Sets prompt messages for the approval callback.
+    pub fn with_messages(mut self, messages: LanguageModelPrompt) -> Self {
+        self.messages = messages;
+        self
+    }
+
+    /// Sets tool-specific context for the approval callback.
+    pub fn with_tools_context(mut self, tools_context: JsonObject) -> Self {
+        self.tools_context = tools_context;
+        self
+    }
+
+    /// Sets runtime context for the approval callback.
+    pub fn with_runtime_context(mut self, runtime_context: JsonObject) -> Self {
+        self.runtime_context = runtime_context;
+        self
+    }
+}
+
+/// Function that resolves approval for one named tool.
+pub type SingleToolApprovalFunction =
+    dyn Fn(JsonValue, SingleToolApprovalOptions) -> ToolApprovalFuture + Send + Sync + 'static;
+
+/// Function that resolves approval for any valid tool call.
+pub type GenericToolApprovalFunction =
+    dyn Fn(GenericToolApprovalOptions) -> ToolApprovalFuture + Send + Sync + 'static;
+
+/// Per-tool or callback approval configuration for high-level generate-text calls.
 ///
-/// Upstream `toolApproval` also accepts callback forms. This Rust slice models
-/// the JSON/data configuration form first: caller-supplied per-tool statuses
-/// override any tool-defined `needs_approval` boolean.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(transparent)]
+/// Upstream `toolApproval` accepts either a generic callback or a per-tool map.
+/// Rust preserves the JSON/data per-tool status shape and also supports
+/// callback entries that run at generation time.
+#[derive(Clone, Default)]
 pub struct ToolApprovalConfiguration {
     tool_statuses: BTreeMap<String, ToolApprovalStatus>,
+    tool_callbacks: BTreeMap<String, Arc<SingleToolApprovalFunction>>,
+    generic_callback: Option<Arc<GenericToolApprovalFunction>>,
 }
 
 impl ToolApprovalConfiguration {
@@ -1820,6 +1930,8 @@ impl ToolApprovalConfiguration {
                 .into_iter()
                 .map(|(tool_name, status)| (tool_name.into(), status))
                 .collect(),
+            tool_callbacks: BTreeMap::new(),
+            generic_callback: None,
         }
     }
 
@@ -1829,7 +1941,42 @@ impl ToolApprovalConfiguration {
         tool_name: impl Into<String>,
         status: impl Into<ToolApprovalStatus>,
     ) -> Self {
-        self.tool_statuses.insert(tool_name.into(), status.into());
+        let tool_name = tool_name.into();
+        self.tool_callbacks.remove(&tool_name);
+        self.tool_statuses.insert(tool_name, status.into());
+        self
+    }
+
+    /// Adds or replaces the approval callback for one tool.
+    pub fn with_tool_approval_function<F, Fut>(
+        mut self,
+        tool_name: impl Into<String>,
+        approve: F,
+    ) -> Self
+    where
+        F: Fn(JsonValue, SingleToolApprovalOptions) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Option<ToolApprovalStatus>> + Send + 'static,
+    {
+        let tool_name = tool_name.into();
+        self.tool_statuses.remove(&tool_name);
+        self.tool_callbacks.insert(
+            tool_name,
+            Arc::new(move |input, options| Box::pin(approve(input, options))),
+        );
+        self
+    }
+
+    /// Sets a generic approval callback that is called for all valid tool calls.
+    ///
+    /// When present, this callback takes precedence over per-tool static
+    /// statuses and per-tool callbacks, matching upstream's function-form
+    /// `toolApproval` behavior.
+    pub fn with_generic_tool_approval<F, Fut>(mut self, approve: F) -> Self
+    where
+        F: Fn(GenericToolApprovalOptions) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Option<ToolApprovalStatus>> + Send + 'static,
+    {
+        self.generic_callback = Some(Arc::new(move |options| Box::pin(approve(options))));
         self
     }
 
@@ -1839,12 +1986,24 @@ impl ToolApprovalConfiguration {
         tool_name: impl Into<String>,
         status: impl Into<ToolApprovalStatus>,
     ) -> Option<ToolApprovalStatus> {
-        self.tool_statuses.insert(tool_name.into(), status.into())
+        let tool_name = tool_name.into();
+        self.tool_callbacks.remove(&tool_name);
+        self.tool_statuses.insert(tool_name, status.into())
     }
 
     /// Returns the configured approval status for one tool.
     pub fn tool_status(&self, tool_name: &str) -> Option<&ToolApprovalStatus> {
         self.tool_statuses.get(tool_name)
+    }
+
+    /// Returns whether the named tool has a configured approval callback.
+    pub fn has_tool_approval_function(&self, tool_name: &str) -> bool {
+        self.tool_callbacks.contains_key(tool_name)
+    }
+
+    /// Returns whether a generic approval callback is configured.
+    pub fn has_generic_tool_approval(&self) -> bool {
+        self.generic_callback.is_some()
     }
 
     /// Returns the configured tool-status map.
@@ -1855,6 +2014,80 @@ impl ToolApprovalConfiguration {
     /// Returns whether this configuration has no per-tool statuses.
     pub fn is_empty(&self) -> bool {
         self.tool_statuses.is_empty()
+            && self.tool_callbacks.is_empty()
+            && self.generic_callback.is_none()
+    }
+}
+
+impl fmt::Debug for ToolApprovalConfiguration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ToolApprovalConfiguration")
+            .field("tool_statuses", &self.tool_statuses)
+            .field(
+                "tool_callback_names",
+                &self.tool_callbacks.keys().collect::<Vec<_>>(),
+            )
+            .field(
+                "has_generic_callback",
+                &self
+                    .generic_callback
+                    .as_ref()
+                    .map(|_| true)
+                    .unwrap_or(false),
+            )
+            .finish()
+    }
+}
+
+impl PartialEq for ToolApprovalConfiguration {
+    fn eq(&self, other: &Self) -> bool {
+        self.tool_statuses == other.tool_statuses
+            && self
+                .generic_callback
+                .as_ref()
+                .zip(other.generic_callback.as_ref())
+                .map_or(
+                    self.generic_callback.is_none() && other.generic_callback.is_none(),
+                    |(left, right)| Arc::ptr_eq(left, right),
+                )
+            && self.tool_callbacks.len() == other.tool_callbacks.len()
+            && self.tool_callbacks.iter().all(|(name, callback)| {
+                other
+                    .tool_callbacks
+                    .get(name)
+                    .is_some_and(|other_callback| Arc::ptr_eq(callback, other_callback))
+            })
+    }
+}
+
+impl Eq for ToolApprovalConfiguration {}
+
+impl Serialize for ToolApprovalConfiguration {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if self.generic_callback.is_some() || !self.tool_callbacks.is_empty() {
+            return Err(<S::Error as serde::ser::Error>::custom(
+                "tool approval callbacks cannot be serialized",
+            ));
+        }
+
+        self.tool_statuses.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolApprovalConfiguration {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(Self {
+            tool_statuses: BTreeMap::deserialize(deserializer)?,
+            tool_callbacks: BTreeMap::new(),
+            generic_callback: None,
+        })
     }
 }
 
@@ -1869,6 +2102,15 @@ pub struct ResolveToolApprovalOptions<'a> {
 
     /// User-defined generate-text approval configuration.
     pub tool_approval: Option<&'a ToolApprovalConfiguration>,
+
+    /// Messages sent to the model for the step that produced this tool call.
+    pub messages: Option<&'a LanguageModelPrompt>,
+
+    /// Tool-specific context keyed by tool name.
+    pub tools_context: Option<&'a JsonObject>,
+
+    /// User-defined runtime context for the generation.
+    pub runtime_context: Option<&'a JsonObject>,
 }
 
 impl<'a> ResolveToolApprovalOptions<'a> {
@@ -1878,6 +2120,9 @@ impl<'a> ResolveToolApprovalOptions<'a> {
             tools: None,
             tool_call,
             tool_approval: None,
+            messages: None,
+            tools_context: None,
+            runtime_context: None,
         }
     }
 
@@ -1893,6 +2138,24 @@ impl<'a> ResolveToolApprovalOptions<'a> {
         self
     }
 
+    /// Sets the prompt messages sent to the model for the step.
+    pub fn with_messages(mut self, messages: &'a LanguageModelPrompt) -> Self {
+        self.messages = Some(messages);
+        self
+    }
+
+    /// Sets the tool contexts available for the generation.
+    pub fn with_tools_context(mut self, tools_context: &'a JsonObject) -> Self {
+        self.tools_context = Some(tools_context);
+        self
+    }
+
+    /// Sets the runtime context available for the generation.
+    pub fn with_runtime_context(mut self, runtime_context: &'a JsonObject) -> Self {
+        self.runtime_context = Some(runtime_context);
+        self
+    }
+
     fn with_optional_tool_approval(
         mut self,
         tool_approval: Option<&'a ToolApprovalConfiguration>,
@@ -1904,17 +2167,53 @@ impl<'a> ResolveToolApprovalOptions<'a> {
 
 /// Resolves the approval status for a valid tool call.
 ///
-/// This mirrors the static branches of upstream `resolveToolApproval`: explicit
-/// generate-text approval configuration wins first, then tool-defined boolean
-/// approval, and missing configuration normalizes to `not-applicable`.
-pub fn resolve_tool_approval(
+/// This mirrors upstream `resolveToolApproval`: a generic generate-text
+/// callback wins first, then per-tool generate-text approval configuration,
+/// then tool-defined boolean approval, and missing configuration normalizes to
+/// `not-applicable`.
+pub async fn resolve_tool_approval(
     options: ResolveToolApprovalOptions<'_>,
 ) -> NormalizedToolApprovalStatus {
-    if let Some(status) = options
-        .tool_approval
-        .and_then(|configuration| configuration.tool_status(&options.tool_call.tool_name))
-    {
-        return normalize_tool_approval_status(Some(status.clone()));
+    if let Some(configuration) = options.tool_approval {
+        if let Some(approve) = &configuration.generic_callback {
+            return normalize_tool_approval_status(
+                approve(GenericToolApprovalOptions {
+                    tool_call: options.tool_call.clone(),
+                    tools: options.tools.map(|tools| tools.to_vec()),
+                    messages: options.messages.cloned().unwrap_or_default(),
+                    tools_context: options.tools_context.cloned().unwrap_or_default(),
+                    runtime_context: options.runtime_context.cloned().unwrap_or_default(),
+                })
+                .await,
+            );
+        }
+
+        if let Some(status) = configuration.tool_status(&options.tool_call.tool_name) {
+            return normalize_tool_approval_status(Some(status.clone()));
+        }
+
+        if let Some(approve) = configuration
+            .tool_callbacks
+            .get(&options.tool_call.tool_name)
+        {
+            let tool_context = options
+                .tools_context
+                .and_then(|tools_context| tools_context.get(&options.tool_call.tool_name))
+                .cloned();
+
+            return normalize_tool_approval_status(
+                approve(
+                    options.tool_call.input.clone(),
+                    SingleToolApprovalOptions {
+                        tool_call_id: options.tool_call.tool_call_id.clone(),
+                        messages: options.messages.cloned().unwrap_or_default(),
+                        tool_context,
+                        runtime_context: options.runtime_context.cloned().unwrap_or_default(),
+                    },
+                )
+                .await,
+            );
+        }
     }
 
     let needs_approval = options.tools.and_then(|tools| {
@@ -4928,8 +5227,15 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
                 .await;
         }
 
-        let tool_approvals =
-            resolve_tool_approvals_for_step(&step.tool_calls, &step_tools, tool_approval.as_ref());
+        let tool_approvals = resolve_tool_approvals_for_step(
+            &step.tool_calls,
+            &step_tools,
+            tool_approval.as_ref(),
+            &step_prompt,
+            &tools_context,
+            &runtime_context,
+        )
+        .await;
         update_pending_deferred_provider_tool_calls(
             &mut pending_deferred_provider_tool_call_ids,
             &step,
@@ -5608,10 +5914,13 @@ struct StepToolApprovalResponse {
     tool_call: GenerateTextToolCall,
 }
 
-fn resolve_tool_approvals_for_step(
+async fn resolve_tool_approvals_for_step(
     tool_calls: &[GenerateTextToolCall],
     tools: &[Tool],
     tool_approval: Option<&ToolApprovalConfiguration>,
+    messages: &LanguageModelPrompt,
+    tools_context: &JsonObject,
+    runtime_context: &JsonObject,
 ) -> StepToolApprovals {
     let mut approvals = StepToolApprovals::default();
 
@@ -5627,8 +5936,12 @@ fn resolve_tool_approvals_for_step(
         let status = resolve_tool_approval(
             ResolveToolApprovalOptions::new(tool_call)
                 .with_tools(tools)
-                .with_optional_tool_approval(tool_approval),
-        );
+                .with_optional_tool_approval(tool_approval)
+                .with_messages(messages)
+                .with_tools_context(tools_context)
+                .with_runtime_context(runtime_context),
+        )
+        .await;
 
         match status {
             NormalizedToolApprovalStatus::NotApplicable => {}
@@ -6863,22 +7176,23 @@ mod tests {
         GenerateTextStepPerformance, GenerateTextStepStartEvent, GenerateTextToolCall,
         GenerateTextToolError, GenerateTextToolExecutionEndEvent,
         GenerateTextToolExecutionStartEvent, GenerateTextToolOutputDenied, GenerateTextToolResult,
-        GeneratedFile, InvalidStreamPartError, InvalidToolApprovalError, InvalidToolInputError,
-        LanguageModelCallEndEvent, LanguageModelCallPerformance, LanguageModelCallStartEvent,
-        MissingToolResultsError, ModelInfo, NoObjectGeneratedError, NoOutputGeneratedError,
-        NoSuchToolError, NormalizedToolApprovalStatus, PrepareStepResult, PruneEmptyMessages,
-        PruneMessagesOptions, PruneReasoning, PruneToolCallRule, PruneToolCallRuleMode,
-        PruneToolCalls, ReasoningFileOutput, ReasoningOutput, ResolveToolApprovalOptions,
-        StaticToolCall, StaticToolError, StaticToolOutputDenied, StaticToolResult, StopCondition,
-        ToolApprovalConfiguration, ToolApprovalRequestOutput, ToolApprovalResponseOutput,
-        ToolApprovalStatus, ToolApprovalStatusKind, ToolCallNotFoundForApprovalError,
-        ToolCallRepairError, ToolCallRepairOptions, ToolCallRepairOriginalError,
-        ToolExecutionEndEvent, ToolExecutionStartEvent, ToolInputRefinementError, TypedToolCall,
-        TypedToolError, TypedToolOutputDenied, TypedToolResult, UiMessageStreamError,
-        UnsupportedModelVersionError, collect_tool_approvals, experimental_filter_active_tools,
-        filter_active_tools, generate_text, has_tool_call, is_loop_finished, is_step_count,
-        is_stop_condition_met, normalize_tool_approval_status, prune_messages,
-        resolve_tool_approval, step_count_is,
+        GeneratedFile, GenericToolApprovalOptions, InvalidStreamPartError,
+        InvalidToolApprovalError, InvalidToolInputError, LanguageModelCallEndEvent,
+        LanguageModelCallPerformance, LanguageModelCallStartEvent, MissingToolResultsError,
+        ModelInfo, NoObjectGeneratedError, NoOutputGeneratedError, NoSuchToolError,
+        NormalizedToolApprovalStatus, PrepareStepResult, PruneEmptyMessages, PruneMessagesOptions,
+        PruneReasoning, PruneToolCallRule, PruneToolCallRuleMode, PruneToolCalls,
+        ReasoningFileOutput, ReasoningOutput, ResolveToolApprovalOptions,
+        SingleToolApprovalOptions, StaticToolCall, StaticToolError, StaticToolOutputDenied,
+        StaticToolResult, StopCondition, ToolApprovalConfiguration, ToolApprovalRequestOutput,
+        ToolApprovalResponseOutput, ToolApprovalStatus, ToolApprovalStatusKind,
+        ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOptions,
+        ToolCallRepairOriginalError, ToolExecutionEndEvent, ToolExecutionStartEvent,
+        ToolInputRefinementError, TypedToolCall, TypedToolError, TypedToolOutputDenied,
+        TypedToolResult, UiMessageStreamError, UnsupportedModelVersionError,
+        collect_tool_approvals, experimental_filter_active_tools, filter_active_tools,
+        generate_text, has_tool_call, is_loop_finished, is_step_count, is_stop_condition_met,
+        normalize_tool_approval_status, prune_messages, resolve_tool_approval, step_count_is,
     };
     use crate::file_data::FileDataContent;
     use crate::headers::Headers;
@@ -7475,11 +7789,11 @@ mod tests {
             NormalizedToolApprovalStatus::denied_with_reason("policy block"),
         );
 
-        let status = resolve_tool_approval(
+        let status = poll_ready(resolve_tool_approval(
             ResolveToolApprovalOptions::new(&tool_call)
                 .with_tools(&tools)
                 .with_tool_approval(&configuration),
-        );
+        ));
 
         assert_eq!(
             status,
@@ -7496,15 +7810,15 @@ mod tests {
             vec![Tool::new("weather", approval_tool_schema()).with_needs_approval(false)];
 
         assert_eq!(
-            resolve_tool_approval(
+            poll_ready(resolve_tool_approval(
                 ResolveToolApprovalOptions::new(&tool_call).with_tools(&approval_required)
-            ),
+            )),
             NormalizedToolApprovalStatus::UserApproval
         );
         assert_eq!(
-            resolve_tool_approval(
+            poll_ready(resolve_tool_approval(
                 ResolveToolApprovalOptions::new(&tool_call).with_tools(&approval_not_required)
-            ),
+            )),
             NormalizedToolApprovalStatus::NotApplicable
         );
     }
@@ -7514,16 +7828,116 @@ mod tests {
         let tool_call = approval_tool_call("weather");
 
         assert_eq!(
-            resolve_tool_approval(ResolveToolApprovalOptions::new(&tool_call)),
+            poll_ready(resolve_tool_approval(ResolveToolApprovalOptions::new(
+                &tool_call
+            ))),
             NormalizedToolApprovalStatus::NotApplicable
         );
         assert_eq!(
-            resolve_tool_approval(
+            poll_ready(resolve_tool_approval(
                 ResolveToolApprovalOptions::new(&tool_call)
                     .with_tools(&[Tool::new("search", approval_tool_schema())])
-            ),
+            )),
             NormalizedToolApprovalStatus::NotApplicable
         );
+    }
+
+    #[test]
+    fn resolve_tool_approval_uses_generic_callback_before_static_tool_statuses() {
+        let tool_call = approval_tool_call("weather");
+        let tools = vec![Tool::new("weather", approval_tool_schema())];
+        let prompt = vec![user_message("Weather?")];
+        let runtime_context = JsonObject::from_iter([("userId".to_string(), json!("user-1"))]);
+        let tools_context = JsonObject::from_iter([(
+            "weather".to_string(),
+            json!({ "risk": "low", "source": "test" }),
+        )]);
+        let seen = Arc::new(Mutex::new(None::<GenericToolApprovalOptions>));
+        let seen_for_callback = Arc::clone(&seen);
+        let configuration = ToolApprovalConfiguration::new()
+            .with_tool_status("weather", ToolApprovalStatusKind::Denied)
+            .with_generic_tool_approval(move |options| {
+                let seen = Arc::clone(&seen_for_callback);
+                async move {
+                    seen.lock().expect("seen lock").replace(options);
+                    Some(NormalizedToolApprovalStatus::approved_with_reason("generic").into())
+                }
+            });
+
+        assert!(configuration.has_generic_tool_approval());
+        assert!(serde_json::to_value(&configuration).is_err());
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration)
+                .with_messages(&prompt)
+                .with_tools_context(&tools_context)
+                .with_runtime_context(&runtime_context),
+        ));
+
+        assert_eq!(
+            status,
+            NormalizedToolApprovalStatus::approved_with_reason("generic")
+        );
+
+        let seen = seen.lock().expect("seen lock");
+        let seen_options = seen.as_ref().expect("callback captured options");
+        assert_eq!(seen_options.tool_call.tool_call_id, "call-1");
+        assert_eq!(seen_options.tools.as_ref().expect("tools passed").len(), 1);
+        assert_eq!(seen_options.messages, prompt);
+        assert_eq!(seen_options.tools_context, tools_context);
+        assert_eq!(seen_options.runtime_context, runtime_context);
+    }
+
+    #[test]
+    fn resolve_tool_approval_uses_per_tool_callback_with_context() {
+        let tool_call = approval_tool_call("weather");
+        let tools = vec![Tool::new("weather", approval_tool_schema())];
+        let prompt = vec![user_message("Weather?")];
+        let runtime_context = JsonObject::from_iter([("tenant".to_string(), json!("acme"))]);
+        let tools_context =
+            JsonObject::from_iter([("weather".to_string(), json!({ "allow": false }))]);
+        let seen = Arc::new(Mutex::new(None::<(JsonValue, SingleToolApprovalOptions)>));
+        let seen_for_callback = Arc::clone(&seen);
+        let configuration = ToolApprovalConfiguration::new().with_tool_approval_function(
+            "weather",
+            move |input, options| {
+                let seen = Arc::clone(&seen_for_callback);
+                async move {
+                    seen.lock().expect("seen lock").replace((input, options));
+                    Some(NormalizedToolApprovalStatus::denied_with_reason("context policy").into())
+                }
+            },
+        );
+
+        assert!(configuration.has_tool_approval_function("weather"));
+        assert!(serde_json::to_value(&configuration).is_err());
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration)
+                .with_messages(&prompt)
+                .with_tools_context(&tools_context)
+                .with_runtime_context(&runtime_context),
+        ));
+
+        assert_eq!(
+            status,
+            NormalizedToolApprovalStatus::denied_with_reason("context policy")
+        );
+
+        let seen = seen.lock().expect("seen lock");
+        let (input, options) = seen.as_ref().expect("callback captured options");
+        assert_eq!(input["city"], json!("Berlin"));
+        assert_eq!(options.tool_call_id, "call-1");
+        assert_eq!(options.messages, prompt);
+        assert_eq!(
+            options.tool_context.as_ref().expect("tool context"),
+            &json!({ "allow": false })
+        );
+        assert_eq!(options.runtime_context, runtime_context);
     }
 
     #[test]
@@ -11287,6 +11701,69 @@ mod tests {
                 && response.tool_call.tool_call_id == "call-1"
         ));
         assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.text, "The weather in Brisbane is sunny.");
+    }
+
+    #[test]
+    fn generate_text_uses_per_tool_approval_callback_before_tool_execution() {
+        let model = ToolLoopLanguageModel::new();
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let callback_invoked = Arc::new(AtomicBool::new(false));
+        let callback_invoked_for_closure = Arc::clone(&callback_invoked);
+        let runtime_context = JsonObject::from_iter([("requestId".to_string(), json!("req-1"))]);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(
+                    Tool::new("weather", input_schema)
+                        .with_execute(|_input, _options| async move { Ok(json!("sunny")) }),
+                )
+                .with_tool_context("weather", json!({ "risk": "low" }))
+                .with_runtime_context(runtime_context.clone())
+                .with_tool_approval(
+                    ToolApprovalConfiguration::new().with_tool_approval_function(
+                        "weather",
+                        move |input, options| {
+                            let callback_invoked = Arc::clone(&callback_invoked_for_closure);
+                            async move {
+                                callback_invoked.store(true, Ordering::SeqCst);
+                                assert_eq!(input["city"], json!("Brisbane"));
+                                assert_eq!(options.messages.len(), 1);
+                                assert_eq!(
+                                    options.tool_context.as_ref().expect("tool context"),
+                                    &json!({ "risk": "low" })
+                                );
+                                assert_eq!(options.runtime_context["requestId"], json!("req-1"));
+                                Some(
+                                    NormalizedToolApprovalStatus::approved_with_reason(
+                                        "callback approved",
+                                    )
+                                    .into(),
+                                )
+                            }
+                        },
+                    ),
+                )
+                .with_max_steps(2),
+        ));
+
+        assert!(callback_invoked.load(Ordering::SeqCst));
+        assert_eq!(model.calls.borrow().len(), 2);
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].output, json!("sunny"));
+        assert!(matches!(
+            &result.steps[0].content[..],
+            [
+                GenerateTextContentPart::ToolCall(_),
+                GenerateTextContentPart::ToolApprovalRequest(_),
+                GenerateTextContentPart::ToolApprovalResponse(response),
+                GenerateTextContentPart::ToolResult(_),
+            ] if response.approved
+                && response.reason.as_deref() == Some("callback approved")
+        ));
         assert_eq!(result.text, "The weather in Brisbane is sunny.");
     }
 
