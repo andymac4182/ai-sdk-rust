@@ -287,6 +287,154 @@ impl fmt::Display for InvalidPromptError {
 
 impl std::error::Error for InvalidPromptError {}
 
+/// Optional context about the value being type-validated.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypeValidationContext {
+    /// Field path in dot notation, such as `message.metadata` or `message.parts[3].data`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+
+    /// Entity name, such as a tool name or data type name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_name: Option<String>,
+
+    /// Entity identifier, such as a message ID or tool call ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<String>,
+}
+
+impl TypeValidationContext {
+    /// Creates empty type-validation context.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds the field path being validated.
+    pub fn with_field(mut self, field: impl Into<String>) -> Self {
+        self.field = Some(field.into());
+        self
+    }
+
+    /// Adds the entity name being validated.
+    pub fn with_entity_name(mut self, entity_name: impl Into<String>) -> Self {
+        self.entity_name = Some(entity_name.into());
+        self
+    }
+
+    /// Adds the entity identifier being validated.
+    pub fn with_entity_id(mut self, entity_id: impl Into<String>) -> Self {
+        self.entity_id = Some(entity_id.into());
+        self
+    }
+
+    fn message_prefix(&self) -> String {
+        let mut prefix = "Type validation failed".to_string();
+
+        if let Some(field) = &self.field {
+            prefix.push_str(" for ");
+            prefix.push_str(field);
+        }
+
+        if self.entity_name.is_some() || self.entity_id.is_some() {
+            prefix.push_str(" (");
+
+            let mut separator = "";
+            if let Some(entity_name) = &self.entity_name {
+                prefix.push_str(entity_name);
+                separator = ", ";
+            }
+            if let Some(entity_id) = &self.entity_id {
+                prefix.push_str(separator);
+                prefix.push_str("id: \"");
+                prefix.push_str(entity_id);
+                prefix.push('"');
+            }
+
+            prefix.push(')');
+        }
+
+        prefix
+    }
+}
+
+/// Error returned when provider or SDK data fails type validation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TypeValidationError {
+    value: JsonValue,
+    context: Option<TypeValidationContext>,
+    cause_message: String,
+    message: String,
+}
+
+impl TypeValidationError {
+    /// Creates a type-validation error from a failed value and validation cause.
+    pub fn new(
+        value: impl Into<JsonValue>,
+        cause: impl fmt::Display,
+        context: Option<TypeValidationContext>,
+    ) -> Self {
+        Self::with_cause_message(value, cause.to_string(), context)
+    }
+
+    /// Creates a type-validation error from a failed value and upstream-style cause message.
+    pub fn with_cause_message(
+        value: impl Into<JsonValue>,
+        cause_message: impl Into<String>,
+        context: Option<TypeValidationContext>,
+    ) -> Self {
+        let value = value.into();
+        let cause_message = cause_message.into();
+        let rendered_value = serde_json::to_string(&value).expect("JSON values serialize");
+        let context_prefix = context.as_ref().map_or_else(
+            || "Type validation failed".to_string(),
+            |context| context.message_prefix(),
+        );
+
+        Self {
+            value,
+            context,
+            message: format!(
+                "{context_prefix}: Value: {rendered_value}.\nError message: {cause_message}"
+            ),
+            cause_message,
+        }
+    }
+
+    /// Returns the value that failed type validation.
+    pub fn value(&self) -> &JsonValue {
+        &self.value
+    }
+
+    /// Returns optional context about the value being validated.
+    pub fn context(&self) -> Option<&TypeValidationContext> {
+        self.context.as_ref()
+    }
+
+    /// Returns the human-readable validation cause message.
+    pub fn cause_message(&self) -> &str {
+        &self.cause_message
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into the failed value, cause message, and optional validation context.
+    pub fn into_parts(self) -> (JsonValue, String, Option<TypeValidationContext>) {
+        (self.value, self.cause_message, self.context)
+    }
+}
+
+impl fmt::Display for TypeValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for TypeValidationError {}
+
 /// Error returned when provider JSON parsing fails.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JsonParseError {
@@ -574,7 +722,7 @@ mod tests {
         EmptyResponseBodyError, InvalidArgumentError, InvalidPromptError, InvalidResponseDataError,
         JsonParseError, LoadApiKeyError, LoadSettingError, ModelType, NoContentGeneratedError,
         NoSuchModelError, ProviderOptions, TooManyEmbeddingValuesForCallError,
-        UnsupportedFunctionalityError,
+        TypeValidationContext, TypeValidationError, UnsupportedFunctionalityError,
     };
     use serde_json::json;
 
@@ -706,6 +854,110 @@ mod tests {
             "Invalid prompt: prompt and messages cannot both be set."
         );
         assert_eq!(error.into_prompt(), prompt);
+    }
+
+    #[test]
+    fn type_validation_context_serializes_as_upstream_camel_case_shape() {
+        let context = TypeValidationContext::new()
+            .with_field("messages[0].parts[0].input")
+            .with_entity_name("weather")
+            .with_entity_id("toolu_123");
+
+        let serialized = serde_json::to_value(&context).expect("context serializes");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "field": "messages[0].parts[0].input",
+                "entityName": "weather",
+                "entityId": "toolu_123"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<TypeValidationContext>(serialized)
+                .expect("context deserializes"),
+            context
+        );
+        assert_eq!(
+            serde_json::to_value(TypeValidationContext::new()).expect("empty context serializes"),
+            json!({})
+        );
+    }
+
+    #[test]
+    fn type_validation_error_matches_upstream_message_without_context() {
+        let value = json!({
+            "cities": "San Francisco"
+        });
+        let error = TypeValidationError::with_cause_message(
+            value.clone(),
+            "Expected array, received string",
+            None,
+        );
+
+        assert_eq!(error.value(), &value);
+        assert_eq!(error.context(), None);
+        assert_eq!(error.cause_message(), "Expected array, received string");
+        assert_eq!(
+            error.message(),
+            "Type validation failed: Value: {\"cities\":\"San Francisco\"}.\nError message: Expected array, received string"
+        );
+        assert_eq!(
+            error.to_string(),
+            "Type validation failed: Value: {\"cities\":\"San Francisco\"}.\nError message: Expected array, received string"
+        );
+        assert_eq!(
+            error.into_parts(),
+            (value, "Expected array, received string".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn type_validation_error_matches_upstream_context_prefixes() {
+        let value = json!({
+            "foo": 123
+        });
+        let context = TypeValidationContext::new()
+            .with_field("messages[0].parts[0].input")
+            .with_entity_name("weather")
+            .with_entity_id("1");
+        let error = TypeValidationError::with_cause_message(
+            value.clone(),
+            "Expected string, received number",
+            Some(context.clone()),
+        );
+
+        assert_eq!(error.value(), &value);
+        assert_eq!(error.context(), Some(&context));
+        assert_eq!(
+            error.to_string(),
+            "Type validation failed for messages[0].parts[0].input (weather, id: \"1\"): Value: {\"foo\":123}.\nError message: Expected string, received number"
+        );
+        assert_eq!(
+            error.into_parts(),
+            (
+                value,
+                "Expected string, received number".to_string(),
+                Some(context)
+            )
+        );
+    }
+
+    #[test]
+    fn type_validation_error_accepts_display_causes() {
+        let cause = serde_json::from_str::<serde_json::Value>("{")
+            .expect_err("invalid JSON should produce a serde_json parse error");
+        let error = TypeValidationError::new(json!(null), &cause, None);
+
+        assert_eq!(error.value(), &json!(null));
+        assert_eq!(error.cause_message(), cause.to_string());
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "Type validation failed: Value: null.\nError message: {}",
+                cause
+            )
+        );
     }
 
     #[test]

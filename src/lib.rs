@@ -63,7 +63,7 @@ pub use provider::{
     EmptyResponseBodyError, InvalidArgumentError, InvalidPromptError, InvalidResponseDataError,
     JsonParseError, LoadApiKeyError, LoadSettingError, ModelType, NoContentGeneratedError,
     NoSuchModelError, ProviderMetadata, ProviderOptions, TooManyEmbeddingValuesForCallError,
-    UnsupportedFunctionalityError,
+    TypeValidationContext, TypeValidationError, UnsupportedFunctionalityError,
 };
 pub use reranking_model::{
     RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
