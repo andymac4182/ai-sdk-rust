@@ -13,6 +13,7 @@ pub mod image_model;
 pub mod image_model_middleware;
 pub mod json;
 pub mod language_model;
+pub mod language_model_middleware;
 pub mod provider;
 pub mod reranking_model;
 pub mod skills;
@@ -69,6 +70,12 @@ pub use language_model::{
     LanguageModelToolResultContentPart, LanguageModelToolResultCustomContent,
     LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUrlSource,
     LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
+};
+pub use language_model_middleware::{
+    LanguageModelDoGenerate, LanguageModelDoStream, LanguageModelMiddleware,
+    LanguageModelMiddlewareCallType, LanguageModelMiddlewareModelOptions,
+    LanguageModelTransformParamsOptions, LanguageModelWrapGenerateOptions,
+    LanguageModelWrapStreamOptions,
 };
 pub use provider::{
     ApiCallError, EmptyResponseBodyError, InvalidArgumentError, InvalidPromptError,
