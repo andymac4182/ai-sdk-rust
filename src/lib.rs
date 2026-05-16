@@ -40,7 +40,7 @@ pub use files::{Files, FilesUploadFileCallOptions, FilesUploadFileData, FilesUpl
 pub use generate_text::{
     GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning, GenerateTextResult,
     GenerateTextStep, GenerateTextTool, GenerateTextToolCall, GenerateTextToolResult,
-    NoSuchToolError, generate_text,
+    InvalidToolInputError, NoSuchToolError, generate_text,
 };
 pub use headers::Headers;
 pub use image_model::{

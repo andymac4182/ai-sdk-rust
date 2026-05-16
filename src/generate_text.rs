@@ -109,6 +109,89 @@ impl fmt::Display for NoSuchToolError {
 
 impl std::error::Error for NoSuchToolError {}
 
+/// Error returned when a model supplies invalid input for a tool call.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvalidToolInputError {
+    tool_name: String,
+    tool_input: String,
+    cause_message: String,
+    message: String,
+}
+
+impl InvalidToolInputError {
+    /// Creates an invalid-tool-input error with the upstream default message.
+    pub fn new(
+        tool_name: impl Into<String>,
+        tool_input: impl Into<String>,
+        cause: impl fmt::Display,
+    ) -> Self {
+        let tool_name = tool_name.into();
+        let tool_input = tool_input.into();
+        let cause_message = cause.to_string();
+        let message = invalid_tool_input_default_message(&tool_name, &cause_message);
+
+        Self {
+            tool_name,
+            tool_input,
+            cause_message,
+            message,
+        }
+    }
+
+    /// Creates an invalid-tool-input error with a caller-supplied message.
+    pub fn with_message(
+        tool_name: impl Into<String>,
+        tool_input: impl Into<String>,
+        cause: impl fmt::Display,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            tool_name: tool_name.into(),
+            tool_input: tool_input.into(),
+            cause_message: cause.to_string(),
+            message: message.into(),
+        }
+    }
+
+    /// Returns the tool name whose input was invalid.
+    pub fn tool_name(&self) -> &str {
+        &self.tool_name
+    }
+
+    /// Returns the raw tool input that failed parsing or validation.
+    pub fn tool_input(&self) -> &str {
+        &self.tool_input
+    }
+
+    /// Returns the retained cause message.
+    pub fn cause_message(&self) -> &str {
+        &self.cause_message
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into its parts.
+    pub fn into_parts(self) -> (String, String, String, String) {
+        (
+            self.tool_name,
+            self.tool_input,
+            self.cause_message,
+            self.message,
+        )
+    }
+}
+
+impl fmt::Display for InvalidToolInputError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for InvalidToolInputError {}
+
 /// Reasoning content emitted during a high-level generate-text step.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(untagged)]
@@ -1362,10 +1445,7 @@ fn invalid_tool_input_message(
     input: &str,
     cause: impl std::fmt::Display,
 ) -> String {
-    format!(
-        "Invalid input for tool {tool_name}: {}",
-        JsonParseError::new(input, cause)
-    )
+    InvalidToolInputError::new(tool_name, input, JsonParseError::new(input, cause)).to_string()
 }
 
 fn mark_unavailable_tool_calls(
@@ -1502,6 +1582,10 @@ fn no_such_tool_default_message(
     }
 }
 
+fn invalid_tool_input_default_message(tool_name: &str, cause_message: &str) -> String {
+    format!("Invalid input for tool {tool_name}: {cause_message}")
+}
+
 fn add_step_usage(steps: &[GenerateTextStep]) -> LanguageModelUsage {
     steps
         .iter()
@@ -1544,8 +1628,8 @@ fn add_optional_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 mod tests {
     use super::{
         GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning, GenerateTextResult,
-        GenerateTextStep, GenerateTextToolCall, GenerateTextToolResult, NoSuchToolError,
-        generate_text,
+        GenerateTextStep, GenerateTextToolCall, GenerateTextToolResult, InvalidToolInputError,
+        NoSuchToolError, generate_text,
     };
     use crate::file_data::FileDataContent;
     use crate::language_model::{
@@ -1560,7 +1644,7 @@ mod tests {
         LanguageModelToolResultPart, LanguageModelUsage, LanguageModelUserContentPart,
         LanguageModelUserMessage, OutputTokenUsage,
     };
-    use crate::provider::{ProviderMetadata, SpecificationVersion};
+    use crate::provider::{JsonParseError, ProviderMetadata, SpecificationVersion};
     use crate::provider_utils::{Tool, ToolExecutionError, dynamic_tool};
     use serde_json::json;
     use std::cell::RefCell;
@@ -1609,6 +1693,40 @@ mod tests {
                 "forecast".to_string(),
                 Some(vec!["weather".to_string()]),
                 "custom unavailable-tool message".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn invalid_tool_input_error_matches_upstream_default_message() {
+        let cause = JsonParseError::new("{ bad", "expected value at line 1 column 1");
+        let error = InvalidToolInputError::new("weather", "{ bad", cause);
+
+        assert_eq!(error.tool_name(), "weather");
+        assert_eq!(error.tool_input(), "{ bad");
+        assert_eq!(
+            error.cause_message(),
+            "JSON parsing failed: Text: { bad.\nError message: expected value at line 1 column 1"
+        );
+        assert_eq!(
+            error.message(),
+            "Invalid input for tool weather: JSON parsing failed: Text: { bad.\nError message: expected value at line 1 column 1"
+        );
+        assert_eq!(error.to_string(), error.message());
+
+        let custom = InvalidToolInputError::with_message(
+            "weather",
+            "{ bad",
+            "schema mismatch",
+            "custom invalid-tool-input message",
+        );
+        assert_eq!(
+            custom.into_parts(),
+            (
+                "weather".to_string(),
+                "{ bad".to_string(),
+                "schema mismatch".to_string(),
+                "custom invalid-tool-input message".to_string()
             )
         );
     }
