@@ -41,6 +41,16 @@ pub fn as_array<T>(value: Option<Arrayable<T>>) -> Vec<T> {
     value.map_or_else(Vec::new, Arrayable::into_vec)
 }
 
+/// Checks whether an optional value is present.
+pub fn is_non_nullable<T>(value: &Option<T>) -> bool {
+    value.is_some()
+}
+
+/// Filters missing values out of a list of optional values.
+pub fn filter_nullable<T>(values: impl IntoIterator<Item = Option<T>>) -> Vec<T> {
+    values.into_iter().flatten().collect()
+}
+
 /// Options for loading a provider API key from an explicit value or environment variable.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoadApiKeyOptions {
@@ -273,9 +283,10 @@ mod tests {
 
     use super::{
         Arrayable, LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, as_array,
-        load_api_key, load_api_key_with_env, load_optional_setting_with_env, load_setting,
-        load_setting_with_env, media_type_to_extension, resolve_provider_reference,
-        strip_file_extension, without_trailing_slash,
+        filter_nullable, is_non_nullable, load_api_key, load_api_key_with_env,
+        load_optional_setting_with_env, load_setting, load_setting_with_env,
+        media_type_to_extension, resolve_provider_reference, strip_file_extension,
+        without_trailing_slash,
     };
 
     #[test]
@@ -319,6 +330,29 @@ mod tests {
         let value = vec!["a", "b"];
 
         assert_eq!(as_array(Some(Arrayable::array(value.clone()))), value);
+    }
+
+    #[test]
+    fn is_non_nullable_reports_present_values() {
+        assert!(is_non_nullable(&Some("value")));
+        assert!(!is_non_nullable::<&str>(&None));
+    }
+
+    #[test]
+    fn filter_nullable_removes_missing_values() {
+        let values = vec![Some(1), None, Some(2), None, Some(3)];
+
+        assert_eq!(filter_nullable(values), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn filter_nullable_preserves_falsy_equivalent_values() {
+        let values = vec![Some(json!(0)), Some(json!(false)), Some(json!("")), None];
+
+        assert_eq!(
+            filter_nullable(values),
+            vec![json!(0), json!(false), json!("")]
+        );
     }
 
     #[test]

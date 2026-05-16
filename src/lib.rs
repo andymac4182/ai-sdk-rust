@@ -88,8 +88,9 @@ pub use provider::{
 };
 pub use provider_utils::{
     Arrayable, LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, as_array,
-    load_api_key, load_optional_setting, load_setting, media_type_to_extension,
-    resolve_provider_reference, strip_file_extension, without_trailing_slash,
+    filter_nullable, is_non_nullable, load_api_key, load_optional_setting, load_setting,
+    media_type_to_extension, resolve_provider_reference, strip_file_extension,
+    without_trailing_slash,
 };
 pub use reranking_model::{
     RerankingModel, RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
