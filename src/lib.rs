@@ -8,6 +8,7 @@ pub mod embedding_model;
 pub mod embedding_model_middleware;
 pub mod file_data;
 pub mod files;
+pub mod generate_text;
 pub mod headers;
 pub mod image_model;
 pub mod image_model_middleware;
@@ -36,6 +37,9 @@ pub use file_data::{
     ProviderReferenceError,
 };
 pub use files::{Files, FilesUploadFileCallOptions, FilesUploadFileData, FilesUploadFileResult};
+pub use generate_text::{
+    GenerateTextModelInfo, GenerateTextOptions, GenerateTextResult, GenerateTextStep, generate_text,
+};
 pub use headers::Headers;
 pub use image_model::{
     ImageModel, ImageModelCallOptions, ImageModelFile, ImageModelImage, ImageModelProviderMetadata,
