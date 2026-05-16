@@ -875,6 +875,647 @@ impl LanguageModelGenerateResult {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelTextStartKind {
+    #[serde(rename = "text-start")]
+    TextStart,
+}
+
+/// Start of a streamed text block.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelTextStart {
+    #[serde(rename = "type")]
+    kind: LanguageModelTextStartKind,
+
+    /// Optional provider-specific metadata for the text block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+
+    /// Identifier for the streamed text block.
+    pub id: String,
+}
+
+impl LanguageModelTextStart {
+    /// Creates a streamed text block start part.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            kind: LanguageModelTextStartKind::TextStart,
+            provider_metadata: None,
+            id: id.into(),
+        }
+    }
+
+    /// Adds provider-specific metadata to this streamed text block.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelTextDeltaKind {
+    #[serde(rename = "text-delta")]
+    TextDelta,
+}
+
+/// Delta for a streamed text block.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelTextDelta {
+    #[serde(rename = "type")]
+    kind: LanguageModelTextDeltaKind,
+
+    /// Identifier for the streamed text block.
+    pub id: String,
+
+    /// Optional provider-specific metadata for the text delta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+
+    /// Text delta emitted by the provider.
+    pub delta: String,
+}
+
+impl LanguageModelTextDelta {
+    /// Creates a streamed text delta part.
+    pub fn new(id: impl Into<String>, delta: impl Into<String>) -> Self {
+        Self {
+            kind: LanguageModelTextDeltaKind::TextDelta,
+            id: id.into(),
+            provider_metadata: None,
+            delta: delta.into(),
+        }
+    }
+
+    /// Adds provider-specific metadata to this streamed text delta.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelTextEndKind {
+    #[serde(rename = "text-end")]
+    TextEnd,
+}
+
+/// End of a streamed text block.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelTextEnd {
+    #[serde(rename = "type")]
+    kind: LanguageModelTextEndKind,
+
+    /// Optional provider-specific metadata for the text block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+
+    /// Identifier for the streamed text block.
+    pub id: String,
+}
+
+impl LanguageModelTextEnd {
+    /// Creates a streamed text block end part.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            kind: LanguageModelTextEndKind::TextEnd,
+            provider_metadata: None,
+            id: id.into(),
+        }
+    }
+
+    /// Adds provider-specific metadata to this streamed text block.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelReasoningStartKind {
+    #[serde(rename = "reasoning-start")]
+    ReasoningStart,
+}
+
+/// Start of a streamed reasoning block.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelReasoningStart {
+    #[serde(rename = "type")]
+    kind: LanguageModelReasoningStartKind,
+
+    /// Optional provider-specific metadata for the reasoning block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+
+    /// Identifier for the streamed reasoning block.
+    pub id: String,
+}
+
+impl LanguageModelReasoningStart {
+    /// Creates a streamed reasoning block start part.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            kind: LanguageModelReasoningStartKind::ReasoningStart,
+            provider_metadata: None,
+            id: id.into(),
+        }
+    }
+
+    /// Adds provider-specific metadata to this streamed reasoning block.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelReasoningDeltaKind {
+    #[serde(rename = "reasoning-delta")]
+    ReasoningDelta,
+}
+
+/// Delta for a streamed reasoning block.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelReasoningDelta {
+    #[serde(rename = "type")]
+    kind: LanguageModelReasoningDeltaKind,
+
+    /// Identifier for the streamed reasoning block.
+    pub id: String,
+
+    /// Optional provider-specific metadata for the reasoning delta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+
+    /// Reasoning delta emitted by the provider.
+    pub delta: String,
+}
+
+impl LanguageModelReasoningDelta {
+    /// Creates a streamed reasoning delta part.
+    pub fn new(id: impl Into<String>, delta: impl Into<String>) -> Self {
+        Self {
+            kind: LanguageModelReasoningDeltaKind::ReasoningDelta,
+            id: id.into(),
+            provider_metadata: None,
+            delta: delta.into(),
+        }
+    }
+
+    /// Adds provider-specific metadata to this streamed reasoning delta.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelReasoningEndKind {
+    #[serde(rename = "reasoning-end")]
+    ReasoningEnd,
+}
+
+/// End of a streamed reasoning block.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelReasoningEnd {
+    #[serde(rename = "type")]
+    kind: LanguageModelReasoningEndKind,
+
+    /// Identifier for the streamed reasoning block.
+    pub id: String,
+
+    /// Optional provider-specific metadata for the reasoning block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+}
+
+impl LanguageModelReasoningEnd {
+    /// Creates a streamed reasoning block end part.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            kind: LanguageModelReasoningEndKind::ReasoningEnd,
+            id: id.into(),
+            provider_metadata: None,
+        }
+    }
+
+    /// Adds provider-specific metadata to this streamed reasoning block.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelToolInputStartKind {
+    #[serde(rename = "tool-input-start")]
+    ToolInputStart,
+}
+
+/// Start of streamed input for a tool call.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelToolInputStart {
+    #[serde(rename = "type")]
+    kind: LanguageModelToolInputStartKind,
+
+    /// Identifier for the streamed tool input.
+    pub id: String,
+
+    /// Name of the tool being called.
+    pub tool_name: String,
+
+    /// Optional provider-specific metadata for the tool input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+
+    /// Whether the tool call will be executed by the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_executed: Option<bool>,
+
+    /// Whether the tool is dynamic and defined at runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic: Option<bool>,
+
+    /// Optional provider-supplied display title for the tool call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+impl LanguageModelToolInputStart {
+    /// Creates a streamed tool input start part.
+    pub fn new(id: impl Into<String>, tool_name: impl Into<String>) -> Self {
+        Self {
+            kind: LanguageModelToolInputStartKind::ToolInputStart,
+            id: id.into(),
+            tool_name: tool_name.into(),
+            provider_metadata: None,
+            provider_executed: None,
+            dynamic: None,
+            title: None,
+        }
+    }
+
+    /// Adds provider-specific metadata to this streamed tool input.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+
+    /// Sets whether the provider will execute this tool call.
+    pub fn with_provider_executed(mut self, provider_executed: bool) -> Self {
+        self.provider_executed = Some(provider_executed);
+        self
+    }
+
+    /// Sets whether this tool call is for a dynamic runtime-defined tool.
+    pub fn with_dynamic(mut self, dynamic: bool) -> Self {
+        self.dynamic = Some(dynamic);
+        self
+    }
+
+    /// Sets the provider-supplied display title.
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelToolInputDeltaKind {
+    #[serde(rename = "tool-input-delta")]
+    ToolInputDelta,
+}
+
+/// Delta for streamed input to a tool call.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelToolInputDelta {
+    #[serde(rename = "type")]
+    kind: LanguageModelToolInputDeltaKind,
+
+    /// Identifier for the streamed tool input.
+    pub id: String,
+
+    /// Tool input delta emitted by the provider.
+    pub delta: String,
+
+    /// Optional provider-specific metadata for the tool input delta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+}
+
+impl LanguageModelToolInputDelta {
+    /// Creates a streamed tool input delta part.
+    pub fn new(id: impl Into<String>, delta: impl Into<String>) -> Self {
+        Self {
+            kind: LanguageModelToolInputDeltaKind::ToolInputDelta,
+            id: id.into(),
+            delta: delta.into(),
+            provider_metadata: None,
+        }
+    }
+
+    /// Adds provider-specific metadata to this streamed tool input delta.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelToolInputEndKind {
+    #[serde(rename = "tool-input-end")]
+    ToolInputEnd,
+}
+
+/// End of streamed input for a tool call.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelToolInputEnd {
+    #[serde(rename = "type")]
+    kind: LanguageModelToolInputEndKind,
+
+    /// Identifier for the streamed tool input.
+    pub id: String,
+
+    /// Optional provider-specific metadata for the tool input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+}
+
+impl LanguageModelToolInputEnd {
+    /// Creates a streamed tool input end part.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            kind: LanguageModelToolInputEndKind::ToolInputEnd,
+            id: id.into(),
+            provider_metadata: None,
+        }
+    }
+
+    /// Adds provider-specific metadata to this streamed tool input.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelStreamStartKind {
+    #[serde(rename = "stream-start")]
+    StreamStart,
+}
+
+/// Start of a language model stream, including call-level warnings.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelStreamStart {
+    #[serde(rename = "type")]
+    kind: LanguageModelStreamStartKind,
+
+    /// Warnings for the call, e.g. unsupported settings.
+    pub warnings: Vec<Warning>,
+}
+
+impl LanguageModelStreamStart {
+    /// Creates a stream start part.
+    pub fn new(warnings: Vec<Warning>) -> Self {
+        Self {
+            kind: LanguageModelStreamStartKind::StreamStart,
+            warnings,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelStreamResponseMetadataKind {
+    #[serde(rename = "response-metadata")]
+    #[default]
+    ResponseMetadata,
+}
+
+/// Response metadata emitted after it becomes available during streaming.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelStreamResponseMetadata {
+    #[serde(rename = "type")]
+    kind: LanguageModelStreamResponseMetadataKind,
+
+    /// Provider response identifier, when one is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
+    /// Start timestamp for the generated response, when one is available.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub timestamp: Option<OffsetDateTime>,
+
+    /// Provider model identifier used for the response, when one is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+}
+
+impl LanguageModelStreamResponseMetadata {
+    /// Creates empty response metadata.
+    pub fn new() -> Self {
+        Self {
+            kind: LanguageModelStreamResponseMetadataKind::ResponseMetadata,
+            ..Self::default()
+        }
+    }
+
+    /// Sets the provider response identifier.
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
+    /// Sets the response start timestamp.
+    pub fn with_timestamp(mut self, timestamp: OffsetDateTime) -> Self {
+        self.timestamp = Some(timestamp);
+        self
+    }
+
+    /// Sets the provider model identifier used for the response.
+    pub fn with_model_id(mut self, model_id: impl Into<String>) -> Self {
+        self.model_id = Some(model_id.into());
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelStreamFinishKind {
+    #[serde(rename = "finish")]
+    Finish,
+}
+
+/// Final metadata emitted after a language model stream finishes.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelStreamFinish {
+    #[serde(rename = "type")]
+    kind: LanguageModelStreamFinishKind,
+
+    /// Usage information for the model call.
+    pub usage: LanguageModelUsage,
+
+    /// Reason why the model finished generating.
+    pub finish_reason: LanguageModelFinishReason,
+
+    /// Provider-specific metadata returned by the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+}
+
+impl LanguageModelStreamFinish {
+    /// Creates a stream finish part.
+    pub fn new(usage: LanguageModelUsage, finish_reason: LanguageModelFinishReason) -> Self {
+        Self {
+            kind: LanguageModelStreamFinishKind::Finish,
+            usage,
+            finish_reason,
+            provider_metadata: None,
+        }
+    }
+
+    /// Adds provider-specific metadata.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelRawStreamPartKind {
+    #[serde(rename = "raw")]
+    Raw,
+}
+
+/// Raw provider chunk emitted when raw chunks are enabled.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelRawStreamPart {
+    #[serde(rename = "type")]
+    kind: LanguageModelRawStreamPartKind,
+
+    /// Raw provider chunk represented as JSON.
+    pub raw_value: JsonValue,
+}
+
+impl LanguageModelRawStreamPart {
+    /// Creates a raw stream part.
+    pub fn new(raw_value: JsonValue) -> Self {
+        Self {
+            kind: LanguageModelRawStreamPartKind::Raw,
+            raw_value,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelErrorStreamPartKind {
+    #[serde(rename = "error")]
+    Error,
+}
+
+/// Error emitted during a language model stream.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelErrorStreamPart {
+    #[serde(rename = "type")]
+    kind: LanguageModelErrorStreamPartKind,
+
+    /// Provider error represented as JSON.
+    pub error: JsonValue,
+}
+
+impl LanguageModelErrorStreamPart {
+    /// Creates an error stream part.
+    pub fn new(error: JsonValue) -> Self {
+        Self {
+            kind: LanguageModelErrorStreamPartKind::Error,
+            error,
+        }
+    }
+}
+
+/// A provider stream part emitted by a language model.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum LanguageModelStreamPart {
+    /// Start of a streamed text block.
+    TextStart(LanguageModelTextStart),
+
+    /// Delta for a streamed text block.
+    TextDelta(LanguageModelTextDelta),
+
+    /// End of a streamed text block.
+    TextEnd(LanguageModelTextEnd),
+
+    /// Start of a streamed reasoning block.
+    ReasoningStart(LanguageModelReasoningStart),
+
+    /// Delta for a streamed reasoning block.
+    ReasoningDelta(LanguageModelReasoningDelta),
+
+    /// End of a streamed reasoning block.
+    ReasoningEnd(LanguageModelReasoningEnd),
+
+    /// Start of streamed tool input.
+    ToolInputStart(LanguageModelToolInputStart),
+
+    /// Delta for streamed tool input.
+    ToolInputDelta(LanguageModelToolInputDelta),
+
+    /// End of streamed tool input.
+    ToolInputEnd(LanguageModelToolInputEnd),
+
+    /// Provider-executed tool approval request content.
+    ToolApprovalRequest(LanguageModelToolApprovalRequest),
+
+    /// Generated tool call content.
+    ToolCall(LanguageModelToolCall),
+
+    /// Provider-executed tool result content.
+    ToolResult(LanguageModelToolResult),
+
+    /// Provider-specific generated content.
+    Custom(LanguageModelCustomContent),
+
+    /// Generated file content.
+    File(LanguageModelFile),
+
+    /// Generated reasoning file content.
+    ReasoningFile(LanguageModelReasoningFile),
+
+    /// Source content used to generate the response.
+    Source(LanguageModelSource),
+
+    /// Stream start with call-level warnings.
+    StreamStart(LanguageModelStreamStart),
+
+    /// Response metadata emitted during streaming.
+    ResponseMetadata(LanguageModelStreamResponseMetadata),
+
+    /// Final usage and finish metadata.
+    Finish(LanguageModelStreamFinish),
+
+    /// Raw provider chunk.
+    Raw(LanguageModelRawStreamPart),
+
+    /// Provider stream error.
+    Error(LanguageModelErrorStreamPart),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 enum LanguageModelFunctionToolKind {
     #[serde(rename = "function")]
     Function,
@@ -2124,21 +2765,25 @@ mod tests {
     use super::{
         FinishReason, InputTokenUsage, LanguageModelAssistantContentPart,
         LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
-        LanguageModelCustomContent, LanguageModelCustomPart, LanguageModelFile,
-        LanguageModelFileData, LanguageModelFilePart, LanguageModelFinishReason,
+        LanguageModelCustomContent, LanguageModelCustomPart, LanguageModelErrorStreamPart,
+        LanguageModelFile, LanguageModelFileData, LanguageModelFilePart, LanguageModelFinishReason,
         LanguageModelFunctionTool, LanguageModelGenerateResult, LanguageModelMessage,
-        LanguageModelPrompt, LanguageModelProviderTool, LanguageModelReasoning,
-        LanguageModelReasoningEffort, LanguageModelReasoningFile, LanguageModelReasoningPart,
-        LanguageModelRequest, LanguageModelResponse, LanguageModelResponseFormat,
-        LanguageModelResponseMetadata, LanguageModelSource, LanguageModelSystemMessage,
-        LanguageModelText, LanguageModelTextPart, LanguageModelTool,
-        LanguageModelToolApprovalRequest, LanguageModelToolApprovalResponsePart,
-        LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolChoice,
-        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResult,
-        LanguageModelToolResultContentPart, LanguageModelToolResultCustomContent,
-        LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUrlSource,
-        LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage,
-        OutputTokenUsage,
+        LanguageModelPrompt, LanguageModelProviderTool, LanguageModelRawStreamPart,
+        LanguageModelReasoning, LanguageModelReasoningDelta, LanguageModelReasoningEffort,
+        LanguageModelReasoningEnd, LanguageModelReasoningFile, LanguageModelReasoningPart,
+        LanguageModelReasoningStart, LanguageModelRequest, LanguageModelResponse,
+        LanguageModelResponseFormat, LanguageModelResponseMetadata, LanguageModelSource,
+        LanguageModelStreamFinish, LanguageModelStreamPart, LanguageModelStreamResponseMetadata,
+        LanguageModelStreamStart, LanguageModelSystemMessage, LanguageModelText,
+        LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextPart,
+        LanguageModelTextStart, LanguageModelTool, LanguageModelToolApprovalRequest,
+        LanguageModelToolApprovalResponsePart, LanguageModelToolCall, LanguageModelToolCallPart,
+        LanguageModelToolChoice, LanguageModelToolContentPart, LanguageModelToolInputDelta,
+        LanguageModelToolInputEnd, LanguageModelToolInputStart, LanguageModelToolMessage,
+        LanguageModelToolResult, LanguageModelToolResultContentPart,
+        LanguageModelToolResultCustomContent, LanguageModelToolResultOutput,
+        LanguageModelToolResultPart, LanguageModelUrlSource, LanguageModelUsage,
+        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::file_data::{FileData, FileDataContent};
     use crate::json::NonNullJsonValue;
@@ -3002,6 +3647,289 @@ mod tests {
                 "warnings": []
             })
         );
+    }
+
+    #[test]
+    fn stream_block_parts_serialize_upstream_shapes() {
+        let provider_metadata: ProviderMetadata = serde_json::from_value(json!({
+            "openai": {
+                "itemId": "item_123"
+            }
+        }))
+        .expect("provider metadata deserializes");
+
+        let parts = vec![
+            LanguageModelStreamPart::TextStart(
+                LanguageModelTextStart::new("text_1")
+                    .with_provider_metadata(provider_metadata.clone()),
+            ),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text_1", "Hel")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text_1")),
+            LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("reason_1")),
+            LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                "reason_1",
+                "Check the source.",
+            )),
+            LanguageModelStreamPart::ReasoningEnd(
+                LanguageModelReasoningEnd::new("reason_1")
+                    .with_provider_metadata(provider_metadata.clone()),
+            ),
+            LanguageModelStreamPart::ToolInputStart(
+                LanguageModelToolInputStart::new("tool_1", "weather")
+                    .with_provider_executed(true)
+                    .with_dynamic(true)
+                    .with_title("Weather lookup")
+                    .with_provider_metadata(provider_metadata),
+            ),
+            LanguageModelStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                "tool_1",
+                r#"{"city""#,
+            )),
+            LanguageModelStreamPart::ToolInputEnd(LanguageModelToolInputEnd::new("tool_1")),
+        ];
+
+        assert_eq!(
+            serde_json::to_value(parts).expect("stream parts serialize"),
+            json!([
+                {
+                    "type": "text-start",
+                    "providerMetadata": {
+                        "openai": {
+                            "itemId": "item_123"
+                        }
+                    },
+                    "id": "text_1"
+                },
+                {
+                    "type": "text-delta",
+                    "id": "text_1",
+                    "delta": "Hel"
+                },
+                {
+                    "type": "text-end",
+                    "id": "text_1"
+                },
+                {
+                    "type": "reasoning-start",
+                    "id": "reason_1"
+                },
+                {
+                    "type": "reasoning-delta",
+                    "id": "reason_1",
+                    "delta": "Check the source."
+                },
+                {
+                    "type": "reasoning-end",
+                    "id": "reason_1",
+                    "providerMetadata": {
+                        "openai": {
+                            "itemId": "item_123"
+                        }
+                    }
+                },
+                {
+                    "type": "tool-input-start",
+                    "id": "tool_1",
+                    "toolName": "weather",
+                    "providerMetadata": {
+                        "openai": {
+                            "itemId": "item_123"
+                        }
+                    },
+                    "providerExecuted": true,
+                    "dynamic": true,
+                    "title": "Weather lookup"
+                },
+                {
+                    "type": "tool-input-delta",
+                    "id": "tool_1",
+                    "delta": "{\"city\""
+                },
+                {
+                    "type": "tool-input-end",
+                    "id": "tool_1"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn stream_lifecycle_parts_serialize_upstream_shapes() {
+        let provider_metadata: ProviderMetadata = serde_json::from_value(json!({
+            "anthropic": {
+                "stopSequence": "\n\nHuman:"
+            }
+        }))
+        .expect("provider metadata deserializes");
+        let response_timestamp =
+            OffsetDateTime::parse("2026-05-16T09:30:00Z", &Rfc3339).expect("timestamp parses");
+
+        let parts = vec![
+            LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(vec![
+                Warning::Unsupported {
+                    feature: "topK".to_string(),
+                    details: Some("The selected model ignores topK.".to_string()),
+                },
+            ])),
+            LanguageModelStreamPart::ResponseMetadata(
+                LanguageModelStreamResponseMetadata::new()
+                    .with_id("resp_123")
+                    .with_timestamp(response_timestamp)
+                    .with_model_id("anthropic/claude-sonnet-4"),
+            ),
+            LanguageModelStreamPart::Finish(
+                LanguageModelStreamFinish::new(
+                    LanguageModelUsage {
+                        input_tokens: InputTokenUsage {
+                            total: Some(120),
+                            ..InputTokenUsage::default()
+                        },
+                        output_tokens: OutputTokenUsage {
+                            total: Some(32),
+                            text: Some(24),
+                            reasoning: Some(8),
+                        },
+                        raw: None,
+                    },
+                    LanguageModelFinishReason {
+                        unified: FinishReason::Stop,
+                        raw: Some("end_turn".to_string()),
+                    },
+                )
+                .with_provider_metadata(provider_metadata),
+            ),
+            LanguageModelStreamPart::Raw(LanguageModelRawStreamPart::new(json!({
+                "providerEvent": "chunk"
+            }))),
+            LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(json!({
+                "message": "transient provider error"
+            }))),
+        ];
+
+        assert_eq!(
+            serde_json::to_value(parts).expect("stream lifecycle parts serialize"),
+            json!([
+                {
+                    "type": "stream-start",
+                    "warnings": [
+                        {
+                            "type": "unsupported",
+                            "feature": "topK",
+                            "details": "The selected model ignores topK."
+                        }
+                    ]
+                },
+                {
+                    "type": "response-metadata",
+                    "id": "resp_123",
+                    "timestamp": "2026-05-16T09:30:00Z",
+                    "modelId": "anthropic/claude-sonnet-4"
+                },
+                {
+                    "type": "finish",
+                    "usage": {
+                        "inputTokens": {
+                            "total": 120
+                        },
+                        "outputTokens": {
+                            "total": 32,
+                            "text": 24,
+                            "reasoning": 8
+                        }
+                    },
+                    "finishReason": {
+                        "unified": "stop",
+                        "raw": "end_turn"
+                    },
+                    "providerMetadata": {
+                        "anthropic": {
+                            "stopSequence": "\n\nHuman:"
+                        }
+                    }
+                },
+                {
+                    "type": "raw",
+                    "rawValue": {
+                        "providerEvent": "chunk"
+                    }
+                },
+                {
+                    "type": "error",
+                    "error": {
+                        "message": "transient provider error"
+                    }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn stream_part_union_deserializes_generated_content_and_finish_variants() {
+        let tool_call: LanguageModelStreamPart = serde_json::from_value(json!({
+            "type": "tool-call",
+            "toolCallId": "tool_call_123",
+            "toolName": "weather",
+            "input": "{\"city\":\"Brisbane\"}"
+        }))
+        .expect("tool call stream part deserializes");
+
+        assert_eq!(
+            tool_call,
+            LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                "tool_call_123",
+                "weather",
+                r#"{"city":"Brisbane"}"#,
+            ))
+        );
+
+        let source: LanguageModelStreamPart = serde_json::from_value(json!({
+            "type": "source",
+            "sourceType": "url",
+            "id": "source_123",
+            "url": "https://example.com"
+        }))
+        .expect("source stream part deserializes");
+
+        assert_eq!(
+            source,
+            LanguageModelStreamPart::Source(LanguageModelSource::url(
+                "source_123",
+                "https://example.com",
+            ))
+        );
+
+        let finish: LanguageModelStreamPart = serde_json::from_value(json!({
+            "type": "finish",
+            "usage": {
+                "inputTokens": {},
+                "outputTokens": {}
+            },
+            "finishReason": {
+                "unified": "stop"
+            }
+        }))
+        .expect("finish stream part deserializes");
+
+        assert_eq!(
+            finish,
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                LanguageModelUsage::default(),
+                LanguageModelFinishReason {
+                    unified: FinishReason::Stop,
+                    raw: None,
+                },
+            ))
+        );
+    }
+
+    #[test]
+    fn stream_start_requires_warnings_array() {
+        let error = serde_json::from_value::<LanguageModelStreamStart>(json!({
+            "type": "stream-start"
+        }))
+        .expect_err("stream-start warnings are required");
+
+        assert!(error.to_string().contains("missing field `warnings`"));
     }
 
     #[test]
