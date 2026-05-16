@@ -59,6 +59,10 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn is_streaming_tool_call_type_validation_none(value: &StreamingToolCallTypeValidation) -> bool {
     matches!(value, StreamingToolCallTypeValidation::None)
 }
@@ -269,6 +273,264 @@ impl SerializedModelOptions {
             config,
         }
     }
+}
+
+/// Scalar value stored in dependency-free multipart form data.
+///
+/// Upstream `convertToFormData` appends JavaScript strings and `Blob`s to a
+/// browser `FormData` object. Rust keeps the same logical boundary as ordered
+/// text or byte entries so HTTP adapters can choose their multipart encoder.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum FormDataValue {
+    /// Text form value.
+    Text {
+        /// Text content for this form field.
+        value: String,
+    },
+
+    /// Binary form value.
+    Bytes {
+        /// Raw bytes for this form field.
+        value: Vec<u8>,
+    },
+}
+
+impl FormDataValue {
+    /// Creates a text form value.
+    pub fn text(value: impl Into<String>) -> Self {
+        Self::Text {
+            value: value.into(),
+        }
+    }
+
+    /// Creates a binary form value.
+    pub fn bytes(value: impl Into<Vec<u8>>) -> Self {
+        Self::Bytes {
+            value: value.into(),
+        }
+    }
+}
+
+impl From<String> for FormDataValue {
+    fn from(value: String) -> Self {
+        Self::text(value)
+    }
+}
+
+impl From<&str> for FormDataValue {
+    fn from(value: &str) -> Self {
+        Self::text(value)
+    }
+}
+
+impl From<Vec<u8>> for FormDataValue {
+    fn from(value: Vec<u8>) -> Self {
+        Self::bytes(value)
+    }
+}
+
+/// Input value accepted by [`convert_to_form_data`].
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum FormDataInputValue {
+    /// Single text value.
+    Text {
+        /// Text content for this form field.
+        value: String,
+    },
+
+    /// Single binary value.
+    Bytes {
+        /// Raw bytes for this form field.
+        value: Vec<u8>,
+    },
+
+    /// Repeated values for this form field.
+    Array {
+        /// Ordered values for this form field.
+        values: Vec<FormDataValue>,
+    },
+}
+
+impl FormDataInputValue {
+    /// Creates a single text input value.
+    pub fn text(value: impl Into<String>) -> Self {
+        Self::Text {
+            value: value.into(),
+        }
+    }
+
+    /// Creates a single binary input value.
+    pub fn bytes(value: impl Into<Vec<u8>>) -> Self {
+        Self::Bytes {
+            value: value.into(),
+        }
+    }
+
+    /// Creates repeated input values.
+    pub fn array(values: Vec<FormDataValue>) -> Self {
+        Self::Array { values }
+    }
+
+    fn into_values(self) -> Vec<FormDataValue> {
+        match self {
+            Self::Text { value } => vec![FormDataValue::text(value)],
+            Self::Bytes { value } => vec![FormDataValue::bytes(value)],
+            Self::Array { values } => values,
+        }
+    }
+}
+
+impl From<FormDataValue> for FormDataInputValue {
+    fn from(value: FormDataValue) -> Self {
+        match value {
+            FormDataValue::Text { value } => Self::text(value),
+            FormDataValue::Bytes { value } => Self::bytes(value),
+        }
+    }
+}
+
+impl From<String> for FormDataInputValue {
+    fn from(value: String) -> Self {
+        Self::text(value)
+    }
+}
+
+impl From<&str> for FormDataInputValue {
+    fn from(value: &str) -> Self {
+        Self::text(value)
+    }
+}
+
+impl From<Vec<u8>> for FormDataInputValue {
+    fn from(value: Vec<u8>) -> Self {
+        Self::bytes(value)
+    }
+}
+
+/// One ordered multipart form data entry.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormDataEntry {
+    /// Field name for this entry.
+    pub name: String,
+
+    /// Field value.
+    pub value: FormDataValue,
+}
+
+impl FormDataEntry {
+    /// Creates a form data entry.
+    pub fn new(name: impl Into<String>, value: FormDataValue) -> Self {
+        Self {
+            name: name.into(),
+            value,
+        }
+    }
+}
+
+/// Dependency-free representation of ordered multipart form data entries.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormData {
+    /// Ordered form entries.
+    pub entries: Vec<FormDataEntry>,
+}
+
+impl FormData {
+    /// Creates empty form data.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Appends a form entry.
+    pub fn append(&mut self, name: impl Into<String>, value: FormDataValue) {
+        self.entries.push(FormDataEntry::new(name, value));
+    }
+
+    /// Returns true when at least one entry exists for the field name.
+    pub fn has(&self, name: &str) -> bool {
+        self.entries.iter().any(|entry| entry.name == name)
+    }
+
+    /// Returns the first value for the field name.
+    pub fn get(&self, name: &str) -> Option<&FormDataValue> {
+        self.entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| &entry.value)
+    }
+
+    /// Returns all values for the field name in append order.
+    pub fn get_all(&self, name: &str) -> Vec<&FormDataValue> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.name == name)
+            .map(|entry| &entry.value)
+            .collect()
+    }
+}
+
+/// Options for [`convert_to_form_data`].
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConvertToFormDataOptions {
+    /// Whether multi-value array fields use the upstream `[]` suffix.
+    #[serde(default = "default_true")]
+    pub use_array_brackets: bool,
+}
+
+impl Default for ConvertToFormDataOptions {
+    fn default() -> Self {
+        Self {
+            use_array_brackets: true,
+        }
+    }
+}
+
+impl ConvertToFormDataOptions {
+    /// Creates options with upstream defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets whether multi-value array fields use the upstream `[]` suffix.
+    pub fn with_use_array_brackets(mut self, use_array_brackets: bool) -> Self {
+        self.use_array_brackets = use_array_brackets;
+        self
+    }
+}
+
+/// Converts an input map to ordered multipart form data entries.
+///
+/// This mirrors upstream `convertToFormData`: missing values are skipped,
+/// empty arrays add no entries, one-element arrays use the original key, and
+/// multi-element arrays use a `[]` suffix unless disabled by options.
+pub fn convert_to_form_data(
+    input: impl IntoIterator<Item = (String, Option<FormDataInputValue>)>,
+    options: ConvertToFormDataOptions,
+) -> FormData {
+    let mut form_data = FormData::new();
+
+    for (key, value) in input {
+        let Some(value) = value else {
+            continue;
+        };
+
+        let values = value.into_values();
+        let form_key = if values.len() > 1 && options.use_array_brackets {
+            format!("{key}[]")
+        } else {
+            key
+        };
+
+        for value in values {
+            form_data.append(form_key.clone(), value);
+        }
+    }
+
+    form_data
 }
 
 /// Validation mode for OpenAI-compatible streaming tool-call deltas.
@@ -5262,22 +5524,24 @@ mod tests {
     use url::Url;
 
     use super::{
-        Arrayable, Base64DecodeError, BinaryResponseHandlerOptions, DEFAULT_MAX_DOWNLOAD_SIZE,
-        DownloadError, EventSourceResponseHandlerOptions, FetchErrorInfo, GetFromApiOptions,
-        HandledFetchError, IdGeneratorOptions, InjectJsonInstructionIntoMessagesOptions,
-        InlineFileDataBytesError, JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions,
-        LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError,
-        ParseJsonResult, PostJsonToApiOptions, PostToApiOptions, ProviderApiRequest,
-        ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
-        ProviderApiResponseBody, ProviderApiResponseHandlerError, ProviderDefinedToolFactory,
-        ProviderExecutedToolFactory, ReasoningLevel, ResponseHandlerResult, RuntimeEnvironment,
-        SerializedModelOptions, StatusCodeErrorResponseHandlerOptions, StreamingToolCallDelta,
+        Arrayable, Base64DecodeError, BinaryResponseHandlerOptions, ConvertToFormDataOptions,
+        DEFAULT_MAX_DOWNLOAD_SIZE, DownloadError, EventSourceResponseHandlerOptions,
+        FetchErrorInfo, FormData, FormDataEntry, FormDataInputValue, FormDataValue,
+        GetFromApiOptions, HandledFetchError, IdGeneratorOptions,
+        InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
+        JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, LoadApiKeyOptions,
+        LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError, ParseJsonResult,
+        PostJsonToApiOptions, PostToApiOptions, ProviderApiRequest, ProviderApiRequestBody,
+        ProviderApiRequestMethod, ProviderApiResponse, ProviderApiResponseBody,
+        ProviderApiResponseHandlerError, ProviderDefinedToolFactory, ProviderExecutedToolFactory,
+        ReasoningLevel, ResponseHandlerResult, RuntimeEnvironment, SerializedModelOptions,
+        StatusCodeErrorResponseHandlerOptions, StreamingToolCallDelta,
         StreamingToolCallDeltaFunction, StreamingToolCallTracker, StreamingToolCallTrackerOptions,
         StreamingToolCallTypeValidation, Tool, ToolExecutionError, ToolExecutionOptions,
         ValidateTypesResult, add_additional_properties_to_json_schema, as_array, combine_headers,
         convert_base64_to_bytes, convert_bytes_to_base64, convert_image_model_file_to_data_uri,
-        convert_inline_file_data_to_bytes, convert_to_base64, create_binary_response_handler,
-        create_event_source_response_handler, create_id_generator,
+        convert_inline_file_data_to_bytes, convert_to_base64, convert_to_form_data,
+        create_binary_response_handler, create_event_source_response_handler, create_id_generator,
         create_json_error_response_handler, create_json_response_handler,
         create_provider_defined_tool_factory,
         create_provider_defined_tool_factory_with_output_schema,
@@ -6152,6 +6416,149 @@ mod tests {
                 .clone()
             )
         );
+    }
+
+    #[test]
+    fn form_data_contracts_round_trip_ordered_text_and_bytes_entries() {
+        let form_data = FormData {
+            entries: vec![
+                FormDataEntry::new("model", FormDataValue::text("gpt-image-1")),
+                FormDataEntry::new("image", FormDataValue::bytes(vec![1, 2, 3])),
+            ],
+        };
+
+        let serialized = serde_json::to_value(&form_data).expect("form data serializes");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "entries": [
+                    {
+                        "name": "model",
+                        "value": {
+                            "type": "text",
+                            "value": "gpt-image-1"
+                        }
+                    },
+                    {
+                        "name": "image",
+                        "value": {
+                            "type": "bytes",
+                            "value": [1, 2, 3]
+                        }
+                    }
+                ]
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<FormData>(serialized).expect("form data deserializes"),
+            form_data
+        );
+
+        let input_value =
+            FormDataInputValue::array(vec![FormDataValue::text("cat"), FormDataValue::text("dog")]);
+        let input_serialized =
+            serde_json::to_value(&input_value).expect("form data input serializes");
+        assert_eq!(
+            input_serialized,
+            json!({
+                "type": "array",
+                "values": [
+                    {
+                        "type": "text",
+                        "value": "cat"
+                    },
+                    {
+                        "type": "text",
+                        "value": "dog"
+                    }
+                ]
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<FormDataInputValue>(input_serialized)
+                .expect("form data input deserializes"),
+            input_value
+        );
+
+        assert_eq!(
+            serde_json::from_value::<ConvertToFormDataOptions>(json!({}))
+                .expect("options deserialize with defaults"),
+            ConvertToFormDataOptions::new()
+        );
+        assert_eq!(
+            serde_json::to_value(ConvertToFormDataOptions::new().with_use_array_brackets(false))
+                .expect("options serialize"),
+            json!({ "useArrayBrackets": false })
+        );
+    }
+
+    #[test]
+    fn convert_to_form_data_skips_missing_and_uses_upstream_array_key_rules() {
+        let form_data = convert_to_form_data(
+            vec![
+                (
+                    "model".to_string(),
+                    Some(FormDataInputValue::text("gpt-image-1")),
+                ),
+                ("mask".to_string(), None),
+                (
+                    "image".to_string(),
+                    Some(FormDataInputValue::array(vec![
+                        FormDataValue::bytes(vec![1, 2]),
+                        FormDataValue::bytes(vec![3, 4]),
+                    ])),
+                ),
+                (
+                    "quality".to_string(),
+                    Some(FormDataInputValue::array(vec![FormDataValue::text("high")])),
+                ),
+                (
+                    "empty".to_string(),
+                    Some(FormDataInputValue::array(Vec::new())),
+                ),
+            ],
+            ConvertToFormDataOptions::new(),
+        );
+
+        assert_eq!(
+            form_data.entries,
+            vec![
+                FormDataEntry::new("model", FormDataValue::text("gpt-image-1")),
+                FormDataEntry::new("image[]", FormDataValue::bytes(vec![1, 2])),
+                FormDataEntry::new("image[]", FormDataValue::bytes(vec![3, 4])),
+                FormDataEntry::new("quality", FormDataValue::text("high")),
+            ]
+        );
+        assert!(form_data.has("model"));
+        assert!(!form_data.has("mask"));
+        assert!(!form_data.has("empty"));
+        assert_eq!(form_data.get("quality"), Some(&FormDataValue::text("high")));
+        assert_eq!(form_data.get_all("image[]").len(), 2);
+    }
+
+    #[test]
+    fn convert_to_form_data_can_disable_array_bracket_suffix() {
+        let form_data = convert_to_form_data(
+            vec![(
+                "image".to_string(),
+                Some(FormDataInputValue::array(vec![
+                    FormDataValue::bytes(vec![1]),
+                    FormDataValue::bytes(vec![2]),
+                ])),
+            )],
+            ConvertToFormDataOptions::new().with_use_array_brackets(false),
+        );
+
+        assert_eq!(
+            form_data.entries,
+            vec![
+                FormDataEntry::new("image", FormDataValue::bytes(vec![1])),
+                FormDataEntry::new("image", FormDataValue::bytes(vec![2])),
+            ]
+        );
+        assert!(!form_data.has("image[]"));
+        assert_eq!(form_data.get_all("image").len(), 2);
     }
 
     #[test]

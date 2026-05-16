@@ -150,8 +150,9 @@ pub use provider::{
     UnsupportedFunctionalityError, get_error_message,
 };
 pub use provider_utils::{
-    Arrayable, Base64DecodeError, BinaryResponseHandlerOptions, DEFAULT_MAX_DOWNLOAD_SIZE,
-    DownloadError, EventSourceResponseHandlerOptions, FetchErrorInfo, GetFromApiOptions,
+    Arrayable, Base64DecodeError, BinaryResponseHandlerOptions, ConvertToFormDataOptions,
+    DEFAULT_MAX_DOWNLOAD_SIZE, DownloadError, EventSourceResponseHandlerOptions, FetchErrorInfo,
+    FormData, FormDataEntry, FormDataInputValue, FormDataValue, GetFromApiOptions,
     HandledFetchError, IdGeneratorOptions, InjectJsonInstructionIntoMessagesOptions,
     InlineFileDataBytesError, JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions,
     LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError,
@@ -165,8 +166,8 @@ pub use provider_utils::{
     ToolNameMapping, ValidateTypesResult, add_additional_properties_to_json_schema, as_array,
     combine_headers, convert_base64_to_bytes, convert_bytes_to_base64,
     convert_image_model_file_to_data_uri, convert_inline_file_data_to_bytes, convert_to_base64,
-    create_binary_response_handler, create_event_source_response_handler, create_id_generator,
-    create_json_error_response_handler, create_json_response_handler,
+    convert_to_form_data, create_binary_response_handler, create_event_source_response_handler,
+    create_id_generator, create_json_error_response_handler, create_json_response_handler,
     create_provider_defined_tool_factory, create_provider_defined_tool_factory_with_output_schema,
     create_provider_executed_tool_factory, create_status_code_error_response_handler,
     create_tool_name_mapping, detect_media_type, dynamic_tool, execute_provider_api_request,
