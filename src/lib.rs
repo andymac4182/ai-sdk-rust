@@ -93,10 +93,11 @@ pub use provider::{
     TypeValidationContext, TypeValidationError, UnsupportedFunctionalityError, get_error_message,
 };
 pub use provider_utils::{
-    Arrayable, LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, Tool,
-    ToolExecuteFunction, ToolExecuteFuture, ToolExecutionError, ToolExecutionOptions,
-    ToolNameMapping, add_additional_properties_to_json_schema, as_array, combine_headers,
-    create_tool_name_mapping, filter_nullable, is_non_nullable, is_provider_reference,
+    Arrayable, InjectJsonInstructionIntoMessagesOptions, LoadApiKeyOptions,
+    LoadOptionalSettingOptions, LoadSettingOptions, Tool, ToolExecuteFunction, ToolExecuteFuture,
+    ToolExecutionError, ToolExecutionOptions, ToolNameMapping,
+    add_additional_properties_to_json_schema, as_array, combine_headers, create_tool_name_mapping,
+    filter_nullable, inject_json_instruction_into_messages, is_non_nullable, is_provider_reference,
     load_api_key, load_optional_setting, load_setting, media_type_to_extension, normalize_headers,
     prepare_tools, remove_undefined_entries, resolve_provider_reference, strip_file_extension,
     with_user_agent_suffix, without_trailing_slash,

@@ -11,10 +11,15 @@ use crate::file_data::{NoSuchProviderReferenceError, ProviderReference};
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonSchema, JsonValue};
 use crate::language_model::{
-    LanguageModelFunctionTool, LanguageModelPrompt, LanguageModelTool,
-    LanguageModelToolInputExample,
+    LanguageModelFunctionTool, LanguageModelMessage, LanguageModelPrompt,
+    LanguageModelSystemMessage, LanguageModelTool, LanguageModelToolInputExample,
 };
 use crate::provider::{LoadApiKeyError, LoadSettingError, ProviderOptions};
+
+const DEFAULT_JSON_SCHEMA_INSTRUCTION_PREFIX: &str = "JSON schema:";
+const DEFAULT_JSON_SCHEMA_INSTRUCTION_SUFFIX: &str =
+    "You MUST answer with a JSON object that matches the JSON schema above.";
+const DEFAULT_JSON_INSTRUCTION_SUFFIX: &str = "You MUST answer with JSON.";
 
 /// Future returned by a Rust tool execution function.
 pub type ToolExecuteFuture =
@@ -296,6 +301,131 @@ pub fn prepare_tools<'a>(
         .collect::<Vec<_>>();
 
     if tools.is_empty() { None } else { Some(tools) }
+}
+
+/// Options for injecting JSON response instructions into a standardized prompt.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct InjectJsonInstructionIntoMessagesOptions {
+    /// Standardized prompt messages to update.
+    pub messages: LanguageModelPrompt,
+
+    /// JSON schema to include in the system instruction.
+    pub schema: Option<JsonSchema>,
+
+    /// Custom prefix to place before the serialized JSON schema.
+    pub schema_prefix: Option<String>,
+
+    /// Custom suffix to place after the serialized JSON schema or generic JSON instruction.
+    pub schema_suffix: Option<String>,
+}
+
+impl InjectJsonInstructionIntoMessagesOptions {
+    /// Creates JSON instruction injection options for a standardized prompt.
+    pub fn new(messages: LanguageModelPrompt) -> Self {
+        Self {
+            messages,
+            schema: None,
+            schema_prefix: None,
+            schema_suffix: None,
+        }
+    }
+
+    /// Sets the JSON schema included in the system instruction.
+    pub fn with_schema(mut self, schema: JsonSchema) -> Self {
+        self.schema = Some(schema);
+        self
+    }
+
+    /// Sets the prefix placed before the serialized JSON schema.
+    pub fn with_schema_prefix(mut self, schema_prefix: impl Into<String>) -> Self {
+        self.schema_prefix = Some(schema_prefix.into());
+        self
+    }
+
+    /// Sets the suffix placed after the schema or generic JSON instruction.
+    pub fn with_schema_suffix(mut self, schema_suffix: impl Into<String>) -> Self {
+        self.schema_suffix = Some(schema_suffix.into());
+        self
+    }
+}
+
+/// Injects JSON response instructions into the leading system prompt message.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils`
+/// `injectJsonInstructionIntoMessages`: the first system message is updated
+/// when present, otherwise a new system message is inserted before the original
+/// prompt, and all non-system messages are preserved in order.
+pub fn inject_json_instruction_into_messages(
+    options: InjectJsonInstructionIntoMessagesOptions,
+) -> LanguageModelPrompt {
+    let InjectJsonInstructionIntoMessagesOptions {
+        messages,
+        schema,
+        schema_prefix,
+        schema_suffix,
+    } = options;
+
+    let mut messages = messages.into_iter();
+    let first_message = messages.next();
+    let mut remaining_messages = Vec::new();
+
+    let mut system_message = match first_message {
+        Some(LanguageModelMessage::System(system_message)) => system_message,
+        Some(message) => {
+            remaining_messages.push(message);
+            LanguageModelSystemMessage::new("")
+        }
+        None => LanguageModelSystemMessage::new(""),
+    };
+
+    remaining_messages.extend(messages);
+    system_message.content = inject_json_instruction(
+        Some(&system_message.content),
+        schema.as_ref(),
+        schema_prefix.as_deref(),
+        schema_suffix.as_deref(),
+    );
+
+    let mut updated_messages = Vec::with_capacity(remaining_messages.len() + 1);
+    updated_messages.push(LanguageModelMessage::System(system_message));
+    updated_messages.extend(remaining_messages);
+    updated_messages
+}
+
+fn inject_json_instruction(
+    prompt: Option<&str>,
+    schema: Option<&JsonSchema>,
+    schema_prefix: Option<&str>,
+    schema_suffix: Option<&str>,
+) -> String {
+    let mut lines = Vec::new();
+
+    if let Some(prompt) = prompt.filter(|prompt| !prompt.is_empty()) {
+        lines.push(prompt.to_string());
+        lines.push(String::new());
+    }
+
+    let schema_prefix = schema_prefix.or(schema.map(|_| DEFAULT_JSON_SCHEMA_INSTRUCTION_PREFIX));
+    if let Some(schema_prefix) = schema_prefix {
+        lines.push(schema_prefix.to_string());
+    }
+
+    if let Some(schema) = schema {
+        lines.push(serde_json::to_string(schema).expect("JSON schemas serialize"));
+    }
+
+    let schema_suffix = schema_suffix.or_else(|| {
+        Some(if schema.is_some() {
+            DEFAULT_JSON_SCHEMA_INSTRUCTION_SUFFIX
+        } else {
+            DEFAULT_JSON_INSTRUCTION_SUFFIX
+        })
+    });
+    if let Some(schema_suffix) = schema_suffix {
+        lines.push(schema_suffix.to_string());
+    }
+
+    lines.join("\n")
 }
 
 /// Adds `additionalProperties: false` to object JSON schemas recursively.
@@ -754,19 +884,21 @@ mod tests {
 
     use crate::language_model::{
         LanguageModelFunctionTool, LanguageModelMessage, LanguageModelProviderTool,
-        LanguageModelTextPart, LanguageModelTool, LanguageModelUserContentPart,
-        LanguageModelUserMessage,
+        LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelTool,
+        LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::{JsonObject, JsonValue, ProviderReference};
     use serde_json::json;
 
     use super::{
-        Arrayable, LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, Tool,
-        ToolExecutionError, ToolExecutionOptions, add_additional_properties_to_json_schema,
-        as_array, combine_headers, create_tool_name_mapping, filter_nullable, is_non_nullable,
-        is_provider_reference, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
-        load_setting, load_setting_with_env, media_type_to_extension, normalize_headers,
-        prepare_tools, remove_undefined_entries, resolve_provider_reference, strip_file_extension,
+        Arrayable, InjectJsonInstructionIntoMessagesOptions, LoadApiKeyOptions,
+        LoadOptionalSettingOptions, LoadSettingOptions, Tool, ToolExecutionError,
+        ToolExecutionOptions, add_additional_properties_to_json_schema, as_array, combine_headers,
+        create_tool_name_mapping, filter_nullable, inject_json_instruction,
+        inject_json_instruction_into_messages, is_non_nullable, is_provider_reference,
+        load_api_key, load_api_key_with_env, load_optional_setting_with_env, load_setting,
+        load_setting_with_env, media_type_to_extension, normalize_headers, prepare_tools,
+        remove_undefined_entries, resolve_provider_reference, strip_file_extension,
         with_user_agent_suffix, without_trailing_slash,
     };
 
@@ -792,6 +924,152 @@ mod tests {
         .as_object()
         .expect("schema is an object")
         .clone()
+    }
+
+    fn object_schema_json() -> String {
+        serde_json::to_string(&object_schema()).expect("schema serializes")
+    }
+
+    fn expected_schema_instruction(prompt: &str) -> String {
+        format!(
+            "{prompt}\n\nJSON schema:\n{}\nYou MUST answer with a JSON object that matches the JSON schema above.",
+            object_schema_json()
+        )
+    }
+
+    #[test]
+    fn inject_json_instruction_adds_schema_to_prompt() {
+        assert_eq!(
+            inject_json_instruction(Some("Generate weather"), Some(&object_schema()), None, None),
+            expected_schema_instruction("Generate weather")
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_uses_generic_json_suffix_without_schema() {
+        assert_eq!(
+            inject_json_instruction(Some("Generate data"), None, None, None),
+            "Generate data\n\nYou MUST answer with JSON."
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_omits_empty_prompt() {
+        assert_eq!(
+            inject_json_instruction(Some(""), Some(&object_schema()), None, None),
+            format!(
+                "JSON schema:\n{}\nYou MUST answer with a JSON object that matches the JSON schema above.",
+                object_schema_json()
+            )
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_uses_custom_schema_lines() {
+        assert_eq!(
+            inject_json_instruction(
+                Some("Generate weather"),
+                Some(&object_schema()),
+                Some("Custom schema:"),
+                Some("Follow this exactly."),
+            ),
+            format!(
+                "Generate weather\n\nCustom schema:\n{}\nFollow this exactly.",
+                object_schema_json()
+            )
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_into_messages_updates_existing_system_message() {
+        let messages = vec![
+            LanguageModelMessage::System(LanguageModelSystemMessage::new("Generate weather")),
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Use Brisbane")),
+            ])),
+        ];
+
+        assert_eq!(
+            inject_json_instruction_into_messages(
+                InjectJsonInstructionIntoMessagesOptions::new(messages.clone())
+                    .with_schema(object_schema())
+            ),
+            vec![
+                LanguageModelMessage::System(LanguageModelSystemMessage::new(
+                    expected_schema_instruction("Generate weather")
+                )),
+                messages[1].clone(),
+            ]
+        );
+        assert_eq!(
+            messages[0],
+            LanguageModelMessage::System(LanguageModelSystemMessage::new("Generate weather"))
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_into_messages_inserts_system_message() {
+        let user_message = LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+            LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Generate weather")),
+        ]));
+
+        assert_eq!(
+            inject_json_instruction_into_messages(
+                InjectJsonInstructionIntoMessagesOptions::new(vec![user_message.clone()])
+                    .with_schema(object_schema())
+            ),
+            vec![
+                LanguageModelMessage::System(LanguageModelSystemMessage::new(format!(
+                    "JSON schema:\n{}\nYou MUST answer with a JSON object that matches the JSON schema above.",
+                    object_schema_json()
+                ))),
+                user_message,
+            ]
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_into_messages_preserves_system_provider_options() {
+        let provider_options = BTreeMap::from([(
+            "test-provider".to_string(),
+            json!({ "trace": "abc" })
+                .as_object()
+                .expect("provider options are an object")
+                .clone(),
+        )]);
+
+        assert_eq!(
+            inject_json_instruction_into_messages(InjectJsonInstructionIntoMessagesOptions::new(
+                vec![LanguageModelMessage::System(
+                    LanguageModelSystemMessage::new("Generate data")
+                        .with_provider_options(provider_options.clone()),
+                )]
+            )),
+            vec![LanguageModelMessage::System(
+                LanguageModelSystemMessage::new("Generate data\n\nYou MUST answer with JSON.")
+                    .with_provider_options(provider_options),
+            )]
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_into_messages_uses_custom_schema_lines() {
+        assert_eq!(
+            inject_json_instruction_into_messages(
+                InjectJsonInstructionIntoMessagesOptions::new(vec![LanguageModelMessage::System(
+                    LanguageModelSystemMessage::new("Generate weather"),
+                )])
+                .with_schema(object_schema())
+                .with_schema_prefix("Custom schema:")
+                .with_schema_suffix("Follow this exactly.")
+            ),
+            vec![LanguageModelMessage::System(
+                LanguageModelSystemMessage::new(format!(
+                    "Generate weather\n\nCustom schema:\n{}\nFollow this exactly.",
+                    object_schema_json()
+                ))
+            )]
+        );
     }
 
     #[test]
