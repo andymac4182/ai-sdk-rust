@@ -11,6 +11,7 @@ use crate::file_data::{
     FileData, FileDataContent, NoSuchProviderReferenceError, ProviderReference,
 };
 use crate::headers::Headers;
+use crate::image_model::ImageModelFile;
 use crate::json::{JsonObject, JsonSchema, JsonValue};
 use crate::language_model::{
     LanguageModelFilePart, LanguageModelFunctionTool, LanguageModelMessage, LanguageModelPrompt,
@@ -1042,6 +1043,36 @@ fn base64_value(byte: u8) -> Option<u8> {
     }
 }
 
+fn encode_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied().unwrap_or_default();
+        let third = chunk.get(2).copied().unwrap_or_default();
+        let bits = (u32::from(first) << 16) | (u32::from(second) << 8) | u32::from(third);
+
+        encoded.push(ALPHABET[((bits >> 18) & 0x3f) as usize] as char);
+        encoded.push(ALPHABET[((bits >> 12) & 0x3f) as usize] as char);
+
+        if chunk.len() > 1 {
+            encoded.push(ALPHABET[((bits >> 6) & 0x3f) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+
+        if chunk.len() > 2 {
+            encoded.push(ALPHABET[(bits & 0x3f) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+    }
+
+    encoded
+}
+
 /// Returns the top-level segment of a media type.
 pub fn get_top_level_media_type(media_type: &str) -> &str {
     media_type
@@ -1084,6 +1115,27 @@ pub fn resolve_full_media_type(
                 part.media_type
             ))
         })
+}
+
+/// Converts an image model file into a URL or data URI string.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils`
+/// `convertImageModelFileToDataUri`: URL files are returned as-is, base64 file
+/// data is embedded directly, and raw bytes are base64-encoded into a data URI.
+pub fn convert_image_model_file_to_data_uri(file: &ImageModelFile) -> String {
+    match file {
+        ImageModelFile::Url { url, .. } => url.as_str().to_string(),
+        ImageModelFile::File {
+            media_type, data, ..
+        } => {
+            let base64 = match data {
+                FileDataContent::Bytes(bytes) => encode_base64(bytes),
+                FileDataContent::Base64(base64) => base64.clone(),
+            };
+
+            format!("data:{media_type};base64,{base64}")
+        }
+    }
 }
 
 /// Combines optional HTTP header maps, with later maps overriding earlier ones.
@@ -1406,7 +1458,10 @@ mod tests {
         LanguageModelTextPart, LanguageModelTool, LanguageModelUserContentPart,
         LanguageModelUserMessage,
     };
-    use crate::{FileData, FileDataContent, JsonObject, JsonValue, ProviderReference, Warning};
+    use crate::{
+        FileData, FileDataContent, ImageModelFile, JsonObject, JsonValue, ProviderReference,
+        Warning,
+    };
     use serde_json::json;
     use url::Url;
 
@@ -1414,10 +1469,11 @@ mod tests {
         Arrayable, InjectJsonInstructionIntoMessagesOptions, LoadApiKeyOptions,
         LoadOptionalSettingOptions, LoadSettingOptions, ReasoningLevel, Tool, ToolExecutionError,
         ToolExecutionOptions, add_additional_properties_to_json_schema, as_array, combine_headers,
-        create_tool_name_mapping, detect_media_type, filter_nullable, get_top_level_media_type,
-        inject_json_instruction, inject_json_instruction_into_messages, is_custom_reasoning,
-        is_full_media_type, is_non_nullable, is_provider_reference, load_api_key,
-        load_api_key_with_env, load_optional_setting_with_env, load_setting, load_setting_with_env,
+        convert_image_model_file_to_data_uri, create_tool_name_mapping, detect_media_type,
+        filter_nullable, get_top_level_media_type, inject_json_instruction,
+        inject_json_instruction_into_messages, is_custom_reasoning, is_full_media_type,
+        is_non_nullable, is_provider_reference, load_api_key, load_api_key_with_env,
+        load_optional_setting_with_env, load_setting, load_setting_with_env,
         map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
         media_type_to_extension, normalize_headers, prepare_tools, remove_undefined_entries,
         resolve_full_media_type, resolve_provider_reference, strip_file_extension,
@@ -2370,6 +2426,51 @@ mod tests {
         assert_eq!(
             error.functionality(),
             "file of media type \"image\" must specify subtype since it could not be auto-detected"
+        );
+    }
+
+    #[test]
+    fn convert_image_model_file_to_data_uri_returns_url_as_is() {
+        let file = ImageModelFile::url(
+            Url::parse("https://example.com/image.png?width=100&height=200").expect("valid URL"),
+        );
+
+        assert_eq!(
+            convert_image_model_file_to_data_uri(&file),
+            "https://example.com/image.png?width=100&height=200"
+        );
+    }
+
+    #[test]
+    fn convert_image_model_file_to_data_uri_embeds_base64_data() {
+        let file = ImageModelFile::file(
+            "image/png",
+            FileDataContent::Base64("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ".to_string()),
+        );
+
+        assert_eq!(
+            convert_image_model_file_to_data_uri(&file),
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+        );
+    }
+
+    #[test]
+    fn convert_image_model_file_to_data_uri_encodes_raw_bytes() {
+        let file = ImageModelFile::file("image/webp", FileDataContent::Bytes(b"Hello".to_vec()));
+
+        assert_eq!(
+            convert_image_model_file_to_data_uri(&file),
+            "data:image/webp;base64,SGVsbG8="
+        );
+    }
+
+    #[test]
+    fn convert_image_model_file_to_data_uri_handles_empty_raw_bytes() {
+        let file = ImageModelFile::file("image/png", FileDataContent::Bytes(Vec::new()));
+
+        assert_eq!(
+            convert_image_model_file_to_data_uri(&file),
+            "data:image/png;base64,"
         );
     }
 
