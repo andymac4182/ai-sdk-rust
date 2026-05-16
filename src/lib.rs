@@ -60,9 +60,9 @@ pub use language_model::{
     LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
 };
 pub use provider::{
-    EmptyResponseBodyError, LoadApiKeyError, LoadSettingError, ModelType, NoContentGeneratedError,
-    NoSuchModelError, ProviderMetadata, ProviderOptions, TooManyEmbeddingValuesForCallError,
-    UnsupportedFunctionalityError,
+    EmptyResponseBodyError, InvalidResponseDataError, LoadApiKeyError, LoadSettingError, ModelType,
+    NoContentGeneratedError, NoSuchModelError, ProviderMetadata, ProviderOptions,
+    TooManyEmbeddingValuesForCallError, UnsupportedFunctionalityError,
 };
 pub use reranking_model::{
     RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,

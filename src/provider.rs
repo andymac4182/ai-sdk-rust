@@ -295,6 +295,57 @@ impl fmt::Display for NoContentGeneratedError {
 
 impl std::error::Error for NoContentGeneratedError {}
 
+/// Error returned when a provider response contains invalid data.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InvalidResponseDataError {
+    data: JsonValue,
+    message: String,
+}
+
+impl InvalidResponseDataError {
+    /// Creates an invalid response data error with the upstream default message.
+    pub fn new(data: impl Into<JsonValue>) -> Self {
+        let data = data.into();
+        let rendered_data = serde_json::to_string(&data).expect("JSON values serialize");
+
+        Self {
+            data,
+            message: format!("Invalid response data: {rendered_data}."),
+        }
+    }
+
+    /// Creates an invalid response data error with a provider-specific message.
+    pub fn with_message(data: impl Into<JsonValue>, message: impl Into<String>) -> Self {
+        Self {
+            data: data.into(),
+            message: message.into(),
+        }
+    }
+
+    /// Returns the provider response data that failed validation.
+    pub fn data(&self) -> &JsonValue {
+        &self.data
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into the provider response data that failed validation.
+    pub fn into_data(self) -> JsonValue {
+        self.data
+    }
+}
+
+impl fmt::Display for InvalidResponseDataError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for InvalidResponseDataError {}
+
 /// Error returned when an embedding model call contains too many values.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TooManyEmbeddingValuesForCallError {
@@ -385,8 +436,8 @@ pub type ProviderMetadata = BTreeMap<String, JsonObject>;
 #[cfg(test)]
 mod tests {
     use super::{
-        EmptyResponseBodyError, LoadApiKeyError, LoadSettingError, ModelType,
-        NoContentGeneratedError, NoSuchModelError, ProviderOptions,
+        EmptyResponseBodyError, InvalidResponseDataError, LoadApiKeyError, LoadSettingError,
+        ModelType, NoContentGeneratedError, NoSuchModelError, ProviderOptions,
         TooManyEmbeddingValuesForCallError, UnsupportedFunctionalityError,
     };
     use serde_json::json;
@@ -526,6 +577,51 @@ mod tests {
         let message = "Model returned only metadata and no text, tool call, or file content.";
         let error = NoContentGeneratedError::with_message(message);
 
+        assert_eq!(error.message(), message);
+        assert_eq!(error.to_string(), message);
+    }
+
+    #[test]
+    fn invalid_response_data_error_matches_upstream_default_message() {
+        let error = InvalidResponseDataError::new(json!({
+            "state": "completed",
+            "assets": {}
+        }));
+
+        assert_eq!(
+            error.data(),
+            &json!({
+                "state": "completed",
+                "assets": {}
+            })
+        );
+        assert_eq!(
+            error.message(),
+            "Invalid response data: {\"assets\":{},\"state\":\"completed\"}."
+        );
+        assert_eq!(
+            error.to_string(),
+            "Invalid response data: {\"assets\":{},\"state\":\"completed\"}."
+        );
+        assert_eq!(
+            error.into_data(),
+            json!({
+                "state": "completed",
+                "assets": {}
+            })
+        );
+    }
+
+    #[test]
+    fn invalid_response_data_error_accepts_provider_specific_message() {
+        let data = json!({
+            "type": "tool-call-delta",
+            "function": {}
+        });
+        let message = "Expected 'function.name' to be a string.";
+        let error = InvalidResponseDataError::with_message(data.clone(), message);
+
+        assert_eq!(error.data(), &data);
         assert_eq!(error.message(), message);
         assert_eq!(error.to_string(), message);
     }
