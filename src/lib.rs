@@ -29,7 +29,9 @@ pub mod util;
 pub mod video_model;
 pub mod warning;
 
-pub use embed::{EmbedManyResult, EmbedResult, Embedding};
+pub use embed::{
+    EmbedManyOptions, EmbedManyResult, EmbedOptions, EmbedResult, Embedding, embed, embed_many,
+};
 pub use embedding_model::{
     EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelEmbedding, EmbeddingModelResponse,
     EmbeddingModelResult, EmbeddingModelUsage,
