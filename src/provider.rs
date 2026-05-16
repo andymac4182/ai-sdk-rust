@@ -251,6 +251,50 @@ impl fmt::Display for EmptyResponseBodyError {
 
 impl std::error::Error for EmptyResponseBodyError {}
 
+/// Error returned when a provider completes without generating content.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NoContentGeneratedError {
+    message: String,
+}
+
+impl NoContentGeneratedError {
+    /// Creates a no-content error with the upstream default message.
+    pub fn new() -> Self {
+        Self::with_message("No content generated.")
+    }
+
+    /// Creates a no-content error with a provider-specific message.
+    pub fn with_message(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into the human-readable error message.
+    pub fn into_message(self) -> String {
+        self.message
+    }
+}
+
+impl Default for NoContentGeneratedError {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for NoContentGeneratedError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for NoContentGeneratedError {}
+
 /// Error returned when an embedding model call contains too many values.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TooManyEmbeddingValuesForCallError {
@@ -341,8 +385,9 @@ pub type ProviderMetadata = BTreeMap<String, JsonObject>;
 #[cfg(test)]
 mod tests {
     use super::{
-        EmptyResponseBodyError, LoadApiKeyError, LoadSettingError, ModelType, NoSuchModelError,
-        ProviderOptions, TooManyEmbeddingValuesForCallError, UnsupportedFunctionalityError,
+        EmptyResponseBodyError, LoadApiKeyError, LoadSettingError, ModelType,
+        NoContentGeneratedError, NoSuchModelError, ProviderOptions,
+        TooManyEmbeddingValuesForCallError, UnsupportedFunctionalityError,
     };
     use serde_json::json;
 
@@ -458,6 +503,28 @@ mod tests {
     fn empty_response_body_error_accepts_provider_specific_message() {
         let message = "Amazon Bedrock event stream response body is empty.";
         let error = EmptyResponseBodyError::with_message(message);
+
+        assert_eq!(error.message(), message);
+        assert_eq!(error.to_string(), message);
+    }
+
+    #[test]
+    fn no_content_generated_error_matches_upstream_default_message() {
+        let error = NoContentGeneratedError::new();
+
+        assert_eq!(error.message(), "No content generated.");
+        assert_eq!(error.to_string(), "No content generated.");
+        assert_eq!(error.into_message(), "No content generated.");
+        assert_eq!(
+            NoContentGeneratedError::default().to_string(),
+            "No content generated."
+        );
+    }
+
+    #[test]
+    fn no_content_generated_error_accepts_provider_specific_message() {
+        let message = "Model returned only metadata and no text, tool call, or file content.";
+        let error = NoContentGeneratedError::with_message(message);
 
         assert_eq!(error.message(), message);
         assert_eq!(error.to_string(), message);
