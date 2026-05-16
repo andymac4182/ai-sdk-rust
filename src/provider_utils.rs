@@ -423,6 +423,88 @@ impl GetFromApiOptions {
     }
 }
 
+/// Options for a dependency-free upstream-style `postJsonToApi` request.
+///
+/// Rust callers provide an injected transport to [`post_json_to_api`], so this
+/// struct carries the request metadata that upstream prepares before calling
+/// `fetch`: URL, optional headers, a JSON body, and the runtime used for the
+/// provider-utils user-agent suffix.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostJsonToApiOptions {
+    /// Provider API URL.
+    pub url: String,
+
+    /// Optional request headers. `None` values are removed during header
+    /// normalization, matching upstream undefined header entries.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, Option<String>>,
+
+    /// JSON request body. Upstream stringifies this value for the sent body and
+    /// preserves the original value as `requestBodyValues`.
+    pub body: JsonValue,
+
+    /// Runtime indicators used to append the provider-utils user-agent suffix.
+    #[serde(default, skip_serializing_if = "RuntimeEnvironment::is_unknown")]
+    pub environment: RuntimeEnvironment,
+}
+
+impl PostJsonToApiOptions {
+    /// Creates JSON POST API request options for the given URL and body.
+    pub fn new(url: impl Into<String>, body: impl Into<JsonValue>) -> Self {
+        Self {
+            url: url.into(),
+            headers: BTreeMap::new(),
+            body: body.into(),
+            environment: RuntimeEnvironment::unknown(),
+        }
+    }
+
+    /// Adds or replaces request headers.
+    pub fn with_headers<K, V, I>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, Option<V>)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        for (key, value) in headers {
+            self.headers.insert(key.into(), value.map(Into::into));
+        }
+
+        self
+    }
+
+    /// Sets a request header.
+    pub fn with_header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(key.into(), Some(value.into()));
+        self
+    }
+
+    /// Sets the JSON request body.
+    pub fn with_body(mut self, body: impl Into<JsonValue>) -> Self {
+        self.body = body.into();
+        self
+    }
+
+    /// Sets the runtime indicators used for request header preparation.
+    pub fn with_environment(mut self, environment: RuntimeEnvironment) -> Self {
+        self.environment = environment;
+        self
+    }
+
+    /// Converts these options into the prepared provider API request.
+    pub fn into_request(self) -> ProviderApiRequest {
+        let Self {
+            url,
+            headers,
+            body,
+            environment,
+        } = self;
+
+        prepare_post_json_to_api_request(url, Some(headers), body, &environment)
+    }
+}
+
 /// HTTP method for provider API adapter requests.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -3379,6 +3461,40 @@ where
     .await
 }
 
+/// Runs an upstream-style `postJsonToApi` request through an injected transport.
+///
+/// This is the public dependency-free orchestration wrapper for upstream
+/// `postJsonToApi`: JSON request metadata is prepared from
+/// [`PostJsonToApiOptions`], the caller-supplied transport performs the HTTP
+/// work, and response handling plus fetch-error normalization are delegated to
+/// [`execute_provider_api_request`].
+pub async fn post_json_to_api<T, Transport, TransportFuture, S, F>(
+    options: PostJsonToApiOptions,
+    transport: Transport,
+    successful_response_handler: S,
+    failed_response_handler: F,
+) -> Result<ResponseHandlerResult<T>, HandledFetchError>
+where
+    Transport: FnOnce(ProviderApiRequest) -> TransportFuture,
+    TransportFuture: Future<Output = Result<ProviderApiResponse, FetchErrorInfo>>,
+    S: FnOnce(
+        &ProviderApiRequest,
+        &ProviderApiResponse,
+    ) -> Result<ResponseHandlerResult<T>, ProviderApiResponseHandlerError>,
+    F: FnOnce(
+        &ProviderApiRequest,
+        &ProviderApiResponse,
+    ) -> Result<ResponseHandlerResult<ApiCallError>, ProviderApiResponseHandlerError>,
+{
+    execute_provider_api_request(
+        options.into_request(),
+        transport,
+        successful_response_handler,
+        failed_response_handler,
+    )
+    .await
+}
+
 fn provider_api_response_handler_error(
     error: ProviderApiResponseHandlerError,
     message: &'static str,
@@ -3933,11 +4049,11 @@ mod tests {
         HandledFetchError, InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
         JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, LoadApiKeyOptions,
         LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError, ParseJsonResult,
-        ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
-        ProviderApiResponseBody, ProviderApiResponseHandlerError, ReasoningLevel,
-        ResponseHandlerResult, RuntimeEnvironment, StatusCodeErrorResponseHandlerOptions, Tool,
-        ToolExecutionError, ToolExecutionOptions, ValidateTypesResult,
-        add_additional_properties_to_json_schema, as_array, combine_headers,
+        PostJsonToApiOptions, ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod,
+        ProviderApiResponse, ProviderApiResponseBody, ProviderApiResponseHandlerError,
+        ReasoningLevel, ResponseHandlerResult, RuntimeEnvironment,
+        StatusCodeErrorResponseHandlerOptions, Tool, ToolExecutionError, ToolExecutionOptions,
+        ValidateTypesResult, add_additional_properties_to_json_schema, as_array, combine_headers,
         convert_base64_to_bytes, convert_bytes_to_base64, convert_image_model_file_to_data_uri,
         convert_inline_file_data_to_bytes, convert_to_base64, create_binary_response_handler,
         create_event_source_response_handler, create_json_error_response_handler,
@@ -3951,12 +4067,13 @@ mod tests {
         is_url_supported, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
         load_setting, load_setting_with_env, map_reasoning_to_provider_budget,
         map_reasoning_to_provider_effort, media_type_to_extension, normalize_headers, parse_json,
-        parse_json_event_stream, parse_provider_options, prepare_get_from_api_request,
-        prepare_post_json_to_api_request, prepare_post_to_api_request, prepare_tools,
-        read_response_with_size_limit, remove_undefined_entries, resolve_full_media_type,
-        resolve_provider_reference, safe_parse_json, safe_validate_types, strip_file_extension,
-        validate_download_url, validate_types, with_provider_utils_user_agent,
-        with_user_agent_suffix, without_trailing_slash,
+        parse_json_event_stream, parse_provider_options, post_json_to_api,
+        prepare_get_from_api_request, prepare_post_json_to_api_request,
+        prepare_post_to_api_request, prepare_tools, read_response_with_size_limit,
+        remove_undefined_entries, resolve_full_media_type, resolve_provider_reference,
+        safe_parse_json, safe_validate_types, strip_file_extension, validate_download_url,
+        validate_types, with_provider_utils_user_agent, with_user_agent_suffix,
+        without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -7138,6 +7255,150 @@ mod tests {
         assert_eq!(error.message(), "Cannot connect to API: Failed to connect");
         assert_eq!(error.url(), "https://api.example.com/v1/data");
         assert_eq!(error.request_body_values(), &json!({}));
+        assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn post_json_to_api_options_serialize_camel_case_request_metadata() {
+        let options =
+            PostJsonToApiOptions::new("https://api.example.com/v1/chat", json!({ "prompt": "Hi" }))
+                .with_headers(vec![
+                    ("Authorization", Some("Bearer test")),
+                    ("X-Ignore", None),
+                ])
+                .with_environment(RuntimeEnvironment::vercel_edge());
+
+        assert_eq!(
+            serde_json::to_value(&options).expect("post-json-to-api options serialize"),
+            json!({
+                "url": "https://api.example.com/v1/chat",
+                "headers": {
+                    "Authorization": "Bearer test",
+                    "X-Ignore": null
+                },
+                "body": {
+                    "prompt": "Hi"
+                },
+                "environment": {
+                    "hasEdgeRuntime": true
+                }
+            })
+        );
+
+        let options: PostJsonToApiOptions = serde_json::from_value(json!({
+            "url": "https://api.example.com/v1/chat",
+            "body": {
+                "prompt": "Hi"
+            }
+        }))
+        .expect("minimal post-json-to-api options deserialize");
+
+        assert_eq!(
+            options,
+            PostJsonToApiOptions::new("https://api.example.com/v1/chat", json!({ "prompt": "Hi" }))
+        );
+    }
+
+    #[test]
+    fn post_json_to_api_prepares_request_and_handles_success() {
+        let options =
+            PostJsonToApiOptions::new("https://api.example.com/v1/chat", json!({ "prompt": "Hi" }))
+                .with_header("Authorization", "Bearer test")
+                .with_environment(RuntimeEnvironment::node_js("v22.0.0"));
+        let expected_response_headers =
+            BTreeMap::from([("x-request-id".to_string(), "req_post_json".to_string())]);
+        let response_headers = expected_response_headers.clone();
+
+        let result = poll_ready(post_json_to_api(
+            options,
+            move |request| {
+                assert_eq!(request.method, ProviderApiRequestMethod::Post);
+                assert_eq!(request.url, "https://api.example.com/v1/chat");
+                assert_eq!(request.request_body_values, json!({ "prompt": "Hi" }));
+                assert_eq!(
+                    request
+                        .body
+                        .as_ref()
+                        .and_then(ProviderApiRequestBody::as_text),
+                    Some("{\"prompt\":\"Hi\"}")
+                );
+                assert_eq!(
+                    request.headers,
+                    BTreeMap::from([
+                        ("authorization".to_string(), "Bearer test".to_string()),
+                        ("content-type".to_string(), "application/json".to_string()),
+                        (
+                            "user-agent".to_string(),
+                            format!(
+                                "ai-sdk/provider-utils/{} runtime/node.js/v22.0.0",
+                                crate::VERSION
+                            )
+                        ),
+                    ])
+                );
+
+                ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    r#"{"name":"Ada","age":36}"#,
+                )
+                .with_headers(response_headers)))
+            },
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    validate_person,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_status_code_error_response_handler(
+                    response.status_code_error_response_handler_options(request),
+                ))
+            },
+        ))
+        .expect("post-json-to-api request succeeds");
+
+        assert_eq!(
+            result.value(),
+            &Person {
+                name: "Ada".to_string(),
+                age: 36
+            }
+        );
+        assert_eq!(result.response_headers(), Some(&expected_response_headers));
+    }
+
+    #[test]
+    fn post_json_to_api_normalizes_transport_failures() {
+        let error = poll_ready(post_json_to_api(
+            PostJsonToApiOptions::new("https://api.example.com/v1/chat", json!({ "prompt": "Hi" })),
+            |_request| {
+                ready(Err(FetchErrorInfo::new("fetch failed")
+                    .with_name("TypeError")
+                    .with_cause_message("ECONNREFUSED")))
+            },
+            |_request, _response| {
+                Ok(ResponseHandlerResult::new(Person {
+                    name: "unused".to_string(),
+                    age: 0,
+                }))
+            },
+            |request, response| {
+                Ok(create_status_code_error_response_handler(
+                    response.status_code_error_response_handler_options(request),
+                ))
+            },
+        ))
+        .expect_err("post-json-to-api transport failure is normalized");
+
+        let HandledFetchError::ApiCall { error } = error else {
+            panic!("fetch TypeError with a cause should become an API call error");
+        };
+
+        assert_eq!(error.message(), "Cannot connect to API: ECONNREFUSED");
+        assert_eq!(error.url(), "https://api.example.com/v1/chat");
+        assert_eq!(error.request_body_values(), &json!({ "prompt": "Hi" }));
         assert!(error.is_retryable());
     }
 
