@@ -280,6 +280,52 @@ impl fmt::Display for ToolCallRepairError {
 
 impl std::error::Error for ToolCallRepairError {}
 
+/// Error returned when tool call results are missing from a prompt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MissingToolResultsError {
+    tool_call_ids: Vec<String>,
+    message: String,
+}
+
+impl MissingToolResultsError {
+    /// Creates a missing-tool-results error with the upstream default message.
+    pub fn new(tool_call_ids: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        let tool_call_ids = tool_call_ids
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<_>>();
+        let message = missing_tool_results_default_message(&tool_call_ids);
+
+        Self {
+            tool_call_ids,
+            message,
+        }
+    }
+
+    /// Returns the tool call IDs whose results were missing.
+    pub fn tool_call_ids(&self) -> &[String] {
+        &self.tool_call_ids
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into its parts.
+    pub fn into_parts(self) -> (Vec<String>, String) {
+        (self.tool_call_ids, self.message)
+    }
+}
+
+impl fmt::Display for MissingToolResultsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for MissingToolResultsError {}
+
 /// Reasoning content emitted during a high-level generate-text step.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(untagged)]
@@ -1678,6 +1724,17 @@ fn tool_call_repair_default_message(cause_message: &str) -> String {
     format!("Error repairing tool call: {cause_message}")
 }
 
+fn missing_tool_results_default_message(tool_call_ids: &[String]) -> String {
+    let plural = tool_call_ids.len() > 1;
+    format!(
+        "Tool result{} {} missing for tool call{} {}.",
+        if plural { "s" } else { "" },
+        if plural { "are" } else { "is" },
+        if plural { "s" } else { "" },
+        tool_call_ids.join(", ")
+    )
+}
+
 fn add_step_usage(steps: &[GenerateTextStep]) -> LanguageModelUsage {
     steps
         .iter()
@@ -1721,7 +1778,8 @@ mod tests {
     use super::{
         GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning, GenerateTextResult,
         GenerateTextStep, GenerateTextToolCall, GenerateTextToolResult, InvalidToolInputError,
-        NoSuchToolError, ToolCallRepairError, ToolCallRepairOriginalError, generate_text,
+        MissingToolResultsError, NoSuchToolError, ToolCallRepairError, ToolCallRepairOriginalError,
+        generate_text,
     };
     use crate::file_data::FileDataContent;
     use crate::language_model::{
@@ -1856,6 +1914,34 @@ mod tests {
                 ToolCallRepairOriginalError::NoSuchTool(original_error),
                 "repair function failed".to_string(),
                 "custom repair error".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn missing_tool_results_error_matches_upstream_default_messages() {
+        let single = MissingToolResultsError::new(["call-1"]);
+        assert_eq!(single.tool_call_ids(), &["call-1".to_string()]);
+        assert_eq!(
+            single.message(),
+            "Tool result is missing for tool call call-1."
+        );
+        assert_eq!(single.to_string(), single.message());
+
+        let multiple = MissingToolResultsError::new(["call-1", "call-2"]);
+        assert_eq!(
+            multiple.tool_call_ids(),
+            &["call-1".to_string(), "call-2".to_string()]
+        );
+        assert_eq!(
+            multiple.message(),
+            "Tool results are missing for tool calls call-1, call-2."
+        );
+        assert_eq!(
+            multiple.into_parts(),
+            (
+                vec!["call-1".to_string(), "call-2".to_string()],
+                "Tool results are missing for tool calls call-1, call-2.".to_string()
             )
         );
     }
