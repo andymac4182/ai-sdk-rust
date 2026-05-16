@@ -4,10 +4,12 @@
 /// The crate version compiled into the library.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod file_data;
 pub mod json;
 pub mod language_model;
 pub mod provider;
 
+pub use file_data::{FileData, FileDataContent, ProviderReference, ProviderReferenceError};
 pub use json::{JsonArray, JsonObject, JsonValue};
 pub use language_model::{
     FinishReason, InputTokenUsage, LanguageModelFinishReason, LanguageModelUsage, OutputTokenUsage,
