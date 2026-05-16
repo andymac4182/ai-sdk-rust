@@ -15,6 +15,7 @@ use crate::language_model::{
     LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultOutput,
     LanguageModelToolResultPart, LanguageModelUsage, OutputTokenUsage,
 };
+use crate::provider::JsonParseError;
 use crate::provider::{ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{Tool, ToolExecutionOptions, prepare_tools};
 use crate::warning::Warning;
@@ -216,6 +217,14 @@ pub struct GenerateTextToolCall {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dynamic: Option<bool>,
 
+    /// Whether this tool call could not be matched or parsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid: Option<bool>,
+
+    /// Error message explaining why this tool call is invalid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+
     /// Provider-specific metadata returned with the tool call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_metadata: Option<ProviderMetadata>,
@@ -223,12 +232,28 @@ pub struct GenerateTextToolCall {
 
 impl GenerateTextToolCall {
     fn from_language_model_tool_call(tool_call: &LanguageModelToolCall) -> Self {
+        let (input, dynamic, invalid, error) = match parse_tool_input(&tool_call.input) {
+            Ok(input) => (input, tool_call.dynamic, None, None),
+            Err(error) => (
+                JsonValue::String(tool_call.input.clone()),
+                Some(true),
+                Some(true),
+                Some(invalid_tool_input_message(
+                    &tool_call.tool_name,
+                    &tool_call.input,
+                    error,
+                )),
+            ),
+        };
+
         Self {
             tool_call_id: tool_call.tool_call_id.clone(),
             tool_name: tool_call.tool_name.clone(),
-            input: parse_tool_input_or_raw(&tool_call.input),
+            input,
             provider_executed: tool_call.provider_executed,
-            dynamic: tool_call.dynamic,
+            dynamic,
+            invalid,
+            error,
             provider_metadata: tool_call.provider_metadata.clone(),
         }
     }
@@ -504,6 +529,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         let result = model.do_generate(call_options.clone()).await;
         let mut step =
             GenerateTextStep::from_language_model_result(step_number, model_info.clone(), result);
+        mark_unavailable_tool_calls(&mut step.tool_calls, call_options.tools.as_deref());
         let tool_results = execute_tool_calls(&tools, &step.tool_calls, &step_prompt).await;
         let should_continue = should_continue_after_tool_results(&step, &tool_results);
         step.tool_results = tool_results;
@@ -557,6 +583,17 @@ async fn execute_tool_calls(
 
     for tool_call in tool_calls {
         if tool_call.provider_executed == Some(true) {
+            continue;
+        }
+
+        if tool_call.invalid == Some(true) {
+            tool_results.push(GenerateTextToolResult::error(
+                tool_call,
+                tool_call
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "Invalid tool call.".to_string()),
+            ));
             continue;
         }
 
@@ -690,7 +727,7 @@ fn assistant_content_part_from_content(
             let mut part = LanguageModelToolCallPart::new(
                 tool_call.tool_call_id.clone(),
                 tool_call.tool_name.clone(),
-                parse_tool_input_or_empty(&tool_call.input),
+                parse_tool_input_or_raw(&tool_call.input),
             );
 
             if let Some(provider_executed) = tool_call.provider_executed {
@@ -778,8 +815,64 @@ fn parse_tool_input_or_raw(input: &str) -> JsonValue {
     parse_tool_input(input).unwrap_or_else(|_| JsonValue::String(input.to_string()))
 }
 
-fn parse_tool_input_or_empty(input: &str) -> JsonValue {
-    parse_tool_input(input).unwrap_or_else(|_| serde_json::json!({}))
+fn invalid_tool_input_message(
+    tool_name: &str,
+    input: &str,
+    cause: impl std::fmt::Display,
+) -> String {
+    format!(
+        "Invalid input for tool {tool_name}: {}",
+        JsonParseError::new(input, cause)
+    )
+}
+
+fn mark_unavailable_tool_calls(
+    tool_calls: &mut [GenerateTextToolCall],
+    available_tools: Option<&[LanguageModelTool]>,
+) {
+    let available_tool_names = available_tools
+        .unwrap_or_default()
+        .iter()
+        .map(language_model_tool_name)
+        .collect::<Vec<_>>();
+
+    for tool_call in tool_calls {
+        if tool_call.provider_executed == Some(true) || tool_call.invalid == Some(true) {
+            continue;
+        }
+
+        if available_tool_names
+            .iter()
+            .any(|tool_name| tool_name == &tool_call.tool_name)
+        {
+            continue;
+        }
+
+        tool_call.dynamic = Some(true);
+        tool_call.invalid = Some(true);
+        tool_call.error = Some(no_such_tool_message(
+            &tool_call.tool_name,
+            &available_tool_names,
+        ));
+    }
+}
+
+fn language_model_tool_name(tool: &LanguageModelTool) -> String {
+    match tool {
+        LanguageModelTool::Function(tool) => tool.name.clone(),
+        LanguageModelTool::Provider(tool) => tool.name.clone(),
+    }
+}
+
+fn no_such_tool_message(tool_name: &str, available_tool_names: &[String]) -> String {
+    if available_tool_names.is_empty() {
+        format!("Model tried to call unavailable tool '{tool_name}'. No tools are available.")
+    } else {
+        format!(
+            "Model tried to call unavailable tool '{tool_name}'. Available tools: {}.",
+            available_tool_names.join(", ")
+        )
+    }
 }
 
 fn add_step_usage(steps: &[GenerateTextStep]) -> LanguageModelUsage {
@@ -1056,6 +1149,8 @@ mod tests {
             input: json!({ "city": "Brisbane" }),
             provider_executed: Some(false),
             dynamic: Some(false),
+            invalid: None,
+            error: None,
             provider_metadata: None,
         };
         let tool_result = GenerateTextToolResult {
@@ -1258,12 +1353,20 @@ mod tests {
 
     struct ToolLoopLanguageModel {
         calls: RefCell<Vec<LanguageModelCallOptions>>,
+        tool_name: String,
+        tool_input: String,
     }
 
     impl ToolLoopLanguageModel {
         fn new() -> Self {
+            Self::with_tool_call("weather", r#"{"city":"Brisbane"}"#)
+        }
+
+        fn with_tool_call(tool_name: impl Into<String>, tool_input: impl Into<String>) -> Self {
             Self {
                 calls: RefCell::new(Vec::new()),
+                tool_name: tool_name.into(),
+                tool_input: tool_input.into(),
             }
         }
     }
@@ -1306,8 +1409,8 @@ mod tests {
                 ready(LanguageModelGenerateResult::new(
                     vec![LanguageModelContent::ToolCall(LanguageModelToolCall::new(
                         "call-1",
-                        "weather",
-                        r#"{"city":"Brisbane"}"#,
+                        self.tool_name.clone(),
+                        self.tool_input.clone(),
                     ))],
                     LanguageModelFinishReason {
                         unified: FinishReason::ToolCalls,
@@ -1445,5 +1548,102 @@ mod tests {
         assert_eq!(result.finish_reason, FinishReason::ToolCalls);
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_results.len(), 1);
+    }
+
+    #[test]
+    fn generate_text_reports_invalid_json_tool_input_and_continues() {
+        let model = ToolLoopLanguageModel::with_tool_call("weather", "{ invalid json");
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema))
+                .with_max_steps(2),
+        ));
+
+        let tool_call = &result.tool_calls[0];
+        assert_eq!(model.calls.borrow().len(), 2);
+        assert_eq!(tool_call.input, json!("{ invalid json"));
+        assert_eq!(tool_call.dynamic, Some(true));
+        assert_eq!(tool_call.invalid, Some(true));
+        assert!(
+            tool_call
+                .error
+                .as_deref()
+                .expect("invalid tool call carries an error")
+                .starts_with(
+                    "Invalid input for tool weather: JSON parsing failed: Text: { invalid json."
+                )
+        );
+
+        let tool_result = &result.tool_results[0];
+        assert_eq!(tool_result.is_error, Some(true));
+        assert_eq!(tool_result.input, json!("{ invalid json"));
+        let error_message = tool_result
+            .output
+            .as_str()
+            .expect("error output is a string");
+        assert!(error_message.starts_with("Invalid input for tool weather:"));
+
+        assert_eq!(
+            model.calls.borrow()[1].prompt[1],
+            LanguageModelMessage::Assistant(
+                crate::language_model::LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                        "call-1",
+                        "weather",
+                        json!("{ invalid json")
+                    ))
+                ])
+            )
+        );
+        assert_eq!(
+            model.calls.borrow()[1].prompt[2],
+            LanguageModelMessage::Tool(crate::language_model::LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call-1",
+                    "weather",
+                    LanguageModelToolResultOutput::error_text(error_message)
+                ))
+            ]))
+        );
+        assert_eq!(result.text, "The weather in Brisbane is sunny.");
+    }
+
+    #[test]
+    fn generate_text_reports_unknown_tool_and_continues_with_error_result() {
+        let model = ToolLoopLanguageModel::with_tool_call("forecast", r#"{"city":"Brisbane"}"#);
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema))
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(model.calls.borrow().len(), 2);
+        assert_eq!(result.tool_calls[0].tool_name, "forecast");
+        assert_eq!(result.tool_calls[0].input, json!({ "city": "Brisbane" }));
+        assert_eq!(result.tool_calls[0].dynamic, Some(true));
+        assert_eq!(result.tool_calls[0].invalid, Some(true));
+        assert_eq!(
+            result.tool_calls[0].error.as_deref(),
+            Some("Model tried to call unavailable tool 'forecast'. Available tools: weather.")
+        );
+
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_name, "forecast");
+        assert_eq!(result.tool_results[0].is_error, Some(true));
+        assert_eq!(
+            result.tool_results[0].output,
+            json!("Model tried to call unavailable tool 'forecast'. Available tools: weather.")
+        );
+        assert_eq!(result.text, "The weather in Brisbane is sunny.");
     }
 }
