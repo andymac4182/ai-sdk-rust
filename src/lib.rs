@@ -45,8 +45,9 @@ pub use generate_text::{
     GenerateTextStep, GenerateTextTool, GenerateTextToolCall, GenerateTextToolResult,
     InvalidStreamPartError, InvalidToolApprovalError, InvalidToolInputError,
     MissingToolResultsError, NoObjectGeneratedError, NoOutputGeneratedError, NoSuchToolError,
-    ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOriginalError,
-    UiMessageStreamError, UnsupportedModelVersionError, generate_text,
+    StopCondition, ToolCallNotFoundForApprovalError, ToolCallRepairError,
+    ToolCallRepairOriginalError, UiMessageStreamError, UnsupportedModelVersionError, generate_text,
+    has_tool_call, is_loop_finished, is_step_count, is_stop_condition_met,
 };
 pub use headers::Headers;
 pub use image_model::{

@@ -27,6 +27,68 @@ use crate::warning::Warning;
 
 const DEFAULT_MAX_STEPS: usize = 1;
 
+/// Predicate-style stop condition for high-level generate-text tool loops.
+///
+/// The upstream SDK models stop conditions as async predicates. This Rust
+/// contract ports the public built-in predicates as data so callers can use
+/// them without committing the crate to an async trait or boxed closure API.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StopCondition {
+    /// Stop when the number of completed steps exactly matches this count.
+    StepCount(usize),
+
+    /// Never stop because of this condition.
+    LoopFinished,
+
+    /// Stop when the most recent step includes any of these tool names.
+    HasToolCall(Vec<String>),
+}
+
+impl StopCondition {
+    /// Returns whether this condition is met for the completed steps.
+    pub fn is_met(&self, steps: &[GenerateTextStep]) -> bool {
+        match self {
+            Self::StepCount(step_count) => steps.len() == *step_count,
+            Self::LoopFinished => false,
+            Self::HasToolCall(tool_names) => {
+                let Some(last_step) = steps.last() else {
+                    return false;
+                };
+
+                last_step
+                    .tool_calls
+                    .iter()
+                    .any(|tool_call| tool_names.iter().any(|name| name == &tool_call.tool_name))
+            }
+        }
+    }
+}
+
+/// Creates a stop condition that is met after exactly `step_count` completed steps.
+pub fn is_step_count(step_count: usize) -> StopCondition {
+    StopCondition::StepCount(step_count)
+}
+
+/// Creates a stop condition that never stops the loop by itself.
+pub fn is_loop_finished() -> StopCondition {
+    StopCondition::LoopFinished
+}
+
+/// Creates a stop condition that is met when the last step calls any named tool.
+pub fn has_tool_call(tool_names: impl IntoIterator<Item = impl Into<String>>) -> StopCondition {
+    StopCondition::HasToolCall(tool_names.into_iter().map(Into::into).collect())
+}
+
+/// Returns whether any stop condition is met for the completed steps.
+pub fn is_stop_condition_met(
+    stop_conditions: &[StopCondition],
+    steps: &[GenerateTextStep],
+) -> bool {
+    stop_conditions
+        .iter()
+        .any(|condition| condition.is_met(steps))
+}
+
 /// Error returned when a model tries to call a tool that is not available.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NoSuchToolError {
@@ -790,6 +852,9 @@ pub struct GenerateTextOptions<'a, M: LanguageModel + ?Sized> {
 
     /// Maximum number of model-call steps to run.
     pub max_steps: usize,
+
+    /// Additional stop conditions checked after every completed step.
+    pub stop_conditions: Vec<StopCondition>,
 }
 
 impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
@@ -800,6 +865,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             call_options: LanguageModelCallOptions::new(prompt),
             tools: Vec::new(),
             max_steps: DEFAULT_MAX_STEPS,
+            stop_conditions: Vec::new(),
         }
     }
 
@@ -810,6 +876,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             call_options,
             tools: Vec::new(),
             max_steps: DEFAULT_MAX_STEPS,
+            stop_conditions: Vec::new(),
         }
     }
 
@@ -896,6 +963,21 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
     /// the model at least once.
     pub fn with_max_steps(mut self, max_steps: usize) -> Self {
         self.max_steps = max_steps.max(1);
+        self
+    }
+
+    /// Adds a stop condition that is checked after every completed step.
+    pub fn with_stop_condition(mut self, stop_condition: StopCondition) -> Self {
+        self.stop_conditions.push(stop_condition);
+        self
+    }
+
+    /// Replaces the additional stop conditions checked after every completed step.
+    pub fn with_stop_conditions(
+        mut self,
+        stop_conditions: impl IntoIterator<Item = StopCondition>,
+    ) -> Self {
+        self.stop_conditions = stop_conditions.into_iter().collect();
         self
     }
 
@@ -1509,6 +1591,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         mut call_options,
         tools,
         max_steps,
+        stop_conditions,
     } = options;
     let model_info = GenerateTextModelInfo::new(model.provider(), model.model_id());
 
@@ -1540,17 +1623,19 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         refresh_tool_result_views(&mut step);
         step.response_messages = response_messages_for_step(&step).unwrap_or_default();
 
-        if should_continue && step_number + 1 < max_steps {
-            if step.response_messages.is_empty() {
-                steps.push(step);
+        let response_messages = step.response_messages.clone();
+        steps.push(step);
+
+        if should_continue
+            && !is_stop_condition_met(&stop_conditions, &steps)
+            && step_number + 1 < max_steps
+        {
+            if response_messages.is_empty() {
                 break;
             } else {
-                call_options.prompt.extend(step.response_messages.clone());
+                call_options.prompt.extend(response_messages);
             }
-
-            steps.push(step);
         } else {
-            steps.push(step);
             break;
         }
     }
@@ -2221,9 +2306,10 @@ mod tests {
         GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning, GenerateTextResult,
         GenerateTextStep, GenerateTextToolCall, GenerateTextToolResult, InvalidStreamPartError,
         InvalidToolApprovalError, InvalidToolInputError, MissingToolResultsError,
-        NoObjectGeneratedError, NoOutputGeneratedError, NoSuchToolError,
+        NoObjectGeneratedError, NoOutputGeneratedError, NoSuchToolError, StopCondition,
         ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOriginalError,
-        UiMessageStreamError, UnsupportedModelVersionError, generate_text,
+        UiMessageStreamError, UnsupportedModelVersionError, generate_text, has_tool_call,
+        is_loop_finished, is_step_count, is_stop_condition_met,
     };
     use crate::file_data::FileDataContent;
     use crate::language_model::{
@@ -2287,6 +2373,80 @@ mod tests {
                 .expect("raw usage is an object"),
             ),
         }
+    }
+
+    fn stop_condition_step(tool_names: &[&str]) -> GenerateTextStep {
+        let content = tool_names
+            .iter()
+            .enumerate()
+            .map(|(index, tool_name)| {
+                LanguageModelContent::ToolCall(LanguageModelToolCall::new(
+                    format!("call-{index}"),
+                    *tool_name,
+                    "{}",
+                ))
+            })
+            .collect::<Vec<_>>();
+        let finish_reason = if content.is_empty() {
+            FinishReason::Stop
+        } else {
+            FinishReason::ToolCalls
+        };
+
+        GenerateTextStep::from_language_model_result(
+            0,
+            GenerateTextModelInfo::new("test-provider", "test-model"),
+            LanguageModelGenerateResult::new(
+                content,
+                LanguageModelFinishReason {
+                    unified: finish_reason,
+                    raw: None,
+                },
+                LanguageModelUsage::default(),
+            ),
+        )
+    }
+
+    #[test]
+    fn stop_conditions_match_upstream_builtin_predicates() {
+        let empty = stop_condition_step(&[]);
+        let final_answer = stop_condition_step(&["finalAnswer"]);
+        let weather = stop_condition_step(&["weather"]);
+
+        assert!(is_step_count(2).is_met(&[empty.clone(), weather.clone()]));
+        assert!(!is_step_count(2).is_met(std::slice::from_ref(&empty)));
+        assert!(!is_step_count(2).is_met(&[empty.clone(), weather.clone(), final_answer.clone(),]));
+        assert!(!is_loop_finished().is_met(&[]));
+        assert!(!is_loop_finished().is_met(std::slice::from_ref(&empty)));
+
+        let stop_on_final_answer = has_tool_call(["finalAnswer"]);
+        assert!(stop_on_final_answer.is_met(&[empty.clone(), final_answer.clone()]));
+        assert!(!stop_on_final_answer.is_met(&[final_answer, empty.clone()]));
+        assert!(!stop_on_final_answer.is_met(&[]));
+
+        assert!(has_tool_call(["search", "weather"]).is_met(std::slice::from_ref(&weather)));
+        assert!(!has_tool_call(["search", "finalAnswer"]).is_met(&[empty]));
+    }
+
+    #[test]
+    fn is_stop_condition_met_matches_any_condition_behavior() {
+        let steps = [stop_condition_step(&[]), stop_condition_step(&["weather"])];
+
+        assert!(is_stop_condition_met(
+            &[is_loop_finished(), is_step_count(2)],
+            &steps
+        ));
+        assert!(is_stop_condition_met(
+            &[is_loop_finished(), has_tool_call(["weather"])],
+            &steps
+        ));
+        assert!(!is_stop_condition_met(
+            &[
+                StopCondition::LoopFinished,
+                StopCondition::HasToolCall(vec!["finalAnswer".to_string()])
+            ],
+            &steps
+        ));
     }
 
     #[test]
@@ -4209,6 +4369,32 @@ mod tests {
         assert_eq!(result.finish_reason, FinishReason::ToolCalls);
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_results.len(), 1);
+    }
+
+    #[test]
+    fn generate_text_stops_after_matching_stop_condition() {
+        let model = ToolLoopLanguageModel::new();
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(
+                    Tool::new("weather", input_schema)
+                        .with_execute(|_input, _options| async move { Ok(json!("sunny")) }),
+                )
+                .with_max_steps(3)
+                .with_stop_condition(has_tool_call(["weather"])),
+        ));
+
+        assert_eq!(model.calls.borrow().len(), 1);
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.finish_reason, FinishReason::ToolCalls);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].output, json!("sunny"));
     }
 
     #[test]
