@@ -345,6 +345,141 @@ impl HandledFetchError {
     }
 }
 
+/// HTTP method for provider API adapter requests.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum ProviderApiRequestMethod {
+    /// Upstream `getFromApi` request method.
+    Get,
+
+    /// Upstream `postToApi` request method.
+    Post,
+}
+
+/// Body content sent by provider API adapter requests.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum ProviderApiRequestBody {
+    /// Text request body content.
+    #[serde(rename = "text")]
+    Text {
+        /// Text body content.
+        content: String,
+    },
+
+    /// Binary request body content.
+    #[serde(rename = "bytes")]
+    Bytes {
+        /// Binary body content.
+        content: Vec<u8>,
+    },
+}
+
+impl ProviderApiRequestBody {
+    /// Creates text request body content.
+    pub fn text(content: impl Into<String>) -> Self {
+        Self::Text {
+            content: content.into(),
+        }
+    }
+
+    /// Creates binary request body content.
+    pub fn bytes(content: impl Into<Vec<u8>>) -> Self {
+        Self::Bytes {
+            content: content.into(),
+        }
+    }
+
+    /// Returns text request body content when this body is text.
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text { content } => Some(content),
+            Self::Bytes { .. } => None,
+        }
+    }
+
+    /// Returns binary request body content when this body is bytes.
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Text { .. } => None,
+            Self::Bytes { content } => Some(content),
+        }
+    }
+}
+
+/// Runtime-independent provider API request prepared for an HTTP adapter.
+///
+/// This is the Rust-native request boundary shared by upstream `getFromApi`
+/// and `postToApi`: it preserves the fetch method, normalized headers,
+/// optional request body content, and the values passed to response handlers as
+/// `requestBodyValues`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderApiRequest {
+    /// HTTP method used by the provider API request.
+    pub method: ProviderApiRequestMethod,
+
+    /// Provider API URL.
+    pub url: String,
+
+    /// Normalized request headers.
+    #[serde(default)]
+    pub headers: Headers,
+
+    /// Request body content, when the request sends a body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<ProviderApiRequestBody>,
+
+    /// Values supplied to upstream response handlers as `requestBodyValues`.
+    pub request_body_values: JsonValue,
+}
+
+impl ProviderApiRequest {
+    /// Creates a prepared provider API request.
+    pub fn new(
+        method: ProviderApiRequestMethod,
+        url: impl Into<String>,
+        headers: Headers,
+        body: Option<ProviderApiRequestBody>,
+        request_body_values: impl Into<JsonValue>,
+    ) -> Self {
+        Self {
+            method,
+            url: url.into(),
+            headers,
+            body,
+            request_body_values: request_body_values.into(),
+        }
+    }
+
+    /// Creates a prepared GET provider API request with empty request body values.
+    pub fn get(url: impl Into<String>, headers: Headers) -> Self {
+        Self::new(
+            ProviderApiRequestMethod::Get,
+            url,
+            headers,
+            None,
+            JsonValue::Object(JsonObject::new()),
+        )
+    }
+
+    /// Creates a prepared POST provider API request.
+    pub fn post(
+        url: impl Into<String>,
+        headers: Headers,
+        body: ProviderApiRequestBody,
+        request_body_values: impl Into<JsonValue>,
+    ) -> Self {
+        Self::new(
+            ProviderApiRequestMethod::Post,
+            url,
+            headers,
+            Some(body),
+            request_body_values,
+        )
+    }
+}
+
 /// Result returned by safe type validation.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ValidateTypesResult<T = JsonValue> {
@@ -2832,6 +2967,60 @@ where
     )
 }
 
+/// Prepares the request metadata used by upstream `getFromApi`.
+///
+/// The returned request has method `GET`, normalized provider-utils user-agent
+/// headers, no body, and empty `requestBodyValues`.
+pub fn prepare_get_from_api_request<K, V, I>(
+    url: impl Into<String>,
+    headers: Option<I>,
+    environment: &RuntimeEnvironment,
+) -> ProviderApiRequest
+where
+    I: IntoIterator<Item = (K, Option<V>)>,
+    K: AsRef<str>,
+    V: Into<String>,
+{
+    ProviderApiRequest::get(url, with_provider_utils_user_agent(headers, environment))
+}
+
+/// Prepares the JSON request metadata used by upstream `postJsonToApi`.
+///
+/// Upstream `postJsonToApi` adds `Content-Type: application/json`, allows caller
+/// headers to override it, stringifies the JSON body for `body.content`, and
+/// preserves the original body value for response-handler `requestBodyValues`.
+pub fn prepare_post_json_to_api_request<K, V, I>(
+    url: impl Into<String>,
+    headers: Option<I>,
+    body: impl Into<JsonValue>,
+    environment: &RuntimeEnvironment,
+) -> ProviderApiRequest
+where
+    I: IntoIterator<Item = (K, Option<V>)>,
+    K: Into<String>,
+    V: Into<String>,
+{
+    let body_values = body.into();
+    let body_content = body_values.to_string();
+    let mut combined_headers = BTreeMap::from([(
+        "Content-Type".to_string(),
+        Some("application/json".to_string()),
+    )]);
+
+    if let Some(headers) = headers {
+        for (key, value) in headers {
+            combined_headers.insert(key.into(), value.map(Into::into));
+        }
+    }
+
+    ProviderApiRequest::post(
+        url,
+        with_provider_utils_user_agent(Some(combined_headers), environment),
+        ProviderApiRequestBody::text(body_content),
+        body_values,
+    )
+}
+
 /// Returns an upstream-style runtime user-agent suffix for provider utilities.
 ///
 /// This mirrors upstream `getRuntimeEnvironmentUserAgent`: browser indicators
@@ -3177,9 +3366,10 @@ mod tests {
         InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
         JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, LoadApiKeyOptions,
         LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError, ParseJsonResult,
-        ReasoningLevel, ResponseHandlerResult, RuntimeEnvironment,
-        StatusCodeErrorResponseHandlerOptions, Tool, ToolExecutionError, ToolExecutionOptions,
-        ValidateTypesResult, add_additional_properties_to_json_schema, as_array, combine_headers,
+        ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ReasoningLevel,
+        ResponseHandlerResult, RuntimeEnvironment, StatusCodeErrorResponseHandlerOptions, Tool,
+        ToolExecutionError, ToolExecutionOptions, ValidateTypesResult,
+        add_additional_properties_to_json_schema, as_array, combine_headers,
         convert_base64_to_bytes, convert_bytes_to_base64, convert_image_model_file_to_data_uri,
         convert_inline_file_data_to_bytes, convert_to_base64, create_binary_response_handler,
         create_event_source_response_handler, create_json_error_response_handler,
@@ -3192,11 +3382,11 @@ mod tests {
         load_optional_setting_with_env, load_setting, load_setting_with_env,
         map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
         media_type_to_extension, normalize_headers, parse_json, parse_json_event_stream,
-        parse_provider_options, prepare_tools, read_response_with_size_limit,
-        remove_undefined_entries, resolve_full_media_type, resolve_provider_reference,
-        safe_parse_json, safe_validate_types, strip_file_extension, validate_download_url,
-        validate_types, with_provider_utils_user_agent, with_user_agent_suffix,
-        without_trailing_slash,
+        parse_provider_options, prepare_get_from_api_request, prepare_post_json_to_api_request,
+        prepare_tools, read_response_with_size_limit, remove_undefined_entries,
+        resolve_full_media_type, resolve_provider_reference, safe_parse_json, safe_validate_types,
+        strip_file_extension, validate_download_url, validate_types,
+        with_provider_utils_user_agent, with_user_agent_suffix, without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -5759,6 +5949,174 @@ mod tests {
                     crate::VERSION
                 ),
             )])
+        );
+    }
+
+    #[test]
+    fn provider_api_request_serializes_upstream_prepared_request_shape() {
+        let request = ProviderApiRequest::post(
+            "https://api.example.com/v1/models",
+            BTreeMap::from([
+                ("content-type".to_string(), "application/json".to_string()),
+                (
+                    "user-agent".to_string(),
+                    "ai-sdk/provider-utils/test".to_string(),
+                ),
+            ]),
+            ProviderApiRequestBody::text("{\"model\":\"test\"}"),
+            json!({ "model": "test" }),
+        );
+
+        let serialized = serde_json::to_value(&request).expect("request serializes");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "method": "POST",
+                "url": "https://api.example.com/v1/models",
+                "headers": {
+                    "content-type": "application/json",
+                    "user-agent": "ai-sdk/provider-utils/test"
+                },
+                "body": {
+                    "type": "text",
+                    "content": "{\"model\":\"test\"}"
+                },
+                "requestBodyValues": { "model": "test" }
+            })
+        );
+
+        let deserialized: ProviderApiRequest =
+            serde_json::from_value(serialized).expect("request deserializes");
+
+        assert_eq!(deserialized, request);
+        assert_eq!(deserialized.method, ProviderApiRequestMethod::Post);
+        assert_eq!(
+            deserialized
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text),
+            Some("{\"model\":\"test\"}")
+        );
+    }
+
+    #[test]
+    fn provider_api_request_body_supports_binary_content() {
+        let body = ProviderApiRequestBody::bytes([1_u8, 2, 3]);
+        let serialized = serde_json::to_value(&body).expect("body serializes");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "type": "bytes",
+                "content": [1, 2, 3]
+            })
+        );
+
+        let deserialized: ProviderApiRequestBody =
+            serde_json::from_value(serialized).expect("body deserializes");
+
+        assert_eq!(deserialized.as_bytes(), Some([1_u8, 2, 3].as_slice()));
+    }
+
+    #[test]
+    fn prepare_get_from_api_request_matches_upstream_request_setup() {
+        let request = prepare_get_from_api_request(
+            "https://api.example.com/data",
+            Some(vec![
+                ("Authorization", Some("Bearer test")),
+                ("X-Ignore", None),
+            ]),
+            &RuntimeEnvironment::navigator_user_agent("Deno/2.0 TEST"),
+        );
+
+        assert_eq!(request.method, ProviderApiRequestMethod::Get);
+        assert_eq!(request.url, "https://api.example.com/data");
+        assert_eq!(request.body, None);
+        assert_eq!(request.request_body_values, json!({}));
+        assert_eq!(
+            request.headers,
+            BTreeMap::from([
+                ("authorization".to_string(), "Bearer test".to_string()),
+                (
+                    "user-agent".to_string(),
+                    format!(
+                        "ai-sdk/provider-utils/{} runtime/deno/2.0 test",
+                        crate::VERSION
+                    ),
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn prepare_post_json_to_api_request_matches_upstream_request_setup() {
+        let request = prepare_post_json_to_api_request(
+            "https://api.example.com/data",
+            Some(vec![
+                ("Authorization", Some("Bearer test")),
+                ("X-Ignore", None),
+            ]),
+            json!({ "model": "test", "prompt": "Hello" }),
+            &RuntimeEnvironment::node_js("v22.0.0"),
+        );
+
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://api.example.com/data");
+        assert_eq!(
+            request.request_body_values,
+            json!({ "model": "test", "prompt": "Hello" })
+        );
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text),
+            Some("{\"model\":\"test\",\"prompt\":\"Hello\"}")
+        );
+        assert_eq!(
+            request.headers,
+            BTreeMap::from([
+                ("authorization".to_string(), "Bearer test".to_string()),
+                ("content-type".to_string(), "application/json".to_string()),
+                (
+                    "user-agent".to_string(),
+                    format!(
+                        "ai-sdk/provider-utils/{} runtime/node.js/v22.0.0",
+                        crate::VERSION
+                    ),
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn prepare_post_json_to_api_request_allows_header_overrides() {
+        let request = prepare_post_json_to_api_request(
+            "https://api.example.com/data",
+            Some(vec![
+                ("Content-Type", Some("application/custom+json")),
+                ("User-Agent", Some("MyApp/1.0")),
+            ]),
+            json!({ "input": "test" }),
+            &RuntimeEnvironment::unknown(),
+        );
+
+        assert_eq!(
+            request.headers,
+            BTreeMap::from([
+                (
+                    "content-type".to_string(),
+                    "application/custom+json".to_string()
+                ),
+                (
+                    "user-agent".to_string(),
+                    format!(
+                        "MyApp/1.0 ai-sdk/provider-utils/{} runtime/unknown",
+                        crate::VERSION
+                    ),
+                ),
+            ])
         );
     }
 
