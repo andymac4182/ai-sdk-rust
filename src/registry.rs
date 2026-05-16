@@ -1,7 +1,8 @@
 use std::fmt;
 
 use crate::provider::{
-    ModelType, NoSuchModelError, Provider, ProviderWithSpeechModel, ProviderWithTranscriptionModel,
+    ModelType, NoSuchModelError, Provider, ProviderWithRerankingModel, ProviderWithSpeechModel,
+    ProviderWithTranscriptionModel,
 };
 
 /// Configuration for a provider registry.
@@ -212,6 +213,16 @@ impl<P: ProviderWithSpeechModel> ProviderRegistry<P> {
     }
 }
 
+impl<P: ProviderWithRerankingModel> ProviderRegistry<P> {
+    /// Returns the reranking model for a registry id shaped as `providerId:modelId`.
+    pub fn reranking_model(&self, id: &str) -> Result<P::RerankingModel, ProviderRegistryError> {
+        let (provider_id, model_id) = self.split_id(id, ModelType::RerankingModel)?;
+        let provider = self.get_provider(provider_id, ModelType::RerankingModel)?;
+
+        provider.reranking_model(model_id).map_err(Into::into)
+    }
+}
+
 /// Creates a provider registry with the upstream default separator (`:`).
 pub fn create_provider_registry<I, K, P>(providers: I) -> ProviderRegistry<P>
 where
@@ -377,8 +388,11 @@ mod tests {
         LanguageModelUsage,
     };
     use crate::provider::{
-        ModelType, NoSuchModelError, Provider, ProviderWithSpeechModel,
+        ModelType, NoSuchModelError, Provider, ProviderWithRerankingModel, ProviderWithSpeechModel,
         ProviderWithTranscriptionModel, SpecificationVersion,
+    };
+    use crate::reranking_model::{
+        RerankingModel, RerankingModelCallOptions, RerankingModelRanking, RerankingModelResult,
     };
     use crate::speech_model::{
         SpeechModel, SpeechModelCallOptions, SpeechModelResponse, SpeechModelResult,
@@ -574,6 +588,33 @@ mod tests {
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
+    struct StaticRerankingModel {
+        provider: String,
+        model_id: String,
+    }
+
+    impl RerankingModel for StaticRerankingModel {
+        type RerankFuture<'a>
+            = Ready<RerankingModelResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            &self.provider
+        }
+
+        fn model_id(&self) -> &str {
+            &self.model_id
+        }
+
+        fn do_rerank(&self, _options: RerankingModelCallOptions) -> Self::RerankFuture<'_> {
+            ready(RerankingModelResult::new(vec![RerankingModelRanking::new(
+                0, 1.0,
+            )]))
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
     struct StaticProvider {
         id: &'static str,
     }
@@ -629,6 +670,20 @@ mod tests {
 
         fn speech_model(&self, model_id: &str) -> Result<Self::SpeechModel, NoSuchModelError> {
             lookup_model(model_id, ModelType::SpeechModel).map(|model_id| StaticSpeechModel {
+                provider: self.id.to_string(),
+                model_id,
+            })
+        }
+    }
+
+    impl ProviderWithRerankingModel for StaticProvider {
+        type RerankingModel = StaticRerankingModel;
+
+        fn reranking_model(
+            &self,
+            model_id: &str,
+        ) -> Result<Self::RerankingModel, NoSuchModelError> {
+            lookup_model(model_id, ModelType::RerankingModel).map(|model_id| StaticRerankingModel {
                 provider: self.id.to_string(),
                 model_id,
             })
@@ -736,6 +791,21 @@ mod tests {
         );
         assert_eq!(speech_model.provider(), "provider");
         assert_eq!(speech_model.model_id(), "tts-1");
+    }
+
+    #[test]
+    fn create_provider_registry_resolves_reranking_model_interface() {
+        let registry = create_provider_registry([("provider", StaticProvider { id: "provider" })]);
+
+        let reranking_model = registry
+            .reranking_model("provider:rerank-1")
+            .expect("reranking model resolves");
+        assert_eq!(
+            reranking_model.specification_version(),
+            SpecificationVersion::V4
+        );
+        assert_eq!(reranking_model.provider(), "provider");
+        assert_eq!(reranking_model.model_id(), "rerank-1");
     }
 
     #[test]
@@ -860,6 +930,41 @@ mod tests {
         assert_eq!(model_error.model_id(), "missing");
         assert_eq!(model_error.model_type(), ModelType::SpeechModel);
         assert_eq!(error.to_string(), "No such speechModel: missing");
+    }
+
+    #[test]
+    fn provider_registry_reports_missing_reranking_provider_context() {
+        let registry =
+            create_provider_registry([("anthropic", StaticProvider { id: "anthropic" })]);
+
+        let error = registry
+            .reranking_model("openai:rerank-1")
+            .expect_err("provider lookup fails");
+        let provider_error = error
+            .as_no_such_provider()
+            .expect("error is missing provider");
+
+        assert_eq!(provider_error.model_id(), "openai");
+        assert_eq!(provider_error.model_type(), ModelType::RerankingModel);
+        assert_eq!(provider_error.provider_id(), "openai");
+        assert_eq!(
+            error.to_string(),
+            "No such provider: openai (available providers: anthropic)"
+        );
+    }
+
+    #[test]
+    fn provider_registry_reports_missing_reranking_model_context() {
+        let registry = create_provider_registry([("provider", StaticProvider { id: "provider" })]);
+
+        let error = registry
+            .reranking_model("provider:missing")
+            .expect_err("model lookup fails");
+        let model_error = error.as_no_such_model().expect("error is missing model");
+
+        assert_eq!(model_error.model_id(), "missing");
+        assert_eq!(model_error.model_type(), ModelType::RerankingModel);
+        assert_eq!(error.to_string(), "No such rerankingModel: missing");
     }
 
     #[test]
