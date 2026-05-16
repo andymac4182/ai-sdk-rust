@@ -227,6 +227,65 @@ impl fmt::Debug for Tool {
     }
 }
 
+/// Bidirectional mapping between caller-facing and provider-facing tool names.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ToolNameMapping {
+    custom_tool_name_to_provider_tool_name: BTreeMap<String, String>,
+    provider_tool_name_to_custom_tool_name: BTreeMap<String, String>,
+}
+
+impl ToolNameMapping {
+    /// Maps a caller-facing tool name to the provider-facing name.
+    ///
+    /// Names without a mapping are returned unchanged.
+    pub fn to_provider_tool_name(&self, custom_tool_name: &str) -> String {
+        self.custom_tool_name_to_provider_tool_name
+            .get(custom_tool_name)
+            .cloned()
+            .unwrap_or_else(|| custom_tool_name.to_string())
+    }
+
+    /// Maps a provider-facing tool name to the caller-facing name.
+    ///
+    /// Names without a mapping are returned unchanged.
+    pub fn to_custom_tool_name(&self, provider_tool_name: &str) -> String {
+        self.provider_tool_name_to_custom_tool_name
+            .get(provider_tool_name)
+            .cloned()
+            .unwrap_or_else(|| provider_tool_name.to_string())
+    }
+}
+
+/// Creates provider-defined tool name mappings from model tools.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils` `createToolNameMapping`:
+/// only provider-defined tools whose ids are present in `provider_tool_names`
+/// produce mappings; function tools and unknown provider tool ids pass through
+/// unchanged.
+pub fn create_tool_name_mapping<'a>(
+    tools: impl IntoIterator<Item = &'a LanguageModelTool>,
+    provider_tool_names: &BTreeMap<String, String>,
+) -> ToolNameMapping {
+    let mut mapping = ToolNameMapping::default();
+
+    for tool in tools {
+        let LanguageModelTool::Provider(tool) = tool else {
+            continue;
+        };
+
+        if let Some(provider_tool_name) = provider_tool_names.get(&tool.id) {
+            mapping
+                .custom_tool_name_to_provider_tool_name
+                .insert(tool.name.clone(), provider_tool_name.clone());
+            mapping
+                .provider_tool_name_to_custom_tool_name
+                .insert(provider_tool_name.clone(), tool.name.clone());
+        }
+    }
+
+    mapping
+}
+
 /// Converts high-level Rust tools into provider-facing language-model tools.
 pub fn prepare_tools<'a>(
     tools: impl IntoIterator<Item = &'a Tool>,
@@ -626,20 +685,21 @@ mod tests {
     use std::task::{Context, Poll, Waker};
 
     use crate::language_model::{
-        LanguageModelFunctionTool, LanguageModelMessage, LanguageModelTextPart, LanguageModelTool,
-        LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelFunctionTool, LanguageModelMessage, LanguageModelProviderTool,
+        LanguageModelTextPart, LanguageModelTool, LanguageModelUserContentPart,
+        LanguageModelUserMessage,
     };
-    use crate::{JsonValue, ProviderReference};
+    use crate::{JsonObject, JsonValue, ProviderReference};
     use serde_json::json;
 
     use super::{
         Arrayable, LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, Tool,
-        ToolExecutionError, ToolExecutionOptions, as_array, combine_headers, filter_nullable,
-        is_non_nullable, is_provider_reference, load_api_key, load_api_key_with_env,
-        load_optional_setting_with_env, load_setting, load_setting_with_env,
-        media_type_to_extension, normalize_headers, prepare_tools, remove_undefined_entries,
-        resolve_provider_reference, strip_file_extension, with_user_agent_suffix,
-        without_trailing_slash,
+        ToolExecutionError, ToolExecutionOptions, as_array, combine_headers,
+        create_tool_name_mapping, filter_nullable, is_non_nullable, is_provider_reference,
+        load_api_key, load_api_key_with_env, load_optional_setting_with_env, load_setting,
+        load_setting_with_env, media_type_to_extension, normalize_headers, prepare_tools,
+        remove_undefined_entries, resolve_provider_reference, strip_file_extension,
+        with_user_agent_suffix, without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -984,6 +1044,111 @@ mod tests {
             ),
             BTreeMap::from([("user-agent".to_string(), String::new())])
         );
+    }
+
+    #[test]
+    fn create_tool_name_mapping_maps_provider_defined_tools() {
+        let tools = vec![
+            LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                "anthropic.computer-use",
+                "custom-computer-tool",
+                JsonObject::new(),
+            )),
+            LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                "openai.code-interpreter",
+                "custom-code-tool",
+                JsonObject::new(),
+            )),
+        ];
+        let provider_tool_names = BTreeMap::from([
+            (
+                "anthropic.computer-use".to_string(),
+                "computer_use".to_string(),
+            ),
+            (
+                "openai.code-interpreter".to_string(),
+                "code_interpreter".to_string(),
+            ),
+        ]);
+
+        let mapping = create_tool_name_mapping(&tools, &provider_tool_names);
+
+        assert_eq!(
+            mapping.to_provider_tool_name("custom-computer-tool"),
+            "computer_use"
+        );
+        assert_eq!(
+            mapping.to_provider_tool_name("custom-code-tool"),
+            "code_interpreter"
+        );
+        assert_eq!(
+            mapping.to_custom_tool_name("computer_use"),
+            "custom-computer-tool"
+        );
+        assert_eq!(
+            mapping.to_custom_tool_name("code_interpreter"),
+            "custom-code-tool"
+        );
+    }
+
+    #[test]
+    fn create_tool_name_mapping_ignores_function_tools() {
+        let tools = vec![LanguageModelTool::Function(LanguageModelFunctionTool::new(
+            "weather",
+            object_schema(),
+        ))];
+        let mapping = create_tool_name_mapping(&tools, &BTreeMap::new());
+
+        assert_eq!(mapping.to_provider_tool_name("weather"), "weather");
+        assert_eq!(mapping.to_custom_tool_name("weather"), "weather");
+    }
+
+    #[test]
+    fn create_tool_name_mapping_passes_through_unknown_provider_tool_ids() {
+        let tools = vec![LanguageModelTool::Provider(LanguageModelProviderTool::new(
+            "unknown.tool",
+            "custom-tool",
+            JsonObject::new(),
+        ))];
+        let mapping = create_tool_name_mapping(&tools, &BTreeMap::new());
+
+        assert_eq!(mapping.to_provider_tool_name("custom-tool"), "custom-tool");
+        assert_eq!(mapping.to_custom_tool_name("unknown-name"), "unknown-name");
+    }
+
+    #[test]
+    fn create_tool_name_mapping_handles_mixed_and_empty_tool_sets() {
+        let provider_tool_names = BTreeMap::from([(
+            "anthropic.computer-use".to_string(),
+            "computer_use".to_string(),
+        )]);
+        let mixed_tools = vec![
+            LanguageModelTool::Function(LanguageModelFunctionTool::new(
+                "function-tool",
+                object_schema(),
+            )),
+            LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                "anthropic.computer-use",
+                "provider-tool",
+                JsonObject::new(),
+            )),
+        ];
+
+        let empty_mapping =
+            create_tool_name_mapping(Vec::<LanguageModelTool>::new().iter(), &BTreeMap::new());
+        assert_eq!(empty_mapping.to_provider_tool_name("any-tool"), "any-tool");
+        assert_eq!(empty_mapping.to_custom_tool_name("any-tool"), "any-tool");
+
+        let mapping = create_tool_name_mapping(&mixed_tools, &provider_tool_names);
+        assert_eq!(
+            mapping.to_provider_tool_name("function-tool"),
+            "function-tool"
+        );
+        assert_eq!(
+            mapping.to_provider_tool_name("provider-tool"),
+            "computer_use"
+        );
+        assert_eq!(mapping.to_custom_tool_name("computer_use"), "provider-tool");
     }
 
     #[test]
