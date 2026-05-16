@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::json::JsonObject;
+use crate::provider::ProviderMetadata;
 
 /// Unified reason why a language model finished generating a response.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -106,6 +107,82 @@ pub struct LanguageModelResponseMetadata {
     pub model_id: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelTextKind {
+    #[serde(rename = "text")]
+    Text,
+}
+
+/// Text that the model has generated.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelText {
+    #[serde(rename = "type")]
+    kind: LanguageModelTextKind,
+
+    /// The text content.
+    pub text: String,
+
+    /// Optional provider-specific metadata for the text part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+}
+
+impl LanguageModelText {
+    /// Creates a generated text part.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            kind: LanguageModelTextKind::Text,
+            text: text.into(),
+            provider_metadata: None,
+        }
+    }
+
+    /// Adds provider-specific metadata to this generated text part.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelReasoningKind {
+    #[serde(rename = "reasoning")]
+    Reasoning,
+}
+
+/// Reasoning that the model has generated.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelReasoning {
+    #[serde(rename = "type")]
+    kind: LanguageModelReasoningKind,
+
+    /// The reasoning text content.
+    pub text: String,
+
+    /// Optional provider-specific metadata for the reasoning part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+}
+
+impl LanguageModelReasoning {
+    /// Creates a generated reasoning part.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            kind: LanguageModelReasoningKind::Reasoning,
+            text: text.into(),
+            provider_metadata: None,
+        }
+    }
+
+    /// Adds provider-specific metadata to this generated reasoning part.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+}
+
 /// Strategy for selecting a tool during a language model call.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -130,8 +207,9 @@ pub enum LanguageModelToolChoice {
 #[cfg(test)]
 mod tests {
     use super::{
-        FinishReason, InputTokenUsage, LanguageModelFinishReason, LanguageModelResponseMetadata,
-        LanguageModelToolChoice, LanguageModelUsage, OutputTokenUsage,
+        FinishReason, InputTokenUsage, LanguageModelFinishReason, LanguageModelReasoning,
+        LanguageModelResponseMetadata, LanguageModelText, LanguageModelToolChoice,
+        LanguageModelUsage, OutputTokenUsage,
     };
     use serde_json::json;
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -248,6 +326,86 @@ mod tests {
                 ..LanguageModelResponseMetadata::default()
             }
         );
+    }
+
+    #[test]
+    fn text_part_serializes_upstream_shape_with_provider_metadata() {
+        let text = LanguageModelText::new("Hello").with_provider_metadata(
+            serde_json::from_value(json!({
+                "openai": {
+                    "logprobs": true
+                }
+            }))
+            .expect("provider metadata deserializes"),
+        );
+
+        assert_eq!(
+            serde_json::to_value(text).expect("text part serializes"),
+            json!({
+                "type": "text",
+                "text": "Hello",
+                "providerMetadata": {
+                    "openai": {
+                        "logprobs": true
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn text_part_deserializes_and_omits_missing_provider_metadata() {
+        let text: LanguageModelText = serde_json::from_value(json!({
+            "type": "text",
+            "text": "Hello"
+        }))
+        .expect("text part deserializes");
+
+        assert_eq!(text, LanguageModelText::new("Hello"));
+        assert_eq!(
+            serde_json::to_value(text).expect("text part serializes"),
+            json!({
+                "type": "text",
+                "text": "Hello"
+            })
+        );
+    }
+
+    #[test]
+    fn reasoning_part_serializes_upstream_shape_with_provider_metadata() {
+        let reasoning = LanguageModelReasoning::new("I should check the source.")
+            .with_provider_metadata(
+                serde_json::from_value(json!({
+                    "anthropic": {
+                        "signature": "sig_123"
+                    }
+                }))
+                .expect("provider metadata deserializes"),
+            );
+
+        assert_eq!(
+            serde_json::to_value(reasoning).expect("reasoning part serializes"),
+            json!({
+                "type": "reasoning",
+                "text": "I should check the source.",
+                "providerMetadata": {
+                    "anthropic": {
+                        "signature": "sig_123"
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn reasoning_part_rejects_other_content_types() {
+        let error = serde_json::from_value::<LanguageModelReasoning>(json!({
+            "type": "text",
+            "text": "Not reasoning"
+        }))
+        .expect_err("wrong discriminator is rejected");
+
+        assert!(error.to_string().contains("unknown variant `text`"));
     }
 
     #[test]
