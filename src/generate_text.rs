@@ -15,12 +15,13 @@ use crate::json::{JsonObject, JsonSchema, JsonValue};
 use crate::language_model::{
     FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
     LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
-    LanguageModelCustomPart, LanguageModelFile, LanguageModelFileData, LanguageModelFilePart,
-    LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelMessage,
-    LanguageModelPrompt, LanguageModelReasoning, LanguageModelReasoningEffort,
-    LanguageModelReasoningFile, LanguageModelReasoningFilePart, LanguageModelReasoningPart,
-    LanguageModelRequest, LanguageModelResponse, LanguageModelResponseFormat, LanguageModelSource,
-    LanguageModelStreamPart, LanguageModelText, LanguageModelTextPart, LanguageModelTool,
+    LanguageModelCustomContent, LanguageModelCustomPart, LanguageModelFile, LanguageModelFileData,
+    LanguageModelFilePart, LanguageModelFinishReason, LanguageModelGenerateResult,
+    LanguageModelMessage, LanguageModelPrompt, LanguageModelReasoning,
+    LanguageModelReasoningEffort, LanguageModelReasoningFile, LanguageModelReasoningFilePart,
+    LanguageModelReasoningPart, LanguageModelRequest, LanguageModelResponse,
+    LanguageModelResponseFormat, LanguageModelSource, LanguageModelStreamPart, LanguageModelText,
+    LanguageModelTextPart, LanguageModelTool, LanguageModelToolApprovalRequest,
     LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
     LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolChoice,
     LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResult,
@@ -695,7 +696,7 @@ pub struct LanguageModelCallEndEvent {
     pub usage: LanguageModelUsage,
 
     /// Content parts produced by the model call.
-    pub content: Vec<LanguageModelContent>,
+    pub content: Vec<GenerateTextContentPart>,
 
     /// Provider response id for this model call.
     pub response_id: String,
@@ -2773,6 +2774,53 @@ impl<'de> Deserialize<'de> for GeneratedFile {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum GenerateTextFileContentKind {
+    #[serde(rename = "file")]
+    File,
+}
+
+/// High-level generated file content of a text generation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateTextFileContent {
+    #[serde(rename = "type")]
+    kind: GenerateTextFileContentKind,
+
+    /// The generated file.
+    pub file: GeneratedFile,
+
+    /// Optional provider-specific metadata for the generated file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+}
+
+impl GenerateTextFileContent {
+    /// Creates high-level generated file content.
+    pub fn new(file: GeneratedFile) -> Self {
+        Self {
+            kind: GenerateTextFileContentKind::File,
+            file,
+            provider_metadata: None,
+        }
+    }
+
+    /// Converts a provider-v4 generated file part into high-level content.
+    pub fn from_language_model_file(file: &LanguageModelFile) -> Self {
+        Self {
+            kind: GenerateTextFileContentKind::File,
+            file: GeneratedFile::from_language_model_file(file),
+            provider_metadata: file.provider_metadata.clone(),
+        }
+    }
+
+    /// Adds provider-specific metadata to this file content.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 enum ReasoningOutputKind {
     #[serde(rename = "reasoning")]
     Reasoning,
@@ -3554,6 +3602,10 @@ pub struct GenerateTextToolResult {
     /// true.
     pub output: JsonValue,
 
+    /// Optional display title from the matched high-level tool definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+
     /// Whether this result represents a tool execution error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
@@ -3585,6 +3637,7 @@ impl Serialize for GenerateTextToolResult {
         S: serde::Serializer,
     {
         let mut field_count = 5;
+        field_count += usize::from(self.title.is_some());
         field_count += usize::from(self.is_error.is_some());
         field_count += usize::from(self.provider_executed.is_some());
         field_count += usize::from(self.dynamic.is_some());
@@ -3598,6 +3651,10 @@ impl Serialize for GenerateTextToolResult {
         state.serialize_field("toolName", &self.tool_name)?;
         state.serialize_field("input", &self.input)?;
         state.serialize_field("output", &self.output)?;
+
+        if let Some(title) = &self.title {
+            state.serialize_field("title", title)?;
+        }
 
         if let Some(is_error) = self.is_error {
             state.serialize_field("isError", &is_error)?;
@@ -3634,6 +3691,7 @@ impl GenerateTextToolResult {
             tool_name: tool_call.tool_name.clone(),
             input: tool_call.input.clone(),
             output,
+            title: tool_call.title.clone(),
             is_error: None,
             provider_executed: tool_call.provider_executed,
             dynamic: tool_call.dynamic,
@@ -3649,6 +3707,7 @@ impl GenerateTextToolResult {
             tool_name: tool_call.tool_name.clone(),
             input: tool_call.input.clone(),
             output: JsonValue::String(message),
+            title: tool_call.title.clone(),
             is_error: Some(true),
             provider_executed: tool_call.provider_executed,
             dynamic: tool_call.dynamic,
@@ -3658,6 +3717,264 @@ impl GenerateTextToolResult {
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum GenerateTextToolErrorKind {
+    #[serde(rename = "tool-error")]
+    ToolError,
+}
+
+/// Error output produced for an invalid or failed tool call in generate-text content.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateTextToolError {
+    #[serde(rename = "type")]
+    kind: GenerateTextToolErrorKind,
+
+    /// Identifier of the matching tool call.
+    pub tool_call_id: String,
+
+    /// Name of the failed tool.
+    pub tool_name: String,
+
+    /// Input associated with the failed tool call.
+    pub input: JsonValue,
+
+    /// JSON-serializable error payload or message.
+    pub error: JsonValue,
+
+    /// Optional display title from the matched high-level tool definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+
+    /// Whether the provider executed this tool call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_executed: Option<bool>,
+
+    /// Whether the tool was dynamically defined by the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic: Option<bool>,
+
+    /// Provider-specific metadata returned with the tool error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+
+    /// High-level metadata from the matched tool definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_metadata: Option<JsonObject>,
+}
+
+impl GenerateTextToolError {
+    /// Creates a high-level tool error content part.
+    pub fn new(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        input: impl Into<JsonValue>,
+        error: impl Into<JsonValue>,
+    ) -> Self {
+        Self {
+            kind: GenerateTextToolErrorKind::ToolError,
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            input: input.into(),
+            error: error.into(),
+            title: None,
+            provider_executed: None,
+            dynamic: None,
+            provider_metadata: None,
+            tool_metadata: None,
+        }
+    }
+
+    /// Adds the display title from the matched high-level tool definition.
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Sets whether the provider executed this tool call.
+    pub fn with_provider_executed(mut self, provider_executed: bool) -> Self {
+        self.provider_executed = Some(provider_executed);
+        self
+    }
+
+    /// Sets whether the tool was dynamically defined by the provider.
+    pub fn with_dynamic(mut self, dynamic: bool) -> Self {
+        self.dynamic = Some(dynamic);
+        self
+    }
+
+    /// Adds provider-specific metadata to this tool error.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+
+    /// Adds high-level metadata from the matched tool definition.
+    pub fn with_tool_metadata(mut self, tool_metadata: JsonObject) -> Self {
+        self.tool_metadata = Some(tool_metadata);
+        self
+    }
+
+    fn from_tool_result(tool_result: &GenerateTextToolResult) -> Self {
+        Self {
+            kind: GenerateTextToolErrorKind::ToolError,
+            tool_call_id: tool_result.tool_call_id.clone(),
+            tool_name: tool_result.tool_name.clone(),
+            input: tool_result.input.clone(),
+            error: tool_result.output.clone(),
+            title: tool_result.title.clone(),
+            provider_executed: tool_result.provider_executed,
+            dynamic: tool_result.dynamic,
+            provider_metadata: tool_result.provider_metadata.clone(),
+            tool_metadata: tool_result.tool_metadata.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum ToolApprovalRequestOutputKind {
+    #[serde(rename = "tool-approval-request")]
+    ToolApprovalRequest,
+}
+
+/// Output part indicating that a tool approval request has been made.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolApprovalRequestOutput {
+    #[serde(rename = "type")]
+    kind: ToolApprovalRequestOutputKind,
+
+    /// ID of the tool approval request.
+    pub approval_id: String,
+
+    /// Tool call that the approval request is for.
+    pub tool_call: GenerateTextToolCall,
+
+    /// Whether the approval status was decided automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_automatic: Option<bool>,
+}
+
+impl ToolApprovalRequestOutput {
+    /// Creates a tool approval request output.
+    pub fn new(approval_id: impl Into<String>, tool_call: GenerateTextToolCall) -> Self {
+        Self {
+            kind: ToolApprovalRequestOutputKind::ToolApprovalRequest,
+            approval_id: approval_id.into(),
+            tool_call,
+            is_automatic: None,
+        }
+    }
+
+    /// Sets whether this request was automatically approved or denied.
+    pub fn with_automatic(mut self, is_automatic: bool) -> Self {
+        self.is_automatic = Some(is_automatic);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum ToolApprovalResponseOutputKind {
+    #[serde(rename = "tool-approval-response")]
+    ToolApprovalResponse,
+}
+
+/// Output part indicating that a tool approval response is available.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolApprovalResponseOutput {
+    #[serde(rename = "type")]
+    kind: ToolApprovalResponseOutputKind,
+
+    /// ID of the tool approval request.
+    pub approval_id: String,
+
+    /// Tool call that the approval response is for.
+    pub tool_call: GenerateTextToolCall,
+
+    /// Whether the approval was granted.
+    pub approved: bool,
+
+    /// Optional approval or denial reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+
+    /// Whether the approved or denied tool call is provider-executed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_executed: Option<bool>,
+}
+
+impl ToolApprovalResponseOutput {
+    /// Creates a tool approval response output.
+    pub fn new(
+        approval_id: impl Into<String>,
+        tool_call: GenerateTextToolCall,
+        approved: bool,
+    ) -> Self {
+        Self {
+            kind: ToolApprovalResponseOutputKind::ToolApprovalResponse,
+            approval_id: approval_id.into(),
+            tool_call,
+            approved,
+            reason: None,
+            provider_executed: None,
+        }
+    }
+
+    /// Adds an approval or denial reason.
+    pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
+        self.reason = Some(reason.into());
+        self
+    }
+
+    /// Sets whether the tool call is provider-executed.
+    pub fn with_provider_executed(mut self, provider_executed: bool) -> Self {
+        self.provider_executed = Some(provider_executed);
+        self
+    }
+}
+
+/// High-level content part produced by `generate_text`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum GenerateTextContentPart {
+    /// Generated text content.
+    Text(LanguageModelText),
+
+    /// Provider-specific generated content.
+    Custom(LanguageModelCustomContent),
+
+    /// High-level reasoning content.
+    Reasoning(ReasoningOutput),
+
+    /// High-level reasoning file content.
+    ReasoningFile(ReasoningFileOutput),
+
+    /// Generated file content.
+    File(GenerateTextFileContent),
+
+    /// Source content used to generate the response.
+    Source(LanguageModelSource),
+
+    /// Tool error content.
+    ToolError(GenerateTextToolError),
+
+    /// Tool call content.
+    ToolCall(GenerateTextToolCall),
+
+    /// Tool result content.
+    ToolResult(GenerateTextToolResult),
+
+    /// Tool approval request content.
+    ToolApprovalRequest(ToolApprovalRequestOutput),
+
+    /// Tool approval response content.
+    ToolApprovalResponse(ToolApprovalResponseOutput),
+}
+
+/// Upstream generate-text content part alias.
+pub type ContentPart = GenerateTextContentPart;
 
 /// Information about the model that produced a generate-text step.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -3777,7 +4094,7 @@ pub struct GenerateTextStep {
     pub runtime_context: JsonObject,
 
     /// Content generated in this step.
-    pub content: Vec<LanguageModelContent>,
+    pub content: Vec<GenerateTextContentPart>,
 
     /// Tool calls generated in this step.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3889,6 +4206,12 @@ impl GenerateTextStep {
         let reasoning = extract_reasoning(&content);
         let reasoning_text = extract_reasoning_text(&reasoning);
         let sources = extract_sources(&content);
+        let content = generate_text_content_parts(
+            &content,
+            &tool_calls,
+            &tool_results,
+            &StepToolApprovals::default(),
+        );
 
         Self {
             call_id,
@@ -3956,7 +4279,7 @@ pub struct GenerateTextFinishEvent {
     pub total_usage: LanguageModelUsage,
 
     /// Content generated in the final step.
-    pub content: Vec<LanguageModelContent>,
+    pub content: Vec<GenerateTextContentPart>,
 
     /// Text generated in the final step.
     pub text: String,
@@ -4104,7 +4427,7 @@ pub type OnFinishEvent = GenerateTextEndEvent;
 #[serde(rename_all = "camelCase")]
 pub struct GenerateTextResult {
     /// Content generated across all steps.
-    pub content: Vec<LanguageModelContent>,
+    pub content: Vec<GenerateTextContentPart>,
 
     /// Tool calls generated across all steps.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -4476,6 +4799,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         let step_started_at = Instant::now();
         let result = step_model.do_generate(step_call_options.clone()).await;
         let response_time_ms = duration_ms(step_started_at.elapsed());
+        let provider_content = result.content.clone();
         let mut step = GenerateTextStep::from_language_model_result(
             call_id.clone(),
             step_number,
@@ -4487,7 +4811,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         mark_unavailable_tool_calls(&mut step.tool_calls, step_call_options.tools.as_deref());
         repair_tool_calls(
             &mut step.tool_calls,
-            &step.content,
+            &provider_content,
             tool_call_repair.as_ref(),
             &step_tools,
             step_call_options.tools.as_deref(),
@@ -4501,6 +4825,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         mark_tool_call_metadata(&mut step.tool_calls, &step_tools);
         mark_tool_result_metadata(&mut step.tool_results, &step.tool_calls, &step_tools);
         refresh_tool_call_views(&mut step);
+        refresh_generate_text_content(&mut step, &provider_content, &StepToolApprovals::default());
         ensure_generate_text_response_identity(&mut step);
 
         if let Some(on_language_model_call_end) = &on_language_model_call_end {
@@ -4542,7 +4867,9 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         mark_tool_result_metadata(&mut step.tool_results, &step.tool_calls, &step_tools);
         refresh_tool_result_views(&mut step);
         step.response_messages =
-            response_messages_for_step(&step, &tool_approvals).unwrap_or_default();
+            response_messages_for_step(&step, &provider_content, &tool_approvals)
+                .unwrap_or_default();
+        refresh_generate_text_content(&mut step, &provider_content, &tool_approvals);
         apply_generate_text_response_metadata(&mut step);
         apply_generate_text_include(&mut step, include, &step_prompt);
         step.performance = GenerateTextStepPerformance::from_usage(
@@ -4715,6 +5042,216 @@ fn refresh_tool_call_views(step: &mut GenerateTextStep) {
     step.dynamic_tool_calls = dynamic_tool_calls(&step.tool_calls);
 }
 
+fn refresh_generate_text_content(
+    step: &mut GenerateTextStep,
+    provider_content: &[LanguageModelContent],
+    tool_approvals: &StepToolApprovals,
+) {
+    step.content = generate_text_content_parts(
+        provider_content,
+        &step.tool_calls,
+        &step.tool_results,
+        tool_approvals,
+    );
+}
+
+fn generate_text_content_parts(
+    provider_content: &[LanguageModelContent],
+    tool_calls: &[GenerateTextToolCall],
+    tool_results: &[GenerateTextToolResult],
+    tool_approvals: &StepToolApprovals,
+) -> Vec<GenerateTextContentPart> {
+    let mut content_parts = Vec::new();
+
+    for part in provider_content {
+        match part {
+            LanguageModelContent::Text(text) => {
+                content_parts.push(GenerateTextContentPart::Text(text.clone()));
+            }
+            LanguageModelContent::Reasoning(reasoning) => {
+                content_parts.push(GenerateTextContentPart::Reasoning(
+                    ReasoningOutput::from_language_model_reasoning(reasoning),
+                ));
+            }
+            LanguageModelContent::Custom(custom) => {
+                content_parts.push(GenerateTextContentPart::Custom(custom.clone()));
+            }
+            LanguageModelContent::ReasoningFile(file) => {
+                content_parts.push(GenerateTextContentPart::ReasoningFile(
+                    ReasoningFileOutput::from_language_model_reasoning_file(file),
+                ));
+            }
+            LanguageModelContent::File(file) => {
+                content_parts.push(GenerateTextContentPart::File(
+                    GenerateTextFileContent::from_language_model_file(file),
+                ));
+            }
+            LanguageModelContent::ToolApprovalRequest(request) => {
+                if let Some(output) =
+                    tool_approval_request_output_from_model_request(request, tool_calls)
+                {
+                    content_parts.push(GenerateTextContentPart::ToolApprovalRequest(output));
+                }
+            }
+            LanguageModelContent::Source(source) => {
+                content_parts.push(GenerateTextContentPart::Source(source.clone()));
+            }
+            LanguageModelContent::ToolCall(tool_call) => {
+                if let Some(tool_call) = tool_calls
+                    .iter()
+                    .find(|parsed| parsed.tool_call_id == tool_call.tool_call_id)
+                    .cloned()
+                {
+                    content_parts.push(GenerateTextContentPart::ToolCall(tool_call));
+                }
+            }
+            LanguageModelContent::ToolResult(tool_result) => {
+                let result = tool_results
+                    .iter()
+                    .find(|result| {
+                        result.provider_executed == Some(true)
+                            && result.tool_call_id == tool_result.tool_call_id
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        generate_text_tool_result_from_language_model_tool_result(
+                            tool_result,
+                            tool_calls,
+                        )
+                    });
+
+                content_parts.push(generate_text_tool_result_content_part(&result));
+            }
+        }
+    }
+
+    let tool_call_ids_with_approval_responses = tool_approvals
+        .responses
+        .iter()
+        .map(|approval| approval.tool_call.tool_call_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut tool_results_with_approval_responses = Vec::new();
+    let mut tool_results_without_approval_responses = Vec::new();
+
+    for tool_result in tool_results
+        .iter()
+        .filter(|tool_result| tool_result.provider_executed != Some(true))
+    {
+        if tool_call_ids_with_approval_responses.contains(&tool_result.tool_call_id) {
+            tool_results_with_approval_responses
+                .push(generate_text_tool_result_content_part(tool_result));
+        } else {
+            tool_results_without_approval_responses
+                .push(generate_text_tool_result_content_part(tool_result));
+        }
+    }
+
+    content_parts.extend(tool_results_without_approval_responses);
+    content_parts.extend(
+        tool_approvals
+            .requests
+            .iter()
+            .filter_map(|request| {
+                tool_approval_request_output_from_prompt_part(request, tool_calls)
+            })
+            .map(GenerateTextContentPart::ToolApprovalRequest),
+    );
+    content_parts.extend(
+        tool_approvals
+            .responses
+            .iter()
+            .map(tool_approval_response_output)
+            .map(GenerateTextContentPart::ToolApprovalResponse),
+    );
+    content_parts.extend(tool_results_with_approval_responses);
+
+    content_parts
+}
+
+fn tool_approval_request_output_from_model_request(
+    request: &LanguageModelToolApprovalRequest,
+    tool_calls: &[GenerateTextToolCall],
+) -> Option<ToolApprovalRequestOutput> {
+    tool_calls
+        .iter()
+        .find(|tool_call| tool_call.tool_call_id == request.tool_call_id)
+        .cloned()
+        .map(|tool_call| ToolApprovalRequestOutput::new(request.approval_id.clone(), tool_call))
+}
+
+fn tool_approval_request_output_from_prompt_part(
+    request: &LanguageModelToolApprovalRequestPart,
+    tool_calls: &[GenerateTextToolCall],
+) -> Option<ToolApprovalRequestOutput> {
+    tool_calls
+        .iter()
+        .find(|tool_call| tool_call.tool_call_id == request.tool_call_id)
+        .cloned()
+        .map(|tool_call| {
+            let output = ToolApprovalRequestOutput::new(request.approval_id.clone(), tool_call);
+            if request.is_automatic == Some(true) {
+                output.with_automatic(true)
+            } else {
+                output
+            }
+        })
+}
+
+fn tool_approval_response_output(
+    approval_response: &StepToolApprovalResponse,
+) -> ToolApprovalResponseOutput {
+    let mut output = ToolApprovalResponseOutput::new(
+        approval_response.response.approval_id.clone(),
+        approval_response.tool_call.clone(),
+        approval_response.response.approved,
+    );
+
+    if let Some(reason) = &approval_response.response.reason {
+        output = output.with_reason(reason.clone());
+    }
+
+    if let Some(provider_executed) = approval_response.tool_call.provider_executed {
+        output = output.with_provider_executed(provider_executed);
+    }
+
+    output
+}
+
+fn generate_text_tool_result_from_language_model_tool_result(
+    tool_result: &LanguageModelToolResult,
+    tool_calls: &[GenerateTextToolCall],
+) -> GenerateTextToolResult {
+    let matching_tool_call = tool_calls
+        .iter()
+        .find(|tool_call| tool_call.tool_call_id == tool_result.tool_call_id);
+
+    GenerateTextToolResult {
+        tool_call_id: tool_result.tool_call_id.clone(),
+        tool_name: tool_result.tool_name.clone(),
+        input: matching_tool_call.map_or(JsonValue::Null, |tool_call| tool_call.input.clone()),
+        output: tool_result.result.as_value().clone(),
+        title: matching_tool_call.and_then(|tool_call| tool_call.title.clone()),
+        is_error: tool_result.is_error,
+        provider_executed: Some(true),
+        dynamic: matching_tool_call
+            .and_then(|tool_call| tool_call.dynamic)
+            .or(tool_result.dynamic),
+        preliminary: tool_result.preliminary,
+        provider_metadata: tool_result.provider_metadata.clone(),
+        tool_metadata: matching_tool_call.and_then(|tool_call| tool_call.tool_metadata.clone()),
+    }
+}
+
+fn generate_text_tool_result_content_part(
+    tool_result: &GenerateTextToolResult,
+) -> GenerateTextContentPart {
+    if tool_result.is_error == Some(true) {
+        GenerateTextContentPart::ToolError(GenerateTextToolError::from_tool_result(tool_result))
+    } else {
+        GenerateTextContentPart::ToolResult(tool_result.clone())
+    }
+}
+
 fn extract_sources(content: &[LanguageModelContent]) -> Vec<LanguageModelSource> {
     content
         .iter()
@@ -4782,6 +5319,10 @@ fn extract_provider_tool_results(
                     tool_name: tool_result.tool_name.clone(),
                     input,
                     output: tool_result.result.as_value().clone(),
+                    title: tool_calls
+                        .iter()
+                        .find(|tool_call| tool_call.tool_call_id == tool_result.tool_call_id)
+                        .and_then(|tool_call| tool_call.title.clone()),
                     is_error: tool_result.is_error,
                     provider_executed: Some(true),
                     dynamic: tool_result.dynamic,
@@ -5175,11 +5716,14 @@ fn should_continue_after_tool_results(
 
 fn response_messages_for_step(
     step: &GenerateTextStep,
+    provider_content: &[LanguageModelContent],
     tool_approvals: &StepToolApprovals,
 ) -> Option<Vec<LanguageModelMessage>> {
     let mut messages = Vec::new();
 
-    if let Some(message) = assistant_message_from_step(step, &tool_approvals.requests) {
+    if let Some(message) =
+        assistant_message_from_step(step, provider_content, &tool_approvals.requests)
+    {
         messages.push(message);
     }
 
@@ -5205,10 +5749,10 @@ fn response_messages_for_step(
 
 fn assistant_message_from_step(
     step: &GenerateTextStep,
+    provider_content: &[LanguageModelContent],
     approval_requests: &[LanguageModelToolApprovalRequestPart],
 ) -> Option<LanguageModelMessage> {
-    let mut parts = step
-        .content
+    let mut parts = provider_content
         .iter()
         .filter_map(|content| assistant_content_part_from_content(content, &step.tool_calls))
         .collect::<Vec<_>>();
@@ -5766,6 +6310,22 @@ fn mark_tool_result_metadata(
     tools: &[Tool],
 ) {
     for tool_result in tool_results {
+        if tool_result.title.is_none() {
+            if let Some(title) = tool_calls
+                .iter()
+                .find(|tool_call| tool_call.tool_call_id == tool_result.tool_call_id)
+                .and_then(|tool_call| tool_call.title.as_deref())
+                .or_else(|| {
+                    tools
+                        .iter()
+                        .find(|tool| tool.name == tool_result.tool_name)
+                        .and_then(Tool::title)
+                })
+            {
+                tool_result.title = Some(title.to_string());
+            }
+        }
+
         if tool_result.tool_metadata.is_some() {
             continue;
         }
@@ -6204,11 +6764,12 @@ fn add_optional_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DefaultGeneratedFile, ExperimentalGeneratedImage, GenerateTextEndEvent,
-        GenerateTextFinishEvent, GenerateTextInclude, GenerateTextModelInfo, GenerateTextOptions,
-        GenerateTextReasoning, GenerateTextResult, GenerateTextStartEvent, GenerateTextStep,
-        GenerateTextStepEndEvent, GenerateTextStepPerformance, GenerateTextStepStartEvent,
-        GenerateTextToolCall, GenerateTextToolExecutionEndEvent,
+        ContentPart, DefaultGeneratedFile, ExperimentalGeneratedImage, GenerateTextContentPart,
+        GenerateTextEndEvent, GenerateTextFileContent, GenerateTextFinishEvent,
+        GenerateTextInclude, GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning,
+        GenerateTextResult, GenerateTextStartEvent, GenerateTextStep, GenerateTextStepEndEvent,
+        GenerateTextStepPerformance, GenerateTextStepStartEvent, GenerateTextToolCall,
+        GenerateTextToolError, GenerateTextToolExecutionEndEvent,
         GenerateTextToolExecutionStartEvent, GenerateTextToolResult, GeneratedFile,
         InvalidStreamPartError, InvalidToolApprovalError, InvalidToolInputError,
         LanguageModelCallEndEvent, LanguageModelCallPerformance, LanguageModelCallStartEvent,
@@ -6216,7 +6777,8 @@ mod tests {
         NoSuchToolError, NormalizedToolApprovalStatus, PrepareStepResult, PruneEmptyMessages,
         PruneMessagesOptions, PruneReasoning, PruneToolCallRule, PruneToolCallRuleMode,
         PruneToolCalls, ReasoningFileOutput, ReasoningOutput, ResolveToolApprovalOptions,
-        StopCondition, ToolApprovalConfiguration, ToolApprovalStatus, ToolApprovalStatusKind,
+        StopCondition, ToolApprovalConfiguration, ToolApprovalRequestOutput,
+        ToolApprovalResponseOutput, ToolApprovalStatus, ToolApprovalStatusKind,
         ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOptions,
         ToolCallRepairOriginalError, ToolExecutionEndEvent, ToolExecutionStartEvent,
         ToolInputRefinementError, UiMessageStreamError, UnsupportedModelVersionError,
@@ -7469,6 +8031,7 @@ mod tests {
             tool_name: tool_call.tool_name.clone(),
             input: tool_call.input.clone(),
             output: json!({ "weather": "sunny" }),
+            title: tool_call.title.clone(),
             is_error: None,
             provider_executed: None,
             dynamic: None,
@@ -7585,7 +8148,9 @@ mod tests {
             model_id: "test-model".to_string(),
             finish_reason: FinishReason::Stop,
             usage: no_object_usage(),
-            content: vec![LanguageModelContent::Text(LanguageModelText::new("Hello"))],
+            content: vec![GenerateTextContentPart::Text(LanguageModelText::new(
+                "Hello",
+            ))],
             response_id: "resp-123".to_string(),
             performance: LanguageModelCallPerformance {
                 response_time_ms: 25,
@@ -8275,7 +8840,9 @@ mod tests {
             model: GenerateTextModelInfo::new("test-provider", "test-model"),
             tools_context: crate::JsonObject::new(),
             runtime_context: crate::JsonObject::new(),
-            content: vec![LanguageModelContent::Text(LanguageModelText::new("Hello"))],
+            content: vec![GenerateTextContentPart::Text(LanguageModelText::new(
+                "Hello",
+            ))],
             tool_calls: Vec::new(),
             static_tool_calls: Vec::new(),
             dynamic_tool_calls: Vec::new(),
@@ -8485,6 +9052,7 @@ mod tests {
             tool_name: "weather".to_string(),
             input: json!({ "city": "Brisbane" }),
             output: json!({ "forecast": "sunny" }),
+            title: Some("Weather information".to_string()),
             is_error: None,
             provider_executed: None,
             dynamic: None,
@@ -8516,6 +9084,7 @@ mod tests {
                 "toolName": "weather",
                 "input": { "city": "Brisbane" },
                 "output": { "forecast": "sunny" },
+                "title": "Weather information",
                 "toolMetadata": {
                     "source": "mcp"
                 }
@@ -8535,6 +9104,155 @@ mod tests {
             )
             .expect("tool result deserializes"),
             tool_result
+        );
+    }
+
+    #[test]
+    fn generate_text_content_parts_round_trip_upstream_high_level_shapes() {
+        let mut provider_metadata = ProviderMetadata::new();
+        provider_metadata.insert(
+            "test".to_string(),
+            json!({ "requestId": "req-123" })
+                .as_object()
+                .expect("provider metadata object")
+                .clone(),
+        );
+        let tool_metadata = json!({ "source": "mcp" })
+            .as_object()
+            .expect("tool metadata object")
+            .clone();
+        let tool_call = GenerateTextToolCall {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "weather".to_string(),
+            input: json!({ "city": "Brisbane" }),
+            title: Some("Weather information".to_string()),
+            provider_executed: Some(true),
+            dynamic: Some(true),
+            invalid: None,
+            error: None,
+            provider_metadata: Some(provider_metadata.clone()),
+            tool_metadata: Some(tool_metadata.clone()),
+        };
+        let parts = vec![
+            ContentPart::File(
+                GenerateTextFileContent::new(GeneratedFile::from_base64("image/png", "aGVsbG8="))
+                    .with_provider_metadata(provider_metadata.clone()),
+            ),
+            ContentPart::ToolError(
+                GenerateTextToolError::new(
+                    "call-1",
+                    "weather",
+                    json!({ "city": "Brisbane" }),
+                    json!("failed"),
+                )
+                .with_title("Weather information")
+                .with_provider_executed(true)
+                .with_dynamic(true)
+                .with_provider_metadata(provider_metadata.clone())
+                .with_tool_metadata(tool_metadata.clone()),
+            ),
+            ContentPart::ToolApprovalRequest(
+                ToolApprovalRequestOutput::new("approval-1", tool_call.clone())
+                    .with_automatic(true),
+            ),
+            ContentPart::ToolApprovalResponse(
+                ToolApprovalResponseOutput::new("approval-1", tool_call, false)
+                    .with_reason("policy block")
+                    .with_provider_executed(true),
+            ),
+        ];
+
+        let value = serde_json::to_value(&parts).expect("content parts serialize");
+        assert_eq!(
+            value,
+            json!([
+                {
+                    "type": "file",
+                    "file": {
+                        "base64": "aGVsbG8=",
+                        "mediaType": "image/png"
+                    },
+                    "providerMetadata": {
+                        "test": {
+                            "requestId": "req-123"
+                        }
+                    }
+                },
+                {
+                    "type": "tool-error",
+                    "toolCallId": "call-1",
+                    "toolName": "weather",
+                    "input": {
+                        "city": "Brisbane"
+                    },
+                    "error": "failed",
+                    "title": "Weather information",
+                    "providerExecuted": true,
+                    "dynamic": true,
+                    "providerMetadata": {
+                        "test": {
+                            "requestId": "req-123"
+                        }
+                    },
+                    "toolMetadata": {
+                        "source": "mcp"
+                    }
+                },
+                {
+                    "type": "tool-approval-request",
+                    "approvalId": "approval-1",
+                    "toolCall": {
+                        "type": "tool-call",
+                        "toolCallId": "call-1",
+                        "toolName": "weather",
+                        "input": {
+                            "city": "Brisbane"
+                        },
+                        "title": "Weather information",
+                        "providerExecuted": true,
+                        "dynamic": true,
+                        "providerMetadata": {
+                            "test": {
+                                "requestId": "req-123"
+                            }
+                        },
+                        "toolMetadata": {
+                            "source": "mcp"
+                        }
+                    },
+                    "isAutomatic": true
+                },
+                {
+                    "type": "tool-approval-response",
+                    "approvalId": "approval-1",
+                    "toolCall": {
+                        "type": "tool-call",
+                        "toolCallId": "call-1",
+                        "toolName": "weather",
+                        "input": {
+                            "city": "Brisbane"
+                        },
+                        "title": "Weather information",
+                        "providerExecuted": true,
+                        "dynamic": true,
+                        "providerMetadata": {
+                            "test": {
+                                "requestId": "req-123"
+                            }
+                        },
+                        "toolMetadata": {
+                            "source": "mcp"
+                        }
+                    },
+                    "approved": false,
+                    "reason": "policy block",
+                    "providerExecuted": true
+                }
+            ])
+        );
+        assert_eq!(
+            serde_json::from_value::<Vec<ContentPart>>(value).expect("content parts deserialize"),
+            parts
         );
     }
 
@@ -10380,6 +11098,17 @@ mod tests {
                 LanguageModelToolResultOutput::text("sunny")
             ))
         );
+        assert!(matches!(
+            &result.steps[0].content[..],
+            [
+                GenerateTextContentPart::ToolCall(_),
+                GenerateTextContentPart::ToolApprovalRequest(_),
+                GenerateTextContentPart::ToolApprovalResponse(response),
+                GenerateTextContentPart::ToolResult(_),
+            ] if response.approved
+                && response.reason.as_deref() == Some("trusted tool")
+                && response.tool_call.tool_call_id == "call-1"
+        ));
         assert_eq!(result.tool_results.len(), 1);
         assert_eq!(result.text, "The weather in Brisbane is sunny.");
     }
@@ -10447,6 +11176,16 @@ mod tests {
                 )),
             ]
         );
+        assert!(matches!(
+            &result.steps[0].content[..],
+            [
+                GenerateTextContentPart::ToolCall(_),
+                GenerateTextContentPart::ToolApprovalRequest(_),
+                GenerateTextContentPart::ToolApprovalResponse(response),
+            ] if !response.approved
+                && response.reason.as_deref() == Some("policy block")
+                && response.tool_call.tool_call_id == "call-1"
+        ));
         assert_eq!(result.text, "The weather in Brisbane is sunny.");
     }
 
