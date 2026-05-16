@@ -2344,7 +2344,7 @@ pub type ToolExecuteFunction =
     dyn Fn(JsonValue, ToolExecutionOptions) -> ToolExecuteFuture + Send + Sync + 'static;
 
 /// Options passed to a tool execution function.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolExecutionOptions {
     /// Identifier of the model tool call being executed.
@@ -2352,6 +2352,10 @@ pub struct ToolExecutionOptions {
 
     /// Prompt messages sent to the model for the step that produced the tool call.
     pub messages: LanguageModelPrompt,
+
+    /// Tool-specific context configured for the executed tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<JsonValue>,
 }
 
 impl ToolExecutionOptions {
@@ -2360,7 +2364,14 @@ impl ToolExecutionOptions {
         Self {
             tool_call_id: tool_call_id.into(),
             messages,
+            context: None,
         }
+    }
+
+    /// Sets the context for the executed tool.
+    pub fn with_context(mut self, context: impl Into<JsonValue>) -> Self {
+        self.context = Some(context.into());
+        self
     }
 }
 
@@ -10272,7 +10283,10 @@ mod tests {
                     LanguageModelTextPart::new("Weather?"),
                 )],
             ))],
-        );
+        )
+        .with_context(json!({
+            "apiKey": "secret"
+        }));
 
         assert_eq!(
             serde_json::to_value(options).expect("execution options serialize"),
@@ -10288,7 +10302,10 @@ mod tests {
                             }
                         ]
                     }
-                ]
+                ],
+                "context": {
+                    "apiKey": "secret"
+                }
             })
         );
     }

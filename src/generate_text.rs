@@ -927,6 +927,12 @@ pub struct GenerateTextOptions<'a, M: LanguageModel + ?Sized> {
     /// High-level Rust tools made available to the model.
     pub tools: Vec<Tool>,
 
+    /// User-defined runtime context attached to every generated step.
+    pub runtime_context: JsonObject,
+
+    /// Tool-specific context keyed by tool name.
+    pub tools_context: JsonObject,
+
     /// Optional active tool names used to restrict the available tool set.
     pub active_tools: Option<Vec<String>>,
 
@@ -947,6 +953,8 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             model,
             call_options: LanguageModelCallOptions::new(prompt),
             tools: Vec::new(),
+            runtime_context: JsonObject::new(),
+            tools_context: JsonObject::new(),
             active_tools: None,
             max_steps: DEFAULT_MAX_STEPS,
             stop_conditions: Vec::new(),
@@ -960,6 +968,8 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             model,
             call_options,
             tools: Vec::new(),
+            runtime_context: JsonObject::new(),
+            tools_context: JsonObject::new(),
             active_tools: None,
             max_steps: DEFAULT_MAX_STEPS,
             stop_conditions: Vec::new(),
@@ -1035,6 +1045,28 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
                 .push(tool),
         }
 
+        self
+    }
+
+    /// Sets the user-defined runtime context attached to every generated step.
+    pub fn with_runtime_context(mut self, runtime_context: JsonObject) -> Self {
+        self.runtime_context = runtime_context;
+        self
+    }
+
+    /// Sets the tool-specific context map keyed by tool name.
+    pub fn with_tools_context(mut self, tools_context: JsonObject) -> Self {
+        self.tools_context = tools_context;
+        self
+    }
+
+    /// Adds or replaces context for a single tool.
+    pub fn with_tool_context(
+        mut self,
+        tool_name: impl Into<String>,
+        context: impl Into<JsonValue>,
+    ) -> Self {
+        self.tools_context.insert(tool_name.into(), context.into());
         self
     }
 
@@ -1468,6 +1500,14 @@ pub struct GenerateTextStep {
     /// Model that produced this step.
     pub model: GenerateTextModelInfo,
 
+    /// Tool context used for this step.
+    #[serde(default)]
+    pub tools_context: JsonObject,
+
+    /// Runtime context used for this step.
+    #[serde(default)]
+    pub runtime_context: JsonObject,
+
     /// Content generated in this step.
     pub content: Vec<LanguageModelContent>,
 
@@ -1586,6 +1626,8 @@ impl GenerateTextStep {
             call_id,
             step_number,
             model,
+            tools_context: JsonObject::new(),
+            runtime_context: JsonObject::new(),
             content,
             tool_calls,
             static_tool_calls,
@@ -1802,6 +1844,8 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         model,
         mut call_options,
         mut tools,
+        runtime_context,
+        tools_context,
         active_tools,
         max_steps,
         stop_conditions,
@@ -1838,6 +1882,8 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
             model_info.clone(),
             result,
         );
+        step.runtime_context = runtime_context.clone();
+        step.tools_context = tools_context.clone();
         mark_unavailable_tool_calls(&mut step.tool_calls, call_options.tools.as_deref());
         mark_runtime_dynamic_tool_calls(&mut step.tool_calls, &tools);
         mark_tool_call_titles(&mut step.tool_calls, &tools);
@@ -1845,7 +1891,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         mark_tool_result_metadata(&mut step.tool_results, &step.tool_calls, &tools);
         refresh_tool_call_views(&mut step);
         let (tool_results, tool_execution_ms) =
-            execute_tool_calls(&tools, &step.tool_calls, &step_prompt).await;
+            execute_tool_calls(&tools, &step.tool_calls, &step_prompt, &tools_context).await;
         let should_continue = should_continue_after_tool_results(&step, &tool_results);
         step.tool_results.extend(tool_results);
         mark_tool_result_metadata(&mut step.tool_results, &step.tool_calls, &tools);
@@ -2076,6 +2122,7 @@ async fn execute_tool_calls(
     tools: &[Tool],
     tool_calls: &[GenerateTextToolCall],
     messages: &LanguageModelPrompt,
+    tools_context: &JsonObject,
 ) -> (Vec<GenerateTextToolResult>, BTreeMap<String, u64>) {
     let mut tool_results = Vec::new();
     let mut tool_execution_ms = BTreeMap::new();
@@ -2100,10 +2147,13 @@ async fn execute_tool_calls(
             continue;
         };
 
-        let Some(execute) = tool.execute(
-            tool_call.input.clone(),
-            ToolExecutionOptions::new(tool_call.tool_call_id.clone(), messages.clone()),
-        ) else {
+        let mut execution_options =
+            ToolExecutionOptions::new(tool_call.tool_call_id.clone(), messages.clone());
+        if let Some(context) = tools_context.get(&tool_call.tool_name) {
+            execution_options = execution_options.with_context(context.clone());
+        }
+
+        let Some(execute) = tool.execute(tool_call.input.clone(), execution_options) else {
             continue;
         };
 
@@ -3437,6 +3487,20 @@ mod tests {
             result.final_step().expect("step exists").model,
             GenerateTextModelInfo::new("test-provider", "test-model")
         );
+        assert!(
+            result
+                .final_step()
+                .expect("step exists")
+                .runtime_context
+                .is_empty()
+        );
+        assert!(
+            result
+                .final_step()
+                .expect("step exists")
+                .tools_context
+                .is_empty()
+        );
         let call_id = &result.final_step().expect("step exists").call_id;
         assert!(call_id.starts_with("call-"));
         assert_eq!(call_id.len(), "call-".len() + 24);
@@ -3554,6 +3618,8 @@ mod tests {
             call_id: "call-test".to_string(),
             step_number: 0,
             model: GenerateTextModelInfo::new("test-provider", "test-model"),
+            tools_context: crate::JsonObject::new(),
+            runtime_context: crate::JsonObject::new(),
             content: vec![LanguageModelContent::Text(LanguageModelText::new("Hello"))],
             tool_calls: Vec::new(),
             static_tool_calls: Vec::new(),
@@ -3647,6 +3713,8 @@ mod tests {
                             "provider": "test-provider",
                             "modelId": "test-model"
                         },
+                        "toolsContext": {},
+                        "runtimeContext": {},
                         "content": [
                             {
                                 "type": "text",
@@ -3694,6 +3762,8 @@ mod tests {
                         "provider": "test-provider",
                         "modelId": "test-model"
                     },
+                    "toolsContext": {},
+                    "runtimeContext": {},
                     "content": [
                         {
                             "type": "text",
@@ -3995,6 +4065,8 @@ mod tests {
         assert_eq!(result.steps[0].files, Vec::new());
         assert_eq!(result.steps[0].sources, Vec::new());
         assert_eq!(result.steps[0].call_id, "call-test");
+        assert!(result.steps[0].runtime_context.is_empty());
+        assert!(result.steps[0].tools_context.is_empty());
         assert_eq!(
             result.steps[0].model,
             GenerateTextModelInfo::new("test-provider", "test-model")
@@ -4713,6 +4785,76 @@ mod tests {
         assert_eq!(
             result.steps[1].performance.tool_execution_ms,
             BTreeMap::new()
+        );
+    }
+
+    #[test]
+    fn generate_text_propagates_runtime_and_tools_context_to_steps_and_tool_execution() {
+        let model = ToolLoopLanguageModel::new();
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let runtime_context = json!({
+            "requestId": "req-1"
+        })
+        .as_object()
+        .expect("runtime context is an object")
+        .clone();
+        let tools_context = json!({
+            "weather": {
+                "apiKey": "secret"
+            }
+        })
+        .as_object()
+        .expect("tools context is an object")
+        .clone();
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_runtime_context(runtime_context.clone())
+                .with_tools_context(tools_context.clone())
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |_input, options| async move {
+                        Ok(json!({
+                            "toolCallId": options.tool_call_id,
+                            "context": options.context
+                        }))
+                    },
+                ))
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(result.steps.len(), 2);
+        assert_eq!(result.steps[0].runtime_context, runtime_context);
+        assert_eq!(result.steps[1].runtime_context, runtime_context);
+        assert_eq!(result.steps[0].tools_context, tools_context);
+        assert_eq!(result.steps[1].tools_context, tools_context);
+        assert_eq!(
+            result.tool_results[0].output["context"],
+            json!({
+                "apiKey": "secret"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&result.steps[0]).expect("step serializes")["runtimeContext"],
+            json!({
+                "requestId": "req-1"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&result.steps[0]).expect("step serializes")["toolsContext"],
+            json!({
+                "weather": {
+                    "apiKey": "secret"
+                }
+            })
         );
     }
 
