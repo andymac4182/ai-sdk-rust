@@ -11,7 +11,7 @@ use std::sync::{
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser::SerializeStruct};
 use url::{Host, Url};
 
 use crate::file_data::{
@@ -601,6 +601,204 @@ impl SerializedModelOptions {
             config,
         }
     }
+}
+
+/// Result returned by a schema validator.
+///
+/// This mirrors upstream provider-utils `ValidationResult` while retaining an
+/// error message instead of a JavaScript `Error` object.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ValidationResult<T = JsonValue> {
+    /// Validation succeeded and produced a typed value.
+    Success { value: T },
+
+    /// Validation failed with a human-readable message.
+    Failure { error: String },
+}
+
+impl<T> ValidationResult<T> {
+    /// Creates a successful validation result.
+    pub fn success(value: T) -> Self {
+        Self::Success { value }
+    }
+
+    /// Creates a failed validation result.
+    pub fn failure(error: impl Into<String>) -> Self {
+        Self::Failure {
+            error: error.into(),
+        }
+    }
+
+    /// Returns whether validation succeeded.
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Success { .. })
+    }
+
+    /// Returns whether validation failed.
+    pub fn is_failure(&self) -> bool {
+        matches!(self, Self::Failure { .. })
+    }
+
+    /// Returns the validated value on success.
+    pub fn value(&self) -> Option<&T> {
+        match self {
+            Self::Success { value } => Some(value),
+            Self::Failure { .. } => None,
+        }
+    }
+
+    /// Returns the validation error message on failure.
+    pub fn error(&self) -> Option<&str> {
+        match self {
+            Self::Success { .. } => None,
+            Self::Failure { error } => Some(error),
+        }
+    }
+
+    /// Converts this validation result into a Rust `Result`.
+    pub fn into_result(self) -> Result<T, String> {
+        match self {
+            Self::Success { value } => Ok(value),
+            Self::Failure { error } => Err(error),
+        }
+    }
+}
+
+impl<T> Serialize for ValidationResult<T>
+where
+    T: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("ValidationResult", 2)?;
+
+        match self {
+            Self::Success { value } => {
+                state.serialize_field("success", &true)?;
+                state.serialize_field("value", value)?;
+            }
+            Self::Failure { error } => {
+                state.serialize_field("success", &false)?;
+                state.serialize_field("error", error)?;
+            }
+        }
+
+        state.end()
+    }
+}
+
+impl<'de, T> Deserialize<'de> for ValidationResult<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct ValidationResultFields<T> {
+            success: bool,
+            value: Option<T>,
+            error: Option<String>,
+        }
+
+        let fields = ValidationResultFields::deserialize(deserializer)?;
+
+        if fields.success {
+            Ok(Self::success(
+                fields
+                    .value
+                    .ok_or_else(|| de::Error::missing_field("value"))?,
+            ))
+        } else {
+            Ok(Self::failure(
+                fields
+                    .error
+                    .ok_or_else(|| de::Error::missing_field("error"))?,
+            ))
+        }
+    }
+}
+
+type SchemaValidator<T> = dyn Fn(&JsonValue) -> ValidationResult<T> + Send + Sync + 'static;
+
+/// JSON-schema-backed provider-utils schema.
+///
+/// This is the Rust-native subset of upstream `Schema`: it stores the provider
+/// JSON Schema plus an optional synchronous validator. JavaScript-only schema
+/// adapters such as Zod and Standard Schema conversion are intentionally left
+/// out of this boundary.
+#[derive(Clone)]
+pub struct Schema<T = JsonValue> {
+    json_schema: JsonSchema,
+    validate: Option<Arc<SchemaValidator<T>>>,
+}
+
+impl<T> Schema<T> {
+    /// Creates a schema from an already-built JSON Schema 7 object.
+    pub fn new(json_schema: JsonSchema) -> Self {
+        Self {
+            json_schema,
+            validate: None,
+        }
+    }
+
+    /// Adds a synchronous validator for the schema.
+    pub fn with_validator<F>(mut self, validate: F) -> Self
+    where
+        F: Fn(&JsonValue) -> ValidationResult<T> + Send + Sync + 'static,
+    {
+        self.validate = Some(Arc::new(validate));
+        self
+    }
+
+    /// Returns the JSON Schema object passed to providers.
+    pub fn json_schema(&self) -> &JsonSchema {
+        &self.json_schema
+    }
+
+    /// Returns whether this schema has a Rust-side validator.
+    pub fn has_validator(&self) -> bool {
+        self.validate.is_some()
+    }
+
+    /// Runs the schema validator when one is present.
+    pub fn validate(&self, value: &JsonValue) -> Option<ValidationResult<T>> {
+        self.validate.as_ref().map(|validate| validate(value))
+    }
+}
+
+impl<T> fmt::Debug for Schema<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Schema")
+            .field("json_schema", &self.json_schema)
+            .field("has_validator", &self.has_validator())
+            .finish()
+    }
+}
+
+/// Creates a provider-utils schema from a JSON Schema 7 object.
+pub fn json_schema(json_schema: JsonSchema) -> Schema {
+    Schema::new(json_schema)
+}
+
+/// Normalizes an optional schema, defaulting to an empty closed object schema.
+///
+/// This mirrors the `undefined` branch of upstream `asSchema`.
+pub fn as_schema(schema: Option<Schema>) -> Schema {
+    schema.unwrap_or_else(|| {
+        Schema::new(JsonObject::from_iter([
+            ("type".to_string(), JsonValue::String("object".to_string())),
+            (
+                "properties".to_string(),
+                JsonValue::Object(JsonObject::new()),
+            ),
+            ("additionalProperties".to_string(), JsonValue::Bool(false)),
+        ]))
+    })
 }
 
 /// Scalar value stored in dependency-free multipart form data.
@@ -6044,15 +6242,15 @@ mod tests {
         PostJsonToApiOptions, PostToApiOptions, ProviderApiRequest, ProviderApiRequestBody,
         ProviderApiRequestMethod, ProviderApiResponse, ProviderApiResponseBody,
         ProviderApiResponseHandlerError, ProviderDefinedToolFactory, ProviderExecutedToolFactory,
-        ReasoningLevel, Resolvable, ResponseHandlerResult, RuntimeEnvironment,
+        ReasoningLevel, Resolvable, ResponseHandlerResult, RuntimeEnvironment, Schema,
         SerializedModelOptions, StatusCodeErrorResponseHandlerOptions, StreamingToolCallDelta,
         StreamingToolCallDeltaFunction, StreamingToolCallTracker, StreamingToolCallTrackerOptions,
         StreamingToolCallTypeValidation, Tool, ToolExecutionError, ToolExecutionOptions,
-        ValidateTypesResult, add_additional_properties_to_json_schema, as_array, combine_headers,
-        convert_base64_to_bytes, convert_bytes_to_base64, convert_image_model_file_to_data_uri,
-        convert_inline_file_data_to_bytes, convert_to_base64, convert_to_form_data,
-        create_binary_response_handler, create_event_source_response_handler, create_id_generator,
-        create_json_error_response_handler, create_json_response_handler,
+        ValidateTypesResult, ValidationResult, add_additional_properties_to_json_schema, as_array,
+        as_schema, combine_headers, convert_base64_to_bytes, convert_bytes_to_base64,
+        convert_image_model_file_to_data_uri, convert_inline_file_data_to_bytes, convert_to_base64,
+        convert_to_form_data, create_binary_response_handler, create_event_source_response_handler,
+        create_id_generator, create_json_error_response_handler, create_json_response_handler,
         create_provider_defined_tool_factory,
         create_provider_defined_tool_factory_with_output_schema,
         create_provider_executed_tool_factory, create_status_code_error_response_handler,
@@ -6062,7 +6260,7 @@ mod tests {
         get_top_level_media_type, handle_fetch_error, handle_provider_api_response,
         inject_json_instruction, inject_json_instruction_into_messages, is_abort_error,
         is_custom_reasoning, is_full_media_type, is_non_nullable, is_parsable_json,
-        is_provider_reference, is_url_supported, load_api_key, load_api_key_with_env,
+        is_provider_reference, is_url_supported, json_schema, load_api_key, load_api_key_with_env,
         load_optional_setting_with_env, load_setting, load_setting_with_env,
         map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
         media_type_to_extension, normalize_headers, parse_json, parse_json_event_stream,
@@ -6321,6 +6519,118 @@ mod tests {
             name: name.to_string(),
             age,
         })
+    }
+
+    #[test]
+    fn validation_result_serializes_upstream_success_and_failure_shapes() {
+        let success = ValidationResult::success(json!({ "name": "Ada" }));
+
+        assert_eq!(
+            serde_json::to_value(&success).expect("success serializes"),
+            json!({
+                "success": true,
+                "value": {
+                    "name": "Ada"
+                }
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ValidationResult<JsonValue>>(json!({
+                "success": true,
+                "value": {
+                    "name": "Ada"
+                }
+            }))
+            .expect("success deserializes"),
+            success
+        );
+
+        let failure: ValidationResult<JsonValue> =
+            ValidationResult::failure("Expected object matching schema");
+
+        assert_eq!(
+            serde_json::to_value(&failure).expect("failure serializes"),
+            json!({
+                "success": false,
+                "error": "Expected object matching schema"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ValidationResult<JsonValue>>(json!({
+                "success": false,
+                "error": "Expected object matching schema"
+            }))
+            .expect("failure deserializes"),
+            failure
+        );
+        assert!(success.is_success());
+        assert!(!success.is_failure());
+        assert_eq!(success.value(), Some(&json!({ "name": "Ada" })));
+        assert_eq!(failure.error(), Some("Expected object matching schema"));
+    }
+
+    #[test]
+    fn schema_wraps_json_schema_and_default_as_schema_matches_upstream() {
+        let schema = json_schema(object_schema());
+
+        assert_eq!(schema.json_schema(), &object_schema());
+        assert!(!schema.has_validator());
+        assert!(schema.validate(&json!({ "city": "Brisbane" })).is_none());
+
+        let existing = as_schema(Some(schema.clone()));
+        assert_eq!(existing.json_schema(), schema.json_schema());
+
+        let default_schema = as_schema(None);
+        let expected_default = json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        })
+        .as_object()
+        .expect("default schema is an object")
+        .clone();
+
+        assert_eq!(default_schema.json_schema(), &expected_default);
+        assert!(format!("{default_schema:?}").contains("has_validator: false"));
+    }
+
+    #[test]
+    fn schema_runs_optional_rust_validator() {
+        let schema =
+            Schema::new(object_schema()).with_validator(|value| match validate_person(value) {
+                Ok(person) => ValidationResult::success(person),
+                Err(error) => ValidationResult::failure(error),
+            });
+
+        assert!(schema.has_validator());
+
+        let valid = schema
+            .validate(&json!({
+                "name": "Ada",
+                "age": 36
+            }))
+            .expect("validator is present");
+
+        assert_eq!(
+            valid.into_result().expect("person validates"),
+            Person {
+                name: "Ada".to_string(),
+                age: 36,
+            }
+        );
+
+        let invalid = schema
+            .validate(&json!({
+                "name": "Ada",
+                "age": "old"
+            }))
+            .expect("validator is present");
+
+        assert_eq!(invalid.error(), Some("Invalid input"));
+        assert_eq!(
+            invalid.into_result().expect_err("person validation fails"),
+            "Invalid input"
+        );
     }
 
     #[derive(Debug, Eq, PartialEq, serde::Serialize)]
