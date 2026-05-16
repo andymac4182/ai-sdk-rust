@@ -21,7 +21,7 @@ use crate::language_model::{
     LanguageModelToolInputExample,
 };
 use crate::provider::{
-    JsonParseError, LoadApiKeyError, LoadSettingError, ProviderOptions,
+    JsonParseError, LoadApiKeyError, LoadSettingError, ProviderOptions, TypeValidationError,
     UnsupportedFunctionalityError,
 };
 use crate::warning::Warning;
@@ -144,6 +144,128 @@ impl fmt::Display for DownloadError {
 }
 
 impl std::error::Error for DownloadError {}
+
+/// Error returned by safe JSON parsing.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ParseJsonError {
+    /// JSON text could not be parsed or failed secure JSON parsing.
+    JsonParse(JsonParseError),
+
+    /// Parsed JSON failed schema/type validation.
+    TypeValidation(TypeValidationError),
+}
+
+impl ParseJsonError {
+    /// Returns the JSON parse error when this is a parse failure.
+    pub fn as_json_parse_error(&self) -> Option<&JsonParseError> {
+        match self {
+            Self::JsonParse(error) => Some(error),
+            Self::TypeValidation(_) => None,
+        }
+    }
+
+    /// Returns the type validation error when this is a validation failure.
+    pub fn as_type_validation_error(&self) -> Option<&TypeValidationError> {
+        match self {
+            Self::JsonParse(_) => None,
+            Self::TypeValidation(error) => Some(error),
+        }
+    }
+}
+
+impl From<JsonParseError> for ParseJsonError {
+    fn from(error: JsonParseError) -> Self {
+        Self::JsonParse(error)
+    }
+}
+
+impl From<TypeValidationError> for ParseJsonError {
+    fn from(error: TypeValidationError) -> Self {
+        Self::TypeValidation(error)
+    }
+}
+
+impl fmt::Display for ParseJsonError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::JsonParse(error) => error.fmt(formatter),
+            Self::TypeValidation(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for ParseJsonError {}
+
+/// Result returned by safe JSON parsing.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ParseJsonResult<T = JsonValue> {
+    /// Parsing and optional validation succeeded.
+    Success {
+        /// Parsed or validated value.
+        value: T,
+
+        /// Raw JSON value before optional schema/type validation.
+        raw_value: JsonValue,
+    },
+
+    /// Parsing or optional validation failed without panicking.
+    Failure {
+        /// Parse or validation error.
+        error: ParseJsonError,
+
+        /// Raw JSON value before validation, when parsing succeeded.
+        raw_value: Option<JsonValue>,
+    },
+}
+
+impl<T> ParseJsonResult<T> {
+    /// Creates a successful parse result.
+    pub fn success(value: T, raw_value: JsonValue) -> Self {
+        Self::Success { value, raw_value }
+    }
+
+    /// Creates a failed parse result.
+    pub fn failure(error: impl Into<ParseJsonError>, raw_value: Option<JsonValue>) -> Self {
+        Self::Failure {
+            error: error.into(),
+            raw_value,
+        }
+    }
+
+    /// Returns whether parsing and optional validation succeeded.
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Success { .. })
+    }
+
+    /// Returns whether parsing or optional validation failed.
+    pub fn is_failure(&self) -> bool {
+        matches!(self, Self::Failure { .. })
+    }
+
+    /// Returns the parsed or validated value on success.
+    pub fn value(&self) -> Option<&T> {
+        match self {
+            Self::Success { value, .. } => Some(value),
+            Self::Failure { .. } => None,
+        }
+    }
+
+    /// Returns the raw parsed JSON value when one is available.
+    pub fn raw_value(&self) -> Option<&JsonValue> {
+        match self {
+            Self::Success { raw_value, .. } => Some(raw_value),
+            Self::Failure { raw_value, .. } => raw_value.as_ref(),
+        }
+    }
+
+    /// Returns the parse or validation error on failure.
+    pub fn error(&self) -> Option<&ParseJsonError> {
+        match self {
+            Self::Success { .. } => None,
+            Self::Failure { error, .. } => Some(error),
+        }
+    }
+}
 
 struct MediaTypeSignature {
     media_type: &'static str,
@@ -1032,6 +1154,19 @@ pub fn parse_json(text: &str) -> Result<JsonValue, JsonParseError> {
     secure_json_parse(text).map_err(|cause| JsonParseError::new(text, cause))
 }
 
+/// Safely parses a JSON string into a JSON value.
+///
+/// This mirrors the no-schema overload of upstream `@ai-sdk/provider-utils`
+/// `safeParseJSON`: successful parses include both `value` and `rawValue`, and
+/// parse failures are returned as [`JsonParseError`] values without a raw JSON
+/// value.
+pub fn safe_parse_json(text: &str) -> ParseJsonResult {
+    match parse_json(text) {
+        Ok(value) => ParseJsonResult::success(value.clone(), value),
+        Err(error) => ParseJsonResult::failure(error, None),
+    }
+}
+
 /// Returns whether the input can be parsed as JSON.
 pub fn is_parsable_json(input: &str) -> bool {
     secure_json_parse(input).is_ok()
@@ -1788,7 +1923,7 @@ mod tests {
     };
     use crate::{
         FileData, FileDataContent, ImageModelFile, JsonObject, JsonValue, ProviderReference,
-        Warning,
+        TypeValidationError, Warning,
     };
     use serde_json::json;
     use url::Url;
@@ -1796,18 +1931,18 @@ mod tests {
     use super::{
         Arrayable, Base64DecodeError, DownloadError, InjectJsonInstructionIntoMessagesOptions,
         InlineFileDataBytesError, LoadApiKeyOptions, LoadOptionalSettingOptions,
-        LoadSettingOptions, ReasoningLevel, Tool, ToolExecutionError, ToolExecutionOptions,
-        add_additional_properties_to_json_schema, as_array, combine_headers,
-        convert_base64_to_bytes, convert_bytes_to_base64, convert_image_model_file_to_data_uri,
-        convert_inline_file_data_to_bytes, convert_to_base64, create_tool_name_mapping,
-        detect_media_type, filter_nullable, get_top_level_media_type, inject_json_instruction,
-        inject_json_instruction_into_messages, is_custom_reasoning, is_full_media_type,
-        is_non_nullable, is_parsable_json, is_provider_reference, load_api_key,
+        LoadSettingOptions, ParseJsonError, ParseJsonResult, ReasoningLevel, Tool,
+        ToolExecutionError, ToolExecutionOptions, add_additional_properties_to_json_schema,
+        as_array, combine_headers, convert_base64_to_bytes, convert_bytes_to_base64,
+        convert_image_model_file_to_data_uri, convert_inline_file_data_to_bytes, convert_to_base64,
+        create_tool_name_mapping, detect_media_type, filter_nullable, get_top_level_media_type,
+        inject_json_instruction, inject_json_instruction_into_messages, is_custom_reasoning,
+        is_full_media_type, is_non_nullable, is_parsable_json, is_provider_reference, load_api_key,
         load_api_key_with_env, load_optional_setting_with_env, load_setting, load_setting_with_env,
         map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
         media_type_to_extension, normalize_headers, parse_json, prepare_tools,
         remove_undefined_entries, resolve_full_media_type, resolve_provider_reference,
-        strip_file_extension, validate_download_url, with_user_agent_suffix,
+        safe_parse_json, strip_file_extension, validate_download_url, with_user_agent_suffix,
         without_trailing_slash,
     };
 
@@ -2619,6 +2754,74 @@ mod tests {
             parse_json(r#"{ "constructor": { "safe": true } }"#).expect("JSON parses"),
             json!({ "constructor": { "safe": true } })
         );
+    }
+
+    #[test]
+    fn safe_parse_json_returns_success_with_raw_value() {
+        let parsed = safe_parse_json(r#"{"foo":"bar","items":[1,true,null]}"#);
+        let expected_value = json!({
+            "foo": "bar",
+            "items": [1, true, null],
+        });
+
+        assert_eq!(
+            parsed,
+            ParseJsonResult::success(expected_value.clone(), expected_value.clone())
+        );
+        assert!(parsed.is_success());
+        assert!(!parsed.is_failure());
+        assert_eq!(parsed.value(), Some(&expected_value));
+        assert_eq!(parsed.raw_value(), Some(&expected_value));
+        assert!(parsed.error().is_none());
+    }
+
+    #[test]
+    fn safe_parse_json_returns_json_parse_error_without_raw_value_on_invalid_json() {
+        let parsed = safe_parse_json("invalid json");
+
+        assert!(parsed.is_failure());
+        assert!(parsed.value().is_none());
+        assert!(parsed.raw_value().is_none());
+
+        let error = parsed.error().expect("parse error is returned");
+        let json_parse_error = error
+            .as_json_parse_error()
+            .expect("failure is a JSON parse error");
+        assert_eq!(json_parse_error.text(), "invalid json");
+        assert!(
+            json_parse_error
+                .message()
+                .starts_with("JSON parsing failed: Text: invalid json.\nError message:")
+        );
+    }
+
+    #[test]
+    fn safe_parse_json_returns_json_parse_error_for_forbidden_prototype_properties() {
+        let parsed = safe_parse_json(r#"{ "__proto__": { "isAdmin": true } }"#);
+        let error = parsed.error().expect("parse error is returned");
+
+        assert_eq!(
+            error
+                .as_json_parse_error()
+                .expect("secure parse failure uses JSON parse error")
+                .cause_message(),
+            "Object contains forbidden prototype property"
+        );
+        assert!(parsed.raw_value().is_none());
+    }
+
+    #[test]
+    fn parse_json_error_can_wrap_type_validation_failures() {
+        let validation_error =
+            TypeValidationError::new(json!({ "age": "30" }), "Expected number", None);
+        let parse_error = ParseJsonError::from(validation_error.clone());
+
+        assert_eq!(
+            parse_error.as_type_validation_error(),
+            Some(&validation_error)
+        );
+        assert!(parse_error.as_json_parse_error().is_none());
+        assert_eq!(parse_error.to_string(), validation_error.to_string());
     }
 
     #[test]
