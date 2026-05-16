@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_data::FileData;
 use crate::headers::Headers;
-use crate::json::{JsonObject, JsonValue};
+use crate::json::{JsonObject, JsonSchema, JsonValue};
 use crate::language_model::{
     FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
     LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
@@ -128,6 +128,91 @@ impl fmt::Debug for ToolInputRefinement {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ToolInputRefinement")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Future returned by a high-level tool-call repair function.
+pub type ToolCallRepairFuture =
+    Pin<Box<dyn Future<Output = Result<Option<LanguageModelToolCall>, String>> + Send>>;
+
+/// Function used to repair an unavailable or invalid tool call before execution.
+pub type ToolCallRepairFunction =
+    dyn Fn(ToolCallRepairOptions) -> ToolCallRepairFuture + Send + Sync + 'static;
+
+/// Options passed to a tool-call repair callback.
+#[derive(Clone, Debug)]
+pub struct ToolCallRepairOptions {
+    /// Original provider tool call that failed parsing or lookup.
+    pub tool_call: LanguageModelToolCall,
+
+    /// High-level Rust tools available for this step after active-tool filtering.
+    pub tools: Vec<Tool>,
+
+    /// Prompt messages that were sent to the model for this step.
+    pub messages: LanguageModelPrompt,
+
+    /// Original parsing or lookup error that triggered repair.
+    pub error: ToolCallRepairOriginalError,
+}
+
+impl ToolCallRepairOptions {
+    /// Creates tool-call repair options.
+    pub fn new(
+        tool_call: LanguageModelToolCall,
+        tools: Vec<Tool>,
+        messages: LanguageModelPrompt,
+        error: ToolCallRepairOriginalError,
+    ) -> Self {
+        Self {
+            tool_call,
+            tools,
+            messages,
+            error,
+        }
+    }
+
+    /// Returns the JSON Schema for a named high-level tool, when available.
+    pub fn input_schema(&self, tool_name: &str) -> Option<&JsonSchema> {
+        self.tools
+            .iter()
+            .find(|tool| tool.name == tool_name)
+            .map(|tool| &tool.input_schema)
+    }
+}
+
+/// Callback wrapper for repairing failed model tool calls.
+#[derive(Clone)]
+pub struct ToolCallRepair {
+    repair: Arc<ToolCallRepairFunction>,
+}
+
+impl ToolCallRepair {
+    /// Creates a tool-call repair callback.
+    pub fn new<F, Fut, E>(repair: F) -> Self
+    where
+        F: Fn(ToolCallRepairOptions) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Option<LanguageModelToolCall>, E>> + Send + 'static,
+        E: fmt::Display,
+    {
+        Self {
+            repair: Arc::new(move |options| {
+                let future = repair(options);
+                Box::pin(async move { future.await.map_err(|error| error.to_string()) })
+            }),
+        }
+    }
+
+    /// Runs the repair callback.
+    pub fn repair(&self, options: ToolCallRepairOptions) -> ToolCallRepairFuture {
+        (self.repair)(options)
+    }
+}
+
+impl fmt::Debug for ToolCallRepair {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ToolCallRepair")
             .finish_non_exhaustive()
     }
 }
@@ -1287,6 +1372,24 @@ impl From<InvalidToolInputError> for ToolCallRepairOriginalError {
     }
 }
 
+impl fmt::Display for ToolCallRepairOriginalError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoSuchTool(error) => error.fmt(formatter),
+            Self::InvalidToolInput(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for ToolCallRepairOriginalError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::NoSuchTool(error) => Some(error),
+            Self::InvalidToolInput(error) => Some(error),
+        }
+    }
+}
+
 /// Error returned when repairing an invalid tool call fails.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolCallRepairError {
@@ -1917,6 +2020,9 @@ pub struct GenerateTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Per-tool input refinements applied after parsing valid tool calls.
     pub tool_input_refinements: BTreeMap<String, ToolInputRefinement>,
 
+    /// Optional callback used to repair invalid model tool calls before execution.
+    pub tool_call_repair: Option<ToolCallRepair>,
+
     /// Optional per-step preparation callback.
     pub prepare_step: Option<PrepareStep<'a, M>>,
 
@@ -1942,6 +2048,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             active_tools: None,
             tool_approval: None,
             tool_input_refinements: BTreeMap::new(),
+            tool_call_repair: None,
             prepare_step: None,
             max_steps: DEFAULT_MAX_STEPS,
             stop_conditions: Vec::new(),
@@ -1960,6 +2067,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             active_tools: None,
             tool_approval: None,
             tool_input_refinements: BTreeMap::new(),
+            tool_call_repair: None,
             prepare_step: None,
             max_steps: DEFAULT_MAX_STEPS,
             stop_conditions: Vec::new(),
@@ -2099,6 +2207,22 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
     {
         self.tool_input_refinements
             .insert(tool_name.into(), ToolInputRefinement::new(refine));
+        self
+    }
+
+    /// Sets a callback that can repair unavailable or invalid tool calls.
+    ///
+    /// The callback receives the original provider tool call, the step's
+    /// active high-level tools, the prompt messages sent to the model, and the
+    /// original lookup or parse error. Returning `None` keeps the original
+    /// invalid tool-call behavior.
+    pub fn with_tool_call_repair<F, Fut, E>(mut self, repair: F) -> Self
+    where
+        F: Fn(ToolCallRepairOptions) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Option<LanguageModelToolCall>, E>> + Send + 'static,
+        E: fmt::Display,
+    {
+        self.tool_call_repair = Some(ToolCallRepair::new(repair));
         self
     }
 
@@ -2876,6 +3000,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         active_tools,
         tool_approval,
         tool_input_refinements,
+        tool_call_repair,
         prepare_step,
         max_steps,
         stop_conditions,
@@ -2983,6 +3108,15 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         step.runtime_context = runtime_context.clone();
         step.tools_context = tools_context.clone();
         mark_unavailable_tool_calls(&mut step.tool_calls, step_call_options.tools.as_deref());
+        repair_tool_calls(
+            &mut step.tool_calls,
+            &step.content,
+            tool_call_repair.as_ref(),
+            &step_tools,
+            step_call_options.tools.as_deref(),
+            &step_prompt,
+        )
+        .await;
         refine_tool_inputs(&mut step.tool_calls, &tool_input_refinements).await;
         sync_tool_result_inputs(&mut step.tool_results, &step.tool_calls);
         mark_runtime_dynamic_tool_calls(&mut step.tool_calls, &step_tools);
@@ -3960,6 +4094,132 @@ fn mark_unavailable_tool_calls(
     }
 }
 
+async fn repair_tool_calls(
+    tool_calls: &mut [GenerateTextToolCall],
+    content: &[LanguageModelContent],
+    repair: Option<&ToolCallRepair>,
+    tools: &[Tool],
+    available_tools: Option<&[LanguageModelTool]>,
+    messages: &LanguageModelPrompt,
+) {
+    let Some(repair) = repair else {
+        return;
+    };
+
+    for tool_call in tool_calls {
+        if tool_call.invalid != Some(true) {
+            continue;
+        }
+
+        let Some(original_tool_call) = original_language_model_tool_call(content, tool_call) else {
+            continue;
+        };
+        let Some(original_error) =
+            tool_call_repair_original_error(original_tool_call, available_tools)
+        else {
+            continue;
+        };
+
+        let options = ToolCallRepairOptions::new(
+            original_tool_call.clone(),
+            tools.to_vec(),
+            messages.clone(),
+            original_error.clone(),
+        );
+
+        match repair.repair(options).await {
+            Ok(Some(repaired_tool_call)) => {
+                match parse_repaired_tool_call(&repaired_tool_call, available_tools) {
+                    Ok(repaired_tool_call) => {
+                        *tool_call = repaired_tool_call;
+                    }
+                    Err(repaired_error) => {
+                        tool_call.dynamic = Some(true);
+                        tool_call.invalid = Some(true);
+                        tool_call.error = Some(repaired_error.to_string());
+                    }
+                }
+            }
+            Ok(None) => {
+                tool_call.error = Some(original_error.to_string());
+            }
+            Err(cause_message) => {
+                tool_call.error =
+                    Some(ToolCallRepairError::new(original_error, cause_message).to_string());
+            }
+        }
+    }
+}
+
+fn original_language_model_tool_call<'a>(
+    content: &'a [LanguageModelContent],
+    tool_call: &GenerateTextToolCall,
+) -> Option<&'a LanguageModelToolCall> {
+    content.iter().find_map(|part| match part {
+        LanguageModelContent::ToolCall(original)
+            if original.tool_call_id == tool_call.tool_call_id =>
+        {
+            Some(original)
+        }
+        _ => None,
+    })
+}
+
+fn parse_repaired_tool_call(
+    tool_call: &LanguageModelToolCall,
+    available_tools: Option<&[LanguageModelTool]>,
+) -> Result<GenerateTextToolCall, ToolCallRepairOriginalError> {
+    if let Some(error) = tool_call_repair_original_error(tool_call, available_tools) {
+        Err(error)
+    } else {
+        Ok(GenerateTextToolCall::from_language_model_tool_call(
+            tool_call,
+        ))
+    }
+}
+
+fn tool_call_repair_original_error(
+    tool_call: &LanguageModelToolCall,
+    available_tools: Option<&[LanguageModelTool]>,
+) -> Option<ToolCallRepairOriginalError> {
+    if !is_provider_executed_dynamic_tool_call(tool_call) {
+        match available_tool_names(available_tools) {
+            None => return Some(NoSuchToolError::new(&tool_call.tool_name).into()),
+            Some(available_tool_names)
+                if !available_tool_names
+                    .iter()
+                    .any(|tool_name| tool_name == &tool_call.tool_name) =>
+            {
+                return Some(
+                    NoSuchToolError::with_available_tools(
+                        &tool_call.tool_name,
+                        available_tool_names,
+                    )
+                    .into(),
+                );
+            }
+            Some(_) => {}
+        }
+    }
+
+    parse_tool_input(&tool_call.input).err().map(|error| {
+        InvalidToolInputError::new(
+            &tool_call.tool_name,
+            &tool_call.input,
+            JsonParseError::new(&tool_call.input, error),
+        )
+        .into()
+    })
+}
+
+fn is_provider_executed_dynamic_tool_call(tool_call: &LanguageModelToolCall) -> bool {
+    tool_call.provider_executed == Some(true) && tool_call.dynamic == Some(true)
+}
+
+fn available_tool_names(available_tools: Option<&[LanguageModelTool]>) -> Option<Vec<String>> {
+    available_tools.map(|tools| tools.iter().map(language_model_tool_name).collect())
+}
+
 async fn refine_tool_inputs(
     tool_calls: &mut [GenerateTextToolCall],
     refinements: &BTreeMap<String, ToolInputRefinement>,
@@ -4499,11 +4759,12 @@ mod tests {
         PruneEmptyMessages, PruneMessagesOptions, PruneReasoning, PruneToolCallRule,
         PruneToolCallRuleMode, PruneToolCalls, ResolveToolApprovalOptions, StopCondition,
         ToolApprovalConfiguration, ToolApprovalStatus, ToolApprovalStatusKind,
-        ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOriginalError,
-        ToolInputRefinementError, UiMessageStreamError, UnsupportedModelVersionError,
-        collect_tool_approvals, experimental_filter_active_tools, filter_active_tools,
-        generate_text, has_tool_call, is_loop_finished, is_step_count, is_stop_condition_met,
-        normalize_tool_approval_status, prune_messages, resolve_tool_approval, step_count_is,
+        ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOptions,
+        ToolCallRepairOriginalError, ToolInputRefinementError, UiMessageStreamError,
+        UnsupportedModelVersionError, collect_tool_approvals, experimental_filter_active_tools,
+        filter_active_tools, generate_text, has_tool_call, is_loop_finished, is_step_count,
+        is_stop_condition_met, normalize_tool_approval_status, prune_messages,
+        resolve_tool_approval, step_count_is,
     };
     use crate::file_data::FileDataContent;
     use crate::json::JsonValue;
@@ -4531,7 +4792,7 @@ mod tests {
     use std::future::{Future, Ready, ready};
     use std::pin::Pin;
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     };
     use std::task::{Context, Poll, Waker};
@@ -7665,6 +7926,166 @@ mod tests {
                 LanguageModelToolResultOutput::error_text("city cannot be refined")
             ))
         );
+    }
+
+    #[test]
+    fn generate_text_repairs_invalid_tool_call_before_execution() {
+        let model = ToolLoopLanguageModel::with_tool_call("weather", "invalid json");
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let repair_options = Arc::new(Mutex::new(Vec::<ToolCallRepairOptions>::new()));
+        let repair_options_for_closure = Arc::clone(&repair_options);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema.clone()).with_execute(
+                    |input, _options| async move {
+                        Ok(json!({
+                            "city": input["city"],
+                            "forecast": "sunny"
+                        }))
+                    },
+                ))
+                .with_tool_call_repair(move |options| {
+                    let repair_options = Arc::clone(&repair_options_for_closure);
+                    let input_schema = input_schema.clone();
+                    async move {
+                        assert_eq!(options.input_schema("weather"), Some(&input_schema));
+                        repair_options
+                            .lock()
+                            .expect("repair options lock")
+                            .push(options);
+                        Ok::<Option<LanguageModelToolCall>, String>(Some(
+                            LanguageModelToolCall::new(
+                                "call-1",
+                                "weather",
+                                r#"{"city":"Brisbane"}"#,
+                            ),
+                        ))
+                    }
+                })
+                .with_max_steps(2),
+        ));
+
+        let repair_options = repair_options.lock().expect("repair options lock");
+        assert_eq!(repair_options.len(), 1);
+        assert_eq!(repair_options[0].tool_call.tool_name, "weather");
+        assert_eq!(repair_options[0].tool_call.input, "invalid json");
+        assert_eq!(repair_options[0].messages, vec![user_message("Weather?")]);
+        assert!(matches!(
+            &repair_options[0].error,
+            ToolCallRepairOriginalError::InvalidToolInput(error)
+                if error.tool_name() == "weather" && error.tool_input() == "invalid json"
+        ));
+        drop(repair_options);
+
+        assert_eq!(model.calls.borrow().len(), 2);
+        assert_eq!(result.tool_calls[0].input, json!({ "city": "Brisbane" }));
+        assert_eq!(result.tool_calls[0].invalid, None);
+        assert_eq!(result.tool_calls[0].error, None);
+        assert_eq!(result.tool_results[0].output["city"], "Brisbane");
+        assert_eq!(result.text, "The weather in Brisbane is sunny.");
+    }
+
+    #[test]
+    fn generate_text_repairs_unknown_tool_name_before_execution() {
+        let model = ToolLoopLanguageModel::with_tool_call("forecast", "{}");
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let repair_options = Arc::new(Mutex::new(Vec::<ToolCallRepairOptions>::new()));
+        let repair_options_for_closure = Arc::clone(&repair_options);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |input, _options| async move {
+                        Ok(json!({
+                            "calledWith": input,
+                            "forecast": "sunny"
+                        }))
+                    },
+                ))
+                .with_tool_call_repair(move |options| {
+                    let repair_options = Arc::clone(&repair_options_for_closure);
+                    async move {
+                        repair_options
+                            .lock()
+                            .expect("repair options lock")
+                            .push(options);
+                        Ok::<Option<LanguageModelToolCall>, String>(Some(
+                            LanguageModelToolCall::new("call-1", "weather", "{}"),
+                        ))
+                    }
+                })
+                .with_max_steps(2),
+        ));
+
+        let repair_options = repair_options.lock().expect("repair options lock");
+        assert_eq!(repair_options.len(), 1);
+        assert!(matches!(
+            &repair_options[0].error,
+            ToolCallRepairOriginalError::NoSuchTool(error)
+                if error.tool_name() == "forecast"
+                    && error.available_tools() == Some(&["weather".to_string()][..])
+        ));
+        drop(repair_options);
+
+        assert_eq!(model.calls.borrow().len(), 2);
+        assert_eq!(result.tool_calls[0].tool_name, "weather");
+        assert_eq!(result.tool_calls[0].input, json!({}));
+        assert_eq!(result.tool_results[0].output["forecast"], "sunny");
+    }
+
+    #[test]
+    fn generate_text_turns_failed_tool_call_repair_into_invalid_tool_result() {
+        let model = ToolLoopLanguageModel::with_tool_call("weather", "invalid json");
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let executed = Arc::new(AtomicBool::new(false));
+        let executed_for_closure = Arc::clone(&executed);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    move |_input, _options| {
+                        let executed = Arc::clone(&executed_for_closure);
+                        async move {
+                            executed.store(true, Ordering::SeqCst);
+                            Ok(json!("should not run"))
+                        }
+                    },
+                ))
+                .with_tool_call_repair(|_options| async move {
+                    Err::<Option<LanguageModelToolCall>, _>("repair failed")
+                })
+                .with_max_steps(2),
+        ));
+
+        assert!(!executed.load(Ordering::SeqCst));
+        assert_eq!(model.calls.borrow().len(), 2);
+        assert_eq!(result.tool_calls[0].invalid, Some(true));
+        assert_eq!(
+            result.tool_calls[0].error.as_deref(),
+            Some("Error repairing tool call: repair failed")
+        );
+        assert_eq!(result.tool_results[0].is_error, Some(true));
+        assert_eq!(
+            result.tool_results[0].output,
+            json!("Error repairing tool call: repair failed")
+        );
+        assert_eq!(result.text, "The weather in Brisbane is sunny.");
     }
 
     #[test]
