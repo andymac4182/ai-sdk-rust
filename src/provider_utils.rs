@@ -5,7 +5,7 @@ use std::future::Future;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::pin::Pin;
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
     atomic::{AtomicU64, Ordering},
 };
 use std::task::{Context, Poll, Waker};
@@ -723,6 +723,39 @@ where
 }
 
 type SchemaValidator<T> = dyn Fn(&JsonValue) -> ValidationResult<T> + Send + Sync + 'static;
+type CreateJsonSchema = dyn Fn() -> JsonSchema + Send + Sync + 'static;
+type CreateSchema<T> = dyn Fn() -> Schema<T> + Send + Sync + 'static;
+
+struct JsonSchemaStore {
+    json_schema: OnceLock<JsonSchema>,
+    create_json_schema: Option<Arc<CreateJsonSchema>>,
+}
+
+impl JsonSchemaStore {
+    fn eager(json_schema: JsonSchema) -> Self {
+        let store = Self {
+            json_schema: OnceLock::new(),
+            create_json_schema: None,
+        };
+        let _ = store.json_schema.set(json_schema);
+        store
+    }
+
+    fn lazy(create_json_schema: Arc<CreateJsonSchema>) -> Self {
+        Self {
+            json_schema: OnceLock::new(),
+            create_json_schema: Some(create_json_schema),
+        }
+    }
+
+    fn json_schema(&self) -> &JsonSchema {
+        self.json_schema.get_or_init(|| {
+            self.create_json_schema
+                .as_ref()
+                .expect("lazy JSON schema store must have a factory")()
+        })
+    }
+}
 
 /// JSON-schema-backed provider-utils schema.
 ///
@@ -730,17 +763,40 @@ type SchemaValidator<T> = dyn Fn(&JsonValue) -> ValidationResult<T> + Send + Syn
 /// JSON Schema plus an optional synchronous validator. JavaScript-only schema
 /// adapters such as Zod and Standard Schema conversion are intentionally left
 /// out of this boundary.
-#[derive(Clone)]
 pub struct Schema<T = JsonValue> {
-    json_schema: JsonSchema,
+    json_schema: Arc<JsonSchemaStore>,
     validate: Option<Arc<SchemaValidator<T>>>,
+}
+
+impl<T> Clone for Schema<T> {
+    fn clone(&self) -> Self {
+        Self {
+            json_schema: Arc::clone(&self.json_schema),
+            validate: self.validate.clone(),
+        }
+    }
 }
 
 impl<T> Schema<T> {
     /// Creates a schema from an already-built JSON Schema 7 object.
     pub fn new(json_schema: JsonSchema) -> Self {
         Self {
-            json_schema,
+            json_schema: Arc::new(JsonSchemaStore::eager(json_schema)),
+            validate: None,
+        }
+    }
+
+    /// Creates a schema whose JSON Schema object is initialized on first access.
+    ///
+    /// This mirrors the lazy function branch of upstream provider-utils
+    /// `jsonSchema`, including caching the produced JSON Schema for subsequent
+    /// accesses and clones.
+    pub fn lazy_json_schema<F>(create_json_schema: F) -> Self
+    where
+        F: Fn() -> JsonSchema + Send + Sync + 'static,
+    {
+        Self {
+            json_schema: Arc::new(JsonSchemaStore::lazy(Arc::new(create_json_schema))),
             validate: None,
         }
     }
@@ -756,7 +812,7 @@ impl<T> Schema<T> {
 
     /// Returns the JSON Schema object passed to providers.
     pub fn json_schema(&self) -> &JsonSchema {
-        &self.json_schema
+        self.json_schema.json_schema()
     }
 
     /// Returns whether this schema has a Rust-side validator.
@@ -774,7 +830,7 @@ impl<T> fmt::Debug for Schema<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Schema")
-            .field("json_schema", &self.json_schema)
+            .field("json_schema", &self.json_schema())
             .field("has_validator", &self.has_validator())
             .finish()
     }
@@ -785,20 +841,154 @@ pub fn json_schema(json_schema: JsonSchema) -> Schema {
     Schema::new(json_schema)
 }
 
+/// Creates a provider-utils schema whose JSON Schema is initialized lazily.
+pub fn lazy_json_schema<F>(create_json_schema: F) -> Schema
+where
+    F: Fn() -> JsonSchema + Send + Sync + 'static,
+{
+    Schema::lazy_json_schema(create_json_schema)
+}
+
+/// Lazily creates and caches a provider-utils schema.
+///
+/// This mirrors upstream provider-utils `lazySchema`: the schema factory is not
+/// called until the schema is requested, and the resulting schema is reused for
+/// all later accesses and clones.
+pub struct LazySchema<T = JsonValue> {
+    inner: Arc<LazySchemaInner<T>>,
+}
+
+struct LazySchemaInner<T> {
+    schema: OnceLock<Schema<T>>,
+    create_schema: Arc<CreateSchema<T>>,
+}
+
+impl<T> Clone for LazySchema<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<T> LazySchema<T> {
+    /// Creates a lazy schema from a schema factory.
+    pub fn new<F>(create_schema: F) -> Self
+    where
+        F: Fn() -> Schema<T> + Send + Sync + 'static,
+    {
+        Self {
+            inner: Arc::new(LazySchemaInner {
+                schema: OnceLock::new(),
+                create_schema: Arc::new(create_schema),
+            }),
+        }
+    }
+
+    /// Returns the cached schema, creating it on first access.
+    pub fn schema(&self) -> &Schema<T> {
+        self.inner
+            .schema
+            .get_or_init(|| (self.inner.create_schema)())
+    }
+
+    /// Returns whether the schema factory has already been evaluated.
+    pub fn is_initialized(&self) -> bool {
+        self.inner.schema.get().is_some()
+    }
+}
+
+impl<T> fmt::Debug for LazySchema<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LazySchema")
+            .field("is_initialized", &self.is_initialized())
+            .finish()
+    }
+}
+
+/// Creates a lazily initialized provider-utils schema.
+pub fn lazy_schema<T, F>(create_schema: F) -> LazySchema<T>
+where
+    F: Fn() -> Schema<T> + Send + Sync + 'static,
+{
+    LazySchema::new(create_schema)
+}
+
+/// Rust-native subset of upstream provider-utils `FlexibleSchema`.
+///
+/// JavaScript schema adapters such as Zod and Standard Schema are intentionally
+/// left to future slices, but concrete and lazy provider-utils schemas can
+/// already share normalization behavior.
+#[derive(Clone)]
+pub enum FlexibleSchema<T = JsonValue> {
+    /// Already constructed provider-utils schema.
+    Schema(Schema<T>),
+
+    /// Lazily created provider-utils schema.
+    Lazy(LazySchema<T>),
+}
+
+impl<T> FlexibleSchema<T> {
+    /// Returns the concrete schema, evaluating lazy schemas on first access.
+    pub fn as_schema(&self) -> &Schema<T> {
+        match self {
+            Self::Schema(schema) => schema,
+            Self::Lazy(schema) => schema.schema(),
+        }
+    }
+
+    /// Converts this flexible schema into a concrete schema.
+    pub fn into_schema(self) -> Schema<T> {
+        match self {
+            Self::Schema(schema) => schema,
+            Self::Lazy(schema) => schema.schema().clone(),
+        }
+    }
+}
+
+impl<T> fmt::Debug for FlexibleSchema<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Schema(schema) => formatter.debug_tuple("Schema").field(schema).finish(),
+            Self::Lazy(schema) => formatter.debug_tuple("Lazy").field(schema).finish(),
+        }
+    }
+}
+
+impl<T> From<Schema<T>> for FlexibleSchema<T> {
+    fn from(schema: Schema<T>) -> Self {
+        Self::Schema(schema)
+    }
+}
+
+impl<T> From<LazySchema<T>> for FlexibleSchema<T> {
+    fn from(schema: LazySchema<T>) -> Self {
+        Self::Lazy(schema)
+    }
+}
+
 /// Normalizes an optional schema, defaulting to an empty closed object schema.
 ///
 /// This mirrors the `undefined` branch of upstream `asSchema`.
 pub fn as_schema(schema: Option<Schema>) -> Schema {
-    schema.unwrap_or_else(|| {
-        Schema::new(JsonObject::from_iter([
-            ("type".to_string(), JsonValue::String("object".to_string())),
-            (
-                "properties".to_string(),
-                JsonValue::Object(JsonObject::new()),
-            ),
-            ("additionalProperties".to_string(), JsonValue::Bool(false)),
-        ]))
-    })
+    schema.unwrap_or_else(default_schema)
+}
+
+/// Normalizes an optional concrete or lazy schema.
+pub fn as_flexible_schema<T>(schema: Option<FlexibleSchema<T>>) -> Schema<T> {
+    schema.map_or_else(default_schema, FlexibleSchema::into_schema)
+}
+
+fn default_schema<T>() -> Schema<T> {
+    Schema::new(JsonObject::from_iter([
+        ("type".to_string(), JsonValue::String("object".to_string())),
+        (
+            "properties".to_string(),
+            JsonValue::Object(JsonObject::new()),
+        ),
+        ("additionalProperties".to_string(), JsonValue::Bool(false)),
+    ]))
 }
 
 /// Scalar value stored in dependency-free multipart form data.
@@ -6214,6 +6404,10 @@ mod tests {
     use std::ffi::OsString;
     use std::future::{Future, ready};
     use std::pin::Pin;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use std::task::{Context, Poll, Waker};
     use std::thread;
     use std::time::Duration;
@@ -6234,10 +6428,11 @@ mod tests {
     use super::{
         Arrayable, Base64DecodeError, BinaryResponseHandlerOptions, ConvertToFormDataOptions,
         DEFAULT_MAX_DOWNLOAD_SIZE, DelayedPromise, DownloadBlobOptions, DownloadBlobResponse,
-        DownloadError, DownloadedBlob, EventSourceResponseHandlerOptions, FetchErrorInfo, FormData,
-        FormDataEntry, FormDataInputValue, FormDataValue, GetFromApiOptions, HandledFetchError,
-        IdGeneratorOptions, InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
-        JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, LoadApiKeyOptions,
+        DownloadError, DownloadedBlob, EventSourceResponseHandlerOptions, FetchErrorInfo,
+        FlexibleSchema, FormData, FormDataEntry, FormDataInputValue, FormDataValue,
+        GetFromApiOptions, HandledFetchError, IdGeneratorOptions,
+        InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
+        JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, LazySchema, LoadApiKeyOptions,
         LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError, ParseJsonResult,
         PostJsonToApiOptions, PostToApiOptions, ProviderApiRequest, ProviderApiRequestBody,
         ProviderApiRequestMethod, ProviderApiResponse, ProviderApiResponseBody,
@@ -6247,10 +6442,11 @@ mod tests {
         StreamingToolCallDeltaFunction, StreamingToolCallTracker, StreamingToolCallTrackerOptions,
         StreamingToolCallTypeValidation, Tool, ToolExecutionError, ToolExecutionOptions,
         ValidateTypesResult, ValidationResult, add_additional_properties_to_json_schema, as_array,
-        as_schema, combine_headers, convert_base64_to_bytes, convert_bytes_to_base64,
-        convert_image_model_file_to_data_uri, convert_inline_file_data_to_bytes, convert_to_base64,
-        convert_to_form_data, create_binary_response_handler, create_event_source_response_handler,
-        create_id_generator, create_json_error_response_handler, create_json_response_handler,
+        as_flexible_schema, as_schema, combine_headers, convert_base64_to_bytes,
+        convert_bytes_to_base64, convert_image_model_file_to_data_uri,
+        convert_inline_file_data_to_bytes, convert_to_base64, convert_to_form_data,
+        create_binary_response_handler, create_event_source_response_handler, create_id_generator,
+        create_json_error_response_handler, create_json_response_handler,
         create_provider_defined_tool_factory,
         create_provider_defined_tool_factory_with_output_schema,
         create_provider_executed_tool_factory, create_status_code_error_response_handler,
@@ -6260,9 +6456,9 @@ mod tests {
         get_top_level_media_type, handle_fetch_error, handle_provider_api_response,
         inject_json_instruction, inject_json_instruction_into_messages, is_abort_error,
         is_custom_reasoning, is_full_media_type, is_non_nullable, is_parsable_json,
-        is_provider_reference, is_url_supported, json_schema, load_api_key, load_api_key_with_env,
-        load_optional_setting_with_env, load_setting, load_setting_with_env,
-        map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
+        is_provider_reference, is_url_supported, json_schema, lazy_json_schema, lazy_schema,
+        load_api_key, load_api_key_with_env, load_optional_setting_with_env, load_setting,
+        load_setting_with_env, map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
         media_type_to_extension, normalize_headers, parse_json, parse_json_event_stream,
         parse_provider_options, post_json_to_api, post_to_api, prepare_get_from_api_request,
         prepare_post_json_to_api_request, prepare_post_to_api_request, prepare_tools,
@@ -6592,6 +6788,60 @@ mod tests {
 
         assert_eq!(default_schema.json_schema(), &expected_default);
         assert!(format!("{default_schema:?}").contains("has_validator: false"));
+    }
+
+    #[test]
+    fn lazy_json_schema_defers_creation_and_caches_across_clones() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let schema = lazy_json_schema({
+            let calls = Arc::clone(&calls);
+            move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                object_schema()
+            }
+        });
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(schema.json_schema(), &object_schema());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let cloned = schema.clone();
+        assert_eq!(cloned.json_schema(), &object_schema());
+        assert_eq!(schema.json_schema(), &object_schema());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn lazy_schema_defers_whole_schema_creation_and_normalizes_as_flexible_schema() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let lazy: LazySchema = lazy_schema({
+            let calls = Arc::clone(&calls);
+            move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                json_schema(object_schema())
+            }
+        });
+
+        assert!(!lazy.is_initialized());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(format!("{lazy:?}").contains("is_initialized: false"));
+
+        let flexible = FlexibleSchema::from(lazy.clone());
+        let schema = as_flexible_schema(Some(flexible));
+
+        assert_eq!(schema.json_schema(), &object_schema());
+        assert!(lazy.is_initialized());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let second = as_flexible_schema(Some(FlexibleSchema::from(lazy.clone())));
+        assert_eq!(second.json_schema(), &object_schema());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let eager = as_flexible_schema(Some(FlexibleSchema::from(json_schema(object_schema()))));
+        assert_eq!(eager.json_schema(), &object_schema());
+
+        let default_schema: Schema = as_flexible_schema(None);
+        assert_eq!(default_schema.json_schema(), as_schema(None).json_schema());
     }
 
     #[test]
