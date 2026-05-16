@@ -90,14 +90,32 @@ impl fmt::Display for ModelType {
 pub struct NoSuchModelError {
     model_id: String,
     model_type: ModelType,
+    message: String,
 }
 
 impl NoSuchModelError {
     /// Creates an error for a missing provider model.
     pub fn new(model_id: impl Into<String>, model_type: ModelType) -> Self {
+        let model_id = model_id.into();
+        let message = no_such_model_default_message(&model_id, model_type);
+
+        Self {
+            model_id,
+            model_type,
+            message,
+        }
+    }
+
+    /// Creates an error with a caller-supplied message.
+    pub fn with_message(
+        model_id: impl Into<String>,
+        model_type: ModelType,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             model_id: model_id.into(),
             model_type,
+            message: message.into(),
         }
     }
 
@@ -111,19 +129,33 @@ impl NoSuchModelError {
         self.model_type
     }
 
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
     /// Converts this error into the requested provider-specific model id.
     pub fn into_model_id(self) -> String {
         self.model_id
+    }
+
+    /// Converts this error into its retained context and message.
+    pub fn into_parts(self) -> (String, ModelType, String) {
+        (self.model_id, self.model_type, self.message)
     }
 }
 
 impl fmt::Display for NoSuchModelError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "No such {}: {}", self.model_type, self.model_id)
+        formatter.write_str(&self.message)
     }
 }
 
 impl std::error::Error for NoSuchModelError {}
+
+fn no_such_model_default_message(model_id: &str, model_type: ModelType) -> String {
+    format!("No such {model_type}: {model_id}")
+}
 
 /// A provider-v4 provider for required model lookups.
 ///
@@ -1597,8 +1629,37 @@ mod tests {
 
         assert_eq!(error.model_id(), "gpt-4.1");
         assert_eq!(error.model_type(), ModelType::LanguageModel);
+        assert_eq!(error.message(), "No such languageModel: gpt-4.1");
         assert_eq!(error.to_string(), "No such languageModel: gpt-4.1");
         assert_eq!(error.into_model_id(), "gpt-4.1");
+    }
+
+    #[test]
+    fn no_such_model_error_accepts_upstream_custom_message() {
+        let error = NoSuchModelError::with_message(
+            "model",
+            ModelType::EmbeddingModel,
+            "Invalid embeddingModel id for registry: model (must be in the format \"providerId:modelId\")",
+        );
+
+        assert_eq!(error.model_id(), "model");
+        assert_eq!(error.model_type(), ModelType::EmbeddingModel);
+        assert_eq!(
+            error.message(),
+            "Invalid embeddingModel id for registry: model (must be in the format \"providerId:modelId\")"
+        );
+        assert_eq!(
+            error.to_string(),
+            "Invalid embeddingModel id for registry: model (must be in the format \"providerId:modelId\")"
+        );
+
+        let (model_id, model_type, message) = error.into_parts();
+        assert_eq!(model_id, "model");
+        assert_eq!(model_type, ModelType::EmbeddingModel);
+        assert_eq!(
+            message,
+            "Invalid embeddingModel id for registry: model (must be in the format \"providerId:modelId\")"
+        );
     }
 
     #[test]
