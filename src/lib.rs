@@ -143,7 +143,10 @@ pub use provider_utils::{
     safe_validate_types, serialize_model_options, strip_file_extension, validate_download_url,
     validate_types, with_provider_utils_user_agent, with_user_agent_suffix, without_trailing_slash,
 };
-pub use registry::NoSuchProviderError;
+pub use registry::{
+    NoSuchProviderError, ProviderRegistry, ProviderRegistryError, ProviderRegistryOptions,
+    create_provider_registry, create_provider_registry_with_options, split_registry_model_id,
+};
 pub use reranking_model::{
     RerankingModel, RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
     RerankingModelResponse, RerankingModelResult,
