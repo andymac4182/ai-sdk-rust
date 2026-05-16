@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -127,6 +128,178 @@ impl fmt::Debug for ToolInputRefinement {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ToolInputRefinement")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Future returned by a per-step preparation callback.
+pub type PrepareStepFuture<'a, M> = Pin<Box<dyn Future<Output = PrepareStepResult<'a, M>> + 'a>>;
+
+/// Function used to override settings for one generate-text model step.
+pub type PrepareStepFunction<'a, M> =
+    dyn Fn(PrepareStepOptions<'a, M>) -> PrepareStepFuture<'a, M> + 'a;
+
+/// Context passed to a per-step preparation callback.
+///
+/// This is the Rust-native equivalent of upstream `PrepareStepFunction`: it
+/// exposes the completed steps, the step number about to run, the current
+/// prompt messages, accumulated response messages, and mutable contexts.
+pub struct PrepareStepOptions<'a, M: LanguageModel + ?Sized> {
+    /// Steps that have already completed.
+    pub steps: Vec<GenerateTextStep>,
+
+    /// Zero-based step number that is about to run.
+    pub step_number: usize,
+
+    /// Default model for the generation call.
+    pub model: &'a M,
+
+    /// Messages that will be sent for this step unless overridden.
+    pub messages: LanguageModelPrompt,
+
+    /// Initial messages passed into generate_text before any response messages.
+    pub initial_messages: LanguageModelPrompt,
+
+    /// Response messages accumulated from initial approvals and previous steps.
+    pub response_messages: Vec<LanguageModelMessage>,
+
+    /// Runtime context carried by the generation loop.
+    pub runtime_context: JsonObject,
+
+    /// Tool context carried by the generation loop.
+    pub tools_context: JsonObject,
+}
+
+/// Per-step settings returned by a preparation callback.
+///
+/// Missing fields keep the outer generate-text settings. Message, runtime
+/// context, and tool context overrides carry forward to later steps, matching
+/// upstream `prepareStep` behavior.
+#[derive(Debug)]
+pub struct PrepareStepResult<'a, M: LanguageModel + ?Sized> {
+    /// Optional same-type model override for this step.
+    pub model: Option<&'a M>,
+
+    /// Optional tool-choice override for this step.
+    pub tool_choice: Option<LanguageModelToolChoice>,
+
+    /// Optional active-tool override for this step.
+    pub active_tools: Option<Vec<String>>,
+
+    /// Optional full prompt-message override. Carries forward after this step.
+    pub messages: Option<LanguageModelPrompt>,
+
+    /// Optional runtime context override. Carries forward after this step.
+    pub runtime_context: Option<JsonObject>,
+
+    /// Optional tool context override. Carries forward after this step.
+    pub tools_context: Option<JsonObject>,
+
+    /// Optional provider-specific option override for this step.
+    pub provider_options: Option<ProviderOptions>,
+}
+
+impl<'a, M: LanguageModel + ?Sized> PrepareStepResult<'a, M> {
+    /// Creates an empty result that keeps all outer settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Overrides the model used for this step.
+    pub fn with_model(mut self, model: &'a M) -> Self {
+        self.model = Some(model);
+        self
+    }
+
+    /// Overrides the tool-choice strategy for this step.
+    pub fn with_tool_choice(mut self, tool_choice: LanguageModelToolChoice) -> Self {
+        self.tool_choice = Some(tool_choice);
+        self
+    }
+
+    /// Overrides the active tool names for this step.
+    pub fn with_active_tools(
+        mut self,
+        active_tools: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.active_tools = Some(active_tools.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Overrides the prompt messages for this step and subsequent steps.
+    pub fn with_messages(mut self, messages: LanguageModelPrompt) -> Self {
+        self.messages = Some(messages);
+        self
+    }
+
+    /// Overrides runtime context for this step and subsequent steps.
+    pub fn with_runtime_context(mut self, runtime_context: JsonObject) -> Self {
+        self.runtime_context = Some(runtime_context);
+        self
+    }
+
+    /// Overrides tool context for this step and subsequent steps.
+    pub fn with_tools_context(mut self, tools_context: JsonObject) -> Self {
+        self.tools_context = Some(tools_context);
+        self
+    }
+
+    /// Adds provider-specific options for this step.
+    pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
+        self.provider_options = Some(provider_options);
+        self
+    }
+}
+
+impl<M: LanguageModel + ?Sized> Default for PrepareStepResult<'_, M> {
+    fn default() -> Self {
+        Self {
+            model: None,
+            tool_choice: None,
+            active_tools: None,
+            messages: None,
+            runtime_context: None,
+            tools_context: None,
+            provider_options: None,
+        }
+    }
+}
+
+/// Per-step preparation callback for high-level generate-text calls.
+pub struct PrepareStep<'a, M: LanguageModel + ?Sized> {
+    prepare: Rc<PrepareStepFunction<'a, M>>,
+}
+
+impl<'a, M: LanguageModel + ?Sized> PrepareStep<'a, M> {
+    /// Creates a per-step preparation callback.
+    pub fn new<F, Fut>(prepare: F) -> Self
+    where
+        F: Fn(PrepareStepOptions<'a, M>) -> Fut + 'a,
+        Fut: Future<Output = PrepareStepResult<'a, M>> + 'a,
+    {
+        Self {
+            prepare: Rc::new(move |options| Box::pin(prepare(options))),
+        }
+    }
+
+    /// Runs the preparation callback.
+    pub fn prepare(&self, options: PrepareStepOptions<'a, M>) -> PrepareStepFuture<'a, M> {
+        (self.prepare)(options)
+    }
+}
+
+impl<M: LanguageModel + ?Sized> Clone for PrepareStep<'_, M> {
+    fn clone(&self) -> Self {
+        Self {
+            prepare: Rc::clone(&self.prepare),
+        }
+    }
+}
+
+impl<M: LanguageModel + ?Sized> fmt::Debug for PrepareStep<'_, M> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PrepareStep")
             .finish_non_exhaustive()
     }
 }
@@ -1744,6 +1917,9 @@ pub struct GenerateTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Per-tool input refinements applied after parsing valid tool calls.
     pub tool_input_refinements: BTreeMap<String, ToolInputRefinement>,
 
+    /// Optional per-step preparation callback.
+    pub prepare_step: Option<PrepareStep<'a, M>>,
+
     /// Maximum number of model-call steps to run.
     pub max_steps: usize,
 
@@ -1766,6 +1942,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             active_tools: None,
             tool_approval: None,
             tool_input_refinements: BTreeMap::new(),
+            prepare_step: None,
             max_steps: DEFAULT_MAX_STEPS,
             stop_conditions: Vec::new(),
             include: GenerateTextInclude::default(),
@@ -1783,6 +1960,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             active_tools: None,
             tool_approval: None,
             tool_input_refinements: BTreeMap::new(),
+            prepare_step: None,
             max_steps: DEFAULT_MAX_STEPS,
             stop_conditions: Vec::new(),
             include: GenerateTextInclude::default(),
@@ -1921,6 +2099,19 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
     {
         self.tool_input_refinements
             .insert(tool_name.into(), ToolInputRefinement::new(refine));
+        self
+    }
+
+    /// Sets a per-step preparation callback.
+    ///
+    /// The callback can override the same-type model, tool choice, active
+    /// tools, prompt messages, contexts, and provider options for each step.
+    pub fn with_prepare_step<F, Fut>(mut self, prepare: F) -> Self
+    where
+        F: Fn(PrepareStepOptions<'a, M>) -> Fut + 'a,
+        Fut: Future<Output = PrepareStepResult<'a, M>> + 'a,
+    {
+        self.prepare_step = Some(PrepareStep::new(prepare));
         self
     }
 
@@ -2679,36 +2870,29 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
     let GenerateTextOptions {
         model,
         mut call_options,
-        mut tools,
-        runtime_context,
-        tools_context,
+        tools,
+        mut runtime_context,
+        mut tools_context,
         active_tools,
         tool_approval,
         tool_input_refinements,
+        prepare_step,
         max_steps,
         stop_conditions,
         include,
     } = options;
-    let model_info = GenerateTextModelInfo::new(model.provider(), model.model_id());
+    let base_language_model_tools = call_options.tools.take();
+    let initial_messages = call_options.prompt.clone();
+    let mut current_prompt = initial_messages.clone();
     let active_tools = active_tools.as_deref();
+    let base_provider_options = call_options.provider_options.clone();
 
-    if active_tools.is_some() {
-        tools = filter_active_tools(Some(tools), active_tools).unwrap_or_default();
-        call_options.tools =
-            filter_active_language_model_tools(call_options.tools.take(), active_tools);
-    }
-
-    if let Some(mut prepared_tools) = prepare_tools(&tools) {
-        call_options
-            .tools
-            .get_or_insert_with(Vec::new)
-            .append(&mut prepared_tools);
-    }
-
+    let mut initial_response_messages = Vec::new();
     if let Some(message) =
-        initial_tool_approval_response_message(&call_options.prompt, &tools, &tools_context).await
+        initial_tool_approval_response_message(&current_prompt, &tools, &tools_context).await
     {
-        call_options.prompt.push(message);
+        current_prompt.push(message.clone());
+        initial_response_messages.push(message);
     }
 
     let max_steps = max_steps.max(1);
@@ -2717,35 +2901,104 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
     let mut pending_deferred_provider_tool_call_ids = BTreeSet::new();
 
     for step_number in 0..max_steps {
-        let step_prompt = call_options.prompt.clone();
+        let accumulated_response_messages =
+            accumulated_response_messages(&initial_response_messages, &steps);
+        let prepare_step_result = if let Some(prepare_step) = &prepare_step {
+            prepare_step
+                .prepare(PrepareStepOptions {
+                    steps: steps.clone(),
+                    step_number,
+                    model,
+                    messages: current_prompt.clone(),
+                    initial_messages: initial_messages.clone(),
+                    response_messages: accumulated_response_messages,
+                    runtime_context: runtime_context.clone(),
+                    tools_context: tools_context.clone(),
+                })
+                .await
+        } else {
+            PrepareStepResult::default()
+        };
+
+        let PrepareStepResult {
+            model: step_model,
+            tool_choice: step_tool_choice,
+            active_tools: step_active_tools,
+            messages: step_messages,
+            runtime_context: step_runtime_context,
+            tools_context: step_tools_context,
+            provider_options: step_provider_options,
+        } = prepare_step_result;
+
+        if let Some(runtime_context_override) = step_runtime_context {
+            runtime_context = runtime_context_override;
+        }
+
+        if let Some(tools_context_override) = step_tools_context {
+            tools_context = tools_context_override;
+        }
+
+        if let Some(messages_override) = step_messages {
+            current_prompt = messages_override;
+        }
+
+        let step_model = step_model.unwrap_or(model);
+        let step_model_info =
+            GenerateTextModelInfo::new(step_model.provider(), step_model.model_id());
+        let step_active_tools = step_active_tools.as_deref().or(active_tools);
+        let step_tools =
+            filter_active_tools(Some(tools.clone()), step_active_tools).unwrap_or_default();
+        let mut step_language_model_tools = filter_active_language_model_tools(
+            base_language_model_tools.clone(),
+            step_active_tools,
+        );
+
+        if let Some(mut prepared_tools) = prepare_tools(&step_tools) {
+            step_language_model_tools
+                .get_or_insert_with(Vec::new)
+                .append(&mut prepared_tools);
+        }
+
+        let mut step_call_options = call_options.clone();
+        step_call_options.prompt = current_prompt.clone();
+        step_call_options.tools = step_language_model_tools;
+
+        if let Some(tool_choice) = step_tool_choice {
+            step_call_options.tool_choice = Some(tool_choice);
+        }
+
+        step_call_options.provider_options =
+            merge_provider_options(base_provider_options.as_ref(), step_provider_options);
+
+        let step_prompt = step_call_options.prompt.clone();
         let step_started_at = Instant::now();
-        let result = model.do_generate(call_options.clone()).await;
+        let result = step_model.do_generate(step_call_options.clone()).await;
         let response_time_ms = duration_ms(step_started_at.elapsed());
         let mut step = GenerateTextStep::from_language_model_result(
             call_id.clone(),
             step_number,
-            model_info.clone(),
+            step_model_info,
             result,
         );
         step.runtime_context = runtime_context.clone();
         step.tools_context = tools_context.clone();
-        mark_unavailable_tool_calls(&mut step.tool_calls, call_options.tools.as_deref());
+        mark_unavailable_tool_calls(&mut step.tool_calls, step_call_options.tools.as_deref());
         refine_tool_inputs(&mut step.tool_calls, &tool_input_refinements).await;
         sync_tool_result_inputs(&mut step.tool_results, &step.tool_calls);
-        mark_runtime_dynamic_tool_calls(&mut step.tool_calls, &tools);
-        mark_tool_call_titles(&mut step.tool_calls, &tools);
-        mark_tool_call_metadata(&mut step.tool_calls, &tools);
-        mark_tool_result_metadata(&mut step.tool_results, &step.tool_calls, &tools);
+        mark_runtime_dynamic_tool_calls(&mut step.tool_calls, &step_tools);
+        mark_tool_call_titles(&mut step.tool_calls, &step_tools);
+        mark_tool_call_metadata(&mut step.tool_calls, &step_tools);
+        mark_tool_result_metadata(&mut step.tool_results, &step.tool_calls, &step_tools);
         refresh_tool_call_views(&mut step);
         let tool_approvals =
-            resolve_tool_approvals_for_step(&step.tool_calls, &tools, tool_approval.as_ref());
+            resolve_tool_approvals_for_step(&step.tool_calls, &step_tools, tool_approval.as_ref());
         update_pending_deferred_provider_tool_calls(
             &mut pending_deferred_provider_tool_call_ids,
             &step,
-            &tools,
+            &step_tools,
         );
         let (tool_results, tool_execution_ms) = execute_tool_calls(
-            &tools,
+            &step_tools,
             &step.tool_calls,
             &step_prompt,
             &tools_context,
@@ -2759,7 +3012,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
             !pending_deferred_provider_tool_call_ids.is_empty(),
         );
         step.tool_results.extend(tool_results);
-        mark_tool_result_metadata(&mut step.tool_results, &step.tool_calls, &tools);
+        mark_tool_result_metadata(&mut step.tool_results, &step.tool_calls, &step_tools);
         refresh_tool_result_views(&mut step);
         step.response_messages =
             response_messages_for_step(&step, &tool_approvals).unwrap_or_default();
@@ -2782,7 +3035,8 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
             if response_messages.is_empty() {
                 break;
             } else {
-                call_options.prompt.extend(response_messages);
+                current_prompt = step_prompt;
+                current_prompt.extend(response_messages);
             }
         } else {
             break;
@@ -2790,6 +3044,34 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
     }
 
     GenerateTextResult::from_steps(steps)
+}
+
+fn accumulated_response_messages(
+    initial_response_messages: &[LanguageModelMessage],
+    steps: &[GenerateTextStep],
+) -> Vec<LanguageModelMessage> {
+    initial_response_messages
+        .iter()
+        .chain(steps.iter().flat_map(|step| step.response_messages.iter()))
+        .cloned()
+        .collect()
+}
+
+fn merge_provider_options(
+    base_provider_options: Option<&ProviderOptions>,
+    step_provider_options: Option<ProviderOptions>,
+) -> Option<ProviderOptions> {
+    if base_provider_options.is_none() && step_provider_options.is_none() {
+        return None;
+    }
+
+    let mut provider_options = base_provider_options.cloned().unwrap_or_default();
+
+    if let Some(step_provider_options) = step_provider_options {
+        provider_options.extend(step_provider_options);
+    }
+
+    Some(provider_options)
 }
 
 fn generate_text_call_id() -> String {
@@ -4213,15 +4495,15 @@ mod tests {
         GenerateTextResult, GenerateTextStep, GenerateTextStepPerformance, GenerateTextToolCall,
         GenerateTextToolResult, InvalidStreamPartError, InvalidToolApprovalError,
         InvalidToolInputError, MissingToolResultsError, NoObjectGeneratedError,
-        NoOutputGeneratedError, NoSuchToolError, NormalizedToolApprovalStatus, PruneEmptyMessages,
-        PruneMessagesOptions, PruneReasoning, PruneToolCallRule, PruneToolCallRuleMode,
-        PruneToolCalls, ResolveToolApprovalOptions, StopCondition, ToolApprovalConfiguration,
-        ToolApprovalStatus, ToolApprovalStatusKind, ToolCallNotFoundForApprovalError,
-        ToolCallRepairError, ToolCallRepairOriginalError, ToolInputRefinementError,
-        UiMessageStreamError, UnsupportedModelVersionError, collect_tool_approvals,
-        experimental_filter_active_tools, filter_active_tools, generate_text, has_tool_call,
-        is_loop_finished, is_step_count, is_stop_condition_met, normalize_tool_approval_status,
-        prune_messages, resolve_tool_approval, step_count_is,
+        NoOutputGeneratedError, NoSuchToolError, NormalizedToolApprovalStatus, PrepareStepResult,
+        PruneEmptyMessages, PruneMessagesOptions, PruneReasoning, PruneToolCallRule,
+        PruneToolCallRuleMode, PruneToolCalls, ResolveToolApprovalOptions, StopCondition,
+        ToolApprovalConfiguration, ToolApprovalStatus, ToolApprovalStatusKind,
+        ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOriginalError,
+        ToolInputRefinementError, UiMessageStreamError, UnsupportedModelVersionError,
+        collect_tool_approvals, experimental_filter_active_tools, filter_active_tools,
+        generate_text, has_tool_call, is_loop_finished, is_step_count, is_stop_condition_met,
+        normalize_tool_approval_status, prune_messages, resolve_tool_approval, step_count_is,
     };
     use crate::file_data::FileDataContent;
     use crate::json::JsonValue;
@@ -4236,10 +4518,10 @@ mod tests {
         LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextDelta,
         LanguageModelTextPart, LanguageModelTool, LanguageModelToolApprovalRequest,
         LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
-        LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolContentPart,
-        LanguageModelToolMessage, LanguageModelToolResult, LanguageModelToolResultOutput,
-        LanguageModelToolResultPart, LanguageModelUsage, LanguageModelUserContentPart,
-        LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolChoice,
+        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResult,
+        LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
+        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::provider::{JsonParseError, ProviderMetadata, SpecificationVersion};
     use crate::provider_utils::{Tool, ToolExecutionError, dynamic_tool};
@@ -6422,6 +6704,167 @@ mod tests {
                 LanguageModelProviderTool::new("provider.web_search", "webSearch", args)
             )])
         );
+    }
+
+    #[test]
+    fn generate_text_prepare_step_overrides_step_settings_and_carries_contexts() {
+        let model = ToolLoopLanguageModel::new();
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema.clone()).with_execute(
+                    |_input, options| async move {
+                        Ok(options.context.unwrap_or_else(|| json!("missing context")))
+                    },
+                ))
+                .with_tool(Tool::new("forecast", input_schema))
+                .with_prepare_step(|options| async move {
+                    assert_eq!(options.initial_messages, vec![user_message("Weather?")]);
+
+                    let mut runtime_context = serde_json::Map::new();
+                    runtime_context.insert(
+                        "tenant".to_string(),
+                        JsonValue::String(format!("step-{}", options.step_number)),
+                    );
+
+                    let mut weather_context = serde_json::Map::new();
+                    weather_context.insert(
+                        "unit".to_string(),
+                        JsonValue::String(format!("unit-{}", options.step_number)),
+                    );
+
+                    let mut tools_context = serde_json::Map::new();
+                    tools_context.insert("weather".to_string(), JsonValue::Object(weather_context));
+
+                    let mut test_options = serde_json::Map::new();
+                    test_options.insert(
+                        "step".to_string(),
+                        JsonValue::Number(options.step_number.into()),
+                    );
+
+                    let mut provider_options = BTreeMap::new();
+                    provider_options.insert("test".to_string(), test_options);
+
+                    let result = PrepareStepResult::new()
+                        .with_runtime_context(runtime_context)
+                        .with_tools_context(tools_context)
+                        .with_provider_options(provider_options);
+
+                    if options.step_number == 0 {
+                        result.with_active_tools(["weather"]).with_tool_choice(
+                            LanguageModelToolChoice::Tool {
+                                tool_name: "weather".to_string(),
+                            },
+                        )
+                    } else {
+                        assert_eq!(options.steps.len(), 1);
+                        assert!(!options.response_messages.is_empty());
+                        result
+                            .with_active_tools(["forecast"])
+                            .with_messages(vec![user_message("Prepared second step")])
+                    }
+                })
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(model.calls.borrow().len(), 2);
+        assert_eq!(
+            model.calls.borrow()[0].tools,
+            Some(vec![LanguageModelTool::Function(
+                LanguageModelFunctionTool::new(
+                    "weather",
+                    json!({ "type": "object" })
+                        .as_object()
+                        .expect("schema is an object")
+                        .clone()
+                )
+            )])
+        );
+        assert_eq!(
+            model.calls.borrow()[0].tool_choice,
+            Some(LanguageModelToolChoice::Tool {
+                tool_name: "weather".to_string()
+            })
+        );
+        assert_eq!(
+            model.calls.borrow()[0].provider_options.as_ref(),
+            Some(&BTreeMap::from([(
+                "test".to_string(),
+                json!({ "step": 0 })
+                    .as_object()
+                    .expect("provider options are an object")
+                    .clone()
+            )]))
+        );
+        assert_eq!(
+            model.calls.borrow()[1].tools,
+            Some(vec![LanguageModelTool::Function(
+                LanguageModelFunctionTool::new(
+                    "forecast",
+                    json!({ "type": "object" })
+                        .as_object()
+                        .expect("schema is an object")
+                        .clone()
+                )
+            )])
+        );
+        assert_eq!(
+            model.calls.borrow()[1].prompt,
+            vec![user_message("Prepared second step")]
+        );
+        assert_eq!(
+            model.calls.borrow()[1].provider_options.as_ref(),
+            Some(&BTreeMap::from([(
+                "test".to_string(),
+                json!({ "step": 1 })
+                    .as_object()
+                    .expect("provider options are an object")
+                    .clone()
+            )]))
+        );
+        assert_eq!(
+            result.steps[0].runtime_context,
+            json!({ "tenant": "step-0" })
+                .as_object()
+                .expect("runtime context is an object")
+                .clone()
+        );
+        assert_eq!(
+            result.steps[0].tool_results[0].output,
+            json!({ "unit": "unit-0" })
+        );
+        assert_eq!(
+            result.steps[1].runtime_context,
+            json!({ "tenant": "step-1" })
+                .as_object()
+                .expect("runtime context is an object")
+                .clone()
+        );
+    }
+
+    #[test]
+    fn generate_text_prepare_step_can_override_model_with_same_model_type() {
+        let primary = FakeLanguageModel::new().with_content(vec![LanguageModelContent::Text(
+            LanguageModelText::new("primary"),
+        )]);
+        let secondary = FakeLanguageModel::new().with_content(vec![LanguageModelContent::Text(
+            LanguageModelText::new("secondary"),
+        )]);
+        let secondary_model = &secondary;
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&primary, vec![user_message("Hello")]).with_prepare_step(
+                move |_options| async move { PrepareStepResult::new().with_model(secondary_model) },
+            ),
+        ));
+
+        assert_eq!(result.text, "secondary");
+        assert!(primary.calls.borrow().is_empty());
+        assert_eq!(secondary.calls.borrow().len(), 1);
     }
 
     #[test]
