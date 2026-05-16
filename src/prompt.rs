@@ -7,7 +7,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::file_data::FileDataContent;
 use crate::headers::Headers;
 use crate::json::JsonValue;
-use crate::language_model::{LanguageModelPrompt, LanguageModelSystemMessage};
+use crate::language_model::{
+    LanguageModelMessage, LanguageModelPrompt, LanguageModelSystemMessage, LanguageModelTextPart,
+    LanguageModelUserContentPart, LanguageModelUserMessage,
+};
+use crate::provider::InvalidPromptError;
 use crate::provider_utils::convert_to_base64;
 
 /// Timeout configuration for high-level model and tool requests.
@@ -306,6 +310,35 @@ pub enum PromptSource {
     Messages(LanguageModelPrompt),
 }
 
+/// Normalized prompt input ready for model-call preparation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StandardizedPrompt {
+    /// Instructions normalized from `instructions` or the deprecated `system`
+    /// alias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<Instructions>,
+
+    /// Model messages normalized from text prompts, prompt messages, or
+    /// messages.
+    pub messages: LanguageModelPrompt,
+}
+
+impl StandardizedPrompt {
+    /// Creates a standardized prompt from optional instructions and messages.
+    pub fn new(instructions: Option<Instructions>, messages: LanguageModelPrompt) -> Self {
+        Self {
+            instructions,
+            messages,
+        }
+    }
+
+    /// Converts this standardized prompt into its provider-facing messages.
+    pub fn into_messages(self) -> LanguageModelPrompt {
+        self.messages
+    }
+}
+
 /// Granular request timeout settings.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -449,6 +482,56 @@ pub fn get_tool_timeout_ms(timeout: Option<&TimeoutConfiguration>, tool_name: &s
         .get(&format!("{tool_name}Ms"))
         .copied()
         .or(options.tool_ms)
+}
+
+/// Converts a high-level prompt into normalized model messages.
+///
+/// This mirrors upstream `standardizePrompt` for the Rust prompt boundary:
+/// text prompts become a single user text message, `instructions` takes
+/// precedence over the deprecated `system` alias, empty message arrays are
+/// rejected, and system messages are only allowed in prompt/message fields when
+/// explicitly enabled.
+pub fn standardize_prompt(prompt: Prompt) -> Result<StandardizedPrompt, InvalidPromptError> {
+    let prompt_value = serde_json::to_value(&prompt).unwrap_or(JsonValue::Null);
+    let Prompt {
+        instructions,
+        system,
+        allow_system_in_messages,
+        source,
+    } = prompt;
+
+    let instructions = instructions.or(system);
+    let messages = match source {
+        PromptSource::Prompt(PromptInput::Text(text)) => {
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::Text(
+                    LanguageModelTextPart::new(text),
+                )],
+            ))]
+        }
+        PromptSource::Prompt(PromptInput::Messages(messages))
+        | PromptSource::Messages(messages) => messages,
+    };
+
+    if messages.is_empty() {
+        return Err(InvalidPromptError::new(
+            prompt_value,
+            "messages must not be empty",
+        ));
+    }
+
+    if !allow_system_in_messages
+        && messages
+            .iter()
+            .any(|message| matches!(message, LanguageModelMessage::System(_)))
+    {
+        return Err(InvalidPromptError::new(
+            prompt_value,
+            "System messages are not allowed in the prompt or messages fields. Use the instructions option instead.",
+        ));
+    }
+
+    Ok(StandardizedPrompt::new(instructions, messages))
 }
 
 /// Converts prompt data content to a base64-encoded string.
@@ -632,9 +715,10 @@ mod tests {
 
     use super::{
         Instructions, InvalidDataContentError, InvalidMessageRoleError, MessageConversionError,
-        Prompt, PromptInput, PromptSource, RequestOptions, TimeoutConfiguration,
-        TimeoutConfigurationOptions, convert_data_content_to_base64_string, get_chunk_timeout_ms,
-        get_step_timeout_ms, get_tool_timeout_ms, get_total_timeout_ms,
+        Prompt, PromptInput, PromptSource, RequestOptions, StandardizedPrompt,
+        TimeoutConfiguration, TimeoutConfigurationOptions, convert_data_content_to_base64_string,
+        get_chunk_timeout_ms, get_step_timeout_ms, get_tool_timeout_ms, get_total_timeout_ms,
+        standardize_prompt,
     };
 
     fn user_text_message(text: &str) -> LanguageModelMessage {
@@ -860,6 +944,94 @@ mod tests {
             prompt.source,
             PromptSource::Prompt(PromptInput::Text("Hello".to_string()))
         );
+    }
+
+    #[test]
+    fn standardize_prompt_converts_text_prompt_and_prefers_instructions() {
+        let standardized = standardize_prompt(
+            Prompt::from_prompt("Hello, world!")
+                .with_system("SYSTEM")
+                .with_instructions("INSTRUCTIONS"),
+        )
+        .expect("prompt standardizes");
+
+        let expected = StandardizedPrompt::new(
+            Some(Instructions::text("INSTRUCTIONS")),
+            vec![user_text_message("Hello, world!")],
+        );
+
+        assert_eq!(standardized, expected);
+        assert_eq!(
+            serde_json::to_value(&standardized).expect("standardized prompt serializes"),
+            json!({
+                "instructions": "INSTRUCTIONS",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Hello, world!"
+                            }
+                        ]
+                    }
+                ]
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<StandardizedPrompt>(
+                serde_json::to_value(&standardized).expect("standardized prompt serializes")
+            )
+            .expect("standardized prompt deserializes"),
+            standardized
+        );
+    }
+
+    #[test]
+    fn standardize_prompt_falls_back_to_system_alias() {
+        let standardized =
+            standardize_prompt(Prompt::from_prompt("Hello").with_system(system_message("SYSTEM")))
+                .expect("prompt standardizes");
+
+        assert_eq!(
+            standardized.instructions,
+            Some(Instructions::message(system_message("SYSTEM")))
+        );
+        assert_eq!(standardized.messages, vec![user_text_message("Hello")]);
+    }
+
+    #[test]
+    fn standardize_prompt_rejects_empty_message_arrays() {
+        let error = standardize_prompt(Prompt::from_messages(Vec::new()))
+            .expect_err("empty messages are rejected");
+
+        assert_eq!(
+            error.message(),
+            "Invalid prompt: messages must not be empty"
+        );
+    }
+
+    #[test]
+    fn standardize_prompt_enforces_system_message_location() {
+        let messages = vec![
+            LanguageModelMessage::System(system_message("SYSTEM")),
+            user_text_message("Hello"),
+        ];
+
+        let error = standardize_prompt(Prompt::from_messages(messages.clone()))
+            .expect_err("system messages are rejected by default");
+        assert_eq!(
+            error.message(),
+            "Invalid prompt: System messages are not allowed in the prompt or messages fields. Use the instructions option instead."
+        );
+
+        let standardized = standardize_prompt(
+            Prompt::from_messages(messages.clone()).with_allow_system_in_messages(true),
+        )
+        .expect("system messages are allowed when configured");
+
+        assert_eq!(standardized.messages, messages);
+        assert_eq!(standardized.instructions, None);
     }
 
     #[test]
