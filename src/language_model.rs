@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use url::Url;
 
-use crate::file_data::FileDataContent;
-use crate::json::{JsonObject, JsonSchema, NonNullJsonValue};
+use crate::file_data::{FileData, FileDataContent};
+use crate::json::{JsonObject, JsonSchema, JsonValue, NonNullJsonValue};
 use crate::provider::{ProviderMetadata, ProviderOptions};
 
 /// Unified reason why a language model finished generating a response.
@@ -868,19 +868,823 @@ pub enum LanguageModelToolChoice {
     },
 }
 
+/// A standardized prompt passed to a language model provider.
+pub type LanguageModelPrompt = Vec<LanguageModelMessage>;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelSystemMessageRole {
+    #[serde(rename = "system")]
+    System,
+}
+
+/// System message in a standardized language model prompt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelSystemMessage {
+    role: LanguageModelSystemMessageRole,
+
+    /// System instruction text.
+    pub content: String,
+
+    /// Provider-specific options for this message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+}
+
+impl LanguageModelSystemMessage {
+    /// Creates a system prompt message.
+    pub fn new(content: impl Into<String>) -> Self {
+        Self {
+            role: LanguageModelSystemMessageRole::System,
+            content: content.into(),
+            provider_options: None,
+        }
+    }
+
+    /// Adds provider-specific options to this message.
+    pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
+        self.provider_options = Some(provider_options);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelUserMessageRole {
+    #[serde(rename = "user")]
+    User,
+}
+
+/// User message in a standardized language model prompt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelUserMessage {
+    role: LanguageModelUserMessageRole,
+
+    /// User-provided content parts.
+    pub content: Vec<LanguageModelUserContentPart>,
+
+    /// Provider-specific options for this message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+}
+
+impl LanguageModelUserMessage {
+    /// Creates a user prompt message.
+    pub fn new(content: Vec<LanguageModelUserContentPart>) -> Self {
+        Self {
+            role: LanguageModelUserMessageRole::User,
+            content,
+            provider_options: None,
+        }
+    }
+
+    /// Adds provider-specific options to this message.
+    pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
+        self.provider_options = Some(provider_options);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelAssistantMessageRole {
+    #[serde(rename = "assistant")]
+    Assistant,
+}
+
+/// Assistant message in a standardized language model prompt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelAssistantMessage {
+    role: LanguageModelAssistantMessageRole,
+
+    /// Assistant-produced content parts.
+    pub content: Vec<LanguageModelAssistantContentPart>,
+
+    /// Provider-specific options for this message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+}
+
+impl LanguageModelAssistantMessage {
+    /// Creates an assistant prompt message.
+    pub fn new(content: Vec<LanguageModelAssistantContentPart>) -> Self {
+        Self {
+            role: LanguageModelAssistantMessageRole::Assistant,
+            content,
+            provider_options: None,
+        }
+    }
+
+    /// Adds provider-specific options to this message.
+    pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
+        self.provider_options = Some(provider_options);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelToolMessageRole {
+    #[serde(rename = "tool")]
+    Tool,
+}
+
+/// Tool message in a standardized language model prompt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelToolMessage {
+    role: LanguageModelToolMessageRole,
+
+    /// Tool result or approval response content parts.
+    pub content: Vec<LanguageModelToolContentPart>,
+
+    /// Provider-specific options for this message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+}
+
+impl LanguageModelToolMessage {
+    /// Creates a tool prompt message.
+    pub fn new(content: Vec<LanguageModelToolContentPart>) -> Self {
+        Self {
+            role: LanguageModelToolMessageRole::Tool,
+            content,
+            provider_options: None,
+        }
+    }
+
+    /// Adds provider-specific options to this message.
+    pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
+        self.provider_options = Some(provider_options);
+        self
+    }
+}
+
+/// A message in a standardized language model prompt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum LanguageModelMessage {
+    /// System instruction message.
+    System(LanguageModelSystemMessage),
+
+    /// User message with text or file input parts.
+    User(LanguageModelUserMessage),
+
+    /// Assistant message with generated prompt-history parts.
+    Assistant(LanguageModelAssistantMessage),
+
+    /// Tool message with tool results or approval responses.
+    Tool(LanguageModelToolMessage),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelTextPartKind {
+    #[serde(rename = "text")]
+    Text,
+}
+
+/// Text content part in a standardized prompt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelTextPart {
+    #[serde(rename = "type")]
+    kind: LanguageModelTextPartKind,
+
+    /// The text content.
+    pub text: String,
+
+    /// Provider-specific options for this content part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+}
+
+impl LanguageModelTextPart {
+    /// Creates a text prompt part.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            kind: LanguageModelTextPartKind::Text,
+            text: text.into(),
+            provider_options: None,
+        }
+    }
+
+    /// Adds provider-specific options to this content part.
+    pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
+        self.provider_options = Some(provider_options);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelReasoningPartKind {
+    #[serde(rename = "reasoning")]
+    Reasoning,
+}
+
+/// Reasoning content part in a standardized prompt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelReasoningPart {
+    #[serde(rename = "type")]
+    kind: LanguageModelReasoningPartKind,
+
+    /// The reasoning text.
+    pub text: String,
+
+    /// Provider-specific options for this content part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+}
+
+impl LanguageModelReasoningPart {
+    /// Creates a reasoning prompt part.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            kind: LanguageModelReasoningPartKind::Reasoning,
+            text: text.into(),
+            provider_options: None,
+        }
+    }
+
+    /// Adds provider-specific options to this content part.
+    pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
+        self.provider_options = Some(provider_options);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelReasoningFilePartKind {
+    #[serde(rename = "reasoning-file")]
+    ReasoningFile,
+}
+
+/// Reasoning file content part in a standardized prompt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelReasoningFilePart {
+    #[serde(rename = "type")]
+    kind: LanguageModelReasoningFilePartKind,
+
+    /// Reasoning file data.
+    pub data: LanguageModelFileData,
+
+    /// The IANA media type of the reasoning file.
+    pub media_type: String,
+
+    /// Provider-specific options for this content part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+}
+
+impl LanguageModelReasoningFilePart {
+    /// Creates a reasoning file prompt part.
+    pub fn new(data: LanguageModelFileData, media_type: impl Into<String>) -> Self {
+        Self {
+            kind: LanguageModelReasoningFilePartKind::ReasoningFile,
+            data,
+            media_type: media_type.into(),
+            provider_options: None,
+        }
+    }
+
+    /// Adds provider-specific options to this content part.
+    pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
+        self.provider_options = Some(provider_options);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelCustomPartKind {
+    #[serde(rename = "custom")]
+    Custom,
+}
+
+/// Provider-specific prompt content part.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelCustomPart {
+    #[serde(rename = "type")]
+    part_type: LanguageModelCustomPartKind,
+
+    /// Provider-specific kind in the `{provider}.{provider-type}` format.
+    pub kind: String,
+
+    /// Provider-specific options for this content part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+}
+
+impl LanguageModelCustomPart {
+    /// Creates a provider-specific prompt part.
+    pub fn new(kind: impl Into<String>) -> Self {
+        Self {
+            part_type: LanguageModelCustomPartKind::Custom,
+            kind: kind.into(),
+            provider_options: None,
+        }
+    }
+
+    /// Adds provider-specific options to this content part.
+    pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
+        self.provider_options = Some(provider_options);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelFilePartKind {
+    #[serde(rename = "file")]
+    File,
+}
+
+/// File content part in a standardized prompt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelFilePart {
+    #[serde(rename = "type")]
+    kind: LanguageModelFilePartKind,
+
+    /// Optional filename of the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+
+    /// Prompt file data.
+    pub data: FileData,
+
+    /// The IANA media type or top-level media segment of the file.
+    pub media_type: String,
+
+    /// Provider-specific options for this content part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+}
+
+impl LanguageModelFilePart {
+    /// Creates a file prompt part.
+    pub fn new(data: FileData, media_type: impl Into<String>) -> Self {
+        Self {
+            kind: LanguageModelFilePartKind::File,
+            filename: None,
+            data,
+            media_type: media_type.into(),
+            provider_options: None,
+        }
+    }
+
+    /// Sets the file name.
+    pub fn with_filename(mut self, filename: impl Into<String>) -> Self {
+        self.filename = Some(filename.into());
+        self
+    }
+
+    /// Adds provider-specific options to this content part.
+    pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
+        self.provider_options = Some(provider_options);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelToolCallPartKind {
+    #[serde(rename = "tool-call")]
+    ToolCall,
+}
+
+/// Tool call content part in a standardized prompt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelToolCallPart {
+    #[serde(rename = "type")]
+    kind: LanguageModelToolCallPartKind,
+
+    /// ID of the tool call.
+    pub tool_call_id: String,
+
+    /// Name of the tool being called.
+    pub tool_name: String,
+
+    /// JSON-serializable tool call input.
+    pub input: JsonValue,
+
+    /// Whether the provider will execute this tool call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_executed: Option<bool>,
+
+    /// Provider-specific options for this content part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+}
+
+impl LanguageModelToolCallPart {
+    /// Creates a tool call prompt part.
+    pub fn new(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        input: JsonValue,
+    ) -> Self {
+        Self {
+            kind: LanguageModelToolCallPartKind::ToolCall,
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            input,
+            provider_executed: None,
+            provider_options: None,
+        }
+    }
+
+    /// Sets whether the provider will execute this tool call.
+    pub fn with_provider_executed(mut self, provider_executed: bool) -> Self {
+        self.provider_executed = Some(provider_executed);
+        self
+    }
+
+    /// Adds provider-specific options to this content part.
+    pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
+        self.provider_options = Some(provider_options);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelToolResultPartKind {
+    #[serde(rename = "tool-result")]
+    ToolResult,
+}
+
+/// Tool result content part in a standardized prompt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelToolResultPart {
+    #[serde(rename = "type")]
+    kind: LanguageModelToolResultPartKind,
+
+    /// ID of the matching tool call.
+    pub tool_call_id: String,
+
+    /// Name of the tool that generated the result.
+    pub tool_name: String,
+
+    /// Output of the tool call.
+    pub output: LanguageModelToolResultOutput,
+
+    /// Provider-specific options for this content part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+}
+
+impl LanguageModelToolResultPart {
+    /// Creates a tool result prompt part.
+    pub fn new(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        output: LanguageModelToolResultOutput,
+    ) -> Self {
+        Self {
+            kind: LanguageModelToolResultPartKind::ToolResult,
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            output,
+            provider_options: None,
+        }
+    }
+
+    /// Adds provider-specific options to this content part.
+    pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
+        self.provider_options = Some(provider_options);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelToolApprovalResponsePartKind {
+    #[serde(rename = "tool-approval-response")]
+    ToolApprovalResponse,
+}
+
+/// Tool approval response content part in a standardized prompt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelToolApprovalResponsePart {
+    #[serde(rename = "type")]
+    kind: LanguageModelToolApprovalResponsePartKind,
+
+    /// ID of the approval request.
+    pub approval_id: String,
+
+    /// Whether the approval was granted.
+    pub approved: bool,
+
+    /// Optional approval or denial reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+
+    /// Provider-specific options for this content part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+}
+
+impl LanguageModelToolApprovalResponsePart {
+    /// Creates a tool approval response prompt part.
+    pub fn new(approval_id: impl Into<String>, approved: bool) -> Self {
+        Self {
+            kind: LanguageModelToolApprovalResponsePartKind::ToolApprovalResponse,
+            approval_id: approval_id.into(),
+            approved,
+            reason: None,
+            provider_options: None,
+        }
+    }
+
+    /// Sets the approval or denial reason.
+    pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
+        self.reason = Some(reason.into());
+        self
+    }
+
+    /// Adds provider-specific options to this content part.
+    pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
+        self.provider_options = Some(provider_options);
+        self
+    }
+}
+
+/// Content part allowed in user prompt messages.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum LanguageModelUserContentPart {
+    /// Text content.
+    Text(LanguageModelTextPart),
+
+    /// File content.
+    File(LanguageModelFilePart),
+}
+
+/// Content part allowed in assistant prompt messages.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum LanguageModelAssistantContentPart {
+    /// Text content.
+    Text(LanguageModelTextPart),
+
+    /// File content.
+    File(LanguageModelFilePart),
+
+    /// Provider-specific custom content.
+    Custom(LanguageModelCustomPart),
+
+    /// Reasoning content.
+    Reasoning(LanguageModelReasoningPart),
+
+    /// Reasoning file content.
+    ReasoningFile(LanguageModelReasoningFilePart),
+
+    /// Tool call content.
+    ToolCall(LanguageModelToolCallPart),
+
+    /// Tool result content.
+    ToolResult(LanguageModelToolResultPart),
+}
+
+/// Content part allowed in tool prompt messages.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum LanguageModelToolContentPart {
+    /// Tool result content.
+    ToolResult(LanguageModelToolResultPart),
+
+    /// Tool approval response content.
+    ToolApprovalResponse(LanguageModelToolApprovalResponsePart),
+}
+
+/// Result of a tool call in a standardized prompt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "type",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase"
+)]
+pub enum LanguageModelToolResultOutput {
+    /// Text tool output.
+    Text {
+        /// Text output value.
+        value: String,
+
+        /// Provider-specific options for this output.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_options: Option<ProviderOptions>,
+    },
+
+    /// JSON tool output.
+    Json {
+        /// JSON output value.
+        value: JsonValue,
+
+        /// Provider-specific options for this output.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_options: Option<ProviderOptions>,
+    },
+
+    /// Execution denied by the user.
+    ExecutionDenied {
+        /// Optional denial reason.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+
+        /// Provider-specific options for this output.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_options: Option<ProviderOptions>,
+    },
+
+    /// Text error output.
+    ErrorText {
+        /// Text error value.
+        value: String,
+
+        /// Provider-specific options for this output.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_options: Option<ProviderOptions>,
+    },
+
+    /// JSON error output.
+    ErrorJson {
+        /// JSON error value.
+        value: JsonValue,
+
+        /// Provider-specific options for this output.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_options: Option<ProviderOptions>,
+    },
+
+    /// Multi-part tool output.
+    Content {
+        /// Content output parts.
+        value: Vec<LanguageModelToolResultContentPart>,
+    },
+}
+
+impl LanguageModelToolResultOutput {
+    /// Creates a text tool output.
+    pub fn text(value: impl Into<String>) -> Self {
+        Self::Text {
+            value: value.into(),
+            provider_options: None,
+        }
+    }
+
+    /// Creates a JSON tool output.
+    pub fn json(value: JsonValue) -> Self {
+        Self::Json {
+            value,
+            provider_options: None,
+        }
+    }
+
+    /// Creates an execution-denied tool output.
+    pub fn execution_denied() -> Self {
+        Self::ExecutionDenied {
+            reason: None,
+            provider_options: None,
+        }
+    }
+
+    /// Creates a text error tool output.
+    pub fn error_text(value: impl Into<String>) -> Self {
+        Self::ErrorText {
+            value: value.into(),
+            provider_options: None,
+        }
+    }
+
+    /// Creates a JSON error tool output.
+    pub fn error_json(value: JsonValue) -> Self {
+        Self::ErrorJson {
+            value,
+            provider_options: None,
+        }
+    }
+
+    /// Creates a multi-part tool output.
+    pub fn content(value: Vec<LanguageModelToolResultContentPart>) -> Self {
+        Self::Content { value }
+    }
+
+    /// Adds provider-specific options to output variants that support them.
+    pub fn with_provider_options(self, provider_options: ProviderOptions) -> Self {
+        match self {
+            Self::Text { value, .. } => Self::Text {
+                value,
+                provider_options: Some(provider_options),
+            },
+            Self::Json { value, .. } => Self::Json {
+                value,
+                provider_options: Some(provider_options),
+            },
+            Self::ExecutionDenied { reason, .. } => Self::ExecutionDenied {
+                reason,
+                provider_options: Some(provider_options),
+            },
+            Self::ErrorText { value, .. } => Self::ErrorText {
+                value,
+                provider_options: Some(provider_options),
+            },
+            Self::ErrorJson { value, .. } => Self::ErrorJson {
+                value,
+                provider_options: Some(provider_options),
+            },
+            Self::Content { value } => Self::Content { value },
+        }
+    }
+
+    /// Sets the denial reason for an execution-denied output.
+    pub fn with_reason(self, reason: impl Into<String>) -> Self {
+        match self {
+            Self::ExecutionDenied {
+                provider_options, ..
+            } => Self::ExecutionDenied {
+                reason: Some(reason.into()),
+                provider_options,
+            },
+            other => other,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelToolResultCustomContentKind {
+    #[serde(rename = "custom")]
+    Custom,
+}
+
+/// Provider-specific custom content inside a multi-part tool result output.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelToolResultCustomContent {
+    #[serde(rename = "type")]
+    kind: LanguageModelToolResultCustomContentKind,
+
+    /// Provider-specific options for this content part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+}
+
+impl LanguageModelToolResultCustomContent {
+    /// Creates a custom tool-result content part.
+    pub fn new() -> Self {
+        Self {
+            kind: LanguageModelToolResultCustomContentKind::Custom,
+            provider_options: None,
+        }
+    }
+
+    /// Adds provider-specific options to this content part.
+    pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
+        self.provider_options = Some(provider_options);
+        self
+    }
+}
+
+impl Default for LanguageModelToolResultCustomContent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Content part inside a multi-part tool result output.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum LanguageModelToolResultContentPart {
+    /// Text content.
+    Text(LanguageModelTextPart),
+
+    /// File content.
+    File(LanguageModelFilePart),
+
+    /// Provider-specific custom content.
+    Custom(LanguageModelToolResultCustomContent),
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        FinishReason, InputTokenUsage, LanguageModelContent, LanguageModelCustomContent,
-        LanguageModelFile, LanguageModelFileData, LanguageModelFinishReason,
-        LanguageModelFunctionTool, LanguageModelProviderTool, LanguageModelReasoning,
-        LanguageModelReasoningFile, LanguageModelResponseMetadata, LanguageModelSource,
-        LanguageModelText, LanguageModelTool, LanguageModelToolApprovalRequest,
-        LanguageModelToolCall, LanguageModelToolChoice, LanguageModelToolResult,
-        LanguageModelUrlSource, LanguageModelUsage, OutputTokenUsage,
+        FinishReason, InputTokenUsage, LanguageModelAssistantContentPart,
+        LanguageModelAssistantMessage, LanguageModelContent, LanguageModelCustomContent,
+        LanguageModelCustomPart, LanguageModelFile, LanguageModelFileData, LanguageModelFilePart,
+        LanguageModelFinishReason, LanguageModelFunctionTool, LanguageModelMessage,
+        LanguageModelPrompt, LanguageModelProviderTool, LanguageModelReasoning,
+        LanguageModelReasoningFile, LanguageModelReasoningPart, LanguageModelResponseMetadata,
+        LanguageModelSource, LanguageModelSystemMessage, LanguageModelText, LanguageModelTextPart,
+        LanguageModelTool, LanguageModelToolApprovalRequest, LanguageModelToolApprovalResponsePart,
+        LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolChoice,
+        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResult,
+        LanguageModelToolResultContentPart, LanguageModelToolResultCustomContent,
+        LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUrlSource,
+        LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage,
+        OutputTokenUsage,
     };
-    use crate::file_data::FileDataContent;
+    use crate::file_data::{FileData, FileDataContent};
     use crate::json::NonNullJsonValue;
+    use crate::provider::ProviderOptions;
     use serde_json::json;
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
     use url::Url;
@@ -1585,7 +2389,7 @@ mod tests {
         }))
         .expect("example input is a JSON object");
 
-        let provider_options = serde_json::from_value(json!({
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
             "openai": {
                 "strictJsonSchema": true
             }
@@ -1761,5 +2565,262 @@ mod tests {
                 tool_name: "weather".to_string()
             }
         );
+    }
+
+    #[test]
+    fn prompt_serializes_system_and_user_messages_with_provider_options() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "anthropic": {
+                "cacheControl": {
+                    "type": "ephemeral"
+                }
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let prompt: LanguageModelPrompt = vec![
+            LanguageModelMessage::System(
+                LanguageModelSystemMessage::new("Be concise.")
+                    .with_provider_options(provider_options.clone()),
+            ),
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(
+                    LanguageModelTextPart::new("Summarize this document.")
+                        .with_provider_options(provider_options.clone()),
+                ),
+                LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Text {
+                            text: "Quarterly results".to_string(),
+                        },
+                        "text/plain",
+                    )
+                    .with_filename("results.txt"),
+                ),
+            ])),
+        ];
+
+        assert_eq!(
+            serde_json::to_value(prompt).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "system",
+                    "content": "Be concise.",
+                    "providerOptions": {
+                        "anthropic": {
+                            "cacheControl": {
+                                "type": "ephemeral"
+                            }
+                        }
+                    }
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Summarize this document.",
+                            "providerOptions": {
+                                "anthropic": {
+                                    "cacheControl": {
+                                        "type": "ephemeral"
+                                    }
+                                }
+                            }
+                        },
+                        {
+                            "type": "file",
+                            "filename": "results.txt",
+                            "data": {
+                                "type": "text",
+                                "text": "Quarterly results"
+                            },
+                            "mediaType": "text/plain"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn assistant_message_deserializes_reasoning_custom_and_tool_call_parts() {
+        let message: LanguageModelMessage = serde_json::from_value(json!({
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "reasoning",
+                    "text": "I should call the weather tool."
+                },
+                {
+                    "type": "custom",
+                    "kind": "openai.audio"
+                },
+                {
+                    "type": "tool-call",
+                    "toolCallId": "tool_call_123",
+                    "toolName": "weather",
+                    "input": {
+                        "city": "Brisbane"
+                    },
+                    "providerExecuted": true
+                }
+            ]
+        }))
+        .expect("assistant message deserializes");
+
+        assert_eq!(
+            message,
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::Reasoning(LanguageModelReasoningPart::new(
+                    "I should call the weather tool.",
+                )),
+                LanguageModelAssistantContentPart::Custom(LanguageModelCustomPart::new(
+                    "openai.audio",
+                )),
+                LanguageModelAssistantContentPart::ToolCall(
+                    LanguageModelToolCallPart::new(
+                        "tool_call_123",
+                        "weather",
+                        json!({
+                            "city": "Brisbane"
+                        }),
+                    )
+                    .with_provider_executed(true),
+                ),
+            ]))
+        );
+    }
+
+    #[test]
+    fn tool_message_serializes_tool_result_and_approval_response_parts() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "format": "compact"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let message = LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+            LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                "tool_call_123",
+                "weather",
+                LanguageModelToolResultOutput::content(vec![
+                    LanguageModelToolResultContentPart::Text(LanguageModelTextPart::new("Sunny")),
+                    LanguageModelToolResultContentPart::Custom(
+                        LanguageModelToolResultCustomContent::new()
+                            .with_provider_options(provider_options),
+                    ),
+                ]),
+            )),
+            LanguageModelToolContentPart::ToolApprovalResponse(
+                LanguageModelToolApprovalResponsePart::new("approval_123", false)
+                    .with_reason("User declined external access."),
+            ),
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(message).expect("tool message serializes"),
+            json!({
+                "role": "tool",
+                "content": [
+                    {
+                        "type": "tool-result",
+                        "toolCallId": "tool_call_123",
+                        "toolName": "weather",
+                        "output": {
+                            "type": "content",
+                            "value": [
+                                {
+                                    "type": "text",
+                                    "text": "Sunny"
+                                },
+                                {
+                                    "type": "custom",
+                                    "providerOptions": {
+                                        "openai": {
+                                            "format": "compact"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "type": "tool-approval-response",
+                        "approvalId": "approval_123",
+                        "approved": false,
+                        "reason": "User declined external access."
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn tool_result_output_serializes_tagged_output_variants_with_provider_options() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "provider": {
+                "traceId": "trace_123"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        assert_eq!(
+            serde_json::to_value(
+                LanguageModelToolResultOutput::json(json!({
+                    "ok": true
+                }))
+                .with_provider_options(provider_options.clone()),
+            )
+            .expect("json output serializes"),
+            json!({
+                "type": "json",
+                "value": {
+                    "ok": true
+                },
+                "providerOptions": {
+                    "provider": {
+                        "traceId": "trace_123"
+                    }
+                }
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(
+                LanguageModelToolResultOutput::execution_denied()
+                    .with_reason("Not approved.")
+                    .with_provider_options(provider_options),
+            )
+            .expect("execution denied output serializes"),
+            json!({
+                "type": "execution-denied",
+                "reason": "Not approved.",
+                "providerOptions": {
+                    "provider": {
+                        "traceId": "trace_123"
+                    }
+                }
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(LanguageModelToolResultOutput::error_text("Timed out."))
+                .expect("error text output serializes"),
+            json!({
+                "type": "error-text",
+                "value": "Timed out."
+            })
+        );
+    }
+
+    #[test]
+    fn prompt_message_rejects_unknown_roles() {
+        serde_json::from_value::<LanguageModelMessage>(json!({
+            "role": "developer",
+            "content": "Unsupported role"
+        }))
+        .expect_err("unsupported prompt role is rejected");
     }
 }

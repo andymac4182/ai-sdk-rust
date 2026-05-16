@@ -17,13 +17,20 @@ pub use json::{
     JsonArray, JsonObject, JsonSchema, JsonValue, NonNullJsonValue, NullJsonValueError,
 };
 pub use language_model::{
-    FinishReason, InputTokenUsage, LanguageModelContent, LanguageModelCustomContent,
-    LanguageModelDocumentSource, LanguageModelFile, LanguageModelFileData,
-    LanguageModelFinishReason, LanguageModelFunctionTool, LanguageModelProviderTool,
-    LanguageModelReasoning, LanguageModelReasoningFile, LanguageModelResponseMetadata,
-    LanguageModelSource, LanguageModelText, LanguageModelTool, LanguageModelToolApprovalRequest,
-    LanguageModelToolCall, LanguageModelToolChoice, LanguageModelToolInputExample,
-    LanguageModelToolResult, LanguageModelUrlSource, LanguageModelUsage, OutputTokenUsage,
+    FinishReason, InputTokenUsage, LanguageModelAssistantContentPart,
+    LanguageModelAssistantMessage, LanguageModelContent, LanguageModelCustomContent,
+    LanguageModelCustomPart, LanguageModelDocumentSource, LanguageModelFile, LanguageModelFileData,
+    LanguageModelFilePart, LanguageModelFinishReason, LanguageModelFunctionTool,
+    LanguageModelMessage, LanguageModelPrompt, LanguageModelProviderTool, LanguageModelReasoning,
+    LanguageModelReasoningFile, LanguageModelReasoningFilePart, LanguageModelReasoningPart,
+    LanguageModelResponseMetadata, LanguageModelSource, LanguageModelSystemMessage,
+    LanguageModelText, LanguageModelTextPart, LanguageModelTool, LanguageModelToolApprovalRequest,
+    LanguageModelToolApprovalResponsePart, LanguageModelToolCall, LanguageModelToolCallPart,
+    LanguageModelToolChoice, LanguageModelToolContentPart, LanguageModelToolInputExample,
+    LanguageModelToolMessage, LanguageModelToolResult, LanguageModelToolResultContentPart,
+    LanguageModelToolResultCustomContent, LanguageModelToolResultOutput,
+    LanguageModelToolResultPart, LanguageModelUrlSource, LanguageModelUsage,
+    LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
 };
 pub use provider::{ProviderMetadata, ProviderOptions};
 pub use warning::Warning;
