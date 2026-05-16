@@ -106,11 +106,32 @@ pub struct LanguageModelResponseMetadata {
     pub model_id: Option<String>,
 }
 
+/// Strategy for selecting a tool during a language model call.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum LanguageModelToolChoice {
+    /// The model may choose whether to call a tool.
+    Auto,
+
+    /// The model must not call a tool.
+    None,
+
+    /// The model must call one of the available tools.
+    Required,
+
+    /// The model must call a specific tool.
+    Tool {
+        /// Name of the tool that must be selected.
+        #[serde(rename = "toolName")]
+        tool_name: String,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         FinishReason, InputTokenUsage, LanguageModelFinishReason, LanguageModelResponseMetadata,
-        LanguageModelUsage, OutputTokenUsage,
+        LanguageModelToolChoice, LanguageModelUsage, OutputTokenUsage,
     };
     use serde_json::json;
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -225,6 +246,49 @@ mod tests {
             LanguageModelResponseMetadata {
                 model_id: Some("provider/model".to_string()),
                 ..LanguageModelResponseMetadata::default()
+            }
+        );
+    }
+
+    #[test]
+    fn tool_choice_serializes_upstream_tagged_shapes() {
+        assert_eq!(
+            serde_json::to_value(LanguageModelToolChoice::Auto).expect("tool choice serializes"),
+            json!({ "type": "auto" })
+        );
+        assert_eq!(
+            serde_json::to_value(LanguageModelToolChoice::None).expect("tool choice serializes"),
+            json!({ "type": "none" })
+        );
+        assert_eq!(
+            serde_json::to_value(LanguageModelToolChoice::Required)
+                .expect("tool choice serializes"),
+            json!({ "type": "required" })
+        );
+        assert_eq!(
+            serde_json::to_value(LanguageModelToolChoice::Tool {
+                tool_name: "search".to_string(),
+            })
+            .expect("tool choice serializes"),
+            json!({
+                "type": "tool",
+                "toolName": "search"
+            })
+        );
+    }
+
+    #[test]
+    fn tool_choice_deserializes_specific_tool_selection() {
+        let tool_choice: LanguageModelToolChoice = serde_json::from_value(json!({
+            "type": "tool",
+            "toolName": "weather"
+        }))
+        .expect("tool choice deserializes");
+
+        assert_eq!(
+            tool_choice,
+            LanguageModelToolChoice::Tool {
+                tool_name: "weather".to_string()
             }
         );
     }

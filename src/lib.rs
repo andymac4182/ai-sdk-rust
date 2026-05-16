@@ -16,7 +16,7 @@ pub use headers::Headers;
 pub use json::{JsonArray, JsonObject, JsonValue};
 pub use language_model::{
     FinishReason, InputTokenUsage, LanguageModelFinishReason, LanguageModelResponseMetadata,
-    LanguageModelUsage, OutputTokenUsage,
+    LanguageModelToolChoice, LanguageModelUsage, OutputTokenUsage,
 };
 pub use provider::{ProviderMetadata, ProviderOptions};
 pub use warning::Warning;
