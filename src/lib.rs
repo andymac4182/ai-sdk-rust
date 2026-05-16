@@ -18,8 +18,8 @@ pub use language_model::{
     FinishReason, InputTokenUsage, LanguageModelCustomContent, LanguageModelFile,
     LanguageModelFileData, LanguageModelFinishReason, LanguageModelReasoning,
     LanguageModelReasoningFile, LanguageModelResponseMetadata, LanguageModelText,
-    LanguageModelToolApprovalRequest, LanguageModelToolChoice, LanguageModelUsage,
-    OutputTokenUsage,
+    LanguageModelToolApprovalRequest, LanguageModelToolCall, LanguageModelToolChoice,
+    LanguageModelUsage, OutputTokenUsage,
 };
 pub use provider::{ProviderMetadata, ProviderOptions};
 pub use warning::Warning;
