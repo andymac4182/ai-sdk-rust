@@ -1,7 +1,45 @@
 use std::env::{self, VarError};
 
+use serde::{Deserialize, Serialize};
+
 use crate::file_data::{NoSuchProviderReferenceError, ProviderReference};
 use crate::provider::{LoadApiKeyError, LoadSettingError};
+
+/// A value that can be supplied as either one item or an array of items.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum Arrayable<T> {
+    /// A single item.
+    Single(T),
+
+    /// Multiple items.
+    Array(Vec<T>),
+}
+
+impl<T> Arrayable<T> {
+    /// Creates an arrayable single value.
+    pub fn single(value: T) -> Self {
+        Self::Single(value)
+    }
+
+    /// Creates an arrayable array value.
+    pub fn array(values: Vec<T>) -> Self {
+        Self::Array(values)
+    }
+
+    /// Converts the value into an array.
+    pub fn into_vec(self) -> Vec<T> {
+        match self {
+            Self::Single(value) => vec![value],
+            Self::Array(values) => values,
+        }
+    }
+}
+
+/// Normalizes a missing, single, or array value into an array.
+pub fn as_array<T>(value: Option<Arrayable<T>>) -> Vec<T> {
+    value.map_or_else(Vec::new, Arrayable::into_vec)
+}
 
 /// Options for loading a provider API key from an explicit value or environment variable.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -231,13 +269,57 @@ mod tests {
     use std::ffi::OsString;
 
     use crate::ProviderReference;
+    use serde_json::json;
 
     use super::{
-        LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, load_api_key,
-        load_api_key_with_env, load_optional_setting_with_env, load_setting, load_setting_with_env,
-        media_type_to_extension, resolve_provider_reference, strip_file_extension,
-        without_trailing_slash,
+        Arrayable, LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, as_array,
+        load_api_key, load_api_key_with_env, load_optional_setting_with_env, load_setting,
+        load_setting_with_env, media_type_to_extension, resolve_provider_reference,
+        strip_file_extension, without_trailing_slash,
     };
+
+    #[test]
+    fn arrayable_serializes_single_or_array_values() {
+        assert_eq!(
+            serde_json::to_value(Arrayable::single("value")).expect("single value serializes"),
+            json!("value")
+        );
+        assert_eq!(
+            serde_json::to_value(Arrayable::array(vec!["a", "b"])).expect("array value serializes"),
+            json!(["a", "b"])
+        );
+    }
+
+    #[test]
+    fn arrayable_deserializes_single_or_array_values() {
+        assert_eq!(
+            serde_json::from_value::<Arrayable<String>>(json!("value"))
+                .expect("single value deserializes"),
+            Arrayable::single("value".to_string())
+        );
+        assert_eq!(
+            serde_json::from_value::<Arrayable<String>>(json!(["a", "b"]))
+                .expect("array value deserializes"),
+            Arrayable::array(vec!["a".to_string(), "b".to_string()])
+        );
+    }
+
+    #[test]
+    fn as_array_returns_empty_array_for_missing_value() {
+        assert_eq!(as_array::<String>(None), Vec::<String>::new());
+    }
+
+    #[test]
+    fn as_array_wraps_single_value_in_array() {
+        assert_eq!(as_array(Some(Arrayable::single("value"))), vec!["value"]);
+    }
+
+    #[test]
+    fn as_array_returns_array_values_unchanged() {
+        let value = vec!["a", "b"];
+
+        assert_eq!(as_array(Some(Arrayable::array(value.clone()))), value);
+    }
 
     #[test]
     fn load_api_key_returns_explicit_value_without_reading_environment() {

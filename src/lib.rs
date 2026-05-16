@@ -87,9 +87,9 @@ pub use provider::{
     TypeValidationContext, TypeValidationError, UnsupportedFunctionalityError, get_error_message,
 };
 pub use provider_utils::{
-    LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, load_api_key,
-    load_optional_setting, load_setting, media_type_to_extension, resolve_provider_reference,
-    strip_file_extension, without_trailing_slash,
+    Arrayable, LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, as_array,
+    load_api_key, load_optional_setting, load_setting, media_type_to_extension,
+    resolve_provider_reference, strip_file_extension, without_trailing_slash,
 };
 pub use reranking_model::{
     RerankingModel, RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
