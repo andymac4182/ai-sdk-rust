@@ -480,6 +480,242 @@ impl ProviderApiRequest {
     }
 }
 
+/// Body content returned by provider API adapter responses.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum ProviderApiResponseBody {
+    /// Text response body content.
+    #[serde(rename = "text")]
+    Text {
+        /// Text body content.
+        content: String,
+    },
+
+    /// Binary response body content.
+    #[serde(rename = "bytes")]
+    Bytes {
+        /// Binary body content.
+        content: Vec<u8>,
+    },
+}
+
+impl ProviderApiResponseBody {
+    /// Creates text response body content.
+    pub fn text(content: impl Into<String>) -> Self {
+        Self::Text {
+            content: content.into(),
+        }
+    }
+
+    /// Creates binary response body content.
+    pub fn bytes(content: impl Into<Vec<u8>>) -> Self {
+        Self::Bytes {
+            content: content.into(),
+        }
+    }
+
+    /// Returns text response body content when this body is text.
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text { content } => Some(content),
+            Self::Bytes { .. } => None,
+        }
+    }
+
+    /// Returns binary response body content when this body is bytes.
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Text { .. } => None,
+            Self::Bytes { content } => Some(content),
+        }
+    }
+
+    fn to_text(&self) -> String {
+        match self {
+            Self::Text { content } => content.clone(),
+            Self::Bytes { content } => String::from_utf8_lossy(content).into_owned(),
+        }
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            Self::Text { content } => content.as_bytes().to_vec(),
+            Self::Bytes { content } => content.clone(),
+        }
+    }
+}
+
+/// Runtime-independent provider API response returned by an HTTP adapter.
+///
+/// This pairs with [`ProviderApiRequest`] as the dependency-free boundary for
+/// upstream `getFromApi` and `postToApi`: HTTP adapters can supply status,
+/// status text, extracted headers, and an already-read body without committing
+/// this crate to a concrete HTTP client.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderApiResponse {
+    /// HTTP response status code.
+    pub status_code: u16,
+
+    /// HTTP response status text.
+    pub status_text: String,
+
+    /// Headers extracted from the HTTP response.
+    #[serde(default)]
+    pub headers: Headers,
+
+    /// Response body content, when one was available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<ProviderApiResponseBody>,
+}
+
+impl ProviderApiResponse {
+    /// Creates a provider API response without a body.
+    pub fn new(status_code: u16, status_text: impl Into<String>) -> Self {
+        Self {
+            status_code,
+            status_text: status_text.into(),
+            headers: Headers::new(),
+            body: None,
+        }
+    }
+
+    /// Creates a provider API response with a text body.
+    pub fn text(status_code: u16, status_text: impl Into<String>, body: impl Into<String>) -> Self {
+        Self::new(status_code, status_text).with_text_body(body)
+    }
+
+    /// Creates a provider API response with a binary body.
+    pub fn bytes(
+        status_code: u16,
+        status_text: impl Into<String>,
+        body: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self::new(status_code, status_text).with_bytes_body(body)
+    }
+
+    /// Adds response headers extracted from the response.
+    pub fn with_headers(mut self, headers: Headers) -> Self {
+        self.headers = headers;
+        self
+    }
+
+    /// Adds text response body content.
+    pub fn with_text_body(mut self, body: impl Into<String>) -> Self {
+        self.body = Some(ProviderApiResponseBody::text(body));
+        self
+    }
+
+    /// Adds binary response body content.
+    pub fn with_bytes_body(mut self, body: impl Into<Vec<u8>>) -> Self {
+        self.body = Some(ProviderApiResponseBody::bytes(body));
+        self
+    }
+
+    /// Returns whether the status maps to upstream `Response.ok`.
+    pub fn is_success_status(&self) -> bool {
+        (200..=299).contains(&self.status_code)
+    }
+
+    /// Returns text response body content when this response has text content.
+    pub fn text_body(&self) -> Option<&str> {
+        self.body
+            .as_ref()
+            .and_then(ProviderApiResponseBody::as_text)
+    }
+
+    /// Returns binary response body content when this response has binary content.
+    pub fn bytes_body(&self) -> Option<&[u8]> {
+        self.body
+            .as_ref()
+            .and_then(ProviderApiResponseBody::as_bytes)
+    }
+
+    /// Builds inputs for [`create_status_code_error_response_handler`].
+    pub fn status_code_error_response_handler_options(
+        &self,
+        request: &ProviderApiRequest,
+    ) -> StatusCodeErrorResponseHandlerOptions {
+        StatusCodeErrorResponseHandlerOptions::new(
+            request.url.clone(),
+            request.request_body_values.clone(),
+            self.status_code,
+            self.status_text.clone(),
+            self.body_as_text(),
+        )
+        .with_response_headers(self.headers.clone())
+    }
+
+    /// Builds inputs for [`create_json_error_response_handler`].
+    pub fn json_error_response_handler_options(
+        &self,
+        request: &ProviderApiRequest,
+    ) -> JsonErrorResponseHandlerOptions {
+        JsonErrorResponseHandlerOptions::new(
+            request.url.clone(),
+            request.request_body_values.clone(),
+            self.status_code,
+            self.status_text.clone(),
+            self.body_as_text(),
+        )
+        .with_response_headers(self.headers.clone())
+    }
+
+    /// Builds inputs for [`create_json_response_handler`].
+    pub fn json_response_handler_options(
+        &self,
+        request: &ProviderApiRequest,
+    ) -> JsonResponseHandlerOptions {
+        JsonResponseHandlerOptions::new(
+            request.url.clone(),
+            request.request_body_values.clone(),
+            self.status_code,
+            self.body_as_text(),
+        )
+        .with_response_headers(self.headers.clone())
+    }
+
+    /// Builds inputs for [`create_binary_response_handler`].
+    pub fn binary_response_handler_options(
+        &self,
+        request: &ProviderApiRequest,
+    ) -> BinaryResponseHandlerOptions {
+        let options = BinaryResponseHandlerOptions::empty(
+            request.url.clone(),
+            request.request_body_values.clone(),
+            self.status_code,
+        )
+        .with_response_headers(self.headers.clone());
+
+        if let Some(body) = self.body.as_ref().map(ProviderApiResponseBody::to_bytes) {
+            BinaryResponseHandlerOptions {
+                response_body: Some(body),
+                ..options
+            }
+        } else {
+            options
+        }
+    }
+
+    /// Builds inputs for [`create_event_source_response_handler`].
+    pub fn event_source_response_handler_options(&self) -> EventSourceResponseHandlerOptions {
+        let options = if let Some(body) = self.body.as_ref().map(ProviderApiResponseBody::to_bytes)
+        {
+            EventSourceResponseHandlerOptions::new(body)
+        } else {
+            EventSourceResponseHandlerOptions::empty()
+        };
+
+        options.with_response_headers(self.headers.clone())
+    }
+
+    fn body_as_text(&self) -> String {
+        self.body
+            .as_ref()
+            .map_or_else(String::new, ProviderApiResponseBody::to_text)
+    }
+}
+
 /// Result returned by safe type validation.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ValidateTypesResult<T = JsonValue> {
@@ -3366,10 +3602,10 @@ mod tests {
         InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
         JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, LoadApiKeyOptions,
         LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError, ParseJsonResult,
-        ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ReasoningLevel,
-        ResponseHandlerResult, RuntimeEnvironment, StatusCodeErrorResponseHandlerOptions, Tool,
-        ToolExecutionError, ToolExecutionOptions, ValidateTypesResult,
-        add_additional_properties_to_json_schema, as_array, combine_headers,
+        ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+        ProviderApiResponseBody, ReasoningLevel, ResponseHandlerResult, RuntimeEnvironment,
+        StatusCodeErrorResponseHandlerOptions, Tool, ToolExecutionError, ToolExecutionOptions,
+        ValidateTypesResult, add_additional_properties_to_json_schema, as_array, combine_headers,
         convert_base64_to_bytes, convert_bytes_to_base64, convert_image_model_file_to_data_uri,
         convert_inline_file_data_to_bytes, convert_to_base64, create_binary_response_handler,
         create_event_source_response_handler, create_json_error_response_handler,
@@ -6017,6 +6253,152 @@ mod tests {
             serde_json::from_value(serialized).expect("body deserializes");
 
         assert_eq!(deserialized.as_bytes(), Some([1_u8, 2, 3].as_slice()));
+    }
+
+    #[test]
+    fn provider_api_response_serializes_upstream_response_metadata_shape() {
+        let response = ProviderApiResponse::text(201, "Created", r#"{"ok":true}"#).with_headers(
+            BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
+        );
+
+        let serialized = serde_json::to_value(&response).expect("response serializes");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "statusCode": 201,
+                "statusText": "Created",
+                "headers": {
+                    "content-type": "application/json"
+                },
+                "body": {
+                    "type": "text",
+                    "content": "{\"ok\":true}"
+                }
+            })
+        );
+
+        let deserialized: ProviderApiResponse =
+            serde_json::from_value(serialized).expect("response deserializes");
+
+        assert_eq!(deserialized, response);
+        assert!(deserialized.is_success_status());
+        assert_eq!(deserialized.text_body(), Some(r#"{"ok":true}"#));
+        assert_eq!(deserialized.bytes_body(), None);
+    }
+
+    #[test]
+    fn provider_api_response_body_supports_binary_content() {
+        let body = ProviderApiResponseBody::bytes([4_u8, 5, 6]);
+        let serialized = serde_json::to_value(&body).expect("body serializes");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "type": "bytes",
+                "content": [4, 5, 6]
+            })
+        );
+
+        let deserialized: ProviderApiResponseBody =
+            serde_json::from_value(serialized).expect("body deserializes");
+
+        assert_eq!(deserialized.as_bytes(), Some([4_u8, 5, 6].as_slice()));
+        assert_eq!(deserialized.as_text(), None);
+    }
+
+    #[test]
+    fn provider_api_response_success_status_matches_fetch_ok_range() {
+        for status_code in [200, 204, 299] {
+            assert!(
+                ProviderApiResponse::new(status_code, "OK").is_success_status(),
+                "{status_code} should be successful"
+            );
+        }
+
+        for status_code in [199, 300, 404, 500] {
+            assert!(
+                !ProviderApiResponse::new(status_code, "Error").is_success_status(),
+                "{status_code} should be failed"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_api_response_builds_text_response_handler_options() {
+        let request = ProviderApiRequest::post(
+            "https://api.example.com/v1/chat",
+            BTreeMap::from([("authorization".to_string(), "Bearer test".to_string())]),
+            ProviderApiRequestBody::text("{\"prompt\":\"hi\"}"),
+            json!({ "prompt": "hi" }),
+        );
+        let response_headers =
+            BTreeMap::from([("x-request-id".to_string(), "req_123".to_string())]);
+        let response =
+            ProviderApiResponse::text(429, "Too Many Requests", r#"{"error":"rate_limit"}"#)
+                .with_headers(response_headers.clone());
+
+        let status_options = response.status_code_error_response_handler_options(&request);
+        assert_eq!(status_options.url, "https://api.example.com/v1/chat");
+        assert_eq!(
+            status_options.request_body_values,
+            json!({ "prompt": "hi" })
+        );
+        assert_eq!(status_options.status_code, 429);
+        assert_eq!(status_options.status_text, "Too Many Requests");
+        assert_eq!(status_options.response_headers, response_headers);
+        assert_eq!(status_options.response_body, r#"{"error":"rate_limit"}"#);
+
+        let json_error_options = response.json_error_response_handler_options(&request);
+        assert_eq!(json_error_options.status_text, "Too Many Requests");
+        assert_eq!(
+            json_error_options.response_body,
+            r#"{"error":"rate_limit"}"#
+        );
+
+        let json_options = response.json_response_handler_options(&request);
+        assert_eq!(json_options.status_code, 429);
+        assert_eq!(json_options.response_body, r#"{"error":"rate_limit"}"#);
+    }
+
+    #[test]
+    fn provider_api_response_builds_binary_and_event_source_handler_options() {
+        let request = ProviderApiRequest::get(
+            "https://api.example.com/v1/events",
+            BTreeMap::from([("accept".to_string(), "text/event-stream".to_string())]),
+        );
+        let response_headers =
+            BTreeMap::from([("content-type".to_string(), "text/event-stream".to_string())]);
+        let response = ProviderApiResponse::bytes(200, "OK", [b'd', b'a', b't', b'a'])
+            .with_headers(response_headers.clone());
+
+        let binary_options = response.binary_response_handler_options(&request);
+        assert_eq!(binary_options.url, "https://api.example.com/v1/events");
+        assert_eq!(binary_options.request_body_values, json!({}));
+        assert_eq!(binary_options.status_code, 200);
+        assert_eq!(binary_options.response_headers, response_headers);
+        assert_eq!(binary_options.response_body, Some(b"data".to_vec()));
+
+        let event_options = response.event_source_response_handler_options();
+        assert_eq!(event_options.response_body, Some(b"data".to_vec()));
+        assert_eq!(
+            event_options.response_headers,
+            BTreeMap::from([("content-type".to_string(), "text/event-stream".to_string())])
+        );
+
+        let empty_options =
+            ProviderApiResponse::new(204, "No Content").binary_response_handler_options(&request);
+        assert_eq!(empty_options.response_body, None);
+    }
+
+    #[test]
+    fn provider_api_response_decodes_binary_text_like_fetch_response_text() {
+        let request = ProviderApiRequest::get("https://api.example.com/v1/data", BTreeMap::new());
+        let response = ProviderApiResponse::bytes(200, "OK", [b'{', b'}']);
+
+        let options = response.json_response_handler_options(&request);
+
+        assert_eq!(options.response_body, "{}");
     }
 
     #[test]
