@@ -1,3 +1,4 @@
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 
 use crate::file_data::FileData;
@@ -208,7 +209,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
 }
 
 /// Tool call emitted during a high-level generate-text step.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateTextToolCall {
     /// Identifier of the model tool call.
@@ -242,6 +243,48 @@ pub struct GenerateTextToolCall {
     pub provider_metadata: Option<ProviderMetadata>,
 }
 
+impl Serialize for GenerateTextToolCall {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut field_count = 4;
+        field_count += usize::from(self.provider_executed.is_some());
+        field_count += usize::from(self.dynamic.is_some());
+        field_count += usize::from(self.invalid.is_some());
+        field_count += usize::from(self.error.is_some());
+        field_count += usize::from(self.provider_metadata.is_some());
+
+        let mut state = serializer.serialize_struct("GenerateTextToolCall", field_count)?;
+        state.serialize_field("type", "tool-call")?;
+        state.serialize_field("toolCallId", &self.tool_call_id)?;
+        state.serialize_field("toolName", &self.tool_name)?;
+        state.serialize_field("input", &self.input)?;
+
+        if let Some(provider_executed) = self.provider_executed {
+            state.serialize_field("providerExecuted", &provider_executed)?;
+        }
+
+        if let Some(dynamic) = self.dynamic {
+            state.serialize_field("dynamic", &dynamic)?;
+        }
+
+        if let Some(invalid) = self.invalid {
+            state.serialize_field("invalid", &invalid)?;
+        }
+
+        if let Some(error) = &self.error {
+            state.serialize_field("error", error)?;
+        }
+
+        if let Some(provider_metadata) = &self.provider_metadata {
+            state.serialize_field("providerMetadata", provider_metadata)?;
+        }
+
+        state.end()
+    }
+}
+
 impl GenerateTextToolCall {
     fn from_language_model_tool_call(tool_call: &LanguageModelToolCall) -> Self {
         let (input, dynamic, invalid, error) = match parse_tool_input(&tool_call.input) {
@@ -272,7 +315,7 @@ impl GenerateTextToolCall {
 }
 
 /// Result produced by executing a Rust tool during a generate-text step.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateTextToolResult {
     /// Identifier of the matching tool call.
@@ -307,6 +350,49 @@ pub struct GenerateTextToolResult {
     /// Provider-specific metadata returned with the tool result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_metadata: Option<ProviderMetadata>,
+}
+
+impl Serialize for GenerateTextToolResult {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut field_count = 5;
+        field_count += usize::from(self.is_error.is_some());
+        field_count += usize::from(self.provider_executed.is_some());
+        field_count += usize::from(self.dynamic.is_some());
+        field_count += usize::from(self.preliminary.is_some());
+        field_count += usize::from(self.provider_metadata.is_some());
+
+        let mut state = serializer.serialize_struct("GenerateTextToolResult", field_count)?;
+        state.serialize_field("type", "tool-result")?;
+        state.serialize_field("toolCallId", &self.tool_call_id)?;
+        state.serialize_field("toolName", &self.tool_name)?;
+        state.serialize_field("input", &self.input)?;
+        state.serialize_field("output", &self.output)?;
+
+        if let Some(is_error) = self.is_error {
+            state.serialize_field("isError", &is_error)?;
+        }
+
+        if let Some(provider_executed) = self.provider_executed {
+            state.serialize_field("providerExecuted", &provider_executed)?;
+        }
+
+        if let Some(dynamic) = self.dynamic {
+            state.serialize_field("dynamic", &dynamic)?;
+        }
+
+        if let Some(preliminary) = self.preliminary {
+            state.serialize_field("preliminary", &preliminary)?;
+        }
+
+        if let Some(provider_metadata) = &self.provider_metadata {
+            state.serialize_field("providerMetadata", provider_metadata)?;
+        }
+
+        state.end()
+    }
 }
 
 impl GenerateTextToolResult {
@@ -1566,6 +1652,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&tool_call).expect("tool call serializes"),
             json!({
+                "type": "tool-call",
                 "toolCallId": "call-1",
                 "toolName": "weather",
                 "input": { "city": "Brisbane" },
@@ -1576,6 +1663,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&tool_result).expect("tool result serializes"),
             json!({
+                "type": "tool-result",
                 "toolCallId": "call-1",
                 "toolName": "weather",
                 "input": { "city": "Brisbane" },
