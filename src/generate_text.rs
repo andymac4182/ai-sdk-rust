@@ -3706,7 +3706,7 @@ pub struct GenerateTextStep {
 
     /// Files generated during this step.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub files: Vec<LanguageModelFile>,
+    pub files: Vec<GeneratedFile>,
 
     /// Reasoning generated during this step.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3868,7 +3868,7 @@ pub struct GenerateTextFinishEvent {
 
     /// Files generated across all steps.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub files: Vec<LanguageModelFile>,
+    pub files: Vec<GeneratedFile>,
 
     /// Sources used to generate the final step.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -4033,7 +4033,7 @@ pub struct GenerateTextResult {
 
     /// Files generated across all steps.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub files: Vec<LanguageModelFile>,
+    pub files: Vec<GeneratedFile>,
 
     /// Reasoning generated in the final step.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -4622,11 +4622,11 @@ fn extract_sources(content: &[LanguageModelContent]) -> Vec<LanguageModelSource>
         .collect()
 }
 
-fn extract_files(content: &[LanguageModelContent]) -> Vec<LanguageModelFile> {
+fn extract_files(content: &[LanguageModelContent]) -> Vec<GeneratedFile> {
     content
         .iter()
         .filter_map(|part| match part {
-            LanguageModelContent::File(file) => Some(file.clone()),
+            LanguageModelContent::File(file) => Some(GeneratedFile::from_language_model_file(file)),
             _ => None,
         })
         .collect()
@@ -8758,28 +8758,25 @@ mod tests {
         );
 
         let result = GenerateTextResult::from_steps(vec![first_step, second_step]);
+        let first_generated_file = GeneratedFile::from_language_model_file(&first_file);
+        let second_generated_file = GeneratedFile::from_language_model_file(&second_file);
 
-        assert_eq!(result.files, vec![first_file.clone(), second_file.clone()]);
-        assert_eq!(result.steps[0].files, vec![first_file]);
-        assert_eq!(result.steps[1].files, vec![second_file]);
+        assert_eq!(
+            result.files,
+            vec![first_generated_file.clone(), second_generated_file.clone()]
+        );
+        assert_eq!(result.steps[0].files, vec![first_generated_file]);
+        assert_eq!(result.steps[1].files, vec![second_generated_file]);
         assert_eq!(
             serde_json::to_value(&result.files).expect("files serialize"),
             json!([
                 {
-                    "type": "file",
+                    "base64": "AQID",
                     "mediaType": "image/png",
-                    "data": {
-                        "type": "data",
-                        "data": "AQID"
-                    }
                 },
                 {
-                    "type": "file",
+                    "base64": "BAUG",
                     "mediaType": "image/jpeg",
-                    "data": {
-                        "type": "data",
-                        "data": [4, 5, 6]
-                    }
                 }
             ])
         );
