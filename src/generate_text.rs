@@ -521,6 +521,207 @@ pub struct GenerateTextStepStartEvent {
     pub tools_context: JsonObject,
 }
 
+/// Event sent immediately before a provider language model call begins.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelCallStartEvent {
+    /// Unique identifier for the generation call.
+    pub call_id: String,
+
+    /// Provider identifier for the step model.
+    pub provider: String,
+
+    /// Provider-specific model id for the step model.
+    pub model_id: String,
+
+    /// Prompt messages sent to the provider for this model call.
+    pub messages: LanguageModelPrompt,
+
+    /// Prepared tool definitions sent to the provider for this model call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<LanguageModelTool>,
+
+    /// Maximum output tokens configured for the provider call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
+
+    /// Sampling temperature configured for the provider call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+
+    /// Stop sequences configured for the provider call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_sequences: Option<Vec<String>>,
+
+    /// Nucleus sampling value configured for the provider call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+
+    /// Top-k sampling value configured for the provider call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u64>,
+
+    /// Presence penalty configured for the provider call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f64>,
+
+    /// Frequency penalty configured for the provider call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f64>,
+
+    /// Requested provider response format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<LanguageModelResponseFormat>,
+
+    /// Deterministic sampling seed configured for the provider call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+
+    /// Tool-choice strategy configured for the provider call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<LanguageModelToolChoice>,
+
+    /// Whether raw stream chunks should be included.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_raw_chunks: Option<bool>,
+
+    /// Additional HTTP headers configured for the provider call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Headers>,
+
+    /// Reasoning effort configured for the provider call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<LanguageModelReasoningEffort>,
+
+    /// Provider-specific options configured for the provider call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+}
+
+impl LanguageModelCallStartEvent {
+    fn from_call_options(
+        call_id: &str,
+        provider: &str,
+        model_id: &str,
+        call_options: &LanguageModelCallOptions,
+    ) -> Self {
+        Self {
+            call_id: call_id.to_string(),
+            provider: provider.to_string(),
+            model_id: model_id.to_string(),
+            messages: call_options.prompt.clone(),
+            tools: call_options.tools.clone().unwrap_or_default(),
+            max_output_tokens: call_options.max_output_tokens,
+            temperature: call_options.temperature,
+            stop_sequences: call_options.stop_sequences.clone(),
+            top_p: call_options.top_p,
+            top_k: call_options.top_k,
+            presence_penalty: call_options.presence_penalty,
+            frequency_penalty: call_options.frequency_penalty,
+            response_format: call_options.response_format.clone(),
+            seed: call_options.seed,
+            tool_choice: call_options.tool_choice.clone(),
+            include_raw_chunks: call_options.include_raw_chunks,
+            headers: call_options.headers.clone(),
+            reasoning: call_options.reasoning.clone(),
+            provider_options: call_options.provider_options.clone(),
+        }
+    }
+}
+
+/// Performance metrics for a provider language model call.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelCallPerformance {
+    /// Time spent waiting for the language model response in milliseconds.
+    pub response_time_ms: u64,
+
+    /// Effective number of output tokens per second over the full model response.
+    pub effective_output_tokens_per_second: f64,
+
+    /// Output tokens per second after the first output token was received.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens_per_second: Option<f64>,
+
+    /// Input tokens per second before the first output token was received.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens_per_second: Option<f64>,
+
+    /// Effective input and output tokens per second over the full model response.
+    pub effective_total_tokens_per_second: f64,
+
+    /// Time until the first text, reasoning, or tool input delta was received.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_to_first_output_token_ms: Option<u64>,
+}
+
+impl LanguageModelCallPerformance {
+    fn from_usage(usage: &LanguageModelUsage, response_time_ms: u64) -> Self {
+        Self {
+            response_time_ms,
+            effective_output_tokens_per_second: calculate_tokens_per_second(
+                usage.output_tokens.total,
+                response_time_ms,
+            ),
+            output_tokens_per_second: None,
+            input_tokens_per_second: None,
+            effective_total_tokens_per_second: calculate_tokens_per_second(
+                sum_token_counts(usage.input_tokens.total, usage.output_tokens.total),
+                response_time_ms,
+            ),
+            time_to_first_output_token_ms: None,
+        }
+    }
+}
+
+/// Event sent after a provider language model call completes, before local tool execution.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelCallEndEvent {
+    /// Unique identifier for the generation call.
+    pub call_id: String,
+
+    /// Provider identifier for the step model.
+    pub provider: String,
+
+    /// Provider-specific model id for the step model.
+    pub model_id: String,
+
+    /// Unified reason why the model call finished.
+    pub finish_reason: FinishReason,
+
+    /// Usage reported by the model call.
+    pub usage: LanguageModelUsage,
+
+    /// Content parts produced by the model call.
+    pub content: Vec<LanguageModelContent>,
+
+    /// Provider response id for this model call.
+    pub response_id: String,
+
+    /// Provider-call performance metrics.
+    pub performance: LanguageModelCallPerformance,
+}
+
+impl LanguageModelCallEndEvent {
+    fn from_step(step: &GenerateTextStep, response_time_ms: u64) -> Self {
+        Self {
+            call_id: step.call_id.clone(),
+            provider: step.model.provider.clone(),
+            model_id: step.model.model_id.clone(),
+            finish_reason: step.finish_reason.clone(),
+            usage: step.usage.clone(),
+            content: step.content.clone(),
+            response_id: step
+                .response
+                .as_ref()
+                .and_then(|response| response.id.clone())
+                .expect("generate_text assigns a response id before language-model-call end"),
+            performance: LanguageModelCallPerformance::from_usage(&step.usage, response_time_ms),
+        }
+    }
+}
+
 /// Future returned by a high-level generate-text start callback.
 pub type GenerateTextOnStartFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
 
@@ -593,6 +794,92 @@ impl fmt::Debug for GenerateTextOnStepStart<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("GenerateTextOnStepStart")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Future returned by a language-model-call start callback.
+pub type GenerateTextOnLanguageModelCallStartFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+/// Callback invoked immediately before a provider language model call begins.
+pub type GenerateTextOnLanguageModelCallStartFunction<'a> =
+    dyn Fn(LanguageModelCallStartEvent) -> GenerateTextOnLanguageModelCallStartFuture<'a> + 'a;
+
+/// Callback wrapper for upstream `experimental_onLanguageModelCallStart`.
+pub struct GenerateTextOnLanguageModelCallStart<'a> {
+    on_language_model_call_start: Rc<GenerateTextOnLanguageModelCallStartFunction<'a>>,
+}
+
+impl<'a> GenerateTextOnLanguageModelCallStart<'a> {
+    /// Creates a language-model-call start callback.
+    pub fn new<F, Fut>(on_language_model_call_start: F) -> Self
+    where
+        F: Fn(LanguageModelCallStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        Self {
+            on_language_model_call_start: Rc::new(move |event| {
+                Box::pin(on_language_model_call_start(event))
+            }),
+        }
+    }
+
+    /// Runs the language-model-call start callback.
+    pub fn start(
+        &self,
+        event: LanguageModelCallStartEvent,
+    ) -> GenerateTextOnLanguageModelCallStartFuture<'a> {
+        (self.on_language_model_call_start)(event)
+    }
+}
+
+impl fmt::Debug for GenerateTextOnLanguageModelCallStart<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GenerateTextOnLanguageModelCallStart")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Future returned by a language-model-call end callback.
+pub type GenerateTextOnLanguageModelCallEndFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+/// Callback invoked after a provider language model call completes.
+pub type GenerateTextOnLanguageModelCallEndFunction<'a> =
+    dyn Fn(LanguageModelCallEndEvent) -> GenerateTextOnLanguageModelCallEndFuture<'a> + 'a;
+
+/// Callback wrapper for upstream `experimental_onLanguageModelCallEnd`.
+pub struct GenerateTextOnLanguageModelCallEnd<'a> {
+    on_language_model_call_end: Rc<GenerateTextOnLanguageModelCallEndFunction<'a>>,
+}
+
+impl<'a> GenerateTextOnLanguageModelCallEnd<'a> {
+    /// Creates a language-model-call end callback.
+    pub fn new<F, Fut>(on_language_model_call_end: F) -> Self
+    where
+        F: Fn(LanguageModelCallEndEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        Self {
+            on_language_model_call_end: Rc::new(move |event| {
+                Box::pin(on_language_model_call_end(event))
+            }),
+        }
+    }
+
+    /// Runs the language-model-call end callback.
+    pub fn end(
+        &self,
+        event: LanguageModelCallEndEvent,
+    ) -> GenerateTextOnLanguageModelCallEndFuture<'a> {
+        (self.on_language_model_call_end)(event)
+    }
+}
+
+impl fmt::Debug for GenerateTextOnLanguageModelCallEnd<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GenerateTextOnLanguageModelCallEnd")
             .finish_non_exhaustive()
     }
 }
@@ -2446,6 +2733,12 @@ pub struct GenerateTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Optional callback invoked before each model step begins.
     pub on_step_start: Option<GenerateTextOnStepStart<'a>>,
 
+    /// Optional callback invoked immediately before each provider model call begins.
+    pub on_language_model_call_start: Option<GenerateTextOnLanguageModelCallStart<'a>>,
+
+    /// Optional callback invoked after each provider model call completes.
+    pub on_language_model_call_end: Option<GenerateTextOnLanguageModelCallEnd<'a>>,
+
     /// Optional callback invoked before a Rust tool executor is invoked.
     pub on_tool_execution_start: Option<GenerateTextOnToolExecutionStart<'a>>,
 
@@ -2484,6 +2777,8 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             prepare_step: None,
             on_start: None,
             on_step_start: None,
+            on_language_model_call_start: None,
+            on_language_model_call_end: None,
             on_tool_execution_start: None,
             on_tool_execution_end: None,
             on_step_finish: None,
@@ -2509,6 +2804,8 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             prepare_step: None,
             on_start: None,
             on_step_start: None,
+            on_language_model_call_start: None,
+            on_language_model_call_end: None,
             on_tool_execution_start: None,
             on_tool_execution_end: None,
             on_step_finish: None,
@@ -2700,6 +2997,36 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
         Fut: Future<Output = ()> + 'a,
     {
         self.on_step_start = Some(GenerateTextOnStepStart::new(on_step_start));
+        self
+    }
+
+    /// Sets a callback that is invoked immediately before each provider model call begins.
+    pub fn with_experimental_on_language_model_call_start<F, Fut>(
+        mut self,
+        on_language_model_call_start: F,
+    ) -> Self
+    where
+        F: Fn(LanguageModelCallStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_language_model_call_start = Some(GenerateTextOnLanguageModelCallStart::new(
+            on_language_model_call_start,
+        ));
+        self
+    }
+
+    /// Sets a callback that is invoked after each provider model call completes.
+    pub fn with_experimental_on_language_model_call_end<F, Fut>(
+        mut self,
+        on_language_model_call_end: F,
+    ) -> Self
+    where
+        F: Fn(LanguageModelCallEndEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_language_model_call_end = Some(GenerateTextOnLanguageModelCallEnd::new(
+            on_language_model_call_end,
+        ));
         self
     }
 
@@ -3685,6 +4012,8 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         prepare_step,
         on_start,
         on_step_start,
+        on_language_model_call_start,
+        on_language_model_call_end,
         on_tool_execution_start,
         on_tool_execution_end,
         on_step_finish,
@@ -3846,6 +4175,17 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
                 .await;
         }
 
+        if let Some(on_language_model_call_start) = &on_language_model_call_start {
+            on_language_model_call_start
+                .start(LanguageModelCallStartEvent::from_call_options(
+                    &call_id,
+                    step_model.provider(),
+                    step_model.model_id(),
+                    &step_call_options,
+                ))
+                .await;
+        }
+
         let step_started_at = Instant::now();
         let result = step_model.do_generate(step_call_options.clone()).await;
         let response_time_ms = duration_ms(step_started_at.elapsed());
@@ -3874,6 +4214,17 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         mark_tool_call_metadata(&mut step.tool_calls, &step_tools);
         mark_tool_result_metadata(&mut step.tool_results, &step.tool_calls, &step_tools);
         refresh_tool_call_views(&mut step);
+        ensure_generate_text_response_identity(&mut step);
+
+        if let Some(on_language_model_call_end) = &on_language_model_call_end {
+            on_language_model_call_end
+                .end(LanguageModelCallEndEvent::from_step(
+                    &step,
+                    response_time_ms,
+                ))
+                .await;
+        }
+
         let tool_approvals =
             resolve_tool_approvals_for_step(&step.tool_calls, &step_tools, tool_approval.as_ref());
         update_pending_deferred_provider_tool_calls(
@@ -3985,6 +4336,16 @@ fn generate_text_call_id() -> String {
 }
 
 fn apply_generate_text_response_metadata(step: &mut GenerateTextStep) {
+    ensure_generate_text_response_identity(step);
+    let response = step
+        .response
+        .as_mut()
+        .expect("generate_text response identity creates response metadata");
+
+    response.messages = Some(step.response_messages.clone());
+}
+
+fn ensure_generate_text_response_identity(step: &mut GenerateTextStep) {
     let response = step.response.get_or_insert_with(LanguageModelResponse::new);
 
     if response.id.is_none() {
@@ -3998,8 +4359,6 @@ fn apply_generate_text_response_metadata(step: &mut GenerateTextStep) {
     if response.model_id.is_none() {
         response.model_id = Some(step.model.model_id.clone());
     }
-
-    response.messages = Some(step.response_messages.clone());
 }
 
 fn apply_generate_text_include(
@@ -5561,7 +5920,8 @@ mod tests {
         GenerateTextStepPerformance, GenerateTextStepStartEvent, GenerateTextToolCall,
         GenerateTextToolExecutionEndEvent, GenerateTextToolExecutionStartEvent,
         GenerateTextToolResult, InvalidStreamPartError, InvalidToolApprovalError,
-        InvalidToolInputError, MissingToolResultsError, NoObjectGeneratedError,
+        InvalidToolInputError, LanguageModelCallEndEvent, LanguageModelCallPerformance,
+        LanguageModelCallStartEvent, MissingToolResultsError, NoObjectGeneratedError,
         NoOutputGeneratedError, NoSuchToolError, NormalizedToolApprovalStatus, PrepareStepResult,
         PruneEmptyMessages, PruneMessagesOptions, PruneReasoning, PruneToolCallRule,
         PruneToolCallRuleMode, PruneToolCalls, ResolveToolApprovalOptions, StopCondition,
@@ -5574,6 +5934,7 @@ mod tests {
         resolve_tool_approval, step_count_is,
     };
     use crate::file_data::FileDataContent;
+    use crate::headers::Headers;
     use crate::json::JsonValue;
     use crate::language_model::{
         FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
@@ -5582,14 +5943,15 @@ mod tests {
         LanguageModelFunctionTool, LanguageModelGenerateResult, LanguageModelMessage,
         LanguageModelProviderTool, LanguageModelReasoning, LanguageModelReasoningFile,
         LanguageModelReasoningPart, LanguageModelRequest, LanguageModelResponse,
-        LanguageModelSource, LanguageModelStreamPart, LanguageModelStreamResult,
-        LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextDelta,
-        LanguageModelTextPart, LanguageModelTool, LanguageModelToolApprovalRequest,
-        LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
-        LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolChoice,
-        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResult,
-        LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
-        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelResponseFormat, LanguageModelSource, LanguageModelStreamPart,
+        LanguageModelStreamResult, LanguageModelSupportedUrls, LanguageModelText,
+        LanguageModelTextDelta, LanguageModelTextPart, LanguageModelTool,
+        LanguageModelToolApprovalRequest, LanguageModelToolApprovalRequestPart,
+        LanguageModelToolApprovalResponsePart, LanguageModelToolCall, LanguageModelToolCallPart,
+        LanguageModelToolChoice, LanguageModelToolContentPart, LanguageModelToolMessage,
+        LanguageModelToolResult, LanguageModelToolResultOutput, LanguageModelToolResultPart,
+        LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage,
+        OutputTokenUsage,
     };
     use crate::provider::{
         JsonParseError, ProviderMetadata, ProviderOptions, SpecificationVersion,
@@ -6740,6 +7102,154 @@ mod tests {
                 LanguageModelToolContentPart::ToolApprovalResponse(response),
             ])),
         ]
+    }
+
+    #[test]
+    fn language_model_call_events_round_trip_upstream_shape() {
+        let prompt = vec![user_message("Say hello")];
+        let response_format = LanguageModelResponseFormat::json().with_name("structured-answer");
+        let start_event = LanguageModelCallStartEvent {
+            call_id: "call-123".to_string(),
+            provider: "test-provider".to_string(),
+            model_id: "test-model".to_string(),
+            messages: prompt.clone(),
+            tools: Vec::new(),
+            max_output_tokens: Some(100),
+            temperature: Some(0.2),
+            stop_sequences: Some(vec!["END".to_string()]),
+            top_p: Some(0.9),
+            top_k: Some(40),
+            presence_penalty: Some(0.1),
+            frequency_penalty: Some(0.2),
+            response_format: Some(response_format.clone()),
+            seed: Some(42),
+            tool_choice: Some(LanguageModelToolChoice::Auto),
+            include_raw_chunks: Some(true),
+            headers: Some(Headers::from_iter([(
+                "x-test".to_string(),
+                "true".to_string(),
+            )])),
+            reasoning: None,
+            provider_options: Some(ProviderOptions::from_iter([(
+                "test".to_string(),
+                serde_json::from_value(json!({ "mode": "strict" }))
+                    .expect("provider options object"),
+            )])),
+        };
+
+        let start_value = serde_json::to_value(&start_event).expect("start event serializes");
+        assert_eq!(start_value["callId"], json!("call-123"));
+        assert_eq!(start_value["modelId"], json!("test-model"));
+        assert_eq!(
+            start_value["responseFormat"],
+            json!({
+                "type": "json",
+                "name": "structured-answer"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<LanguageModelCallStartEvent>(start_value)
+                .expect("start event deserializes"),
+            start_event
+        );
+
+        let end_event = LanguageModelCallEndEvent {
+            call_id: "call-123".to_string(),
+            provider: "test-provider".to_string(),
+            model_id: "test-model".to_string(),
+            finish_reason: FinishReason::Stop,
+            usage: no_object_usage(),
+            content: vec![LanguageModelContent::Text(LanguageModelText::new("Hello"))],
+            response_id: "resp-123".to_string(),
+            performance: LanguageModelCallPerformance {
+                response_time_ms: 25,
+                effective_output_tokens_per_second: 280.0,
+                output_tokens_per_second: None,
+                input_tokens_per_second: None,
+                effective_total_tokens_per_second: 720.0,
+                time_to_first_output_token_ms: None,
+            },
+        };
+
+        let end_value = serde_json::to_value(&end_event).expect("end event serializes");
+        assert_eq!(end_value["responseId"], json!("resp-123"));
+        assert_eq!(end_value["performance"]["responseTimeMs"], json!(25));
+        assert_eq!(
+            serde_json::from_value::<LanguageModelCallEndEvent>(end_value)
+                .expect("end event deserializes"),
+            end_event
+        );
+    }
+
+    #[test]
+    fn generate_text_notifies_language_model_call_start_and_end() {
+        let model = FakeLanguageModel::new().with_body_metadata();
+        let prompt = vec![user_message("Say hello")];
+        let response_format = LanguageModelResponseFormat::json().with_name("structured-answer");
+        let start_events = Arc::new(Mutex::new(Vec::<LanguageModelCallStartEvent>::new()));
+        let end_events = Arc::new(Mutex::new(Vec::<LanguageModelCallEndEvent>::new()));
+        let event_order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+
+        let start_events_for_callback = Arc::clone(&start_events);
+        let start_order = Arc::clone(&event_order);
+        let end_events_for_callback = Arc::clone(&end_events);
+        let end_order = Arc::clone(&event_order);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, prompt.clone())
+                .with_max_output_tokens(100)
+                .with_response_format(response_format.clone())
+                .with_experimental_on_language_model_call_start(move |event| {
+                    let start_events = Arc::clone(&start_events_for_callback);
+                    let event_order = Arc::clone(&start_order);
+                    async move {
+                        event_order.lock().expect("event order lock").push("start");
+                        start_events.lock().expect("start event lock").push(event);
+                    }
+                })
+                .with_experimental_on_language_model_call_end(move |event| {
+                    let end_events = Arc::clone(&end_events_for_callback);
+                    let event_order = Arc::clone(&end_order);
+                    async move {
+                        event_order.lock().expect("event order lock").push("end");
+                        end_events.lock().expect("end event lock").push(event);
+                    }
+                }),
+        ));
+
+        assert_eq!(
+            event_order.lock().expect("event order lock").as_slice(),
+            ["start", "end"]
+        );
+        assert_eq!(
+            model.calls.borrow()[0].response_format,
+            Some(response_format.clone())
+        );
+
+        let start_events = start_events.lock().expect("start event lock");
+        assert_eq!(start_events.len(), 1);
+        let start = &start_events[0];
+        assert_eq!(start.provider, "test-provider");
+        assert_eq!(start.model_id, "test-model");
+        assert_eq!(start.messages, prompt);
+        assert_eq!(start.max_output_tokens, Some(100));
+        assert_eq!(start.response_format, Some(response_format));
+        drop(start_events);
+
+        let end_events = end_events.lock().expect("end event lock");
+        assert_eq!(end_events.len(), 1);
+        let end = &end_events[0];
+        assert_eq!(end.provider, "test-provider");
+        assert_eq!(end.model_id, "test-model");
+        assert_eq!(end.finish_reason, FinishReason::Stop);
+        assert_eq!(end.response_id, "resp_body");
+        assert_eq!(end.usage, result.steps[0].usage);
+        assert_eq!(end.content, result.steps[0].content);
+        assert!(
+            end.performance
+                .effective_output_tokens_per_second
+                .is_finite()
+        );
     }
 
     #[test]
