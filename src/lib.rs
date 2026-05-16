@@ -83,7 +83,7 @@ pub use transcription_model::{
     TranscriptionModelResponse, TranscriptionModelResult, TranscriptionModelSegment,
 };
 pub use video_model::{
-    VideoModelCallOptions, VideoModelFile, VideoModelResponse, VideoModelResult,
+    VideoModel, VideoModelCallOptions, VideoModelFile, VideoModelResponse, VideoModelResult,
     VideoModelVideoData,
 };
 pub use warning::Warning;

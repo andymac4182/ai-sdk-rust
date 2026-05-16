@@ -1,11 +1,51 @@
+use std::future::Future;
+
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use url::Url;
 
 use crate::file_data::FileDataContent;
 use crate::headers::Headers;
-use crate::provider::{ProviderMetadata, ProviderOptions};
+use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
 use crate::warning::Warning;
+
+/// A provider-v4 video model.
+///
+/// The upstream TypeScript contract exposes a `maxVideosPerCall` capability
+/// that may be a function returning a `PromiseLike`, plus a `doGenerate`
+/// method returning a `PromiseLike<VideoModelV4Result>`. This Rust trait maps
+/// those asynchronous boundaries to associated [`Future`] types without
+/// introducing an async-trait dependency.
+pub trait VideoModel {
+    /// Future returned by [`VideoModel::max_videos_per_call`].
+    type MaxVideosPerCallFuture<'a>: Future<Output = Option<usize>> + Send + 'a
+    where
+        Self: 'a;
+
+    /// Future returned by [`VideoModel::do_generate`].
+    type GenerateFuture<'a>: Future<Output = VideoModelResult> + Send + 'a
+    where
+        Self: 'a;
+
+    /// Returns the provider/model interface version implemented by this model.
+    fn specification_version(&self) -> SpecificationVersion {
+        SpecificationVersion::V4
+    }
+
+    /// Returns the provider identifier.
+    fn provider(&self) -> &str;
+
+    /// Returns the provider-specific model id.
+    fn model_id(&self) -> &str;
+
+    /// Returns the maximum number of videos supported in one call.
+    ///
+    /// `None` represents the upstream `undefined` or global-limit case.
+    fn max_videos_per_call(&self) -> Self::MaxVideosPerCallFuture<'_>;
+
+    /// Generates videos for the supplied options.
+    fn do_generate(&self, options: VideoModelCallOptions) -> Self::GenerateFuture<'_>;
+}
 
 /// A video or image file used for video editing or image-to-video generation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -338,15 +378,67 @@ impl VideoModelResult {
 #[cfg(test)]
 mod tests {
     use super::{
-        VideoModelCallOptions, VideoModelFile, VideoModelResponse, VideoModelResult,
+        VideoModel, VideoModelCallOptions, VideoModelFile, VideoModelResponse, VideoModelResult,
         VideoModelVideoData,
     };
     use crate::file_data::FileDataContent;
-    use crate::provider::{ProviderMetadata, ProviderOptions};
+    use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
     use crate::warning::Warning;
     use serde_json::json;
+    use std::future::{Future, Ready, ready};
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
     use time::OffsetDateTime;
     use url::Url;
+
+    struct StaticVideoModel;
+
+    impl VideoModel for StaticVideoModel {
+        type MaxVideosPerCallFuture<'a>
+            = Ready<Option<usize>>
+        where
+            Self: 'a;
+
+        type GenerateFuture<'a>
+            = Ready<VideoModelResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "test-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            "video-test"
+        }
+
+        fn max_videos_per_call(&self) -> Self::MaxVideosPerCallFuture<'_> {
+            ready(Some(1))
+        }
+
+        fn do_generate(&self, _options: VideoModelCallOptions) -> Self::GenerateFuture<'_> {
+            let response_timestamp = OffsetDateTime::parse(
+                "2024-01-02T03:04:05Z",
+                &time::format_description::well_known::Rfc3339,
+            )
+            .expect("timestamp parses");
+
+            ready(VideoModelResult::new(
+                vec![VideoModelVideoData::base64("AAAAIGZ0eXBtcDQy", "video/mp4")],
+                VideoModelResponse::new(response_timestamp, "video-test"),
+            ))
+        }
+    }
+
+    fn poll_ready<T>(mut future: Ready<T>) -> T {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+
+        match Pin::new(&mut future).poll(&mut context) {
+            Poll::Ready(value) => value,
+            Poll::Pending => unreachable!("std::future::Ready never returns pending"),
+        }
+    }
 
     #[test]
     fn call_options_serializes_upstream_shape_with_image_and_provider_options() {
@@ -428,6 +520,24 @@ mod tests {
                 "n": 1,
                 "providerOptions": {}
             })
+        );
+    }
+
+    #[test]
+    fn video_model_trait_exposes_upstream_v4_identity_capability_and_generate_boundary() {
+        let model = StaticVideoModel;
+        let options = VideoModelCallOptions::new(1).with_prompt("A generated video");
+
+        let max_videos_per_call = poll_ready(model.max_videos_per_call());
+        let result = poll_ready(model.do_generate(options));
+
+        assert_eq!(model.specification_version(), SpecificationVersion::V4);
+        assert_eq!(model.provider(), "test-provider");
+        assert_eq!(model.model_id(), "video-test");
+        assert_eq!(max_videos_per_call, Some(1));
+        assert_eq!(
+            result.videos,
+            vec![VideoModelVideoData::base64("AAAAIGZ0eXBtcDQy", "video/mp4")]
         );
     }
 
