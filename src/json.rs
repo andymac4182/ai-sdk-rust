@@ -12,6 +12,11 @@ pub type JsonValue = Value;
 /// A JSON object keyed by string values.
 pub type JsonObject = Map<String, JsonValue>;
 
+/// A JSON schema object.
+///
+/// The upstream AI SDK uses JSON Schema 7 objects for provider-facing schemas.
+pub type JsonSchema = JsonObject;
+
 /// A JSON array.
 pub type JsonArray = Vec<JsonValue>;
 

@@ -3,8 +3,8 @@ use time::OffsetDateTime;
 use url::Url;
 
 use crate::file_data::FileDataContent;
-use crate::json::{JsonObject, NonNullJsonValue};
-use crate::provider::ProviderMetadata;
+use crate::json::{JsonObject, JsonSchema, NonNullJsonValue};
+use crate::provider::{ProviderMetadata, ProviderOptions};
 
 /// Unified reason why a language model finished generating a response.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -710,6 +710,143 @@ pub enum LanguageModelContent {
     ToolResult(LanguageModelToolResult),
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelFunctionToolKind {
+    #[serde(rename = "function")]
+    Function,
+}
+
+/// Example input for a function tool.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LanguageModelToolInputExample {
+    /// Example input object for the tool.
+    pub input: JsonObject,
+}
+
+impl LanguageModelToolInputExample {
+    /// Creates a function tool input example.
+    pub fn new(input: JsonObject) -> Self {
+        Self { input }
+    }
+}
+
+/// Function tool definition made available to a language model call.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelFunctionTool {
+    #[serde(rename = "type")]
+    kind: LanguageModelFunctionToolKind,
+
+    /// Name of the tool, unique within this model call.
+    pub name: String,
+
+    /// Description of the tool's purpose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    /// JSON Schema 7 object describing the tool input.
+    pub input_schema: JsonSchema,
+
+    /// Optional examples that show the model what inputs should look like.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_examples: Option<Vec<LanguageModelToolInputExample>>,
+
+    /// Strict mode setting for providers that support it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
+
+    /// Provider-specific options for this tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+}
+
+impl LanguageModelFunctionTool {
+    /// Creates a function tool definition.
+    pub fn new(name: impl Into<String>, input_schema: JsonSchema) -> Self {
+        Self {
+            kind: LanguageModelFunctionToolKind::Function,
+            name: name.into(),
+            description: None,
+            input_schema,
+            input_examples: None,
+            strict: None,
+            provider_options: None,
+        }
+    }
+
+    /// Sets the tool description.
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    /// Adds a tool input example.
+    pub fn with_input_example(mut self, input: JsonObject) -> Self {
+        self.input_examples
+            .get_or_insert_with(Vec::new)
+            .push(LanguageModelToolInputExample::new(input));
+        self
+    }
+
+    /// Sets strict mode for providers that support it.
+    pub fn with_strict(mut self, strict: bool) -> Self {
+        self.strict = Some(strict);
+        self
+    }
+
+    /// Adds provider-specific options to this tool.
+    pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
+        self.provider_options = Some(provider_options);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelProviderToolKind {
+    #[serde(rename = "provider")]
+    Provider,
+}
+
+/// Provider-specific tool definition made available to a language model call.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelProviderTool {
+    #[serde(rename = "type")]
+    kind: LanguageModelProviderToolKind,
+
+    /// Provider tool identifier, typically `<provider-id>.<unique-tool-name>`.
+    pub id: String,
+
+    /// Name of the tool, unique within this model call.
+    pub name: String,
+
+    /// Provider-specific arguments for configuring the tool.
+    pub args: JsonObject,
+}
+
+impl LanguageModelProviderTool {
+    /// Creates a provider-specific tool definition.
+    pub fn new(id: impl Into<String>, name: impl Into<String>, args: JsonObject) -> Self {
+        Self {
+            kind: LanguageModelProviderToolKind::Provider,
+            id: id.into(),
+            name: name.into(),
+            args,
+        }
+    }
+}
+
+/// Tool definition made available to a language model call.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum LanguageModelTool {
+    /// Function tool with a caller-defined JSON schema.
+    Function(LanguageModelFunctionTool),
+
+    /// Provider-defined tool with provider-specific arguments.
+    Provider(LanguageModelProviderTool),
+}
+
 /// Strategy for selecting a tool during a language model call.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -736,8 +873,9 @@ mod tests {
     use super::{
         FinishReason, InputTokenUsage, LanguageModelContent, LanguageModelCustomContent,
         LanguageModelFile, LanguageModelFileData, LanguageModelFinishReason,
-        LanguageModelReasoning, LanguageModelReasoningFile, LanguageModelResponseMetadata,
-        LanguageModelSource, LanguageModelText, LanguageModelToolApprovalRequest,
+        LanguageModelFunctionTool, LanguageModelProviderTool, LanguageModelReasoning,
+        LanguageModelReasoningFile, LanguageModelResponseMetadata, LanguageModelSource,
+        LanguageModelText, LanguageModelTool, LanguageModelToolApprovalRequest,
         LanguageModelToolCall, LanguageModelToolChoice, LanguageModelToolResult,
         LanguageModelUrlSource, LanguageModelUsage, OutputTokenUsage,
     };
@@ -1427,6 +1565,159 @@ mod tests {
             "text": "No matching content variant"
         }))
         .expect_err("unsupported content variant is rejected");
+    }
+
+    #[test]
+    fn function_tool_serializes_upstream_shape_with_schema_examples_and_options() {
+        let input_schema = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "city": {
+                    "type": "string"
+                }
+            },
+            "required": ["city"]
+        }))
+        .expect("input schema is a JSON object");
+
+        let example = serde_json::from_value(json!({
+            "city": "Brisbane"
+        }))
+        .expect("example input is a JSON object");
+
+        let provider_options = serde_json::from_value(json!({
+            "openai": {
+                "strictJsonSchema": true
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let tool = LanguageModelFunctionTool::new("weather", input_schema)
+            .with_description("Get the current weather.")
+            .with_input_example(example)
+            .with_strict(true)
+            .with_provider_options(provider_options);
+
+        assert_eq!(
+            serde_json::to_value(tool).expect("function tool serializes"),
+            json!({
+                "type": "function",
+                "name": "weather",
+                "description": "Get the current weather.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "city": {
+                            "type": "string"
+                        }
+                    },
+                    "required": ["city"]
+                },
+                "inputExamples": [
+                    {
+                        "input": {
+                            "city": "Brisbane"
+                        }
+                    }
+                ],
+                "strict": true,
+                "providerOptions": {
+                    "openai": {
+                        "strictJsonSchema": true
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn function_tool_deserializes_and_omits_missing_optional_fields() {
+        let tool: LanguageModelFunctionTool = serde_json::from_value(json!({
+            "type": "function",
+            "name": "lookup",
+            "inputSchema": {
+                "type": "object"
+            }
+        }))
+        .expect("function tool deserializes");
+
+        let input_schema =
+            serde_json::from_value(json!({ "type": "object" })).expect("schema is object");
+
+        assert_eq!(tool, LanguageModelFunctionTool::new("lookup", input_schema));
+        assert_eq!(
+            serde_json::to_value(tool).expect("function tool serializes"),
+            json!({
+                "type": "function",
+                "name": "lookup",
+                "inputSchema": {
+                    "type": "object"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn provider_tool_deserializes_record_args() {
+        let tool: LanguageModelProviderTool = serde_json::from_value(json!({
+            "type": "provider",
+            "id": "openai.web_search",
+            "name": "web_search",
+            "args": {
+                "searchContextSize": "low"
+            }
+        }))
+        .expect("provider tool deserializes");
+
+        let args = serde_json::from_value(json!({
+            "searchContextSize": "low"
+        }))
+        .expect("provider tool args are a JSON object");
+
+        assert_eq!(
+            tool,
+            LanguageModelProviderTool::new("openai.web_search", "web_search", args)
+        );
+        assert_eq!(
+            serde_json::to_value(tool).expect("provider tool serializes"),
+            json!({
+                "type": "provider",
+                "id": "openai.web_search",
+                "name": "web_search",
+                "args": {
+                    "searchContextSize": "low"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn tool_union_deserializes_provider_tool_variant() {
+        let tool: LanguageModelTool = serde_json::from_value(json!({
+            "type": "provider",
+            "id": "openai.web_search",
+            "name": "web_search",
+            "args": {}
+        }))
+        .expect("tool union deserializes");
+
+        assert_eq!(
+            tool,
+            LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                "openai.web_search",
+                "web_search",
+                serde_json::from_value(json!({})).expect("args are a JSON object"),
+            ))
+        );
+    }
+
+    #[test]
+    fn tool_union_rejects_unknown_tool_types() {
+        serde_json::from_value::<LanguageModelTool>(json!({
+            "type": "unsupported",
+            "name": "unknown"
+        }))
+        .expect_err("unsupported tool variant is rejected");
     }
 
     #[test]
