@@ -75,7 +75,7 @@ pub use skills::{
     SkillsFile, SkillsFileData, SkillsUploadSkillCallOptions, SkillsUploadSkillResult,
 };
 pub use speech_model::{
-    SpeechModelAudio, SpeechModelCallOptions, SpeechModelRequest, SpeechModelResponse,
+    SpeechModel, SpeechModelAudio, SpeechModelCallOptions, SpeechModelRequest, SpeechModelResponse,
     SpeechModelResult,
 };
 pub use transcription_model::{
