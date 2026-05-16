@@ -2,10 +2,12 @@ use std::collections::BTreeMap;
 use std::env::{self, VarError};
 use std::fmt;
 use std::future::Future;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::pin::Pin;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use url::{Host, Url};
 
 use crate::file_data::{
     FileData, FileDataContent, NoSuchProviderReferenceError, ProviderReference,
@@ -60,6 +62,87 @@ impl fmt::Display for Base64DecodeError {
 }
 
 impl std::error::Error for Base64DecodeError {}
+
+/// Error returned when a URL is unsafe or failed to download.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DownloadError {
+    url: String,
+    status_code: Option<u16>,
+    status_text: Option<String>,
+    message: String,
+}
+
+impl DownloadError {
+    /// Creates a download error with a caller-supplied message.
+    pub fn new(url: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            status_code: None,
+            status_text: None,
+            message: message.into(),
+        }
+    }
+
+    /// Creates a download error from an HTTP response status.
+    pub fn with_status(
+        url: impl Into<String>,
+        status_code: u16,
+        status_text: impl Into<String>,
+    ) -> Self {
+        let url = url.into();
+        let status_text = status_text.into();
+        Self {
+            message: format!("Failed to download {url}: {status_code} {status_text}"),
+            url,
+            status_code: Some(status_code),
+            status_text: Some(status_text),
+        }
+    }
+
+    /// Creates a download error from a lower-level failure message.
+    pub fn with_cause_message(url: impl Into<String>, cause_message: impl fmt::Display) -> Self {
+        let url = url.into();
+        Self {
+            message: format!("Failed to download {url}: {cause_message}"),
+            url,
+            status_code: None,
+            status_text: None,
+        }
+    }
+
+    /// Returns the URL that failed validation or download.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Returns the response status code when one was available.
+    pub fn status_code(&self) -> Option<u16> {
+        self.status_code
+    }
+
+    /// Returns the response status text when one was available.
+    pub fn status_text(&self) -> Option<&str> {
+        self.status_text.as_deref()
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into its URL.
+    pub fn into_url(self) -> String {
+        self.url
+    }
+}
+
+impl fmt::Display for DownloadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for DownloadError {}
 
 struct MediaTypeSignature {
     media_type: &'static str,
@@ -1222,6 +1305,99 @@ pub fn convert_image_model_file_to_data_uri(file: &ImageModelFile) -> String {
     }
 }
 
+/// Validates that a URL is safe to download from.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils` `validateDownloadUrl`:
+/// `http`, `https`, and `data` URLs are accepted, while local protocols,
+/// localhost-style hostnames, and private IPv4/IPv6 addresses are rejected to
+/// avoid accidental internal network access.
+pub fn validate_download_url(url: &str) -> Result<(), DownloadError> {
+    let parsed =
+        Url::parse(url).map_err(|_| DownloadError::new(url, format!("Invalid URL: {url}")))?;
+
+    match parsed.scheme() {
+        "data" => return Ok(()),
+        "http" | "https" => {}
+        scheme => {
+            return Err(DownloadError::new(
+                url,
+                format!("URL scheme must be http, https, or data, got {scheme}:"),
+            ));
+        }
+    }
+
+    let host = parsed
+        .host()
+        .ok_or_else(|| DownloadError::new(url, "URL must have a hostname"))?;
+
+    match host {
+        Host::Domain(hostname) => validate_download_hostname(url, hostname),
+        Host::Ipv4(ip) => validate_download_ipv4(url, ip),
+        Host::Ipv6(ip) => validate_download_ipv6(url, ip),
+    }
+}
+
+fn validate_download_hostname(url: &str, hostname: &str) -> Result<(), DownloadError> {
+    let hostname = hostname.to_ascii_lowercase();
+
+    if hostname == "localhost" || hostname.ends_with(".local") || hostname.ends_with(".localhost") {
+        return Err(DownloadError::new(
+            url,
+            format!("URL with hostname {hostname} is not allowed"),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_download_ipv4(url: &str, ip: Ipv4Addr) -> Result<(), DownloadError> {
+    if is_private_download_ipv4(ip) {
+        Err(DownloadError::new(
+            url,
+            format!("URL with IP address {ip} is not allowed"),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_download_ipv6(url: &str, ip: Ipv6Addr) -> Result<(), DownloadError> {
+    if is_private_download_ipv6(ip) {
+        Err(DownloadError::new(
+            url,
+            format!("URL with IPv6 address [{ip}] is not allowed"),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn is_private_download_ipv4(ip: Ipv4Addr) -> bool {
+    let [a, b, _, _] = ip.octets();
+
+    a == 0
+        || a == 10
+        || a == 127
+        || (a == 169 && b == 254)
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 168)
+}
+
+fn is_private_download_ipv6(ip: Ipv6Addr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() {
+        return true;
+    }
+
+    if let Some(mapped_ipv4) = ip.to_ipv4_mapped() {
+        return is_private_download_ipv4(mapped_ipv4);
+    }
+
+    let segments = ip.segments();
+    let first_segment = segments[0];
+
+    (first_segment & 0xfe00) == 0xfc00 || (first_segment & 0xffc0) == 0xfe80
+}
+
 /// Combines optional HTTP header maps, with later maps overriding earlier ones.
 ///
 /// This mirrors upstream `@ai-sdk/provider-utils` `combineHeaders`: missing
@@ -1550,7 +1726,7 @@ mod tests {
     use url::Url;
 
     use super::{
-        Arrayable, Base64DecodeError, InjectJsonInstructionIntoMessagesOptions,
+        Arrayable, Base64DecodeError, DownloadError, InjectJsonInstructionIntoMessagesOptions,
         InlineFileDataBytesError, LoadApiKeyOptions, LoadOptionalSettingOptions,
         LoadSettingOptions, ReasoningLevel, Tool, ToolExecutionError, ToolExecutionOptions,
         add_additional_properties_to_json_schema, as_array, combine_headers,
@@ -1563,7 +1739,7 @@ mod tests {
         map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
         media_type_to_extension, normalize_headers, prepare_tools, remove_undefined_entries,
         resolve_full_media_type, resolve_provider_reference, strip_file_extension,
-        with_user_agent_suffix, without_trailing_slash,
+        validate_download_url, with_user_agent_suffix, without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -2675,6 +2851,133 @@ mod tests {
             convert_image_model_file_to_data_uri(&file),
             "data:image/png;base64,"
         );
+    }
+
+    #[test]
+    fn download_error_retains_status_and_cause_messages() {
+        let status_error =
+            DownloadError::with_status("https://example.com/missing.png", 404, "Not Found");
+        assert_eq!(status_error.url(), "https://example.com/missing.png");
+        assert_eq!(status_error.status_code(), Some(404));
+        assert_eq!(status_error.status_text(), Some("Not Found"));
+        assert_eq!(
+            status_error.message(),
+            "Failed to download https://example.com/missing.png: 404 Not Found"
+        );
+        assert_eq!(status_error.to_string(), status_error.message());
+
+        let cause_error =
+            DownloadError::with_cause_message("https://example.com/file", "connection refused");
+        assert_eq!(
+            cause_error.message(),
+            "Failed to download https://example.com/file: connection refused"
+        );
+        assert_eq!(cause_error.status_code(), None);
+        assert_eq!(cause_error.status_text(), None);
+    }
+
+    #[test]
+    fn validate_download_url_allows_public_http_https_data_and_ip_urls() {
+        assert!(validate_download_url("https://example.com/image.png").is_ok());
+        assert!(validate_download_url("http://example.com/image.png").is_ok());
+        assert!(validate_download_url("https://203.0.113.1/file").is_ok());
+        assert!(validate_download_url("https://example.com:8080/file").is_ok());
+        assert!(validate_download_url("data:text/plain;base64,aGVsbG8=").is_ok());
+    }
+
+    #[test]
+    fn validate_download_url_rejects_invalid_and_unsupported_schemes() {
+        assert_eq!(
+            validate_download_url("not-a-url")
+                .expect_err("invalid URL is rejected")
+                .message(),
+            "Invalid URL: not-a-url"
+        );
+        assert_eq!(
+            validate_download_url("file:///etc/passwd")
+                .expect_err("file scheme is rejected")
+                .message(),
+            "URL scheme must be http, https, or data, got file:"
+        );
+        assert_eq!(
+            validate_download_url("ftp://example.com/file")
+                .expect_err("ftp scheme is rejected")
+                .message(),
+            "URL scheme must be http, https, or data, got ftp:"
+        );
+        assert_eq!(
+            validate_download_url("javascript:alert(1)")
+                .expect_err("javascript scheme is rejected")
+                .message(),
+            "URL scheme must be http, https, or data, got javascript:"
+        );
+    }
+
+    #[test]
+    fn validate_download_url_rejects_local_hostnames() {
+        for url in [
+            "http://localhost/file",
+            "http://localhost:3000/file",
+            "http://myhost.local/file",
+            "http://app.localhost/file",
+        ] {
+            assert!(
+                validate_download_url(url)
+                    .expect_err("local hostname is rejected")
+                    .message()
+                    .contains("is not allowed"),
+                "{url} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_download_url_rejects_private_ipv4_addresses() {
+        for url in [
+            "http://127.0.0.1/file",
+            "http://127.255.0.1/file",
+            "http://10.0.0.1/file",
+            "http://172.16.0.1/file",
+            "http://172.31.255.255/file",
+            "http://192.168.1.1/file",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://0.0.0.0/file",
+        ] {
+            assert!(
+                validate_download_url(url)
+                    .expect_err("private IPv4 address is rejected")
+                    .message()
+                    .contains("IP address"),
+                "{url} should be rejected"
+            );
+        }
+
+        assert!(validate_download_url("http://172.15.0.1/file").is_ok());
+        assert!(validate_download_url("http://172.32.0.1/file").is_ok());
+    }
+
+    #[test]
+    fn validate_download_url_rejects_private_ipv6_addresses() {
+        for url in [
+            "http://[::1]/file",
+            "http://[::]/file",
+            "http://[fc00::1]/file",
+            "http://[fd12::1]/file",
+            "http://[fe80::1]/file",
+            "http://[::ffff:127.0.0.1]/file",
+            "http://[::ffff:10.0.0.1]/file",
+            "http://[::ffff:169.254.169.254]/file",
+        ] {
+            assert!(
+                validate_download_url(url)
+                    .expect_err("private IPv6 address is rejected")
+                    .message()
+                    .contains("IPv6 address"),
+                "{url} should be rejected"
+            );
+        }
+
+        assert!(validate_download_url("http://[::ffff:203.0.113.1]/file").is_ok());
     }
 
     #[test]

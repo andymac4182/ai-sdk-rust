@@ -93,7 +93,7 @@ pub use provider::{
     TypeValidationContext, TypeValidationError, UnsupportedFunctionalityError, get_error_message,
 };
 pub use provider_utils::{
-    Arrayable, Base64DecodeError, InjectJsonInstructionIntoMessagesOptions,
+    Arrayable, Base64DecodeError, DownloadError, InjectJsonInstructionIntoMessagesOptions,
     InlineFileDataBytesError, LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions,
     ReasoningLevel, Tool, ToolExecuteFunction, ToolExecuteFuture, ToolExecutionError,
     ToolExecutionOptions, ToolNameMapping, add_additional_properties_to_json_schema, as_array,
@@ -104,8 +104,8 @@ pub use provider_utils::{
     is_non_nullable, is_provider_reference, load_api_key, load_optional_setting, load_setting,
     map_reasoning_to_provider_budget, map_reasoning_to_provider_effort, media_type_to_extension,
     normalize_headers, prepare_tools, remove_undefined_entries, resolve_full_media_type,
-    resolve_provider_reference, strip_file_extension, with_user_agent_suffix,
-    without_trailing_slash,
+    resolve_provider_reference, strip_file_extension, validate_download_url,
+    with_user_agent_suffix, without_trailing_slash,
 };
 pub use reranking_model::{
     RerankingModel, RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
