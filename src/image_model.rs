@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::future::Future;
+use std::{fmt, future::Future};
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -339,6 +339,71 @@ impl ImageModelResponse {
     }
 }
 
+/// Error returned when high-level image generation produces no images.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NoImageGeneratedError {
+    message: String,
+    responses: Option<Vec<ImageModelResponse>>,
+}
+
+impl NoImageGeneratedError {
+    /// Creates a no-image error with the upstream default message and no response metadata.
+    pub fn new() -> Self {
+        Self {
+            message: "No image generated.".to_string(),
+            responses: None,
+        }
+    }
+
+    /// Creates a no-image error with response metadata from attempted provider calls.
+    pub fn with_responses(responses: impl IntoIterator<Item = ImageModelResponse>) -> Self {
+        Self {
+            message: "No image generated.".to_string(),
+            responses: Some(responses.into_iter().collect()),
+        }
+    }
+
+    /// Creates a no-image error with a caller-supplied message and optional responses.
+    pub fn with_message(
+        message: impl Into<String>,
+        responses: Option<Vec<ImageModelResponse>>,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            responses,
+        }
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Returns response metadata for attempted provider calls, when available.
+    pub fn responses(&self) -> Option<&[ImageModelResponse]> {
+        self.responses.as_deref()
+    }
+
+    /// Converts this error into its message and optional responses.
+    pub fn into_parts(self) -> (String, Option<Vec<ImageModelResponse>>) {
+        (self.message, self.responses)
+    }
+}
+
+impl Default for NoImageGeneratedError {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for NoImageGeneratedError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for NoImageGeneratedError {}
+
 /// Result of an image model provider call.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -397,6 +462,7 @@ mod tests {
     use super::{
         ImageModel, ImageModelCallOptions, ImageModelFile, ImageModelProviderMetadata,
         ImageModelProviderMetadataEntry, ImageModelResponse, ImageModelResult, ImageModelUsage,
+        NoImageGeneratedError,
     };
     use crate::file_data::FileDataContent;
     use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
@@ -667,5 +733,53 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn no_image_generated_error_matches_upstream_default_message() {
+        let error = NoImageGeneratedError::new();
+
+        assert_eq!(error.message(), "No image generated.");
+        assert_eq!(error.responses(), None);
+        assert_eq!(error.to_string(), "No image generated.");
+        assert_eq!(
+            NoImageGeneratedError::default().to_string(),
+            "No image generated."
+        );
+        assert_eq!(
+            error.into_parts(),
+            ("No image generated.".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn no_image_generated_error_retains_response_metadata() {
+        let response_timestamp = OffsetDateTime::parse(
+            "2026-05-16T10:00:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .expect("timestamp parses");
+        let response = ImageModelResponse::new(response_timestamp, "openai/gpt-image-1")
+            .with_header("x-request-id", "req_123");
+
+        let error = NoImageGeneratedError::with_responses([response.clone()]);
+
+        assert_eq!(error.message(), "No image generated.");
+        assert_eq!(error.responses(), Some([response.clone()].as_slice()));
+        assert_eq!(
+            error.into_parts(),
+            (
+                "No image generated.".to_string(),
+                Some(vec![response.clone()])
+            )
+        );
+
+        let custom = NoImageGeneratedError::with_message(
+            "No image generated after retries.",
+            Some(vec![response.clone()]),
+        );
+        assert_eq!(custom.message(), "No image generated after retries.");
+        assert_eq!(custom.responses(), Some([response].as_slice()));
+        assert_eq!(custom.to_string(), custom.message());
     }
 }

@@ -49,6 +49,7 @@ pub use headers::Headers;
 pub use image_model::{
     ImageModel, ImageModelCallOptions, ImageModelFile, ImageModelImage, ImageModelProviderMetadata,
     ImageModelProviderMetadataEntry, ImageModelResponse, ImageModelResult, ImageModelUsage,
+    NoImageGeneratedError,
 };
 pub use image_model_middleware::{
     ImageModelDoGenerate, ImageModelMiddleware, ImageModelMiddlewareModelOptions,
