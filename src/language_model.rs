@@ -6,6 +6,7 @@ use crate::file_data::{FileData, FileDataContent};
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonSchema, JsonValue, NonNullJsonValue};
 use crate::provider::{ProviderMetadata, ProviderOptions};
+use crate::warning::Warning;
 
 /// Unified reason why a language model finished generating a response.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -108,6 +109,96 @@ pub struct LanguageModelResponseMetadata {
     /// Provider model identifier used for the response, when one is available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
+}
+
+/// Optional request information for telemetry and debugging language model calls.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelRequest {
+    /// Request HTTP body that was sent to the provider API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<JsonValue>,
+}
+
+impl LanguageModelRequest {
+    /// Creates empty request metadata.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the raw provider request body.
+    pub fn with_body(mut self, body: JsonValue) -> Self {
+        self.body = Some(body);
+        self
+    }
+}
+
+/// Optional response information for telemetry and debugging language model calls.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelResponse {
+    /// Provider response identifier, when one is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
+    /// Start timestamp for the generated response, when one is available.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub timestamp: Option<OffsetDateTime>,
+
+    /// Provider model identifier used for the response, when one is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+
+    /// Response headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Headers>,
+
+    /// Provider response body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<JsonValue>,
+}
+
+impl LanguageModelResponse {
+    /// Creates empty response metadata.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the provider response identifier.
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
+    /// Sets the response start timestamp.
+    pub fn with_timestamp(mut self, timestamp: OffsetDateTime) -> Self {
+        self.timestamp = Some(timestamp);
+        self
+    }
+
+    /// Sets the provider model identifier used for the response.
+    pub fn with_model_id(mut self, model_id: impl Into<String>) -> Self {
+        self.model_id = Some(model_id.into());
+        self
+    }
+
+    /// Adds a response header.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers
+            .get_or_insert_with(Headers::new)
+            .insert(name.into(), value.into());
+        self
+    }
+
+    /// Sets the raw provider response body.
+    pub fn with_body(mut self, body: JsonValue) -> Self {
+        self.body = Some(body);
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -709,6 +800,78 @@ pub enum LanguageModelContent {
 
     /// Provider-executed tool result content.
     ToolResult(LanguageModelToolResult),
+}
+
+/// Result of a non-streaming language model provider call.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelGenerateResult {
+    /// Ordered content that the model has generated.
+    pub content: Vec<LanguageModelContent>,
+
+    /// Reason why the model finished generating.
+    pub finish_reason: LanguageModelFinishReason,
+
+    /// Usage information for the model call.
+    pub usage: LanguageModelUsage,
+
+    /// Provider-specific metadata returned by the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+
+    /// Optional request information for telemetry and debugging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<LanguageModelRequest>,
+
+    /// Optional response information for telemetry and debugging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<LanguageModelResponse>,
+
+    /// Warnings for the call, e.g. unsupported settings.
+    pub warnings: Vec<Warning>,
+}
+
+impl LanguageModelGenerateResult {
+    /// Creates a language model generation result with no warnings.
+    pub fn new(
+        content: Vec<LanguageModelContent>,
+        finish_reason: LanguageModelFinishReason,
+        usage: LanguageModelUsage,
+    ) -> Self {
+        Self {
+            content,
+            finish_reason,
+            usage,
+            provider_metadata: None,
+            request: None,
+            response: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Adds provider-specific metadata.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+
+    /// Sets optional request information.
+    pub fn with_request(mut self, request: LanguageModelRequest) -> Self {
+        self.request = Some(request);
+        self
+    }
+
+    /// Sets optional response information.
+    pub fn with_response(mut self, response: LanguageModelResponse) -> Self {
+        self.response = Some(response);
+        self
+    }
+
+    /// Adds a warning returned by the provider.
+    pub fn with_warning(mut self, warning: Warning) -> Self {
+        self.warnings.push(warning);
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1963,9 +2126,10 @@ mod tests {
         LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
         LanguageModelCustomContent, LanguageModelCustomPart, LanguageModelFile,
         LanguageModelFileData, LanguageModelFilePart, LanguageModelFinishReason,
-        LanguageModelFunctionTool, LanguageModelMessage, LanguageModelPrompt,
-        LanguageModelProviderTool, LanguageModelReasoning, LanguageModelReasoningEffort,
-        LanguageModelReasoningFile, LanguageModelReasoningPart, LanguageModelResponseFormat,
+        LanguageModelFunctionTool, LanguageModelGenerateResult, LanguageModelMessage,
+        LanguageModelPrompt, LanguageModelProviderTool, LanguageModelReasoning,
+        LanguageModelReasoningEffort, LanguageModelReasoningFile, LanguageModelReasoningPart,
+        LanguageModelRequest, LanguageModelResponse, LanguageModelResponseFormat,
         LanguageModelResponseMetadata, LanguageModelSource, LanguageModelSystemMessage,
         LanguageModelText, LanguageModelTextPart, LanguageModelTool,
         LanguageModelToolApprovalRequest, LanguageModelToolApprovalResponsePart,
@@ -1978,7 +2142,8 @@ mod tests {
     };
     use crate::file_data::{FileData, FileDataContent};
     use crate::json::NonNullJsonValue;
-    use crate::provider::ProviderOptions;
+    use crate::provider::{ProviderMetadata, ProviderOptions};
+    use crate::warning::Warning;
     use serde_json::json;
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
     use url::Url;
@@ -2663,6 +2828,180 @@ mod tests {
             "text": "No matching content variant"
         }))
         .expect_err("unsupported content variant is rejected");
+    }
+
+    #[test]
+    fn generate_result_serializes_upstream_shape_with_request_response_and_warnings() {
+        let provider_metadata: ProviderMetadata = serde_json::from_value(json!({
+            "openai": {
+                "cachedPromptTokens": 8
+            }
+        }))
+        .expect("provider metadata deserializes");
+        let response_timestamp =
+            OffsetDateTime::parse("2026-05-16T09:30:00Z", &Rfc3339).expect("timestamp parses");
+
+        let result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new("Hello"))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            LanguageModelUsage {
+                input_tokens: InputTokenUsage {
+                    total: Some(12),
+                    cache_read: Some(8),
+                    ..InputTokenUsage::default()
+                },
+                output_tokens: OutputTokenUsage {
+                    total: Some(4),
+                    text: Some(4),
+                    ..OutputTokenUsage::default()
+                },
+                raw: Some(
+                    serde_json::from_value(json!({
+                        "totalTokens": 16
+                    }))
+                    .expect("raw usage is a JSON object"),
+                ),
+            },
+        )
+        .with_provider_metadata(provider_metadata)
+        .with_request(LanguageModelRequest::new().with_body(json!({
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Hello"
+                }
+            ]
+        })))
+        .with_response(
+            LanguageModelResponse::new()
+                .with_id("resp_123")
+                .with_timestamp(response_timestamp)
+                .with_model_id("openai/gpt-5")
+                .with_header("x-request-id", "req_123")
+                .with_body(json!({
+                    "id": "resp_123"
+                })),
+        )
+        .with_warning(Warning::Compatibility {
+            feature: "json-mode".to_string(),
+            details: None,
+        });
+
+        assert_eq!(
+            serde_json::to_value(result).expect("generate result serializes"),
+            json!({
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Hello"
+                    }
+                ],
+                "finishReason": {
+                    "unified": "stop",
+                    "raw": "stop"
+                },
+                "usage": {
+                    "inputTokens": {
+                        "total": 12,
+                        "cacheRead": 8
+                    },
+                    "outputTokens": {
+                        "total": 4,
+                        "text": 4
+                    },
+                    "raw": {
+                        "totalTokens": 16
+                    }
+                },
+                "providerMetadata": {
+                    "openai": {
+                        "cachedPromptTokens": 8
+                    }
+                },
+                "request": {
+                    "body": {
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": "Hello"
+                            }
+                        ]
+                    }
+                },
+                "response": {
+                    "id": "resp_123",
+                    "timestamp": "2026-05-16T09:30:00Z",
+                    "modelId": "openai/gpt-5",
+                    "headers": {
+                        "x-request-id": "req_123"
+                    },
+                    "body": {
+                        "id": "resp_123"
+                    }
+                },
+                "warnings": [
+                    {
+                        "type": "compatibility",
+                        "feature": "json-mode"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn generate_result_deserializes_empty_warnings_and_omits_optional_fields() {
+        let result: LanguageModelGenerateResult = serde_json::from_value(json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Hello"
+                }
+            ],
+            "finishReason": {
+                "unified": "stop"
+            },
+            "usage": {
+                "inputTokens": {},
+                "outputTokens": {}
+            },
+            "warnings": []
+        }))
+        .expect("generate result deserializes");
+
+        assert_eq!(
+            result,
+            LanguageModelGenerateResult::new(
+                vec![LanguageModelContent::Text(LanguageModelText::new("Hello"))],
+                LanguageModelFinishReason {
+                    unified: FinishReason::Stop,
+                    raw: None,
+                },
+                LanguageModelUsage::default(),
+            )
+        );
+        assert_eq!(
+            serde_json::to_value(result).expect("generate result serializes"),
+            json!({
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Hello"
+                    }
+                ],
+                "finishReason": {
+                    "unified": "stop"
+                },
+                "usage": {
+                    "inputTokens": {},
+                    "outputTokens": {}
+                },
+                "warnings": []
+            })
+        );
     }
 
     #[test]
