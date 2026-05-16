@@ -6,6 +6,15 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
 
+/// Returns a stable human-readable message for optional error-like values.
+///
+/// This mirrors upstream `getErrorMessage` behavior for the Rust boundary:
+/// `None` maps to `unknown error`, strings display as-is, and JSON or error
+/// values use their [`fmt::Display`] representation.
+pub fn get_error_message(error: Option<&dyn fmt::Display>) -> String {
+    error.map_or_else(|| "unknown error".to_string(), ToString::to_string)
+}
+
 /// The upstream provider model categories used when reporting missing models.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -913,9 +922,44 @@ mod tests {
         InvalidResponseDataError, JsonParseError, LoadApiKeyError, LoadSettingError, ModelType,
         NoContentGeneratedError, NoSuchModelError, ProviderOptions,
         TooManyEmbeddingValuesForCallError, TypeValidationContext, TypeValidationError,
-        UnsupportedFunctionalityError,
+        UnsupportedFunctionalityError, get_error_message,
     };
+    use std::fmt;
+
     use serde_json::json;
+
+    #[test]
+    fn get_error_message_matches_upstream_unknown_string_error_and_json_cases() {
+        #[derive(Debug)]
+        struct ProviderFailure;
+
+        impl fmt::Display for ProviderFailure {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("ProviderFailure: request timed out")
+            }
+        }
+
+        assert_eq!(get_error_message(None), "unknown error");
+        assert_eq!(
+            get_error_message(Some(&"something went wrong")),
+            "something went wrong"
+        );
+        assert_eq!(get_error_message(Some(&"")), "");
+        assert_eq!(
+            get_error_message(Some(&ProviderFailure)),
+            "ProviderFailure: request timed out"
+        );
+        assert_eq!(
+            get_error_message(Some(&json!({
+                "code": "FAIL",
+                "detail": "oops"
+            }))),
+            "{\"code\":\"FAIL\",\"detail\":\"oops\"}"
+        );
+        assert_eq!(get_error_message(Some(&json!(42))), "42");
+        assert_eq!(get_error_message(Some(&json!(false))), "false");
+        assert_eq!(get_error_message(Some(&json!(["a", "b"]))), "[\"a\",\"b\"]");
+    }
 
     #[test]
     fn model_type_serializes_as_upstream_model_type_strings() {
