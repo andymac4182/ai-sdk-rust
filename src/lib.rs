@@ -27,6 +27,7 @@ pub mod reranking_model;
 pub mod retry;
 pub mod skills;
 pub mod speech_model;
+pub mod transcribe;
 pub mod transcription_model;
 pub mod util;
 pub mod video_model;
@@ -241,6 +242,7 @@ pub use speech_model::{
     NoSpeechGeneratedError, SpeechModel, SpeechModelAudio, SpeechModelCallOptions,
     SpeechModelRequest, SpeechModelResponse, SpeechModelResult,
 };
+pub use transcribe::{ExperimentalTranscriptionResult, TranscriptionResult};
 pub use transcription_model::{
     NoTranscriptGeneratedError, TranscriptionModel, TranscriptionModelCallOptions,
     TranscriptionModelRequest, TranscriptionModelResponse, TranscriptionModelResult,
