@@ -1,8 +1,8 @@
 use std::fmt;
 
 use crate::provider::{
-    ModelType, NoSuchModelError, Provider, ProviderWithRerankingModel, ProviderWithSpeechModel,
-    ProviderWithTranscriptionModel,
+    ModelType, NoSuchModelError, Provider, ProviderWithFiles, ProviderWithRerankingModel,
+    ProviderWithSpeechModel, ProviderWithTranscriptionModel,
 };
 
 /// Configuration for a provider registry.
@@ -223,6 +223,15 @@ impl<P: ProviderWithRerankingModel> ProviderRegistry<P> {
     }
 }
 
+impl<P: ProviderWithFiles> ProviderRegistry<P> {
+    /// Returns the files interface for a registered provider id.
+    pub fn files(&self, id: &str) -> Result<P::Files, ProviderRegistryError> {
+        let provider = self.get_provider(id, ModelType::LanguageModel)?;
+
+        Ok(provider.files())
+    }
+}
+
 /// Creates a provider registry with the upstream default separator (`:`).
 pub fn create_provider_registry<I, K, P>(providers: I) -> ProviderRegistry<P>
 where
@@ -377,7 +386,8 @@ mod tests {
         create_provider_registry_with_options, split_registry_model_id,
     };
     use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelResult};
-    use crate::file_data::FileDataContent;
+    use crate::file_data::{FileDataContent, ProviderReference};
+    use crate::files::{Files, FilesUploadFileCallOptions, FilesUploadFileResult};
     use crate::image_model::{
         ImageModel, ImageModelCallOptions, ImageModelResponse, ImageModelResult,
     };
@@ -388,8 +398,8 @@ mod tests {
         LanguageModelUsage,
     };
     use crate::provider::{
-        ModelType, NoSuchModelError, Provider, ProviderWithRerankingModel, ProviderWithSpeechModel,
-        ProviderWithTranscriptionModel, SpecificationVersion,
+        ModelType, NoSuchModelError, Provider, ProviderWithFiles, ProviderWithRerankingModel,
+        ProviderWithSpeechModel, ProviderWithTranscriptionModel, SpecificationVersion,
     };
     use crate::reranking_model::{
         RerankingModel, RerankingModelCallOptions, RerankingModelRanking, RerankingModelResult,
@@ -401,6 +411,7 @@ mod tests {
         TranscriptionModel, TranscriptionModelCallOptions, TranscriptionModelResponse,
         TranscriptionModelResult,
     };
+    use std::collections::BTreeMap;
     use std::future::{Ready, ready};
     use time::OffsetDateTime;
 
@@ -615,6 +626,29 @@ mod tests {
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
+    struct StaticFiles {
+        provider: String,
+    }
+
+    impl Files for StaticFiles {
+        type UploadFileFuture<'a>
+            = Ready<FilesUploadFileResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            &self.provider
+        }
+
+        fn upload_file(&self, _options: FilesUploadFileCallOptions) -> Self::UploadFileFuture<'_> {
+            ready(FilesUploadFileResult::new(provider_reference(
+                &self.provider,
+                "file-123",
+            )))
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
     struct StaticProvider {
         id: &'static str,
     }
@@ -690,12 +724,27 @@ mod tests {
         }
     }
 
+    impl ProviderWithFiles for StaticProvider {
+        type Files = StaticFiles;
+
+        fn files(&self) -> Self::Files {
+            StaticFiles {
+                provider: self.id.to_string(),
+            }
+        }
+    }
+
     fn lookup_model(model_id: &str, model_type: ModelType) -> Result<String, NoSuchModelError> {
         if model_id == "missing" {
             Err(NoSuchModelError::new(model_id, model_type))
         } else {
             Ok(model_id.to_string())
         }
+    }
+
+    fn provider_reference(provider: &str, id: &str) -> ProviderReference {
+        ProviderReference::from_map(BTreeMap::from([(provider.to_string(), id.to_string())]))
+            .expect("provider reference is valid")
     }
 
     #[test]
@@ -806,6 +855,18 @@ mod tests {
         );
         assert_eq!(reranking_model.provider(), "provider");
         assert_eq!(reranking_model.model_id(), "rerank-1");
+    }
+
+    #[test]
+    fn create_provider_registry_resolves_files_interface() {
+        let registry = create_provider_registry([("provider", StaticProvider { id: "provider" })]);
+
+        let files = registry
+            .files("provider")
+            .expect("files interface resolves");
+
+        assert_eq!(files.specification_version(), SpecificationVersion::V4);
+        assert_eq!(files.provider(), "provider");
     }
 
     #[test]
@@ -965,6 +1026,25 @@ mod tests {
         assert_eq!(model_error.model_id(), "missing");
         assert_eq!(model_error.model_type(), ModelType::RerankingModel);
         assert_eq!(error.to_string(), "No such rerankingModel: missing");
+    }
+
+    #[test]
+    fn provider_registry_reports_missing_files_provider_context() {
+        let registry =
+            create_provider_registry([("anthropic", StaticProvider { id: "anthropic" })]);
+
+        let error = registry.files("openai").expect_err("provider lookup fails");
+        let provider_error = error
+            .as_no_such_provider()
+            .expect("error is missing provider");
+
+        assert_eq!(provider_error.model_id(), "openai");
+        assert_eq!(provider_error.model_type(), ModelType::LanguageModel);
+        assert_eq!(provider_error.provider_id(), "openai");
+        assert_eq!(
+            error.to_string(),
+            "No such provider: openai (available providers: anthropic)"
+        );
     }
 
     #[test]
