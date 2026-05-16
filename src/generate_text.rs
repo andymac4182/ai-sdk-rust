@@ -1344,13 +1344,13 @@ mod tests {
         FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
         LanguageModelCallOptions, LanguageModelContent, LanguageModelFile, LanguageModelFileData,
         LanguageModelFinishReason, LanguageModelFunctionTool, LanguageModelGenerateResult,
-        LanguageModelMessage, LanguageModelReasoning, LanguageModelReasoningFile,
-        LanguageModelSource, LanguageModelStreamPart, LanguageModelStreamResult,
-        LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextPart, LanguageModelTool,
-        LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolContentPart,
-        LanguageModelToolResult, LanguageModelToolResultOutput, LanguageModelToolResultPart,
-        LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage,
-        OutputTokenUsage,
+        LanguageModelMessage, LanguageModelProviderTool, LanguageModelReasoning,
+        LanguageModelReasoningFile, LanguageModelSource, LanguageModelStreamPart,
+        LanguageModelStreamResult, LanguageModelSupportedUrls, LanguageModelText,
+        LanguageModelTextPart, LanguageModelTool, LanguageModelToolCall, LanguageModelToolCallPart,
+        LanguageModelToolContentPart, LanguageModelToolResult, LanguageModelToolResultOutput,
+        LanguageModelToolResultPart, LanguageModelUsage, LanguageModelUserContentPart,
+        LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::provider::{ProviderMetadata, SpecificationVersion};
     use crate::provider_utils::{Tool, ToolExecutionError};
@@ -2139,6 +2139,43 @@ mod tests {
                 LanguageModelFunctionTool::new("weather", input_schema)
                     .with_description("Look up weather.")
                     .with_strict(true)
+            )])
+        );
+    }
+
+    #[test]
+    fn generate_text_passes_provider_tools_to_language_model() {
+        let model = FakeLanguageModel::new();
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let output_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let args = json!({ "location": "AU" })
+            .as_object()
+            .expect("args are an object")
+            .clone();
+
+        let _ = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Search?")]).with_tool(
+                Tool::provider_executed(
+                    "webSearch",
+                    "provider.web_search",
+                    args.clone(),
+                    input_schema,
+                    output_schema,
+                )
+                .with_supports_deferred_results(true),
+            ),
+        ));
+
+        assert_eq!(
+            model.calls.borrow()[0].tools,
+            Some(vec![LanguageModelTool::Provider(
+                LanguageModelProviderTool::new("provider.web_search", "webSearch", args)
             )])
         );
     }

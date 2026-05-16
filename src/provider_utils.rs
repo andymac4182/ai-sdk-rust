@@ -21,10 +21,10 @@ use crate::image_model::ImageModelFile;
 use crate::json::{JsonObject, JsonSchema, JsonValue};
 use crate::language_model::{
     LanguageModelFilePart, LanguageModelFunctionTool, LanguageModelMessage, LanguageModelPrompt,
-    LanguageModelReasoningEffort, LanguageModelStreamPart, LanguageModelSupportedUrls,
-    LanguageModelSystemMessage, LanguageModelTool, LanguageModelToolCall,
-    LanguageModelToolInputDelta, LanguageModelToolInputEnd, LanguageModelToolInputExample,
-    LanguageModelToolInputStart,
+    LanguageModelProviderTool, LanguageModelReasoningEffort, LanguageModelStreamPart,
+    LanguageModelSupportedUrls, LanguageModelSystemMessage, LanguageModelTool,
+    LanguageModelToolCall, LanguageModelToolInputDelta, LanguageModelToolInputEnd,
+    LanguageModelToolInputExample, LanguageModelToolInputStart,
 };
 use crate::provider::{
     ApiCallError, EmptyResponseBodyError, InvalidArgumentError, InvalidResponseDataError,
@@ -2411,13 +2411,28 @@ impl From<&str> for ToolExecutionError {
     }
 }
 
-/// User-defined Rust function tool made available to a language model call.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ToolKind {
+    Function,
+    Provider {
+        id: String,
+        args: JsonObject,
+        provider_executed: bool,
+        output_schema: Option<JsonSchema>,
+        supports_deferred_results: Option<bool>,
+    },
+}
+
+/// User-defined Rust or provider-defined tool made available to a language model call.
 ///
 /// This mirrors the function-tool branch of upstream `@ai-sdk/provider-utils`
-/// `Tool`: it carries model-facing schema/description metadata and may include
-/// an executor for later client-side tool handling.
+/// `Tool`, plus provider tools whose model-facing schema is owned by the
+/// provider. Function tools carry model-facing schema/description metadata and
+/// may include an executor for later client-side tool handling.
 #[derive(Clone)]
 pub struct Tool {
+    kind: ToolKind,
+
     /// Name of the tool, unique within a model call.
     pub name: String,
 
@@ -2443,6 +2458,65 @@ impl Tool {
     /// Creates a function tool definition.
     pub fn new(name: impl Into<String>, input_schema: JsonSchema) -> Self {
         Self {
+            kind: ToolKind::Function,
+            name: name.into(),
+            description: None,
+            input_schema,
+            input_examples: None,
+            strict: None,
+            provider_options: None,
+            execute: None,
+        }
+    }
+
+    /// Creates a provider-defined tool that is executed by the caller.
+    ///
+    /// This is the Rust-native equivalent of upstream provider-defined tool
+    /// factories: `id` identifies the provider tool, `args` configures it, and
+    /// `name` is the caller-facing tool name used in this model call.
+    pub fn provider_defined(
+        name: impl Into<String>,
+        id: impl Into<String>,
+        args: JsonObject,
+        input_schema: JsonSchema,
+    ) -> Self {
+        Self {
+            kind: ToolKind::Provider {
+                id: id.into(),
+                args,
+                provider_executed: false,
+                output_schema: None,
+                supports_deferred_results: None,
+            },
+            name: name.into(),
+            description: None,
+            input_schema,
+            input_examples: None,
+            strict: None,
+            provider_options: None,
+            execute: None,
+        }
+    }
+
+    /// Creates a provider-executed tool.
+    ///
+    /// Provider-executed tools are sent to the model as provider tools and do
+    /// not require a Rust executor because the provider returns tool results.
+    pub fn provider_executed(
+        name: impl Into<String>,
+        id: impl Into<String>,
+        args: JsonObject,
+        input_schema: JsonSchema,
+        output_schema: JsonSchema,
+    ) -> Self {
+        Self {
+            kind: ToolKind::Provider {
+                id: id.into(),
+                args,
+                provider_executed: true,
+                output_schema: Some(output_schema),
+                supports_deferred_results: None,
+            },
             name: name.into(),
             description: None,
             input_schema,
@@ -2473,6 +2547,32 @@ impl Tool {
         self
     }
 
+    /// Sets the expected output schema for provider-defined tools.
+    pub fn with_output_schema(mut self, output_schema: JsonSchema) -> Self {
+        if let ToolKind::Provider {
+            output_schema: stored_output_schema,
+            ..
+        } = &mut self.kind
+        {
+            *stored_output_schema = Some(output_schema);
+        }
+
+        self
+    }
+
+    /// Sets whether a provider-executed tool supports deferred results.
+    pub fn with_supports_deferred_results(mut self, supports_deferred_results: bool) -> Self {
+        if let ToolKind::Provider {
+            supports_deferred_results: stored_supports_deferred_results,
+            ..
+        } = &mut self.kind
+        {
+            *stored_supports_deferred_results = Some(supports_deferred_results);
+        }
+
+        self
+    }
+
     /// Adds provider-specific options to this tool.
     pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
         self.provider_options = Some(provider_options);
@@ -2496,6 +2596,57 @@ impl Tool {
         self.execute.is_some()
     }
 
+    /// Returns whether this tool is a provider tool.
+    pub fn is_provider_tool(&self) -> bool {
+        matches!(self.kind, ToolKind::Provider { .. })
+    }
+
+    /// Returns whether this tool is executed by the provider.
+    pub fn is_provider_executed(&self) -> bool {
+        matches!(
+            self.kind,
+            ToolKind::Provider {
+                provider_executed: true,
+                ..
+            }
+        )
+    }
+
+    /// Returns the provider tool identifier for provider tools.
+    pub fn provider_tool_id(&self) -> Option<&str> {
+        match &self.kind {
+            ToolKind::Provider { id, .. } => Some(id),
+            ToolKind::Function => None,
+        }
+    }
+
+    /// Returns the provider tool arguments for provider tools.
+    pub fn provider_tool_args(&self) -> Option<&JsonObject> {
+        match &self.kind {
+            ToolKind::Provider { args, .. } => Some(args),
+            ToolKind::Function => None,
+        }
+    }
+
+    /// Returns the expected output schema for provider tools when one is configured.
+    pub fn output_schema(&self) -> Option<&JsonSchema> {
+        match &self.kind {
+            ToolKind::Provider { output_schema, .. } => output_schema.as_ref(),
+            ToolKind::Function => None,
+        }
+    }
+
+    /// Returns whether this provider-executed tool supports deferred results.
+    pub fn supports_deferred_results(&self) -> Option<bool> {
+        match &self.kind {
+            ToolKind::Provider {
+                supports_deferred_results,
+                ..
+            } => *supports_deferred_results,
+            ToolKind::Function => None,
+        }
+    }
+
     /// Executes this tool when an executor is present.
     pub fn execute(
         &self,
@@ -2507,6 +2658,14 @@ impl Tool {
 
     /// Converts this high-level tool into the provider-facing language-model tool shape.
     pub fn to_language_model_tool(&self) -> LanguageModelTool {
+        if let ToolKind::Provider { id, args, .. } = &self.kind {
+            return LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                id.clone(),
+                self.name.clone(),
+                args.clone(),
+            ));
+        }
+
         let mut tool = LanguageModelFunctionTool::new(self.name.clone(), self.input_schema.clone());
 
         if let Some(description) = &self.description {
@@ -2535,6 +2694,7 @@ impl fmt::Debug for Tool {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Tool")
+            .field("kind", &self.kind)
             .field("name", &self.name)
             .field("description", &self.description)
             .field("input_schema", &self.input_schema)
@@ -9424,19 +9584,128 @@ mod tests {
     }
 
     #[test]
+    fn tool_prepares_upstream_provider_defined_tool_shape() {
+        let args = json!({ "maxResults": 3 })
+            .as_object()
+            .expect("args are an object")
+            .clone();
+        let output_schema = json!({
+            "type": "object",
+            "properties": {
+                "results": { "type": "array" }
+            }
+        })
+        .as_object()
+        .expect("output schema is an object")
+        .clone();
+        let tool = Tool::provider_defined(
+            "webSearch",
+            "provider.web_search",
+            args.clone(),
+            object_schema(),
+        )
+        .with_output_schema(output_schema.clone());
+
+        assert!(tool.is_provider_tool());
+        assert!(!tool.is_provider_executed());
+        assert_eq!(tool.provider_tool_id(), Some("provider.web_search"));
+        assert_eq!(tool.provider_tool_args(), Some(&args));
+        assert_eq!(tool.output_schema(), Some(&output_schema));
+        assert_eq!(tool.supports_deferred_results(), None);
+        assert_eq!(
+            tool.to_language_model_tool(),
+            LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                "provider.web_search",
+                "webSearch",
+                args.clone()
+            ))
+        );
+        assert_eq!(
+            serde_json::to_value(tool.to_language_model_tool()).expect("tool serializes"),
+            json!({
+                "type": "provider",
+                "id": "provider.web_search",
+                "name": "webSearch",
+                "args": {
+                    "maxResults": 3
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn tool_prepares_upstream_provider_executed_tool_shape() {
+        let args = json!({ "region": "au" })
+            .as_object()
+            .expect("args are an object")
+            .clone();
+        let output_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("output schema is an object")
+            .clone();
+        let tool = Tool::provider_executed(
+            "codeInterpreter",
+            "provider.code_interpreter",
+            args.clone(),
+            object_schema(),
+            output_schema.clone(),
+        )
+        .with_supports_deferred_results(true);
+
+        assert!(tool.is_provider_tool());
+        assert!(tool.is_provider_executed());
+        assert!(!tool.is_executable());
+        assert_eq!(tool.provider_tool_id(), Some("provider.code_interpreter"));
+        assert_eq!(tool.provider_tool_args(), Some(&args));
+        assert_eq!(tool.output_schema(), Some(&output_schema));
+        assert_eq!(tool.supports_deferred_results(), Some(true));
+        assert_eq!(
+            serde_json::to_value(tool.to_language_model_tool()).expect("tool serializes"),
+            json!({
+                "type": "provider",
+                "id": "provider.code_interpreter",
+                "name": "codeInterpreter",
+                "args": {
+                    "region": "au"
+                }
+            })
+        );
+    }
+
+    #[test]
     fn prepare_tools_returns_none_for_empty_tool_sets() {
         assert_eq!(prepare_tools(Vec::<Tool>::new().iter()), None);
     }
 
     #[test]
     fn prepare_tools_converts_high_level_tools() {
-        let tools = vec![Tool::new("weather", object_schema())];
+        let provider_tool_args = json!({ "key": "value" })
+            .as_object()
+            .expect("args are an object")
+            .clone();
+        let tools = vec![
+            Tool::new("weather", object_schema()),
+            Tool::provider_defined(
+                "providerTool",
+                "provider.tool-id",
+                provider_tool_args.clone(),
+                object_schema(),
+            ),
+        ];
 
         assert_eq!(
             prepare_tools(&tools),
-            Some(vec![LanguageModelTool::Function(
-                LanguageModelFunctionTool::new("weather", object_schema())
-            )])
+            Some(vec![
+                LanguageModelTool::Function(LanguageModelFunctionTool::new(
+                    "weather",
+                    object_schema()
+                )),
+                LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "provider.tool-id",
+                    "providerTool",
+                    provider_tool_args
+                ))
+            ])
         );
     }
 
