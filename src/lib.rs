@@ -91,9 +91,10 @@ pub use language_model_middleware::{
     LanguageModelWrapStreamOptions,
 };
 pub use prompt::{
-    InvalidDataContentError, InvalidMessageRoleError, MessageConversionError, RequestOptions,
-    TimeoutConfiguration, TimeoutConfigurationOptions, convert_data_content_to_base64_string,
-    get_chunk_timeout_ms, get_step_timeout_ms, get_tool_timeout_ms, get_total_timeout_ms,
+    Instructions, InvalidDataContentError, InvalidMessageRoleError, MessageConversionError, Prompt,
+    PromptInput, PromptSource, RequestOptions, TimeoutConfiguration, TimeoutConfigurationOptions,
+    convert_data_content_to_base64_string, get_chunk_timeout_ms, get_step_timeout_ms,
+    get_tool_timeout_ms, get_total_timeout_ms,
 };
 pub use provider::{
     ApiCallError, EmptyResponseBodyError, InvalidArgumentError, InvalidPromptError,

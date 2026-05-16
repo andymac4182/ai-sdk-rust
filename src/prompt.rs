@@ -1,11 +1,13 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::file_data::FileDataContent;
 use crate::headers::Headers;
 use crate::json::JsonValue;
+use crate::language_model::{LanguageModelPrompt, LanguageModelSystemMessage};
 use crate::provider_utils::convert_to_base64;
 
 /// Timeout configuration for high-level model and tool requests.
@@ -41,6 +43,267 @@ impl From<TimeoutConfigurationOptions> for TimeoutConfiguration {
     fn from(options: TimeoutConfigurationOptions) -> Self {
         Self::Detailed(options)
     }
+}
+
+/// Instructions to include alongside a high-level prompt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum Instructions {
+    /// Plain system instruction text.
+    Text(String),
+
+    /// A single system model message.
+    Message(LanguageModelSystemMessage),
+
+    /// Multiple system model messages.
+    Messages(Vec<LanguageModelSystemMessage>),
+}
+
+impl Instructions {
+    /// Creates text instructions.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text(text.into())
+    }
+
+    /// Creates instructions from a single system model message.
+    pub fn message(message: LanguageModelSystemMessage) -> Self {
+        Self::Message(message)
+    }
+
+    /// Creates instructions from multiple system model messages.
+    pub fn messages(messages: Vec<LanguageModelSystemMessage>) -> Self {
+        Self::Messages(messages)
+    }
+}
+
+impl From<String> for Instructions {
+    fn from(text: String) -> Self {
+        Self::Text(text)
+    }
+}
+
+impl From<&str> for Instructions {
+    fn from(text: &str) -> Self {
+        Self::Text(text.to_string())
+    }
+}
+
+impl From<LanguageModelSystemMessage> for Instructions {
+    fn from(message: LanguageModelSystemMessage) -> Self {
+        Self::Message(message)
+    }
+}
+
+impl From<Vec<LanguageModelSystemMessage>> for Instructions {
+    fn from(messages: Vec<LanguageModelSystemMessage>) -> Self {
+        Self::Messages(messages)
+    }
+}
+
+/// The mutually exclusive high-level prompt input.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum PromptInput {
+    /// A simple text prompt.
+    Text(String),
+
+    /// A list of model messages.
+    Messages(LanguageModelPrompt),
+}
+
+impl PromptInput {
+    /// Creates a text prompt input.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text(text.into())
+    }
+
+    /// Creates a model-message prompt input.
+    pub fn messages(messages: LanguageModelPrompt) -> Self {
+        Self::Messages(messages)
+    }
+}
+
+impl From<String> for PromptInput {
+    fn from(text: String) -> Self {
+        Self::Text(text)
+    }
+}
+
+impl From<&str> for PromptInput {
+    fn from(text: &str) -> Self {
+        Self::Text(text.to_string())
+    }
+}
+
+impl From<LanguageModelPrompt> for PromptInput {
+    fn from(messages: LanguageModelPrompt) -> Self {
+        Self::Messages(messages)
+    }
+}
+
+/// High-level prompt input for AI SDK generation calls.
+///
+/// This mirrors upstream `Prompt`: callers may provide either `prompt` or
+/// `messages`, but not both. JavaScript-only runtime values are intentionally
+/// omitted from the Rust JSON contract.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Prompt {
+    /// Instructions to include with the prompt.
+    pub instructions: Option<Instructions>,
+
+    /// Deprecated upstream alias for instructions.
+    pub system: Option<Instructions>,
+
+    /// Whether system messages are allowed in prompt/message fields.
+    pub allow_system_in_messages: bool,
+
+    /// The exclusive prompt source.
+    pub source: PromptSource,
+}
+
+impl Prompt {
+    /// Creates a prompt from the upstream `prompt` field.
+    pub fn from_prompt(prompt: impl Into<PromptInput>) -> Self {
+        Self {
+            instructions: None,
+            system: None,
+            allow_system_in_messages: false,
+            source: PromptSource::Prompt(prompt.into()),
+        }
+    }
+
+    /// Creates a prompt from the upstream `messages` field.
+    pub fn from_messages(messages: LanguageModelPrompt) -> Self {
+        Self {
+            instructions: None,
+            system: None,
+            allow_system_in_messages: false,
+            source: PromptSource::Messages(messages),
+        }
+    }
+
+    /// Sets instructions.
+    pub fn with_instructions(mut self, instructions: impl Into<Instructions>) -> Self {
+        self.instructions = Some(instructions.into());
+        self
+    }
+
+    /// Sets the deprecated upstream `system` alias.
+    pub fn with_system(mut self, system: impl Into<Instructions>) -> Self {
+        self.system = Some(system.into());
+        self
+    }
+
+    /// Sets whether system messages may appear in prompt/message inputs.
+    pub const fn with_allow_system_in_messages(mut self, allow_system_in_messages: bool) -> Self {
+        self.allow_system_in_messages = allow_system_in_messages;
+        self
+    }
+
+    /// Returns the prompt field when this prompt uses the `prompt` form.
+    pub fn prompt(&self) -> Option<&PromptInput> {
+        match &self.source {
+            PromptSource::Prompt(prompt) => Some(prompt),
+            PromptSource::Messages(_) => None,
+        }
+    }
+
+    /// Returns the messages field when this prompt uses the `messages` form.
+    pub fn messages(&self) -> Option<&LanguageModelPrompt> {
+        match &self.source {
+            PromptSource::Prompt(_) => None,
+            PromptSource::Messages(messages) => Some(messages),
+        }
+    }
+}
+
+impl Serialize for Prompt {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut field_count = 1;
+        if self.instructions.is_some() {
+            field_count += 1;
+        }
+        if self.system.is_some() {
+            field_count += 1;
+        }
+        if self.allow_system_in_messages {
+            field_count += 1;
+        }
+
+        let mut state = serializer.serialize_struct("Prompt", field_count)?;
+        if let Some(instructions) = &self.instructions {
+            state.serialize_field("instructions", instructions)?;
+        }
+        if let Some(system) = &self.system {
+            state.serialize_field("system", system)?;
+        }
+        if self.allow_system_in_messages {
+            state.serialize_field("allowSystemInMessages", &self.allow_system_in_messages)?;
+        }
+        match &self.source {
+            PromptSource::Prompt(prompt) => state.serialize_field("prompt", prompt)?,
+            PromptSource::Messages(messages) => state.serialize_field("messages", messages)?,
+        }
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Prompt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct PromptHelper {
+            #[serde(default)]
+            instructions: Option<Instructions>,
+            #[serde(default)]
+            system: Option<Instructions>,
+            #[serde(default)]
+            allow_system_in_messages: bool,
+            #[serde(default)]
+            prompt: Option<PromptInput>,
+            #[serde(default)]
+            messages: Option<LanguageModelPrompt>,
+        }
+
+        let helper = PromptHelper::deserialize(deserializer)?;
+        let source = match (helper.prompt, helper.messages) {
+            (Some(prompt), None) => PromptSource::Prompt(prompt),
+            (None, Some(messages)) => PromptSource::Messages(messages),
+            (Some(_), Some(_)) => {
+                return Err(serde::de::Error::custom(
+                    "prompt and messages cannot both be set",
+                ));
+            }
+            (None, None) => {
+                return Err(serde::de::Error::custom(
+                    "either prompt or messages must be set",
+                ));
+            }
+        };
+
+        Ok(Self {
+            instructions: helper.instructions,
+            system: helper.system,
+            allow_system_in_messages: helper.allow_system_in_messages,
+            source,
+        })
+    }
+}
+
+/// The exclusive prompt source in a high-level prompt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PromptSource {
+    /// The upstream `prompt` field.
+    Prompt(PromptInput),
+
+    /// The upstream `messages` field.
+    Messages(LanguageModelPrompt),
 }
 
 /// Granular request timeout settings.
@@ -362,12 +625,27 @@ mod tests {
 
     use crate::file_data::FileDataContent;
     use crate::json::JsonValue;
+    use crate::language_model::{
+        LanguageModelMessage, LanguageModelPrompt, LanguageModelSystemMessage,
+        LanguageModelTextPart, LanguageModelUserContentPart, LanguageModelUserMessage,
+    };
 
     use super::{
-        InvalidDataContentError, InvalidMessageRoleError, MessageConversionError, RequestOptions,
-        TimeoutConfiguration, TimeoutConfigurationOptions, convert_data_content_to_base64_string,
-        get_chunk_timeout_ms, get_step_timeout_ms, get_tool_timeout_ms, get_total_timeout_ms,
+        Instructions, InvalidDataContentError, InvalidMessageRoleError, MessageConversionError,
+        Prompt, PromptInput, PromptSource, RequestOptions, TimeoutConfiguration,
+        TimeoutConfigurationOptions, convert_data_content_to_base64_string, get_chunk_timeout_ms,
+        get_step_timeout_ms, get_tool_timeout_ms, get_total_timeout_ms,
     };
+
+    fn user_text_message(text: &str) -> LanguageModelMessage {
+        LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+            LanguageModelUserContentPart::Text(LanguageModelTextPart::new(text)),
+        ]))
+    }
+
+    fn system_message(text: &str) -> LanguageModelSystemMessage {
+        LanguageModelSystemMessage::new(text)
+    }
 
     #[test]
     fn timeout_configuration_serializes_number_form() {
@@ -452,6 +730,136 @@ mod tests {
         let options: RequestOptions = serde_json::from_value(json!({})).expect("deserialize");
 
         assert_eq!(options, RequestOptions::new());
+    }
+
+    #[test]
+    fn instructions_serialize_upstream_union_shapes() {
+        assert_eq!(
+            serde_json::to_value(Instructions::text("Be concise.")).expect("serialize"),
+            json!("Be concise.")
+        );
+        assert_eq!(
+            serde_json::to_value(Instructions::message(system_message("Use metric units.")))
+                .expect("serialize"),
+            json!({
+                "role": "system",
+                "content": "Use metric units."
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(Instructions::messages(vec![
+                system_message("Be concise."),
+                system_message("Use metric units.")
+            ]))
+            .expect("serialize"),
+            json!([
+                {
+                    "role": "system",
+                    "content": "Be concise."
+                },
+                {
+                    "role": "system",
+                    "content": "Use metric units."
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn prompt_serializes_text_prompt_with_optional_common_fields() {
+        let prompt = Prompt::from_prompt("What is the weather?")
+            .with_instructions("Answer briefly.")
+            .with_system(system_message("Legacy system instructions."))
+            .with_allow_system_in_messages(true);
+
+        assert_eq!(
+            serde_json::to_value(prompt).expect("prompt serialize"),
+            json!({
+                "instructions": "Answer briefly.",
+                "system": {
+                    "role": "system",
+                    "content": "Legacy system instructions."
+                },
+                "allowSystemInMessages": true,
+                "prompt": "What is the weather?"
+            })
+        );
+    }
+
+    #[test]
+    fn prompt_deserializes_messages_form() {
+        let messages: LanguageModelPrompt = vec![user_text_message("Hello")];
+
+        let prompt: Prompt = serde_json::from_value(json!({
+            "instructions": [
+                {
+                    "role": "system",
+                    "content": "Be concise."
+                }
+            ],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Hello"
+                        }
+                    ]
+                }
+            ]
+        }))
+        .expect("prompt deserialize");
+
+        assert_eq!(
+            prompt,
+            Prompt::from_messages(messages).with_instructions(vec![system_message("Be concise.")])
+        );
+        assert_eq!(
+            prompt.messages().expect("messages"),
+            &vec![user_text_message("Hello")]
+        );
+        assert_eq!(prompt.prompt(), None);
+    }
+
+    #[test]
+    fn prompt_input_supports_message_array_in_prompt_field() {
+        let prompt = Prompt::from_prompt(PromptInput::messages(vec![user_text_message("Hello")]));
+
+        assert_eq!(
+            serde_json::to_value(prompt).expect("prompt serialize"),
+            json!({
+                "prompt": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn prompt_deserialization_rejects_invalid_prompt_union_shapes() {
+        assert!(
+            serde_json::from_value::<Prompt>(json!({
+                "prompt": "Hello",
+                "messages": []
+            }))
+            .is_err()
+        );
+        assert!(serde_json::from_value::<Prompt>(json!({})).is_err());
+
+        let prompt = Prompt::from_prompt("Hello");
+        assert_eq!(
+            prompt.source,
+            PromptSource::Prompt(PromptInput::Text("Hello".to_string()))
+        );
     }
 
     #[test]
