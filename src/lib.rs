@@ -10,6 +10,7 @@ pub mod headers;
 pub mod json;
 pub mod language_model;
 pub mod provider;
+pub mod reranking_model;
 pub mod warning;
 
 pub use embedding_model::{
@@ -39,6 +40,10 @@ pub use language_model::{
     LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
 };
 pub use provider::{ProviderMetadata, ProviderOptions};
+pub use reranking_model::{
+    RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
+    RerankingModelResponse, RerankingModelResult,
+};
 pub use warning::Warning;
 
 #[cfg(test)]
