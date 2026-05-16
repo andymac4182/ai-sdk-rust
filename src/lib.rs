@@ -15,11 +15,12 @@ pub use file_data::{FileData, FileDataContent, ProviderReference, ProviderRefere
 pub use headers::Headers;
 pub use json::{JsonArray, JsonObject, JsonValue, NonNullJsonValue, NullJsonValueError};
 pub use language_model::{
-    FinishReason, InputTokenUsage, LanguageModelCustomContent, LanguageModelFile,
-    LanguageModelFileData, LanguageModelFinishReason, LanguageModelReasoning,
-    LanguageModelReasoningFile, LanguageModelResponseMetadata, LanguageModelText,
-    LanguageModelToolApprovalRequest, LanguageModelToolCall, LanguageModelToolChoice,
-    LanguageModelToolResult, LanguageModelUsage, OutputTokenUsage,
+    FinishReason, InputTokenUsage, LanguageModelCustomContent, LanguageModelDocumentSource,
+    LanguageModelFile, LanguageModelFileData, LanguageModelFinishReason, LanguageModelReasoning,
+    LanguageModelReasoningFile, LanguageModelResponseMetadata, LanguageModelSource,
+    LanguageModelText, LanguageModelToolApprovalRequest, LanguageModelToolCall,
+    LanguageModelToolChoice, LanguageModelToolResult, LanguageModelUrlSource, LanguageModelUsage,
+    OutputTokenUsage,
 };
 pub use provider::{ProviderMetadata, ProviderOptions};
 pub use warning::Warning;

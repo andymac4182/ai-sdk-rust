@@ -361,6 +361,169 @@ impl LanguageModelToolApprovalRequest {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelSourceKind {
+    #[serde(rename = "source")]
+    Source,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelUrlSourceType {
+    #[serde(rename = "url")]
+    Url,
+}
+
+/// A URL source used as input to generate a language model response.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelUrlSource {
+    #[serde(rename = "type")]
+    kind: LanguageModelSourceKind,
+
+    source_type: LanguageModelUrlSourceType,
+
+    /// Identifier for the source.
+    pub id: String,
+
+    /// URL string for the source.
+    pub url: String,
+
+    /// Optional title for the source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+
+    /// Optional provider-specific metadata for the source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+}
+
+impl LanguageModelUrlSource {
+    /// Creates a URL source.
+    pub fn new(id: impl Into<String>, url: impl Into<String>) -> Self {
+        Self {
+            kind: LanguageModelSourceKind::Source,
+            source_type: LanguageModelUrlSourceType::Url,
+            id: id.into(),
+            url: url.into(),
+            title: None,
+            provider_metadata: None,
+        }
+    }
+
+    /// Sets the source title.
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Adds provider-specific metadata to this source.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum LanguageModelDocumentSourceType {
+    #[serde(rename = "document")]
+    Document,
+}
+
+/// A document source used as input to generate a language model response.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelDocumentSource {
+    #[serde(rename = "type")]
+    kind: LanguageModelSourceKind,
+
+    source_type: LanguageModelDocumentSourceType,
+
+    /// Identifier for the source.
+    pub id: String,
+
+    /// The IANA media type of the source document.
+    pub media_type: String,
+
+    /// Title of the source document.
+    pub title: String,
+
+    /// Optional filename of the source document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+
+    /// Optional provider-specific metadata for the source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+}
+
+impl LanguageModelDocumentSource {
+    /// Creates a document source.
+    pub fn new(
+        id: impl Into<String>,
+        media_type: impl Into<String>,
+        title: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: LanguageModelSourceKind::Source,
+            source_type: LanguageModelDocumentSourceType::Document,
+            id: id.into(),
+            media_type: media_type.into(),
+            title: title.into(),
+            filename: None,
+            provider_metadata: None,
+        }
+    }
+
+    /// Sets the source document filename.
+    pub fn with_filename(mut self, filename: impl Into<String>) -> Self {
+        self.filename = Some(filename.into());
+        self
+    }
+
+    /// Adds provider-specific metadata to this source.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+}
+
+/// A source that was used as input to generate a language model response.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum LanguageModelSource {
+    /// Source that references web content.
+    Url(LanguageModelUrlSource),
+
+    /// Source that references a file or document.
+    Document(LanguageModelDocumentSource),
+}
+
+impl LanguageModelSource {
+    /// Creates a URL source.
+    pub fn url(id: impl Into<String>, url: impl Into<String>) -> Self {
+        Self::Url(LanguageModelUrlSource::new(id, url))
+    }
+
+    /// Creates a document source.
+    pub fn document(
+        id: impl Into<String>,
+        media_type: impl Into<String>,
+        title: impl Into<String>,
+    ) -> Self {
+        Self::Document(LanguageModelDocumentSource::new(id, media_type, title))
+    }
+
+    /// Adds provider-specific metadata to this source.
+    pub fn with_provider_metadata(self, provider_metadata: ProviderMetadata) -> Self {
+        match self {
+            Self::Url(source) => Self::Url(source.with_provider_metadata(provider_metadata)),
+            Self::Document(source) => {
+                Self::Document(source.with_provider_metadata(provider_metadata))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 enum LanguageModelToolCallKind {
     #[serde(rename = "tool-call")]
     ToolCall,
@@ -541,9 +704,10 @@ mod tests {
     use super::{
         FinishReason, InputTokenUsage, LanguageModelCustomContent, LanguageModelFile,
         LanguageModelFileData, LanguageModelFinishReason, LanguageModelReasoning,
-        LanguageModelReasoningFile, LanguageModelResponseMetadata, LanguageModelText,
-        LanguageModelToolApprovalRequest, LanguageModelToolCall, LanguageModelToolChoice,
-        LanguageModelToolResult, LanguageModelUsage, OutputTokenUsage,
+        LanguageModelReasoningFile, LanguageModelResponseMetadata, LanguageModelSource,
+        LanguageModelText, LanguageModelToolApprovalRequest, LanguageModelToolCall,
+        LanguageModelToolChoice, LanguageModelToolResult, LanguageModelUrlSource,
+        LanguageModelUsage, OutputTokenUsage,
     };
     use crate::file_data::FileDataContent;
     use crate::json::NonNullJsonValue;
@@ -930,6 +1094,74 @@ mod tests {
         .expect_err("wrong discriminator is rejected");
 
         assert!(error.to_string().contains("unknown variant `tool-call`"));
+    }
+
+    #[test]
+    fn url_source_serializes_upstream_shape_with_optional_title_and_metadata() {
+        let source = LanguageModelUrlSource::new("source_123", "https://example.com/article")
+            .with_title("Research article")
+            .with_provider_metadata(
+                serde_json::from_value(json!({
+                    "google": {
+                        "groundingChunk": 0
+                    }
+                }))
+                .expect("provider metadata deserializes"),
+            );
+
+        assert_eq!(
+            serde_json::to_value(LanguageModelSource::Url(source)).expect("source serializes"),
+            json!({
+                "type": "source",
+                "sourceType": "url",
+                "id": "source_123",
+                "url": "https://example.com/article",
+                "title": "Research article",
+                "providerMetadata": {
+                    "google": {
+                        "groundingChunk": 0
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn document_source_deserializes_and_omits_missing_optional_fields() {
+        let source: LanguageModelSource = serde_json::from_value(json!({
+            "type": "source",
+            "sourceType": "document",
+            "id": "doc_123",
+            "mediaType": "application/pdf",
+            "title": "Model card"
+        }))
+        .expect("document source deserializes");
+
+        assert_eq!(
+            source,
+            LanguageModelSource::document("doc_123", "application/pdf", "Model card")
+        );
+        assert_eq!(
+            serde_json::to_value(source).expect("document source serializes"),
+            json!({
+                "type": "source",
+                "sourceType": "document",
+                "id": "doc_123",
+                "mediaType": "application/pdf",
+                "title": "Model card"
+            })
+        );
+    }
+
+    #[test]
+    fn source_rejects_other_content_types() {
+        serde_json::from_value::<LanguageModelSource>(json!({
+            "type": "tool-call",
+            "sourceType": "url",
+            "id": "source_123",
+            "url": "https://example.com"
+        }))
+        .expect_err("wrong discriminator is rejected");
     }
 
     #[test]
