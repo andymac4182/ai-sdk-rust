@@ -10,8 +10,8 @@ use crate::language_model::{
     LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelMessage,
     LanguageModelPrompt, LanguageModelReasoningEffort, LanguageModelReasoningFilePart,
     LanguageModelReasoningPart, LanguageModelRequest, LanguageModelResponse,
-    LanguageModelResponseFormat, LanguageModelText, LanguageModelTextPart, LanguageModelTool,
-    LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolChoice,
+    LanguageModelResponseFormat, LanguageModelSource, LanguageModelText, LanguageModelTextPart,
+    LanguageModelTool, LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolChoice,
     LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResult,
     LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
     OutputTokenUsage,
@@ -374,6 +374,10 @@ pub struct GenerateTextStep {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub response_messages: Vec<LanguageModelMessage>,
 
+    /// Sources used to generate this step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<LanguageModelSource>,
+
     /// Text content generated in this step, formed by concatenating all text parts.
     pub text: String,
 
@@ -426,6 +430,7 @@ impl GenerateTextStep {
         let text = extract_text(&content);
         let tool_calls = extract_tool_calls(&content);
         let tool_results = extract_provider_tool_results(&content, &tool_calls);
+        let sources = extract_sources(&content);
 
         Self {
             step_number,
@@ -434,6 +439,7 @@ impl GenerateTextStep {
             tool_calls,
             tool_results,
             response_messages: Vec::new(),
+            sources,
             text,
             finish_reason: unified,
             raw_finish_reason,
@@ -464,6 +470,10 @@ pub struct GenerateTextResult {
     /// Accumulated response messages generated across all steps.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub response_messages: Vec<LanguageModelMessage>,
+
+    /// Sources used to generate the response across all steps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<LanguageModelSource>,
 
     /// Text generated in the final step.
     pub text: String,
@@ -523,6 +533,10 @@ impl GenerateTextResult {
             response_messages: steps
                 .iter()
                 .flat_map(|step| step.response_messages.iter().cloned())
+                .collect(),
+            sources: steps
+                .iter()
+                .flat_map(|step| step.sources.iter().cloned())
                 .collect(),
             warnings: steps
                 .iter()
@@ -609,6 +623,16 @@ fn extract_tool_calls(content: &[LanguageModelContent]) -> Vec<GenerateTextToolC
             LanguageModelContent::ToolCall(tool_call) => Some(
                 GenerateTextToolCall::from_language_model_tool_call(tool_call),
             ),
+            _ => None,
+        })
+        .collect()
+}
+
+fn extract_sources(content: &[LanguageModelContent]) -> Vec<LanguageModelSource> {
+    content
+        .iter()
+        .filter_map(|part| match part {
+            LanguageModelContent::Source(source) => Some(source.clone()),
             _ => None,
         })
         .collect()
@@ -1043,11 +1067,12 @@ mod tests {
         FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
         LanguageModelCallOptions, LanguageModelContent, LanguageModelFinishReason,
         LanguageModelFunctionTool, LanguageModelGenerateResult, LanguageModelMessage,
-        LanguageModelStreamPart, LanguageModelStreamResult, LanguageModelSupportedUrls,
-        LanguageModelText, LanguageModelTextPart, LanguageModelTool, LanguageModelToolCall,
-        LanguageModelToolCallPart, LanguageModelToolContentPart, LanguageModelToolResult,
-        LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
-        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelSource, LanguageModelStreamPart, LanguageModelStreamResult,
+        LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextPart, LanguageModelTool,
+        LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolContentPart,
+        LanguageModelToolResult, LanguageModelToolResultOutput, LanguageModelToolResultPart,
+        LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage,
+        OutputTokenUsage,
     };
     use crate::provider::{ProviderMetadata, SpecificationVersion};
     use crate::provider_utils::{Tool, ToolExecutionError};
@@ -1211,6 +1236,7 @@ mod tests {
                     LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new("Hello")),
                 ]),
             )],
+            sources: Vec::new(),
             text: "Hello".to_string(),
             finish_reason: FinishReason::Stop,
             raw_finish_reason: Some("stop".to_string()),
@@ -1399,10 +1425,76 @@ mod tests {
         assert_eq!(result.text, "");
         assert_eq!(result.finish_reason, FinishReason::Length);
         assert_eq!(result.raw_finish_reason, None);
+        assert_eq!(result.sources, Vec::new());
         assert_eq!(result.steps[0].raw_finish_reason, None);
+        assert_eq!(result.steps[0].sources, Vec::new());
         assert_eq!(
             result.steps[0].model,
             GenerateTextModelInfo::new("test-provider", "test-model")
+        );
+    }
+
+    #[test]
+    fn generate_text_surfaces_sources_across_result_and_steps() {
+        let first_source = LanguageModelSource::url("source-1", "https://example.com/one");
+        let second_source =
+            LanguageModelSource::document("source-2", "application/pdf", "Reference PDF");
+        let first_step = GenerateTextStep::from_language_model_result(
+            0,
+            GenerateTextModelInfo::new("test-provider", "test-model"),
+            LanguageModelGenerateResult::new(
+                vec![
+                    LanguageModelContent::Text(LanguageModelText::new("First")),
+                    LanguageModelContent::Source(first_source.clone()),
+                ],
+                LanguageModelFinishReason {
+                    unified: FinishReason::ToolCalls,
+                    raw: None,
+                },
+                LanguageModelUsage::default(),
+            ),
+        );
+        let second_step = GenerateTextStep::from_language_model_result(
+            1,
+            GenerateTextModelInfo::new("test-provider", "test-model"),
+            LanguageModelGenerateResult::new(
+                vec![
+                    LanguageModelContent::Source(second_source.clone()),
+                    LanguageModelContent::Text(LanguageModelText::new("Done")),
+                ],
+                LanguageModelFinishReason {
+                    unified: FinishReason::Stop,
+                    raw: None,
+                },
+                LanguageModelUsage::default(),
+            ),
+        );
+
+        let result = GenerateTextResult::from_steps(vec![first_step, second_step]);
+
+        assert_eq!(
+            result.sources,
+            vec![first_source.clone(), second_source.clone()]
+        );
+        assert_eq!(result.steps[0].sources, vec![first_source]);
+        assert_eq!(result.steps[1].sources, vec![second_source]);
+        assert_eq!(
+            serde_json::to_value(&result.sources).expect("sources serialize"),
+            json!([
+                {
+                    "type": "source",
+                    "sourceType": "url",
+                    "id": "source-1",
+                    "url": "https://example.com/one"
+                },
+                {
+                    "type": "source",
+                    "sourceType": "document",
+                    "id": "source-2",
+                    "mediaType": "application/pdf",
+                    "title": "Reference PDF"
+                }
+            ])
         );
     }
 
