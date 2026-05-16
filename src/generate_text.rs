@@ -19,7 +19,7 @@ use crate::language_model::{
     LanguageModelToolMessage, LanguageModelToolResult, LanguageModelToolResultOutput,
     LanguageModelToolResultPart, LanguageModelUsage, OutputTokenUsage,
 };
-use crate::provider::JsonParseError;
+use crate::provider::{JsonParseError, get_error_message};
 use crate::provider::{ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{Tool, ToolExecutionOptions, prepare_tools};
 use crate::warning::Warning;
@@ -191,6 +191,94 @@ impl fmt::Display for InvalidToolInputError {
 }
 
 impl std::error::Error for InvalidToolInputError {}
+
+/// Original tool-call parsing error that a repair attempt tried to fix.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ToolCallRepairOriginalError {
+    /// The model tried to call a tool that was not available.
+    NoSuchTool(NoSuchToolError),
+
+    /// The model supplied invalid input for an available tool.
+    InvalidToolInput(InvalidToolInputError),
+}
+
+impl From<NoSuchToolError> for ToolCallRepairOriginalError {
+    fn from(error: NoSuchToolError) -> Self {
+        Self::NoSuchTool(error)
+    }
+}
+
+impl From<InvalidToolInputError> for ToolCallRepairOriginalError {
+    fn from(error: InvalidToolInputError) -> Self {
+        Self::InvalidToolInput(error)
+    }
+}
+
+/// Error returned when repairing an invalid tool call fails.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolCallRepairError {
+    original_error: ToolCallRepairOriginalError,
+    cause_message: String,
+    message: String,
+}
+
+impl ToolCallRepairError {
+    /// Creates a tool-call repair error with the upstream default message.
+    pub fn new(
+        original_error: impl Into<ToolCallRepairOriginalError>,
+        cause: impl fmt::Display,
+    ) -> Self {
+        let cause_message = get_error_message(Some(&cause));
+        let message = tool_call_repair_default_message(&cause_message);
+
+        Self {
+            original_error: original_error.into(),
+            cause_message,
+            message,
+        }
+    }
+
+    /// Creates a tool-call repair error with a caller-supplied message.
+    pub fn with_message(
+        original_error: impl Into<ToolCallRepairOriginalError>,
+        cause: impl fmt::Display,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            original_error: original_error.into(),
+            cause_message: get_error_message(Some(&cause)),
+            message: message.into(),
+        }
+    }
+
+    /// Returns the original tool-call parsing error that triggered repair.
+    pub fn original_error(&self) -> &ToolCallRepairOriginalError {
+        &self.original_error
+    }
+
+    /// Returns the retained repair failure cause message.
+    pub fn cause_message(&self) -> &str {
+        &self.cause_message
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into its parts.
+    pub fn into_parts(self) -> (ToolCallRepairOriginalError, String, String) {
+        (self.original_error, self.cause_message, self.message)
+    }
+}
+
+impl fmt::Display for ToolCallRepairError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ToolCallRepairError {}
 
 /// Reasoning content emitted during a high-level generate-text step.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1586,6 +1674,10 @@ fn invalid_tool_input_default_message(tool_name: &str, cause_message: &str) -> S
     format!("Invalid input for tool {tool_name}: {cause_message}")
 }
 
+fn tool_call_repair_default_message(cause_message: &str) -> String {
+    format!("Error repairing tool call: {cause_message}")
+}
+
 fn add_step_usage(steps: &[GenerateTextStep]) -> LanguageModelUsage {
     steps
         .iter()
@@ -1629,7 +1721,7 @@ mod tests {
     use super::{
         GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning, GenerateTextResult,
         GenerateTextStep, GenerateTextToolCall, GenerateTextToolResult, InvalidToolInputError,
-        NoSuchToolError, generate_text,
+        NoSuchToolError, ToolCallRepairError, ToolCallRepairOriginalError, generate_text,
     };
     use crate::file_data::FileDataContent;
     use crate::language_model::{
@@ -1727,6 +1819,43 @@ mod tests {
                 "{ bad".to_string(),
                 "schema mismatch".to_string(),
                 "custom invalid-tool-input message".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn tool_call_repair_error_matches_upstream_default_message() {
+        let original_error =
+            InvalidToolInputError::new("weather", "{ bad", "expected value at line 1 column 1");
+        let error = ToolCallRepairError::new(original_error.clone(), "repair model failed");
+
+        assert_eq!(
+            error.original_error(),
+            &ToolCallRepairOriginalError::InvalidToolInput(original_error)
+        );
+        assert_eq!(error.cause_message(), "repair model failed");
+        assert_eq!(
+            error.message(),
+            "Error repairing tool call: repair model failed"
+        );
+        assert_eq!(error.to_string(), error.message());
+    }
+
+    #[test]
+    fn tool_call_repair_error_retains_original_no_such_tool_error_and_custom_message() {
+        let original_error = NoSuchToolError::new("weather");
+        let error = ToolCallRepairError::with_message(
+            original_error.clone(),
+            "repair function failed",
+            "custom repair error",
+        );
+
+        assert_eq!(
+            error.into_parts(),
+            (
+                ToolCallRepairOriginalError::NoSuchTool(original_error),
+                "repair function failed".to_string(),
+                "custom repair error".to_string()
             )
         );
     }
