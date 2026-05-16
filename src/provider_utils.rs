@@ -533,6 +533,133 @@ pub fn convert_to_form_data(
     form_data
 }
 
+/// Options for downloading a URL into a dependency-free blob value.
+///
+/// Upstream `downloadBlob` accepts a URL and an optional `maxBytes` value.
+/// Rust omits JavaScript-only `AbortSignal` and lets callers inject the HTTP
+/// transport in [`download_blob`].
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadBlobOptions {
+    /// URL to download.
+    pub url: String,
+
+    /// Maximum accepted response body size in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<usize>,
+}
+
+impl DownloadBlobOptions {
+    /// Creates download options for a URL.
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            max_bytes: None,
+        }
+    }
+
+    /// Sets the maximum accepted response body size in bytes.
+    pub fn with_max_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_bytes = Some(max_bytes);
+        self
+    }
+}
+
+/// HTTP response data supplied to [`download_blob`] by an adapter.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadBlobResponse {
+    /// HTTP response status code.
+    pub status_code: u16,
+
+    /// HTTP response status text.
+    pub status_text: String,
+
+    /// Headers extracted from the HTTP response.
+    #[serde(default)]
+    pub headers: Headers,
+
+    /// Downloaded response body bytes. Missing bodies are treated as empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<Vec<u8>>,
+
+    /// Final URL after an HTTP redirect, when the adapter followed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_url: Option<String>,
+}
+
+impl DownloadBlobResponse {
+    /// Creates a response without a body.
+    pub fn new(status_code: u16, status_text: impl Into<String>) -> Self {
+        Self {
+            status_code,
+            status_text: status_text.into(),
+            headers: Headers::new(),
+            body: None,
+            final_url: None,
+        }
+    }
+
+    /// Creates a response with byte body content.
+    pub fn bytes(
+        status_code: u16,
+        status_text: impl Into<String>,
+        body: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self::new(status_code, status_text).with_body(body)
+    }
+
+    /// Adds response headers.
+    pub fn with_headers(mut self, headers: Headers) -> Self {
+        self.headers = headers;
+        self
+    }
+
+    /// Adds byte body content.
+    pub fn with_body(mut self, body: impl Into<Vec<u8>>) -> Self {
+        self.body = Some(body.into());
+        self
+    }
+
+    /// Marks the response as redirected to a final URL.
+    pub fn with_final_url(mut self, final_url: impl Into<String>) -> Self {
+        self.final_url = Some(final_url.into());
+        self
+    }
+
+    fn is_success_status(&self) -> bool {
+        (200..=299).contains(&self.status_code)
+    }
+}
+
+/// Dependency-free blob returned by [`download_blob`].
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadedBlob {
+    /// Downloaded bytes.
+    pub data: Vec<u8>,
+
+    /// Response media type from the `content-type` header, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+}
+
+impl DownloadedBlob {
+    /// Creates a downloaded blob from bytes.
+    pub fn new(data: impl Into<Vec<u8>>) -> Self {
+        Self {
+            data: data.into(),
+            media_type: None,
+        }
+    }
+
+    /// Sets the response media type.
+    pub fn with_media_type(mut self, media_type: impl Into<String>) -> Self {
+        self.media_type = Some(media_type.into());
+        self
+    }
+}
+
 /// Validation mode for OpenAI-compatible streaming tool-call deltas.
 ///
 /// Upstream `StreamingToolCallTracker` accepts `none`, `if-present`, or
@@ -4309,6 +4436,52 @@ where
     Ok(response_body)
 }
 
+/// Downloads a URL into a dependency-free blob through an injected transport.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils` `downloadBlob`: the initial
+/// URL is SSRF-validated before calling the transport, redirected final URLs are
+/// validated when present, non-2xx responses become [`DownloadError`], the
+/// response body is read through [`read_response_with_size_limit`], and the
+/// `content-type` header becomes the returned blob media type.
+pub async fn download_blob<Transport, TransportFuture>(
+    options: DownloadBlobOptions,
+    transport: Transport,
+) -> Result<DownloadedBlob, DownloadError>
+where
+    Transport: FnOnce(&str) -> TransportFuture,
+    TransportFuture: Future<Output = Result<DownloadBlobResponse, DownloadError>>,
+{
+    let DownloadBlobOptions { url, max_bytes } = options;
+
+    validate_download_url(&url)?;
+
+    let response = transport(&url).await?;
+
+    if let Some(final_url) = response.final_url.as_deref() {
+        validate_download_url(final_url)?;
+    }
+
+    if !response.is_success_status() {
+        return Err(DownloadError::with_status(
+            url,
+            response.status_code,
+            response.status_text,
+        ));
+    }
+
+    let content_length = header_value(&response.headers, "content-length");
+    let response_body =
+        read_response_with_size_limit(&url, response.body.as_deref(), content_length, max_bytes)?;
+
+    let mut blob = DownloadedBlob::new(response_body);
+
+    if let Some(media_type) = header_value(&response.headers, "content-type") {
+        blob = blob.with_media_type(media_type);
+    }
+
+    Ok(blob)
+}
+
 fn parse_content_length_header(content_length: &str) -> Option<u128> {
     let content_length = content_length.trim_start();
     let content_length = content_length.strip_prefix('+').unwrap_or(content_length);
@@ -4328,6 +4501,13 @@ fn parse_content_length_header(content_length: &str) -> Option<u128> {
     }
 
     Some(length)
+}
+
+fn header_value<'a>(headers: &'a Headers, name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
 }
 
 /// Converts an image model file into a URL or data URI string.
@@ -5525,10 +5705,10 @@ mod tests {
 
     use super::{
         Arrayable, Base64DecodeError, BinaryResponseHandlerOptions, ConvertToFormDataOptions,
-        DEFAULT_MAX_DOWNLOAD_SIZE, DownloadError, EventSourceResponseHandlerOptions,
-        FetchErrorInfo, FormData, FormDataEntry, FormDataInputValue, FormDataValue,
-        GetFromApiOptions, HandledFetchError, IdGeneratorOptions,
-        InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
+        DEFAULT_MAX_DOWNLOAD_SIZE, DownloadBlobOptions, DownloadBlobResponse, DownloadError,
+        DownloadedBlob, EventSourceResponseHandlerOptions, FetchErrorInfo, FormData, FormDataEntry,
+        FormDataInputValue, FormDataValue, GetFromApiOptions, HandledFetchError,
+        IdGeneratorOptions, InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
         JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, LoadApiKeyOptions,
         LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError, ParseJsonResult,
         PostJsonToApiOptions, PostToApiOptions, ProviderApiRequest, ProviderApiRequestBody,
@@ -5546,10 +5726,10 @@ mod tests {
         create_provider_defined_tool_factory,
         create_provider_defined_tool_factory_with_output_schema,
         create_provider_executed_tool_factory, create_status_code_error_response_handler,
-        create_tool_name_mapping, detect_media_type, dynamic_tool, execute_provider_api_request,
-        extract_response_headers, filter_nullable, generate_id, get_from_api,
-        get_runtime_environment_user_agent, get_top_level_media_type, handle_fetch_error,
-        handle_provider_api_response, inject_json_instruction,
+        create_tool_name_mapping, detect_media_type, download_blob, dynamic_tool,
+        execute_provider_api_request, extract_response_headers, filter_nullable, generate_id,
+        get_from_api, get_runtime_environment_user_agent, get_top_level_media_type,
+        handle_fetch_error, handle_provider_api_response, inject_json_instruction,
         inject_json_instruction_into_messages, is_abort_error, is_custom_reasoning,
         is_full_media_type, is_non_nullable, is_parsable_json, is_provider_reference,
         is_url_supported, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
@@ -6559,6 +6739,192 @@ mod tests {
         );
         assert!(!form_data.has("image[]"));
         assert_eq!(form_data.get_all("image").len(), 2);
+    }
+
+    #[test]
+    fn download_blob_contracts_serialize_with_upstream_camel_case_fields() {
+        let options = DownloadBlobOptions::new("https://example.com/image.png").with_max_bytes(4);
+        assert_eq!(
+            serde_json::to_value(&options).expect("options serialize"),
+            json!({
+                "url": "https://example.com/image.png",
+                "maxBytes": 4
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<DownloadBlobOptions>(json!({
+                "url": "https://example.com/image.png"
+            }))
+            .expect("options deserialize"),
+            DownloadBlobOptions::new("https://example.com/image.png")
+        );
+
+        let response = DownloadBlobResponse::bytes(200, "OK", vec![1, 2, 3])
+            .with_headers(BTreeMap::from([(
+                "content-type".to_string(),
+                "image/png".to_string(),
+            )]))
+            .with_final_url("https://cdn.example.com/image.png");
+        assert_eq!(
+            serde_json::to_value(&response).expect("response serializes"),
+            json!({
+                "statusCode": 200,
+                "statusText": "OK",
+                "headers": {
+                    "content-type": "image/png"
+                },
+                "body": [1, 2, 3],
+                "finalUrl": "https://cdn.example.com/image.png"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<DownloadBlobResponse>(
+                serde_json::to_value(&response).expect("response serializes")
+            )
+            .expect("response deserializes"),
+            response
+        );
+
+        let blob = DownloadedBlob::new(vec![1, 2, 3]).with_media_type("image/png");
+        assert_eq!(
+            serde_json::to_value(&blob).expect("blob serializes"),
+            json!({
+                "data": [1, 2, 3],
+                "mediaType": "image/png"
+            })
+        );
+    }
+
+    #[test]
+    fn download_blob_downloads_bytes_and_content_type_through_injected_transport() {
+        let result = poll_ready(download_blob(
+            DownloadBlobOptions::new("https://example.com/image.png"),
+            |url| {
+                assert_eq!(url, "https://example.com/image.png");
+                ready(Ok(DownloadBlobResponse::bytes(
+                    200,
+                    "OK",
+                    b"test content".to_vec(),
+                )
+                .with_headers(BTreeMap::from([
+                    ("Content-Type".to_string(), "image/png".to_string()),
+                    ("Content-Length".to_string(), "12".to_string()),
+                ]))))
+            },
+        ))
+        .expect("download succeeds");
+
+        assert_eq!(
+            result,
+            DownloadedBlob::new(b"test content".to_vec()).with_media_type("image/png")
+        );
+    }
+
+    #[test]
+    fn download_blob_returns_empty_blob_for_missing_body() {
+        let result = poll_ready(download_blob(
+            DownloadBlobOptions::new("https://example.com/empty.bin"),
+            |_| {
+                ready(Ok(DownloadBlobResponse::new(200, "OK").with_headers(
+                    BTreeMap::from([(
+                        "content-type".to_string(),
+                        "application/octet-stream".to_string(),
+                    )]),
+                )))
+            },
+        ))
+        .expect("download succeeds");
+
+        assert_eq!(
+            result,
+            DownloadedBlob::new(Vec::new()).with_media_type("application/octet-stream")
+        );
+    }
+
+    #[test]
+    fn download_blob_turns_non_success_status_into_download_error() {
+        let error = poll_ready(download_blob(
+            DownloadBlobOptions::new("https://example.com/not-found.png"),
+            |_| ready(Ok(DownloadBlobResponse::new(404, "Not Found"))),
+        ))
+        .expect_err("non-success status fails");
+
+        assert_eq!(error.url(), "https://example.com/not-found.png");
+        assert_eq!(error.status_code(), Some(404));
+        assert_eq!(error.status_text(), Some("Not Found"));
+        assert_eq!(
+            error.message(),
+            "Failed to download https://example.com/not-found.png: 404 Not Found"
+        );
+    }
+
+    #[test]
+    fn download_blob_enforces_size_limit_from_headers_and_body_bytes() {
+        let content_length_error = poll_ready(download_blob(
+            DownloadBlobOptions::new("https://example.com/huge.bin").with_max_bytes(3),
+            |_| {
+                ready(Ok(DownloadBlobResponse::bytes(200, "OK", vec![1, 2, 3, 4])
+                    .with_headers(BTreeMap::from([(
+                        "content-length".to_string(),
+                        "4 bytes".to_string(),
+                    )]))))
+            },
+        ))
+        .expect_err("content-length over limit fails");
+        assert_eq!(
+            content_length_error.message(),
+            "Download of https://example.com/huge.bin exceeded maximum size of 3 bytes (Content-Length: 4)."
+        );
+
+        let body_error = poll_ready(download_blob(
+            DownloadBlobOptions::new("https://example.com/liar.bin").with_max_bytes(3),
+            |_| ready(Ok(DownloadBlobResponse::bytes(200, "OK", vec![1, 2, 3, 4]))),
+        ))
+        .expect_err("body over limit fails");
+        assert_eq!(
+            body_error.message(),
+            "Download of https://example.com/liar.bin exceeded maximum size of 3 bytes."
+        );
+    }
+
+    #[test]
+    fn download_blob_validates_redirect_final_url() {
+        let error = poll_ready(download_blob(
+            DownloadBlobOptions::new("https://example.com/redirect"),
+            |_| {
+                ready(Ok(DownloadBlobResponse::bytes(
+                    200,
+                    "OK",
+                    b"secret".to_vec(),
+                )
+                .with_final_url("http://localhost/admin")))
+            },
+        ))
+        .expect_err("unsafe redirect URL fails");
+
+        assert_eq!(
+            error.message(),
+            "URL with hostname localhost is not allowed"
+        );
+    }
+
+    #[test]
+    fn download_blob_propagates_transport_download_errors() {
+        let error = poll_ready(download_blob(
+            DownloadBlobOptions::new("https://example.com/network-error.png"),
+            |_| {
+                ready(Err(DownloadError::with_cause_message(
+                    "https://example.com/network-error.png",
+                    "Network error",
+                )))
+            },
+        ))
+        .expect_err("transport error propagates");
+
+        assert_eq!(
+            error.message(),
+            "Failed to download https://example.com/network-error.png: Network error"
+        );
     }
 
     #[test]
