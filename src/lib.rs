@@ -47,12 +47,13 @@ pub use generate_text::{
     GenerateTextStep, GenerateTextStepPerformance, GenerateTextTool, GenerateTextToolCall,
     GenerateTextToolResult, InvalidStreamPartError, InvalidToolApprovalError,
     InvalidToolInputError, MissingToolResultsError, NoObjectGeneratedError, NoOutputGeneratedError,
-    NoSuchToolError, PruneEmptyMessages, PruneMessagesOptions, PruneReasoning, PruneToolCallRule,
-    PruneToolCallRuleMode, PruneToolCalls, StopCondition, ToolCallNotFoundForApprovalError,
+    NoSuchToolError, NormalizedToolApprovalStatus, PruneEmptyMessages, PruneMessagesOptions,
+    PruneReasoning, PruneToolCallRule, PruneToolCallRuleMode, PruneToolCalls, StopCondition,
+    ToolApprovalStatus, ToolApprovalStatusKind, ToolCallNotFoundForApprovalError,
     ToolCallRepairError, ToolCallRepairOriginalError, UiMessageStreamError,
     UnsupportedModelVersionError, collect_tool_approvals, experimental_filter_active_tools,
     filter_active_tools, generate_text, has_tool_call, is_loop_finished, is_step_count,
-    is_stop_condition_met, prune_messages, step_count_is,
+    is_stop_condition_met, normalize_tool_approval_status, prune_messages, step_count_is,
 };
 pub use headers::Headers;
 pub use image_model::{

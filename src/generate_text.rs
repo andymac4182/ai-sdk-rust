@@ -561,6 +561,140 @@ pub fn collect_tool_approvals(
     Ok(collected)
 }
 
+/// Named approval states accepted by upstream tool approval configuration.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolApprovalStatusKind {
+    /// The tool call does not require approval.
+    NotApplicable,
+
+    /// The tool call has been approved.
+    Approved,
+
+    /// The tool call has been denied.
+    Denied,
+
+    /// The tool call requires explicit user approval.
+    UserApproval,
+}
+
+/// Normalized object form of an upstream tool approval status.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum NormalizedToolApprovalStatus {
+    /// The tool call does not require approval.
+    NotApplicable,
+
+    /// The tool call has been approved, optionally with a reason.
+    Approved {
+        /// Optional reason for the approval.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+
+    /// The tool call has been denied, optionally with a reason.
+    Denied {
+        /// Optional reason for the denial.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+
+    /// The tool call requires explicit user approval.
+    UserApproval,
+}
+
+impl NormalizedToolApprovalStatus {
+    /// Creates an approved status without a reason.
+    pub const fn approved() -> Self {
+        Self::Approved { reason: None }
+    }
+
+    /// Creates an approved status with a reason.
+    pub fn approved_with_reason(reason: impl Into<String>) -> Self {
+        Self::Approved {
+            reason: Some(reason.into()),
+        }
+    }
+
+    /// Creates a denied status without a reason.
+    pub const fn denied() -> Self {
+        Self::Denied { reason: None }
+    }
+
+    /// Creates a denied status with a reason.
+    pub fn denied_with_reason(reason: impl Into<String>) -> Self {
+        Self::Denied {
+            reason: Some(reason.into()),
+        }
+    }
+
+    /// Returns the optional reason for approved or denied statuses.
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Approved { reason } | Self::Denied { reason } => reason.as_deref(),
+            Self::NotApplicable | Self::UserApproval => None,
+        }
+    }
+}
+
+/// Upstream tool approval status input.
+///
+/// Upstream accepts either a string status such as `"approved"` or an object
+/// status such as `{ "type": "denied", "reason": "policy" }`. Rust callers
+/// can normalize both forms with [`normalize_tool_approval_status`].
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ToolApprovalStatus {
+    /// String approval status form.
+    Kind(ToolApprovalStatusKind),
+
+    /// Object approval status form.
+    Object(NormalizedToolApprovalStatus),
+}
+
+impl ToolApprovalStatus {
+    /// Converts this status into the normalized object form used by upstream resolution.
+    pub fn normalized(self) -> NormalizedToolApprovalStatus {
+        match self {
+            Self::Kind(kind) => kind.into(),
+            Self::Object(status) => status,
+        }
+    }
+}
+
+impl From<ToolApprovalStatusKind> for ToolApprovalStatus {
+    fn from(kind: ToolApprovalStatusKind) -> Self {
+        Self::Kind(kind)
+    }
+}
+
+impl From<NormalizedToolApprovalStatus> for ToolApprovalStatus {
+    fn from(status: NormalizedToolApprovalStatus) -> Self {
+        Self::Object(status)
+    }
+}
+
+impl From<ToolApprovalStatusKind> for NormalizedToolApprovalStatus {
+    fn from(kind: ToolApprovalStatusKind) -> Self {
+        match kind {
+            ToolApprovalStatusKind::NotApplicable => Self::NotApplicable,
+            ToolApprovalStatusKind::Approved => Self::approved(),
+            ToolApprovalStatusKind::Denied => Self::denied(),
+            ToolApprovalStatusKind::UserApproval => Self::UserApproval,
+        }
+    }
+}
+
+/// Normalizes an optional upstream approval status to its object form.
+pub fn normalize_tool_approval_status(
+    status: Option<ToolApprovalStatus>,
+) -> NormalizedToolApprovalStatus {
+    status.map_or(
+        NormalizedToolApprovalStatus::NotApplicable,
+        ToolApprovalStatus::normalized,
+    )
+}
+
 /// Error returned when a model tries to call a tool that is not available.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NoSuchToolError {
@@ -3396,12 +3530,14 @@ mod tests {
         GenerateTextResult, GenerateTextStep, GenerateTextStepPerformance, GenerateTextToolCall,
         GenerateTextToolResult, InvalidStreamPartError, InvalidToolApprovalError,
         InvalidToolInputError, MissingToolResultsError, NoObjectGeneratedError,
-        NoOutputGeneratedError, NoSuchToolError, PruneEmptyMessages, PruneMessagesOptions,
-        PruneReasoning, PruneToolCallRule, PruneToolCallRuleMode, PruneToolCalls, StopCondition,
+        NoOutputGeneratedError, NoSuchToolError, NormalizedToolApprovalStatus, PruneEmptyMessages,
+        PruneMessagesOptions, PruneReasoning, PruneToolCallRule, PruneToolCallRuleMode,
+        PruneToolCalls, StopCondition, ToolApprovalStatus, ToolApprovalStatusKind,
         ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOriginalError,
         UiMessageStreamError, UnsupportedModelVersionError, collect_tool_approvals,
         experimental_filter_active_tools, filter_active_tools, generate_text, has_tool_call,
-        is_loop_finished, is_step_count, is_stop_condition_met, prune_messages, step_count_is,
+        is_loop_finished, is_step_count, is_stop_condition_met, normalize_tool_approval_status,
+        prune_messages, step_count_is,
     };
     use crate::file_data::FileDataContent;
     use crate::language_model::{
@@ -3809,6 +3945,88 @@ mod tests {
                 "Tool call \"tool-call-1\" not found for approval request \"approval-1\"."
                     .to_string()
             )
+        );
+    }
+
+    #[test]
+    fn tool_approval_status_accepts_upstream_string_forms_and_normalizes_them() {
+        let approved = serde_json::from_value::<ToolApprovalStatus>(json!("approved"))
+            .expect("approved string status deserializes");
+        let denied = serde_json::from_value::<ToolApprovalStatus>(json!("denied"))
+            .expect("denied string status deserializes");
+        let user_approval = serde_json::from_value::<ToolApprovalStatus>(json!("user-approval"))
+            .expect("user-approval string status deserializes");
+
+        assert_eq!(
+            normalize_tool_approval_status(Some(approved)),
+            NormalizedToolApprovalStatus::approved()
+        );
+        assert_eq!(
+            normalize_tool_approval_status(Some(denied)),
+            NormalizedToolApprovalStatus::denied()
+        );
+        assert_eq!(
+            normalize_tool_approval_status(Some(user_approval)),
+            NormalizedToolApprovalStatus::UserApproval
+        );
+        assert_eq!(
+            normalize_tool_approval_status(None),
+            NormalizedToolApprovalStatus::NotApplicable
+        );
+    }
+
+    #[test]
+    fn tool_approval_status_object_forms_round_trip_upstream_json() {
+        let approved = NormalizedToolApprovalStatus::approved_with_reason("owner allowed");
+        let denied = NormalizedToolApprovalStatus::denied_with_reason("policy block");
+
+        assert_eq!(approved.reason(), Some("owner allowed"));
+        assert_eq!(denied.reason(), Some("policy block"));
+        assert_eq!(
+            serde_json::to_value(&approved).expect("approved status serializes"),
+            json!({
+                "type": "approved",
+                "reason": "owner allowed"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&denied).expect("denied status serializes"),
+            json!({
+                "type": "denied",
+                "reason": "policy block"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(NormalizedToolApprovalStatus::approved())
+                .expect("approved status serializes"),
+            json!({
+                "type": "approved"
+            })
+        );
+
+        let input = serde_json::from_value::<ToolApprovalStatus>(json!({
+            "type": "denied",
+            "reason": "manual denial"
+        }))
+        .expect("object status deserializes");
+
+        assert_eq!(
+            input.normalized(),
+            NormalizedToolApprovalStatus::denied_with_reason("manual denial")
+        );
+    }
+
+    #[test]
+    fn tool_approval_status_kind_round_trips_status_strings() {
+        assert_eq!(
+            serde_json::to_value(ToolApprovalStatusKind::NotApplicable)
+                .expect("status kind serializes"),
+            json!("not-applicable")
+        );
+        assert_eq!(
+            serde_json::from_value::<ToolApprovalStatusKind>(json!("user-approval"))
+                .expect("status kind deserializes"),
+            ToolApprovalStatusKind::UserApproval
         );
     }
 
