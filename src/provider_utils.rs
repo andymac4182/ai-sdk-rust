@@ -28,6 +28,27 @@ const DEFAULT_JSON_SCHEMA_INSTRUCTION_SUFFIX: &str =
     "You MUST answer with a JSON object that matches the JSON schema above.";
 const DEFAULT_JSON_INSTRUCTION_SUFFIX: &str = "You MUST answer with JSON.";
 
+/// Error returned when inline file data cannot be converted to raw bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InlineFileDataBytesError {
+    /// The supplied file data is a URL or provider reference rather than inline content.
+    NonInlineFileData,
+
+    /// The supplied inline data is not valid base64.
+    InvalidBase64Data,
+}
+
+impl fmt::Display for InlineFileDataBytesError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonInlineFileData => formatter.write_str("file data must be inline data or text"),
+            Self::InvalidBase64Data => formatter.write_str("invalid base64 inline file data"),
+        }
+    }
+}
+
+impl std::error::Error for InlineFileDataBytesError {}
+
 struct MediaTypeSignature {
     media_type: &'static str,
     bytes_prefix: &'static [Option<u8>],
@@ -906,6 +927,30 @@ pub fn is_provider_reference(data: &JsonValue) -> bool {
         .is_some_and(|object| !object.contains_key("type"))
 }
 
+/// Converts inline file data into raw bytes.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils`
+/// `convertInlineFileDataToUint8Array`: text file data is UTF-8 encoded, raw
+/// byte data is returned unchanged, and string data is decoded from base64.
+/// URL and provider-reference variants are rejected because the upstream helper
+/// only accepts tagged inline data/text file data.
+pub fn convert_inline_file_data_to_bytes(
+    data: &FileData,
+) -> Result<Vec<u8>, InlineFileDataBytesError> {
+    match data {
+        FileData::Text { text } => Ok(text.as_bytes().to_vec()),
+        FileData::Data { data } => match data {
+            FileDataContent::Bytes(bytes) => Ok(bytes.clone()),
+            FileDataContent::Base64(base64) => {
+                decode_base64(base64).ok_or(InlineFileDataBytesError::InvalidBase64Data)
+            }
+        },
+        FileData::Url { .. } | FileData::Reference { .. } => {
+            Err(InlineFileDataBytesError::NonInlineFileData)
+        }
+    }
+}
+
 /// Detects the IANA media type of raw bytes or base64-encoded file content.
 ///
 /// This mirrors upstream `@ai-sdk/provider-utils` `detectMediaType`: when a
@@ -1466,10 +1511,11 @@ mod tests {
     use url::Url;
 
     use super::{
-        Arrayable, InjectJsonInstructionIntoMessagesOptions, LoadApiKeyOptions,
-        LoadOptionalSettingOptions, LoadSettingOptions, ReasoningLevel, Tool, ToolExecutionError,
-        ToolExecutionOptions, add_additional_properties_to_json_schema, as_array, combine_headers,
-        convert_image_model_file_to_data_uri, create_tool_name_mapping, detect_media_type,
+        Arrayable, InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
+        LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, ReasoningLevel, Tool,
+        ToolExecutionError, ToolExecutionOptions, add_additional_properties_to_json_schema,
+        as_array, combine_headers, convert_image_model_file_to_data_uri,
+        convert_inline_file_data_to_bytes, create_tool_name_mapping, detect_media_type,
         filter_nullable, get_top_level_media_type, inject_json_instruction,
         inject_json_instruction_into_messages, is_custom_reasoning, is_full_media_type,
         is_non_nullable, is_provider_reference, load_api_key, load_api_key_with_env,
@@ -2222,6 +2268,80 @@ mod tests {
         assert!(!is_provider_reference(&json!("some-string")));
         assert!(!is_provider_reference(&json!(42)));
         assert!(!is_provider_reference(&json!([1, 2, 3])));
+    }
+
+    #[test]
+    fn convert_inline_file_data_to_bytes_encodes_text_as_utf8() {
+        assert_eq!(
+            convert_inline_file_data_to_bytes(&FileData::Text {
+                text: "hello\nworld".to_string(),
+            })
+            .expect("text data converts"),
+            b"hello\nworld".to_vec()
+        );
+    }
+
+    #[test]
+    fn convert_inline_file_data_to_bytes_returns_raw_bytes_unchanged() {
+        assert_eq!(
+            convert_inline_file_data_to_bytes(&FileData::Data {
+                data: FileDataContent::Bytes(vec![0, 1, 2, 255]),
+            })
+            .expect("raw bytes convert"),
+            vec![0, 1, 2, 255]
+        );
+    }
+
+    #[test]
+    fn convert_inline_file_data_to_bytes_decodes_base64_data() {
+        assert_eq!(
+            convert_inline_file_data_to_bytes(&FileData::Data {
+                data: FileDataContent::Base64("SGVsbG8=".to_string()),
+            })
+            .expect("base64 data converts"),
+            b"Hello".to_vec()
+        );
+        assert_eq!(
+            convert_inline_file_data_to_bytes(&FileData::Data {
+                data: FileDataContent::Base64("-_8=".to_string()),
+            })
+            .expect("base64url data converts"),
+            vec![251, 255]
+        );
+    }
+
+    #[test]
+    fn convert_inline_file_data_to_bytes_rejects_non_inline_file_data() {
+        assert_eq!(
+            convert_inline_file_data_to_bytes(&FileData::Url {
+                url: Url::parse("https://example.com/file.txt").expect("valid URL"),
+            })
+            .expect_err("URL file data is not inline"),
+            InlineFileDataBytesError::NonInlineFileData
+        );
+
+        let reference = ProviderReference::try_from(BTreeMap::from([(
+            "openai".to_string(),
+            "file-abc123".to_string(),
+        )]))
+        .expect("provider reference is valid");
+
+        assert_eq!(
+            convert_inline_file_data_to_bytes(&FileData::Reference { reference })
+                .expect_err("provider references are not inline"),
+            InlineFileDataBytesError::NonInlineFileData
+        );
+    }
+
+    #[test]
+    fn convert_inline_file_data_to_bytes_rejects_invalid_base64_data() {
+        assert_eq!(
+            convert_inline_file_data_to_bytes(&FileData::Data {
+                data: FileDataContent::Base64("not valid base64!".to_string()),
+            })
+            .expect_err("invalid base64 does not convert"),
+            InlineFileDataBytesError::InvalidBase64Data
+        );
     }
 
     #[test]
