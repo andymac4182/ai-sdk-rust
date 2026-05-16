@@ -247,6 +247,61 @@ impl fmt::Display for InvalidArgumentError {
 
 impl std::error::Error for InvalidArgumentError {}
 
+/// Error returned when provider JSON parsing fails.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JsonParseError {
+    text: String,
+    cause_message: String,
+    message: String,
+}
+
+impl JsonParseError {
+    /// Creates a JSON parse error from the failed text and parse error.
+    pub fn new(text: impl Into<String>, cause: impl fmt::Display) -> Self {
+        Self::with_cause_message(text, cause.to_string())
+    }
+
+    /// Creates a JSON parse error from the failed text and upstream-style cause message.
+    pub fn with_cause_message(text: impl Into<String>, cause_message: impl Into<String>) -> Self {
+        let text = text.into();
+        let cause_message = cause_message.into();
+
+        Self {
+            message: format!("JSON parsing failed: Text: {text}.\nError message: {cause_message}"),
+            text,
+            cause_message,
+        }
+    }
+
+    /// Returns the text that failed JSON parsing.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Returns the human-readable cause message.
+    pub fn cause_message(&self) -> &str {
+        &self.cause_message
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into the failed text and cause message.
+    pub fn into_parts(self) -> (String, String) {
+        (self.text, self.cause_message)
+    }
+}
+
+impl fmt::Display for JsonParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for JsonParseError {}
+
 /// Error returned when a provider response has no body to parse.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EmptyResponseBodyError {
@@ -476,9 +531,9 @@ pub type ProviderMetadata = BTreeMap<String, JsonObject>;
 #[cfg(test)]
 mod tests {
     use super::{
-        EmptyResponseBodyError, InvalidArgumentError, InvalidResponseDataError, LoadApiKeyError,
-        LoadSettingError, ModelType, NoContentGeneratedError, NoSuchModelError, ProviderOptions,
-        TooManyEmbeddingValuesForCallError, UnsupportedFunctionalityError,
+        EmptyResponseBodyError, InvalidArgumentError, InvalidResponseDataError, JsonParseError,
+        LoadApiKeyError, LoadSettingError, ModelType, NoContentGeneratedError, NoSuchModelError,
+        ProviderOptions, TooManyEmbeddingValuesForCallError, UnsupportedFunctionalityError,
     };
     use serde_json::json;
 
@@ -588,6 +643,45 @@ mod tests {
         assert_eq!(
             error.into_parts(),
             ("separator".to_string(), message.to_string())
+        );
+    }
+
+    #[test]
+    fn json_parse_error_matches_upstream_message_contract() {
+        let text = "{ invalid json";
+        let cause_message = "SyntaxError: Expected property name or '}' in JSON at position 2";
+        let error = JsonParseError::with_cause_message(text, cause_message);
+
+        assert_eq!(error.text(), text);
+        assert_eq!(error.cause_message(), cause_message);
+        assert_eq!(
+            error.message(),
+            "JSON parsing failed: Text: { invalid json.\nError message: SyntaxError: Expected property name or '}' in JSON at position 2"
+        );
+        assert_eq!(
+            error.to_string(),
+            "JSON parsing failed: Text: { invalid json.\nError message: SyntaxError: Expected property name or '}' in JSON at position 2"
+        );
+        assert_eq!(
+            error.into_parts(),
+            (text.to_string(), cause_message.to_string())
+        );
+    }
+
+    #[test]
+    fn json_parse_error_accepts_display_causes() {
+        let cause = serde_json::from_str::<serde_json::Value>("not json")
+            .expect_err("invalid JSON should produce a serde_json parse error");
+        let error = JsonParseError::new("not json", &cause);
+
+        assert_eq!(error.text(), "not json");
+        assert_eq!(error.cause_message(), cause.to_string());
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "JSON parsing failed: Text: not json.\nError message: {}",
+                cause
+            )
         );
     }
 
