@@ -1609,6 +1609,9 @@ pub struct GenerateTextResult {
 
     /// Details for all generation steps.
     pub steps: Vec<GenerateTextStep>,
+
+    /// The final step, mirroring upstream `GenerateTextResult.finalStep`.
+    pub final_step: GenerateTextStep,
 }
 
 impl GenerateTextResult {
@@ -1673,13 +1676,14 @@ impl GenerateTextResult {
             request: final_step.request.clone(),
             response: final_step.response.clone(),
             provider_metadata: final_step.provider_metadata.clone(),
+            final_step: final_step.clone(),
             steps,
         }
     }
 
-    /// Returns the final step, when the result contains at least one step.
+    /// Returns the final step recorded on this result.
     pub fn final_step(&self) -> Option<&GenerateTextStep> {
-        self.steps.last()
+        Some(&self.final_step)
     }
 }
 
@@ -3155,6 +3159,7 @@ mod tests {
         assert_eq!(result.warnings, Vec::new());
         assert_eq!(result.content.len(), 2);
         assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.final_step, result.steps[0]);
         assert_eq!(
             result.response_messages,
             vec![LanguageModelMessage::Assistant(
@@ -3391,7 +3396,43 @@ mod tests {
                         },
                         "warnings": []
                     }
-                ]
+                ],
+                "finalStep": {
+                    "stepNumber": 0,
+                    "model": {
+                        "provider": "test-provider",
+                        "modelId": "test-model"
+                    },
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Hello"
+                        }
+                    ],
+                    "responseMessages": [
+                        {
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "Hello"
+                                }
+                            ]
+                        }
+                    ],
+                    "text": "Hello",
+                    "finishReason": "stop",
+                    "rawFinishReason": "stop",
+                    "usage": {
+                        "inputTokens": {
+                            "total": 3
+                        },
+                        "outputTokens": {
+                            "total": 1
+                        }
+                    },
+                    "warnings": []
+                }
             })
         );
     }
@@ -3606,7 +3647,22 @@ mod tests {
                     },
                     "warnings": []
                 }
-            ]
+            ],
+            "finalStep": {
+                "stepNumber": 0,
+                "model": {
+                    "provider": "test-provider",
+                    "modelId": "test-model"
+                },
+                "content": [],
+                "text": "",
+                "finishReason": "length",
+                "usage": {
+                    "inputTokens": {},
+                    "outputTokens": {}
+                },
+                "warnings": []
+            }
         }))
         .expect("result deserializes");
 
@@ -3632,6 +3688,7 @@ mod tests {
             result.steps[0].model,
             GenerateTextModelInfo::new("test-provider", "test-model")
         );
+        assert_eq!(result.final_step, result.steps[0]);
     }
 
     #[test]
