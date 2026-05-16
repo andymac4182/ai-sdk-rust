@@ -42,6 +42,11 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// Tool names that are enabled for a generation step.
+///
+/// `None` means no tool restriction is applied.
+pub type ActiveTools = Option<Vec<String>>;
+
 /// Future returned by a high-level tool input refinement function.
 pub type ToolInputRefinementFuture =
     Pin<Box<dyn Future<Output = Result<JsonValue, ToolInputRefinementError>> + Send>>;
@@ -271,7 +276,7 @@ pub struct PrepareStepResult<'a, M: LanguageModel + ?Sized> {
     pub tool_choice: Option<LanguageModelToolChoice>,
 
     /// Optional active-tool override for this step.
-    pub active_tools: Option<Vec<String>>,
+    pub active_tools: ActiveTools,
 
     /// Optional full prompt-message override. Carries forward after this step.
     pub messages: Option<LanguageModelPrompt>,
@@ -420,7 +425,7 @@ pub struct GenerateTextStartEvent {
 
     /// Optional active-tool restriction for the generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_tools: Option<Vec<String>>,
+    pub active_tools: ActiveTools,
 
     /// Maximum output tokens configured for the generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -504,7 +509,7 @@ pub struct GenerateTextStepStartEvent {
 
     /// Active-tool restriction used for this step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_tools: Option<Vec<String>>,
+    pub active_tools: ActiveTools,
 
     /// Previously completed steps.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3023,7 +3028,7 @@ pub struct GenerateTextOptions<'a, M: LanguageModel + ?Sized> {
     pub tools_context: JsonObject,
 
     /// Optional active tool names used to restrict the available tool set.
-    pub active_tools: Option<Vec<String>>,
+    pub active_tools: ActiveTools,
 
     /// Static approval configuration for tool calls.
     pub tool_approval: Option<ToolApprovalConfiguration>,
@@ -3585,6 +3590,15 @@ impl GenerateTextToolCall {
     }
 }
 
+/// Upstream typed static tool-call alias.
+pub type StaticToolCall = GenerateTextToolCall;
+
+/// Upstream typed dynamic tool-call alias.
+pub type DynamicToolCall = GenerateTextToolCall;
+
+/// Upstream typed tool-call alias.
+pub type TypedToolCall = GenerateTextToolCall;
+
 /// Result produced by executing a Rust tool during a generate-text step.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -3718,6 +3732,15 @@ impl GenerateTextToolResult {
     }
 }
 
+/// Upstream typed static tool-result alias.
+pub type StaticToolResult = GenerateTextToolResult;
+
+/// Upstream typed dynamic tool-result alias.
+pub type DynamicToolResult = GenerateTextToolResult;
+
+/// Upstream typed tool-result alias.
+pub type TypedToolResult = GenerateTextToolResult;
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 enum GenerateTextToolErrorKind {
     #[serde(rename = "tool-error")]
@@ -3831,6 +3854,74 @@ impl GenerateTextToolError {
         }
     }
 }
+
+/// Upstream typed static tool-error alias.
+pub type StaticToolError = GenerateTextToolError;
+
+/// Upstream typed dynamic tool-error alias.
+pub type DynamicToolError = GenerateTextToolError;
+
+/// Upstream typed tool-error alias.
+pub type TypedToolError = GenerateTextToolError;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum GenerateTextToolOutputDeniedKind {
+    #[serde(rename = "tool-output-denied")]
+    ToolOutputDenied,
+}
+
+/// Output indicating that a tool execution was denied.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateTextToolOutputDenied {
+    #[serde(rename = "type")]
+    kind: GenerateTextToolOutputDeniedKind,
+
+    /// Identifier of the denied tool call.
+    pub tool_call_id: String,
+
+    /// Name of the denied tool.
+    pub tool_name: String,
+
+    /// Whether the provider would have executed this tool call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_executed: Option<bool>,
+
+    /// Whether the tool was dynamically defined by the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic: Option<bool>,
+}
+
+impl GenerateTextToolOutputDenied {
+    /// Creates a denied tool-output record.
+    pub fn new(tool_call_id: impl Into<String>, tool_name: impl Into<String>) -> Self {
+        Self {
+            kind: GenerateTextToolOutputDeniedKind::ToolOutputDenied,
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            provider_executed: None,
+            dynamic: None,
+        }
+    }
+
+    /// Sets whether the provider would have executed this tool call.
+    pub fn with_provider_executed(mut self, provider_executed: bool) -> Self {
+        self.provider_executed = Some(provider_executed);
+        self
+    }
+
+    /// Sets whether the tool was dynamically defined by the provider.
+    pub fn with_dynamic(mut self, dynamic: bool) -> Self {
+        self.dynamic = Some(dynamic);
+        self
+    }
+}
+
+/// Upstream static denied tool-output alias.
+pub type StaticToolOutputDenied = GenerateTextToolOutputDenied;
+
+/// Upstream typed denied tool-output alias.
+pub type TypedToolOutputDenied = GenerateTextToolOutputDenied;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 enum ToolApprovalRequestOutputKind {
@@ -6764,27 +6855,30 @@ fn add_optional_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ContentPart, DefaultGeneratedFile, ExperimentalGeneratedImage, GenerateTextContentPart,
+        ActiveTools, ContentPart, DefaultGeneratedFile, DynamicToolCall, DynamicToolError,
+        DynamicToolResult, ExperimentalGeneratedImage, GenerateTextContentPart,
         GenerateTextEndEvent, GenerateTextFileContent, GenerateTextFinishEvent,
         GenerateTextInclude, GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning,
         GenerateTextResult, GenerateTextStartEvent, GenerateTextStep, GenerateTextStepEndEvent,
         GenerateTextStepPerformance, GenerateTextStepStartEvent, GenerateTextToolCall,
         GenerateTextToolError, GenerateTextToolExecutionEndEvent,
-        GenerateTextToolExecutionStartEvent, GenerateTextToolResult, GeneratedFile,
-        InvalidStreamPartError, InvalidToolApprovalError, InvalidToolInputError,
+        GenerateTextToolExecutionStartEvent, GenerateTextToolOutputDenied, GenerateTextToolResult,
+        GeneratedFile, InvalidStreamPartError, InvalidToolApprovalError, InvalidToolInputError,
         LanguageModelCallEndEvent, LanguageModelCallPerformance, LanguageModelCallStartEvent,
         MissingToolResultsError, ModelInfo, NoObjectGeneratedError, NoOutputGeneratedError,
         NoSuchToolError, NormalizedToolApprovalStatus, PrepareStepResult, PruneEmptyMessages,
         PruneMessagesOptions, PruneReasoning, PruneToolCallRule, PruneToolCallRuleMode,
         PruneToolCalls, ReasoningFileOutput, ReasoningOutput, ResolveToolApprovalOptions,
-        StopCondition, ToolApprovalConfiguration, ToolApprovalRequestOutput,
-        ToolApprovalResponseOutput, ToolApprovalStatus, ToolApprovalStatusKind,
-        ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOptions,
-        ToolCallRepairOriginalError, ToolExecutionEndEvent, ToolExecutionStartEvent,
-        ToolInputRefinementError, UiMessageStreamError, UnsupportedModelVersionError,
-        collect_tool_approvals, experimental_filter_active_tools, filter_active_tools,
-        generate_text, has_tool_call, is_loop_finished, is_step_count, is_stop_condition_met,
-        normalize_tool_approval_status, prune_messages, resolve_tool_approval, step_count_is,
+        StaticToolCall, StaticToolError, StaticToolOutputDenied, StaticToolResult, StopCondition,
+        ToolApprovalConfiguration, ToolApprovalRequestOutput, ToolApprovalResponseOutput,
+        ToolApprovalStatus, ToolApprovalStatusKind, ToolCallNotFoundForApprovalError,
+        ToolCallRepairError, ToolCallRepairOptions, ToolCallRepairOriginalError,
+        ToolExecutionEndEvent, ToolExecutionStartEvent, ToolInputRefinementError, TypedToolCall,
+        TypedToolError, TypedToolOutputDenied, TypedToolResult, UiMessageStreamError,
+        UnsupportedModelVersionError, collect_tool_approvals, experimental_filter_active_tools,
+        filter_active_tools, generate_text, has_tool_call, is_loop_finished, is_step_count,
+        is_stop_condition_met, normalize_tool_approval_status, prune_messages,
+        resolve_tool_approval, step_count_is,
     };
     use crate::file_data::FileDataContent;
     use crate::headers::Headers;
@@ -9104,6 +9198,89 @@ mod tests {
             )
             .expect("tool result deserializes"),
             tool_result
+        );
+    }
+
+    #[test]
+    fn generate_text_upstream_tool_aliases_and_denied_output_match_contracts() {
+        let active_tools: ActiveTools = Some(vec!["weather".to_string()]);
+        assert_eq!(active_tools, Some(vec!["weather".to_string()]));
+
+        let tool_call = GenerateTextToolCall {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "weather".to_string(),
+            input: json!({ "city": "Brisbane" }),
+            title: None,
+            provider_executed: None,
+            dynamic: Some(false),
+            invalid: None,
+            error: None,
+            provider_metadata: None,
+            tool_metadata: None,
+        };
+        let static_call: StaticToolCall = tool_call.clone();
+        let dynamic_call: DynamicToolCall = tool_call.clone();
+        let typed_call: TypedToolCall = tool_call.clone();
+
+        let tool_result = GenerateTextToolResult {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "weather".to_string(),
+            input: json!({ "city": "Brisbane" }),
+            output: json!("sunny"),
+            title: None,
+            is_error: None,
+            provider_executed: None,
+            dynamic: Some(false),
+            preliminary: None,
+            provider_metadata: None,
+            tool_metadata: None,
+        };
+        let static_result: StaticToolResult = tool_result.clone();
+        let dynamic_result: DynamicToolResult = tool_result.clone();
+        let typed_result: TypedToolResult = tool_result.clone();
+
+        let tool_error = GenerateTextToolError::new(
+            "call-1",
+            "weather",
+            json!({ "city": "Brisbane" }),
+            json!("denied"),
+        )
+        .with_dynamic(false);
+        let static_error: StaticToolError = tool_error.clone();
+        let dynamic_error: DynamicToolError = tool_error.clone();
+        let typed_error: TypedToolError = tool_error.clone();
+
+        let denied: StaticToolOutputDenied = GenerateTextToolOutputDenied::new("call-1", "weather")
+            .with_provider_executed(true)
+            .with_dynamic(false);
+        let typed_denied: TypedToolOutputDenied = denied.clone();
+
+        assert_eq!(static_call, tool_call);
+        assert_eq!(dynamic_call, tool_call);
+        assert_eq!(typed_call, dynamic_call);
+        assert_eq!(static_result, tool_result);
+        assert_eq!(dynamic_result, tool_result);
+        assert_eq!(typed_result, dynamic_result);
+        assert_eq!(static_error, tool_error);
+        assert_eq!(dynamic_error, tool_error);
+        assert_eq!(typed_error, dynamic_error);
+        assert_eq!(typed_denied, denied);
+
+        let denied_value = serde_json::to_value(&denied).expect("denied output serializes");
+        assert_eq!(
+            denied_value,
+            json!({
+                "type": "tool-output-denied",
+                "toolCallId": "call-1",
+                "toolName": "weather",
+                "providerExecuted": true,
+                "dynamic": false
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<GenerateTextToolOutputDenied>(denied_value)
+                .expect("denied output deserializes"),
+            denied
         );
     }
 
