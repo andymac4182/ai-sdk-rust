@@ -4753,6 +4753,25 @@ pub fn parse_json(text: &str) -> Result<JsonValue, JsonParseError> {
     secure_json_parse(text).map_err(|cause| JsonParseError::new(text, cause))
 }
 
+/// Parses a JSON string and validates it with a schema.
+///
+/// This mirrors the schema overload of upstream `@ai-sdk/provider-utils`
+/// `parseJSON`: secure JSON parse failures are returned as
+/// [`JsonParseError`], while schema failures are returned as
+/// [`TypeValidationError`] through [`ParseJsonError`].
+pub fn parse_json_with_schema<T>(
+    text: &str,
+    schema: impl Into<FlexibleSchema<T>>,
+) -> Result<T, ParseJsonError>
+where
+    T: DeserializeOwned,
+{
+    match safe_parse_json_with_schema(text, schema) {
+        ParseJsonResult::Success { value, .. } => Ok(value),
+        ParseJsonResult::Failure { error, .. } => Err(error),
+    }
+}
+
 /// Safely parses a JSON string into a JSON value.
 ///
 /// This mirrors the no-schema overload of upstream `@ai-sdk/provider-utils`
@@ -4763,6 +4782,34 @@ pub fn safe_parse_json(text: &str) -> ParseJsonResult {
     match parse_json(text) {
         Ok(value) => ParseJsonResult::success(value.clone(), value),
         Err(error) => ParseJsonResult::failure(error, None),
+    }
+}
+
+/// Safely parses a JSON string and validates it with a schema.
+///
+/// This mirrors the schema overload of upstream `safeParseJSON`: successful
+/// validation returns the typed value plus the original raw JSON value, parse
+/// failures have no raw value, and schema failures preserve the parsed raw
+/// value alongside the [`TypeValidationError`].
+pub fn safe_parse_json_with_schema<T>(
+    text: &str,
+    schema: impl Into<FlexibleSchema<T>>,
+) -> ParseJsonResult<T>
+where
+    T: DeserializeOwned,
+{
+    let raw_value = match parse_json(text) {
+        Ok(value) => value,
+        Err(error) => return ParseJsonResult::failure(error, None),
+    };
+
+    match safe_validate_types(raw_value.clone(), schema, None) {
+        ValidateTypesResult::Success { value, raw_value } => {
+            ParseJsonResult::success(value, raw_value)
+        }
+        ValidateTypesResult::Failure { error, raw_value } => {
+            ParseJsonResult::failure(error, Some(raw_value))
+        }
     }
 }
 
@@ -6491,10 +6538,11 @@ mod tests {
         load_api_key, load_api_key_with_env, load_optional_setting_with_env, load_setting,
         load_setting_with_env, map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
         media_type_to_extension, normalize_headers, parse_json, parse_json_event_stream,
-        parse_provider_options, post_json_to_api, post_to_api, prepare_get_from_api_request,
-        prepare_post_json_to_api_request, prepare_post_to_api_request, prepare_tools,
-        read_response_with_size_limit, remove_undefined_entries, resolve, resolve_full_media_type,
-        resolve_provider_reference, safe_parse_json, safe_validate_types, serialize_model_options,
+        parse_json_with_schema, parse_provider_options, post_json_to_api, post_to_api,
+        prepare_get_from_api_request, prepare_post_json_to_api_request,
+        prepare_post_to_api_request, prepare_tools, read_response_with_size_limit,
+        remove_undefined_entries, resolve, resolve_full_media_type, resolve_provider_reference,
+        safe_parse_json, safe_parse_json_with_schema, safe_validate_types, serialize_model_options,
         strip_file_extension, validate_download_url, validate_types,
         with_provider_utils_user_agent, with_user_agent_suffix, without_trailing_slash,
     };
@@ -8521,6 +8569,88 @@ mod tests {
             safe_validate_types(value.clone(), json_schema(object_schema()), None);
 
         assert_eq!(parsed, ValidateTypesResult::success(value.clone(), value));
+    }
+
+    #[test]
+    fn parse_json_with_schema_returns_validated_values() {
+        let person = parse_json_with_schema(r#"{"name":"John","age":30}"#, person_schema())
+            .expect("JSON parses and validates");
+
+        assert_eq!(
+            person,
+            Person {
+                name: "John".to_string(),
+                age: 30
+            }
+        );
+    }
+
+    #[test]
+    fn parse_json_with_schema_wraps_type_validation_errors() {
+        let error = parse_json_with_schema(r#"{"name":"John","age":"old"}"#, person_schema())
+            .expect_err("invalid typed JSON fails validation");
+
+        let validation_error = error
+            .as_type_validation_error()
+            .expect("schema failure is returned");
+        assert_eq!(
+            validation_error.value(),
+            &json!({ "name": "John", "age": "old" })
+        );
+        assert_eq!(validation_error.cause_message(), "Invalid input");
+        assert!(error.as_json_parse_error().is_none());
+    }
+
+    #[test]
+    fn safe_parse_json_with_schema_preserves_raw_value_after_transformation() {
+        let schema = Schema::new(object_schema()).with_validator(|value| {
+            let count = value
+                .get("count")
+                .and_then(JsonValue::as_str)
+                .and_then(|count| count.parse::<u64>().ok())
+                .expect("test input has a numeric count string");
+
+            ValidationResult::success(json!({ "count": count }))
+        });
+
+        let parsed = safe_parse_json_with_schema(r#"{"count":"42"}"#, schema);
+
+        assert_eq!(
+            parsed,
+            ParseJsonResult::success(json!({ "count": 42 }), json!({ "count": "42" }))
+        );
+    }
+
+    #[test]
+    fn safe_parse_json_with_schema_preserves_raw_value_on_validation_failure() {
+        let parsed = safe_parse_json_with_schema(r#"{"name":"John","age":"old"}"#, person_schema());
+
+        assert!(parsed.is_failure());
+        assert_eq!(
+            parsed.raw_value(),
+            Some(&json!({ "name": "John", "age": "old" }))
+        );
+
+        let validation_error = parsed
+            .error()
+            .and_then(ParseJsonError::as_type_validation_error)
+            .expect("schema failure is returned");
+        assert_eq!(validation_error.cause_message(), "Invalid input");
+    }
+
+    #[test]
+    fn safe_parse_json_with_schema_has_no_raw_value_on_parse_failure() {
+        let parsed: ParseJsonResult<Person> =
+            safe_parse_json_with_schema("invalid json", person_schema());
+
+        assert!(parsed.is_failure());
+        assert!(parsed.raw_value().is_none());
+        assert!(
+            parsed
+                .error()
+                .and_then(ParseJsonError::as_json_parse_error)
+                .is_some()
+        );
     }
 
     #[test]
