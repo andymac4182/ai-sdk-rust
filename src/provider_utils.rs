@@ -7,6 +7,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::file_data::{NoSuchProviderReferenceError, ProviderReference};
+use crate::headers::Headers;
 use crate::json::{JsonObject, JsonSchema, JsonValue};
 use crate::language_model::{
     LanguageModelFunctionTool, LanguageModelPrompt, LanguageModelTool,
@@ -283,6 +284,29 @@ pub fn filter_nullable<T>(values: impl IntoIterator<Item = Option<T>>) -> Vec<T>
     values.into_iter().flatten().collect()
 }
 
+/// Normalizes optional HTTP header entries into a lower-case header map.
+///
+/// This mirrors upstream `@ai-sdk/provider-utils` `normalizeHeaders`: missing
+/// input becomes an empty map, nullish values are removed, and header names are
+/// normalized to lower case.
+pub fn normalize_headers<K, V, I>(headers: Option<I>) -> Headers
+where
+    I: IntoIterator<Item = (K, Option<V>)>,
+    K: AsRef<str>,
+    V: Into<String>,
+{
+    let Some(headers) = headers else {
+        return Headers::new();
+    };
+
+    headers
+        .into_iter()
+        .filter_map(|(key, value)| {
+            value.map(|value| (key.as_ref().to_ascii_lowercase(), value.into()))
+        })
+        .collect()
+}
+
 /// Options for loading a provider API key from an explicit value or environment variable.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoadApiKeyOptions {
@@ -524,8 +548,8 @@ mod tests {
         Arrayable, LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions, Tool,
         ToolExecutionError, ToolExecutionOptions, as_array, filter_nullable, is_non_nullable,
         load_api_key, load_api_key_with_env, load_optional_setting_with_env, load_setting,
-        load_setting_with_env, media_type_to_extension, prepare_tools, resolve_provider_reference,
-        strip_file_extension, without_trailing_slash,
+        load_setting_with_env, media_type_to_extension, normalize_headers, prepare_tools,
+        resolve_provider_reference, strip_file_extension, without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -615,6 +639,48 @@ mod tests {
         assert_eq!(
             filter_nullable(values),
             vec![json!(0), json!(false), json!("")]
+        );
+    }
+
+    #[test]
+    fn normalize_headers_returns_empty_map_for_missing_input() {
+        assert_eq!(
+            normalize_headers::<String, String, Vec<(String, Option<String>)>>(None),
+            BTreeMap::new()
+        );
+    }
+
+    #[test]
+    fn normalize_headers_lowercases_keys_and_filters_missing_values() {
+        let headers = normalize_headers(Some(vec![
+            ("Authorization", Some("Bearer token")),
+            ("X-Feature", Some("beta")),
+            ("X-Ignore", None),
+        ]));
+
+        assert_eq!(
+            headers,
+            BTreeMap::from([
+                ("authorization".to_string(), "Bearer token".to_string()),
+                ("x-feature".to_string(), "beta".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn normalize_headers_preserves_empty_strings_and_allows_later_overrides() {
+        let headers = normalize_headers(Some(vec![
+            ("CONTENT-TYPE", Some("text/plain")),
+            ("content-type", Some("application/json")),
+            ("x-empty", Some("")),
+        ]));
+
+        assert_eq!(
+            headers,
+            BTreeMap::from([
+                ("content-type".to_string(), "application/json".to_string()),
+                ("x-empty".to_string(), "".to_string()),
+            ])
         );
     }
 
