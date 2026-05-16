@@ -72,7 +72,7 @@ pub use reranking_model::{
     RerankingModelResponse, RerankingModelResult,
 };
 pub use skills::{
-    SkillsFile, SkillsFileData, SkillsUploadSkillCallOptions, SkillsUploadSkillResult,
+    Skills, SkillsFile, SkillsFileData, SkillsUploadSkillCallOptions, SkillsUploadSkillResult,
 };
 pub use speech_model::{
     SpeechModel, SpeechModelAudio, SpeechModelCallOptions, SpeechModelRequest, SpeechModelResponse,

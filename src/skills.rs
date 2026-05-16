@@ -1,8 +1,33 @@
+use std::future::Future;
+
 use serde::{Deserialize, Serialize};
 
 use crate::file_data::{FileDataContent, ProviderReference};
-use crate::provider::{ProviderMetadata, ProviderOptions};
+use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
 use crate::warning::Warning;
+
+/// A provider-v4 skills interface.
+///
+/// The upstream TypeScript contract exposes an `uploadSkill` method returning a
+/// `PromiseLike<SkillsV4UploadSkillResult>`. This Rust trait maps that boundary
+/// to an associated [`Future`] without introducing an async-trait dependency.
+pub trait Skills {
+    /// Future returned by [`Skills::upload_skill`].
+    type UploadSkillFuture<'a>: Future<Output = SkillsUploadSkillResult> + Send + 'a
+    where
+        Self: 'a;
+
+    /// Returns the provider/skills interface version implemented by this interface.
+    fn specification_version(&self) -> SpecificationVersion {
+        SpecificationVersion::V4
+    }
+
+    /// Returns the provider identifier.
+    fn provider(&self) -> &str;
+
+    /// Uploads a skill and returns a provider reference for later calls.
+    fn upload_skill(&self, options: SkillsUploadSkillCallOptions) -> Self::UploadSkillFuture<'_>;
+}
 
 /// File data accepted by the provider skills upload interface.
 ///
@@ -174,15 +199,57 @@ impl SkillsUploadSkillResult {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::future::{Future, Ready, ready};
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
 
     use serde_json::json;
 
     use super::{
-        SkillsFile, SkillsFileData, SkillsUploadSkillCallOptions, SkillsUploadSkillResult,
+        Skills, SkillsFile, SkillsFileData, SkillsUploadSkillCallOptions, SkillsUploadSkillResult,
     };
     use crate::file_data::{FileDataContent, ProviderReference};
-    use crate::provider::{ProviderMetadata, ProviderOptions};
+    use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
     use crate::warning::Warning;
+
+    struct StaticSkills;
+
+    impl Skills for StaticSkills {
+        type UploadSkillFuture<'a>
+            = Ready<SkillsUploadSkillResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "test-provider"
+        }
+
+        fn upload_skill(
+            &self,
+            options: SkillsUploadSkillCallOptions,
+        ) -> Self::UploadSkillFuture<'_> {
+            let provider_reference = ProviderReference::try_from(BTreeMap::from([(
+                "test-provider".to_string(),
+                "skill_123".to_string(),
+            )]))
+            .expect("provider reference is valid");
+
+            ready(
+                SkillsUploadSkillResult::new(provider_reference)
+                    .with_display_title(format!("{} files", options.files.len())),
+            )
+        }
+    }
+
+    fn poll_ready<T>(mut future: Ready<T>) -> T {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+
+        match Pin::new(&mut future).poll(&mut context) {
+            Poll::Ready(value) => value,
+            Poll::Pending => unreachable!("std::future::Ready never returns pending"),
+        }
+    }
 
     #[test]
     fn upload_skill_call_options_serializes_files_title_and_provider_options() {
@@ -270,6 +337,26 @@ mod tests {
                     }
                 ]
             })
+        );
+    }
+
+    #[test]
+    fn skills_trait_exposes_upstream_v4_identity_and_upload_boundary() {
+        let skills = StaticSkills;
+        let result = poll_ready(skills.upload_skill(SkillsUploadSkillCallOptions::new(vec![
+            SkillsFile::new("skill.md", SkillsFileData::text("# Skill")),
+        ])));
+        let expected_provider_reference = ProviderReference::try_from(BTreeMap::from([(
+            "test-provider".to_string(),
+            "skill_123".to_string(),
+        )]))
+        .expect("provider reference is valid");
+
+        assert_eq!(skills.specification_version(), SpecificationVersion::V4);
+        assert_eq!(skills.provider(), "test-provider");
+        assert_eq!(
+            result,
+            SkillsUploadSkillResult::new(expected_provider_reference).with_display_title("1 files")
         );
     }
 
