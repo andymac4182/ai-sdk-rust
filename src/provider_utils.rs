@@ -3223,6 +3223,51 @@ where
     }
 }
 
+/// Executes a prepared provider API request through a caller-supplied transport.
+///
+/// This is the dependency-free orchestration boundary for upstream
+/// `getFromApi` and `postToApi`: HTTP adapters send the prepared request and
+/// return a [`ProviderApiResponse`], response statuses are dispatched through
+/// [`handle_provider_api_response`], and transport failures are normalized with
+/// [`handle_fetch_error`].
+pub async fn execute_provider_api_request<T, Transport, TransportFuture, S, F>(
+    request: ProviderApiRequest,
+    transport: Transport,
+    successful_response_handler: S,
+    failed_response_handler: F,
+) -> Result<ResponseHandlerResult<T>, HandledFetchError>
+where
+    Transport: FnOnce(ProviderApiRequest) -> TransportFuture,
+    TransportFuture: Future<Output = Result<ProviderApiResponse, FetchErrorInfo>>,
+    S: FnOnce(
+        &ProviderApiRequest,
+        &ProviderApiResponse,
+    ) -> Result<ResponseHandlerResult<T>, ProviderApiResponseHandlerError>,
+    F: FnOnce(
+        &ProviderApiRequest,
+        &ProviderApiResponse,
+    ) -> Result<ResponseHandlerResult<ApiCallError>, ProviderApiResponseHandlerError>,
+{
+    let response = match transport(request.clone()).await {
+        Ok(response) => response,
+        Err(error) => {
+            return Err(handle_fetch_error(
+                error,
+                request.url,
+                request.request_body_values,
+            ));
+        }
+    };
+
+    handle_provider_api_response(
+        &request,
+        &response,
+        successful_response_handler,
+        failed_response_handler,
+    )
+    .map_err(|error| HandledFetchError::ApiCall { error })
+}
+
 fn provider_api_response_handler_error(
     error: ProviderApiResponseHandlerError,
     message: &'static str,
@@ -3786,20 +3831,21 @@ mod tests {
         convert_inline_file_data_to_bytes, convert_to_base64, create_binary_response_handler,
         create_event_source_response_handler, create_json_error_response_handler,
         create_json_response_handler, create_status_code_error_response_handler,
-        create_tool_name_mapping, detect_media_type, extract_response_headers, filter_nullable,
-        get_runtime_environment_user_agent, get_top_level_media_type, handle_fetch_error,
-        handle_provider_api_response, inject_json_instruction,
-        inject_json_instruction_into_messages, is_abort_error, is_custom_reasoning,
-        is_full_media_type, is_non_nullable, is_parsable_json, is_provider_reference,
-        is_url_supported, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
-        load_setting, load_setting_with_env, map_reasoning_to_provider_budget,
-        map_reasoning_to_provider_effort, media_type_to_extension, normalize_headers, parse_json,
-        parse_json_event_stream, parse_provider_options, prepare_get_from_api_request,
-        prepare_post_json_to_api_request, prepare_post_to_api_request, prepare_tools,
-        read_response_with_size_limit, remove_undefined_entries, resolve_full_media_type,
-        resolve_provider_reference, safe_parse_json, safe_validate_types, strip_file_extension,
-        validate_download_url, validate_types, with_provider_utils_user_agent,
-        with_user_agent_suffix, without_trailing_slash,
+        create_tool_name_mapping, detect_media_type, execute_provider_api_request,
+        extract_response_headers, filter_nullable, get_runtime_environment_user_agent,
+        get_top_level_media_type, handle_fetch_error, handle_provider_api_response,
+        inject_json_instruction, inject_json_instruction_into_messages, is_abort_error,
+        is_custom_reasoning, is_full_media_type, is_non_nullable, is_parsable_json,
+        is_provider_reference, is_url_supported, load_api_key, load_api_key_with_env,
+        load_optional_setting_with_env, load_setting, load_setting_with_env,
+        map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
+        media_type_to_extension, normalize_headers, parse_json, parse_json_event_stream,
+        parse_provider_options, prepare_get_from_api_request, prepare_post_json_to_api_request,
+        prepare_post_to_api_request, prepare_tools, read_response_with_size_limit,
+        remove_undefined_entries, resolve_full_media_type, resolve_provider_reference,
+        safe_parse_json, safe_validate_types, strip_file_extension, validate_download_url,
+        validate_types, with_provider_utils_user_agent, with_user_agent_suffix,
+        without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -6738,6 +6784,121 @@ mod tests {
         .expect_err("api-call handler errors are passed through");
 
         assert_eq!(*error, api_error);
+    }
+
+    #[test]
+    fn execute_provider_api_request_sends_prepared_request_and_handles_success() {
+        let request = prepare_get_from_api_request(
+            "https://api.example.com/v1/data",
+            Some(vec![("Authorization", Some("Bearer test"))]),
+            &RuntimeEnvironment::unknown(),
+        );
+        let expected_request = request.clone();
+        let response_headers =
+            BTreeMap::from([("x-request-id".to_string(), "req_execute".to_string())]);
+        let expected_response_headers = response_headers.clone();
+
+        let result = poll_ready(execute_provider_api_request(
+            request,
+            move |request| {
+                assert_eq!(request, expected_request);
+
+                ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    r#"{"name":"Ada","age":36}"#,
+                )
+                .with_headers(response_headers)))
+            },
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    validate_person,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_status_code_error_response_handler(
+                    response.status_code_error_response_handler_options(request),
+                ))
+            },
+        ))
+        .expect("successful transport response is handled");
+
+        assert_eq!(
+            result.value(),
+            &Person {
+                name: "Ada".to_string(),
+                age: 36
+            }
+        );
+        assert_eq!(result.response_headers(), Some(&expected_response_headers));
+    }
+
+    #[test]
+    fn execute_provider_api_request_normalizes_transport_failures() {
+        let request = ProviderApiRequest::post(
+            "https://api.example.com/v1/chat",
+            BTreeMap::new(),
+            ProviderApiRequestBody::text("{\"prompt\":\"hi\"}"),
+            json!({ "prompt": "hi" }),
+        );
+
+        let error = poll_ready(execute_provider_api_request(
+            request,
+            |_request| {
+                ready(Err(FetchErrorInfo::new("fetch failed")
+                    .with_name("TypeError")
+                    .with_cause_message("ECONNRESET")))
+            },
+            |_request, _response| {
+                Ok(ResponseHandlerResult::new(Person {
+                    name: "unused".to_string(),
+                    age: 0,
+                }))
+            },
+            |request, response| {
+                Ok(create_status_code_error_response_handler(
+                    response.status_code_error_response_handler_options(request),
+                ))
+            },
+        ))
+        .expect_err("transport failure is normalized");
+
+        let HandledFetchError::ApiCall { error } = error else {
+            panic!("fetch TypeError with a cause should become an API call error");
+        };
+
+        assert_eq!(error.message(), "Cannot connect to API: ECONNRESET");
+        assert_eq!(error.url(), "https://api.example.com/v1/chat");
+        assert_eq!(error.request_body_values(), &json!({ "prompt": "hi" }));
+        assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn execute_provider_api_request_preserves_abort_transport_failures() {
+        let abort_error = FetchErrorInfo::new("Aborted").with_name("AbortError");
+        let error = poll_ready(execute_provider_api_request(
+            ProviderApiRequest::get("https://api.example.com/v1/data", BTreeMap::new()),
+            {
+                let abort_error = abort_error.clone();
+                move |_request| ready(Err(abort_error))
+            },
+            |_request, _response| {
+                Ok(ResponseHandlerResult::new(Person {
+                    name: "unused".to_string(),
+                    age: 0,
+                }))
+            },
+            |request, response| {
+                Ok(create_status_code_error_response_handler(
+                    response.status_code_error_response_handler_options(request),
+                ))
+            },
+        ))
+        .expect_err("abort failure is preserved");
+
+        assert_eq!(error, HandledFetchError::Original { error: abort_error });
     }
 
     #[test]
