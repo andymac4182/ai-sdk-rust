@@ -629,6 +629,69 @@ impl fmt::Display for InvalidStreamPartError {
 
 impl std::error::Error for InvalidStreamPartError {}
 
+/// Error returned when a high-level API receives an unsupported model version.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnsupportedModelVersionError {
+    version: String,
+    provider: String,
+    model_id: String,
+    message: String,
+}
+
+impl UnsupportedModelVersionError {
+    /// Creates an unsupported-model-version error with the upstream default message.
+    pub fn new(
+        version: impl Into<String>,
+        provider: impl Into<String>,
+        model_id: impl Into<String>,
+    ) -> Self {
+        let version = version.into();
+        let provider = provider.into();
+        let model_id = model_id.into();
+        let message = unsupported_model_version_default_message(&version, &provider, &model_id);
+
+        Self {
+            version,
+            provider,
+            model_id,
+            message,
+        }
+    }
+
+    /// Returns the unsupported specification version.
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// Returns the model provider.
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    /// Returns the model ID.
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Converts this error into its retained parts.
+    pub fn into_parts(self) -> (String, String, String, String) {
+        (self.version, self.provider, self.model_id, self.message)
+    }
+}
+
+impl fmt::Display for UnsupportedModelVersionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for UnsupportedModelVersionError {}
+
 /// Reasoning content emitted during a high-level generate-text step.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(untagged)]
@@ -2052,6 +2115,17 @@ fn tool_call_not_found_for_approval_default_message(
     format!("Tool call \"{tool_call_id}\" not found for approval request \"{approval_id}\".")
 }
 
+fn unsupported_model_version_default_message(
+    version: &str,
+    provider: &str,
+    model_id: &str,
+) -> String {
+    format!(
+        "Unsupported model version {version} for provider \"{provider}\" and model \"{model_id}\". \
+         AI SDK 5 only supports models that implement specification version \"v2\"."
+    )
+}
+
 fn add_step_usage(steps: &[GenerateTextStep]) -> LanguageModelUsage {
     steps
         .iter()
@@ -2098,7 +2172,7 @@ mod tests {
         InvalidToolApprovalError, InvalidToolInputError, MissingToolResultsError,
         NoObjectGeneratedError, NoOutputGeneratedError, NoSuchToolError,
         ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOriginalError,
-        generate_text,
+        UnsupportedModelVersionError, generate_text,
     };
     use crate::file_data::FileDataContent;
     use crate::language_model::{
@@ -2491,6 +2565,30 @@ mod tests {
             (
                 chunk,
                 "text-delta chunk arrived without a matching text-start".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn unsupported_model_version_error_matches_upstream_message_and_context() {
+        let error = UnsupportedModelVersionError::new("v1", "test-provider", "test-model-id");
+
+        assert_eq!(error.version(), "v1");
+        assert_eq!(error.provider(), "test-provider");
+        assert_eq!(error.model_id(), "test-model-id");
+        assert_eq!(
+            error.message(),
+            "Unsupported model version v1 for provider \"test-provider\" and model \"test-model-id\". AI SDK 5 only supports models that implement specification version \"v2\"."
+        );
+        assert_eq!(error.to_string(), error.message());
+        assert_eq!(
+            error.into_parts(),
+            (
+                "v1".to_string(),
+                "test-provider".to_string(),
+                "test-model-id".to_string(),
+                "Unsupported model version v1 for provider \"test-provider\" and model \"test-model-id\". AI SDK 5 only supports models that implement specification version \"v2\"."
+                    .to_string()
             )
         );
     }

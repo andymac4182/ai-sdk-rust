@@ -43,7 +43,7 @@ pub use generate_text::{
     InvalidStreamPartError, InvalidToolApprovalError, InvalidToolInputError,
     MissingToolResultsError, NoObjectGeneratedError, NoOutputGeneratedError, NoSuchToolError,
     ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOriginalError,
-    generate_text,
+    UnsupportedModelVersionError, generate_text,
 };
 pub use headers::Headers;
 pub use image_model::{
