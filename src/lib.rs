@@ -252,7 +252,9 @@ pub use util::{
     parse_partial_json,
 };
 pub use video_model::{
-    NoVideoGeneratedError, VideoModel, VideoModelCallOptions, VideoModelFile, VideoModelResponse,
+    ExperimentalVideoModel, ExperimentalVideoModelCallOptions, ExperimentalVideoModelFile,
+    ExperimentalVideoModelResult, ExperimentalVideoModelVideoData, NoVideoGeneratedError,
+    VideoModel, VideoModelCallOptions, VideoModelFile, VideoModelResponse,
     VideoModelResponseMetadata, VideoModelResult, VideoModelVideoData,
 };
 pub use warning::Warning;

@@ -47,6 +47,21 @@ pub trait VideoModel {
     fn do_generate(&self, options: VideoModelCallOptions) -> Self::GenerateFuture<'_>;
 }
 
+/// Experimental upstream-compatible alias for [`VideoModel`].
+pub use self::VideoModel as ExperimentalVideoModel;
+
+/// Experimental upstream-compatible alias for [`VideoModelFile`].
+pub use self::VideoModelFile as ExperimentalVideoModelFile;
+
+/// Experimental upstream-compatible alias for [`VideoModelCallOptions`].
+pub use self::VideoModelCallOptions as ExperimentalVideoModelCallOptions;
+
+/// Experimental upstream-compatible alias for [`VideoModelVideoData`].
+pub use self::VideoModelVideoData as ExperimentalVideoModelVideoData;
+
+/// Experimental upstream-compatible alias for [`VideoModelResult`].
+pub use self::VideoModelResult as ExperimentalVideoModelResult;
+
 /// A video or image file used for video editing or image-to-video generation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -488,8 +503,10 @@ impl VideoModelResult {
 #[cfg(test)]
 mod tests {
     use super::{
-        NoVideoGeneratedError, VideoModel, VideoModelCallOptions, VideoModelFile,
-        VideoModelResponse, VideoModelResponseMetadata, VideoModelResult, VideoModelVideoData,
+        ExperimentalVideoModel, ExperimentalVideoModelCallOptions, ExperimentalVideoModelFile,
+        ExperimentalVideoModelResult, ExperimentalVideoModelVideoData, NoVideoGeneratedError,
+        VideoModel, VideoModelCallOptions, VideoModelFile, VideoModelResponse,
+        VideoModelResponseMetadata, VideoModelResult, VideoModelVideoData,
     };
     use crate::file_data::FileDataContent;
     use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
@@ -648,6 +665,60 @@ mod tests {
         assert_eq!(
             result.videos,
             vec![VideoModelVideoData::base64("AAAAIGZ0eXBtcDQy", "video/mp4")]
+        );
+    }
+
+    #[test]
+    fn experimental_video_aliases_share_upstream_v4_contracts() {
+        fn assert_experimental_video_model<M: ExperimentalVideoModel>(model: &M) {
+            assert_eq!(model.specification_version(), SpecificationVersion::V4);
+        }
+
+        let model = StaticVideoModel;
+        assert_experimental_video_model(&model);
+
+        let image: ExperimentalVideoModelFile =
+            VideoModelFile::url(Url::parse("https://example.com/input.png").expect("valid URL"));
+        let call_options: ExperimentalVideoModelCallOptions = VideoModelCallOptions::new(1)
+            .with_prompt("make a short clip")
+            .with_image(image);
+
+        assert_eq!(
+            serde_json::to_value(call_options).expect("experimental call options serialize"),
+            json!({
+                "prompt": "make a short clip",
+                "n": 1,
+                "image": {
+                    "type": "url",
+                    "url": "https://example.com/input.png"
+                },
+                "providerOptions": {}
+            })
+        );
+
+        let video: ExperimentalVideoModelVideoData = VideoModelVideoData::url(
+            Url::parse("https://example.com/output.mp4").expect("valid URL"),
+            "video/mp4",
+        );
+        let result: ExperimentalVideoModelResult = VideoModelResult::new(
+            vec![video],
+            VideoModelResponse::new(OffsetDateTime::UNIX_EPOCH, "video-model"),
+        );
+
+        assert_eq!(
+            serde_json::to_value(result).expect("experimental result serializes"),
+            json!({
+                "videos": [{
+                    "type": "url",
+                    "url": "https://example.com/output.mp4",
+                    "mediaType": "video/mp4"
+                }],
+                "warnings": [],
+                "response": {
+                    "timestamp": "1970-01-01T00:00:00Z",
+                    "modelId": "video-model"
+                }
+            })
         );
     }
 
