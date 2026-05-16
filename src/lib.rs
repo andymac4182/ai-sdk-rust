@@ -42,16 +42,17 @@ pub use file_data::{
 };
 pub use files::{Files, FilesUploadFileCallOptions, FilesUploadFileData, FilesUploadFileResult};
 pub use generate_text::{
-    GenerateTextInclude, GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning,
-    GenerateTextResult, GenerateTextStep, GenerateTextStepPerformance, GenerateTextTool,
-    GenerateTextToolCall, GenerateTextToolResult, InvalidStreamPartError, InvalidToolApprovalError,
+    CollectToolApprovalsError, CollectedToolApproval, CollectedToolApprovals, GenerateTextInclude,
+    GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning, GenerateTextResult,
+    GenerateTextStep, GenerateTextStepPerformance, GenerateTextTool, GenerateTextToolCall,
+    GenerateTextToolResult, InvalidStreamPartError, InvalidToolApprovalError,
     InvalidToolInputError, MissingToolResultsError, NoObjectGeneratedError, NoOutputGeneratedError,
     NoSuchToolError, PruneEmptyMessages, PruneMessagesOptions, PruneReasoning, PruneToolCallRule,
     PruneToolCallRuleMode, PruneToolCalls, StopCondition, ToolCallNotFoundForApprovalError,
     ToolCallRepairError, ToolCallRepairOriginalError, UiMessageStreamError,
-    UnsupportedModelVersionError, experimental_filter_active_tools, filter_active_tools,
-    generate_text, has_tool_call, is_loop_finished, is_step_count, is_stop_condition_met,
-    prune_messages, step_count_is,
+    UnsupportedModelVersionError, collect_tool_approvals, experimental_filter_active_tools,
+    filter_active_tools, generate_text, has_tool_call, is_loop_finished, is_step_count,
+    is_stop_condition_met, prune_messages, step_count_is,
 };
 pub use headers::Headers;
 pub use image_model::{

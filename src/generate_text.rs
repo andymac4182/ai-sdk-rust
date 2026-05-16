@@ -17,10 +17,11 @@ use crate::language_model::{
     LanguageModelReasoningFile, LanguageModelReasoningFilePart, LanguageModelReasoningPart,
     LanguageModelRequest, LanguageModelResponse, LanguageModelResponseFormat, LanguageModelSource,
     LanguageModelStreamPart, LanguageModelText, LanguageModelTextPart, LanguageModelTool,
-    LanguageModelToolApprovalRequestPart, LanguageModelToolCall, LanguageModelToolCallPart,
-    LanguageModelToolChoice, LanguageModelToolContentPart, LanguageModelToolMessage,
-    LanguageModelToolResult, LanguageModelToolResultOutput, LanguageModelToolResultPart,
-    LanguageModelUsage, OutputTokenUsage,
+    LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
+    LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolChoice,
+    LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResult,
+    LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
+    OutputTokenUsage,
 };
 use crate::provider::{JsonParseError, get_error_message};
 use crate::provider::{ProviderMetadata, ProviderOptions};
@@ -410,6 +411,154 @@ pub fn prune_messages(options: PruneMessagesOptions) -> Vec<LanguageModelMessage
     }
 
     messages
+}
+
+/// Tool approval response paired with its original request and tool call.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectedToolApproval {
+    /// Tool approval request found in an assistant message.
+    pub approval_request: LanguageModelToolApprovalRequestPart,
+
+    /// Tool approval response found in the latest tool message.
+    pub approval_response: LanguageModelToolApprovalResponsePart,
+
+    /// Tool call referenced by the approval request.
+    pub tool_call: LanguageModelToolCallPart,
+}
+
+/// Tool approvals collected from the latest tool message.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectedToolApprovals {
+    /// Approvals where the latest response granted execution.
+    pub approved_tool_approvals: Vec<CollectedToolApproval>,
+
+    /// Approvals where the latest response denied execution.
+    pub denied_tool_approvals: Vec<CollectedToolApproval>,
+}
+
+/// Error returned while collecting tool approval responses from prompt messages.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CollectToolApprovalsError {
+    /// A tool approval response referenced an unknown approval request.
+    InvalidToolApproval(InvalidToolApprovalError),
+
+    /// A tool approval request referenced a missing tool call.
+    ToolCallNotFoundForApproval(ToolCallNotFoundForApprovalError),
+}
+
+impl fmt::Display for CollectToolApprovalsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidToolApproval(error) => error.fmt(formatter),
+            Self::ToolCallNotFoundForApproval(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for CollectToolApprovalsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidToolApproval(error) => Some(error),
+            Self::ToolCallNotFoundForApproval(error) => Some(error),
+        }
+    }
+}
+
+impl From<InvalidToolApprovalError> for CollectToolApprovalsError {
+    fn from(error: InvalidToolApprovalError) -> Self {
+        Self::InvalidToolApproval(error)
+    }
+}
+
+impl From<ToolCallNotFoundForApprovalError> for CollectToolApprovalsError {
+    fn from(error: ToolCallNotFoundForApprovalError) -> Self {
+        Self::ToolCallNotFoundForApproval(error)
+    }
+}
+
+/// Collects tool approval responses from the latest tool message.
+///
+/// This mirrors upstream `collectToolApprovals`: if the final message is not a
+/// tool message, no approvals are returned. Approval responses whose tool call
+/// already has a result in that final tool message are treated as processed and
+/// omitted from the returned approval lists.
+pub fn collect_tool_approvals(
+    messages: &[LanguageModelMessage],
+) -> Result<CollectedToolApprovals, CollectToolApprovalsError> {
+    let Some(LanguageModelMessage::Tool(last_message)) = messages.last() else {
+        return Ok(CollectedToolApprovals::default());
+    };
+
+    let mut tool_calls_by_id = BTreeMap::new();
+    let mut approval_requests_by_id = BTreeMap::new();
+    for message in messages {
+        let LanguageModelMessage::Assistant(message) = message else {
+            continue;
+        };
+
+        for part in &message.content {
+            match part {
+                LanguageModelAssistantContentPart::ToolCall(part) => {
+                    tool_calls_by_id.insert(part.tool_call_id.clone(), part.clone());
+                }
+                LanguageModelAssistantContentPart::ToolApprovalRequest(part) => {
+                    approval_requests_by_id.insert(part.approval_id.clone(), part.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let tool_results = last_message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            LanguageModelToolContentPart::ToolResult(part) => Some(part.tool_call_id.clone()),
+            LanguageModelToolContentPart::ToolApprovalResponse(_) => None,
+        })
+        .collect::<BTreeSet<_>>();
+
+    let mut collected = CollectedToolApprovals::default();
+    for part in &last_message.content {
+        let LanguageModelToolContentPart::ToolApprovalResponse(approval_response) = part else {
+            continue;
+        };
+
+        let approval_request = approval_requests_by_id
+            .get(&approval_response.approval_id)
+            .cloned()
+            .ok_or_else(|| InvalidToolApprovalError::new(&approval_response.approval_id))?;
+
+        if tool_results.contains(&approval_request.tool_call_id) {
+            continue;
+        }
+
+        let tool_call = tool_calls_by_id
+            .get(&approval_request.tool_call_id)
+            .cloned()
+            .ok_or_else(|| {
+                ToolCallNotFoundForApprovalError::new(
+                    &approval_request.tool_call_id,
+                    &approval_request.approval_id,
+                )
+            })?;
+
+        let approval = CollectedToolApproval {
+            approval_request,
+            approval_response: approval_response.clone(),
+            tool_call,
+        };
+
+        if approval.approval_response.approved {
+            collected.approved_tool_approvals.push(approval);
+        } else {
+            collected.denied_tool_approvals.push(approval);
+        }
+    }
+
+    Ok(collected)
 }
 
 /// Error returned when a model tries to call a tool that is not available.
@@ -3250,9 +3399,9 @@ mod tests {
         NoOutputGeneratedError, NoSuchToolError, PruneEmptyMessages, PruneMessagesOptions,
         PruneReasoning, PruneToolCallRule, PruneToolCallRuleMode, PruneToolCalls, StopCondition,
         ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOriginalError,
-        UiMessageStreamError, UnsupportedModelVersionError, experimental_filter_active_tools,
-        filter_active_tools, generate_text, has_tool_call, is_loop_finished, is_step_count,
-        is_stop_condition_met, prune_messages, step_count_is,
+        UiMessageStreamError, UnsupportedModelVersionError, collect_tool_approvals,
+        experimental_filter_active_tools, filter_active_tools, generate_text, has_tool_call,
+        is_loop_finished, is_step_count, is_stop_condition_met, prune_messages, step_count_is,
     };
     use crate::file_data::FileDataContent;
     use crate::language_model::{
@@ -3660,6 +3809,183 @@ mod tests {
                 "Tool call \"tool-call-1\" not found for approval request \"approval-1\"."
                     .to_string()
             )
+        );
+    }
+
+    #[test]
+    fn collect_tool_approvals_returns_empty_when_latest_message_is_not_tool() {
+        let messages = vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![LanguageModelUserContentPart::Text(
+                LanguageModelTextPart::new("Hello"),
+            )],
+        ))];
+
+        let approvals = collect_tool_approvals(&messages).expect("approvals collect");
+
+        assert!(approvals.approved_tool_approvals.is_empty());
+        assert!(approvals.denied_tool_approvals.is_empty());
+        assert_eq!(
+            serde_json::to_value(approvals).expect("approvals serialize"),
+            json!({
+                "approvedToolApprovals": [],
+                "deniedToolApprovals": []
+            })
+        );
+    }
+
+    #[test]
+    fn collect_tool_approvals_splits_approved_and_denied_responses() {
+        let messages = vec![
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call-approved",
+                    "weather",
+                    json!({ "city": "Brisbane" }),
+                )),
+                LanguageModelAssistantContentPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequestPart::new("approval-approved", "call-approved")
+                        .with_automatic(true),
+                ),
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call-denied",
+                    "search",
+                    json!({ "query": "forecast" }),
+                )),
+                LanguageModelAssistantContentPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequestPart::new("approval-denied", "call-denied"),
+                ),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolApprovalResponse(
+                    LanguageModelToolApprovalResponsePart::new("approval-approved", true),
+                ),
+                LanguageModelToolContentPart::ToolApprovalResponse(
+                    LanguageModelToolApprovalResponsePart::new("approval-denied", false)
+                        .with_reason("manual denial"),
+                ),
+            ])),
+        ];
+
+        let approvals = collect_tool_approvals(&messages).expect("approvals collect");
+
+        assert_eq!(approvals.approved_tool_approvals.len(), 1);
+        assert_eq!(approvals.denied_tool_approvals.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&approvals).expect("approvals serialize"),
+            json!({
+                "approvedToolApprovals": [
+                    {
+                        "approvalRequest": {
+                            "type": "tool-approval-request",
+                            "approvalId": "approval-approved",
+                            "toolCallId": "call-approved",
+                            "isAutomatic": true
+                        },
+                        "approvalResponse": {
+                            "type": "tool-approval-response",
+                            "approvalId": "approval-approved",
+                            "approved": true
+                        },
+                        "toolCall": {
+                            "type": "tool-call",
+                            "toolCallId": "call-approved",
+                            "toolName": "weather",
+                            "input": { "city": "Brisbane" }
+                        }
+                    }
+                ],
+                "deniedToolApprovals": [
+                    {
+                        "approvalRequest": {
+                            "type": "tool-approval-request",
+                            "approvalId": "approval-denied",
+                            "toolCallId": "call-denied"
+                        },
+                        "approvalResponse": {
+                            "type": "tool-approval-response",
+                            "approvalId": "approval-denied",
+                            "approved": false,
+                            "reason": "manual denial"
+                        },
+                        "toolCall": {
+                            "type": "tool-call",
+                            "toolCallId": "call-denied",
+                            "toolName": "search",
+                            "input": { "query": "forecast" }
+                        }
+                    }
+                ]
+            })
+        );
+
+        let round_tripped =
+            serde_json::from_value(serde_json::to_value(&approvals).expect("approvals serialize"))
+                .expect("approvals deserialize");
+        assert_eq!(approvals, round_tripped);
+    }
+
+    #[test]
+    fn collect_tool_approvals_ignores_processed_approval_responses() {
+        let messages = vec![
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call-1",
+                    "weather",
+                    json!({ "city": "Brisbane" }),
+                )),
+                LanguageModelAssistantContentPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequestPart::new("approval-1", "call-1"),
+                ),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolApprovalResponse(
+                    LanguageModelToolApprovalResponsePart::new("approval-1", true),
+                ),
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call-1",
+                    "weather",
+                    LanguageModelToolResultOutput::text("sunny"),
+                )),
+            ])),
+        ];
+
+        let approvals = collect_tool_approvals(&messages).expect("approvals collect");
+
+        assert!(approvals.approved_tool_approvals.is_empty());
+        assert!(approvals.denied_tool_approvals.is_empty());
+    }
+
+    #[test]
+    fn collect_tool_approvals_reports_invalid_approval_references() {
+        let messages = vec![LanguageModelMessage::Tool(LanguageModelToolMessage::new(
+            vec![LanguageModelToolContentPart::ToolApprovalResponse(
+                LanguageModelToolApprovalResponsePart::new("missing-approval", true),
+            )],
+        ))];
+
+        let error = collect_tool_approvals(&messages).expect_err("approval id is missing");
+        assert_eq!(
+            error.to_string(),
+            "Tool approval response references unknown approvalId: \"missing-approval\". No matching tool-approval-request found in message history."
+        );
+
+        let messages = vec![
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequestPart::new("approval-1", "missing-call"),
+                ),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolApprovalResponse(
+                    LanguageModelToolApprovalResponsePart::new("approval-1", true),
+                ),
+            ])),
+        ];
+
+        let error = collect_tool_approvals(&messages).expect_err("tool call is missing");
+        assert_eq!(
+            error.to_string(),
+            "Tool call \"missing-call\" not found for approval request \"approval-1\"."
         );
     }
 
