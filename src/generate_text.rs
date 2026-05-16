@@ -27,6 +27,10 @@ use crate::warning::Warning;
 
 const DEFAULT_MAX_STEPS: usize = 1;
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Predicate-style stop condition for high-level generate-text tool loops.
 ///
 /// The upstream SDK models stop conditions as async predicates. This Rust
@@ -865,6 +869,48 @@ impl From<LanguageModelTool> for GenerateTextTool {
     }
 }
 
+/// Settings controlling which large provider payloads are retained in step results.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateTextInclude {
+    /// Whether to retain the request HTTP body in step results.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub request_body: bool,
+
+    /// Whether to retain request messages in step results.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub request_messages: bool,
+
+    /// Whether to retain the response HTTP body in step results.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub response_body: bool,
+}
+
+impl GenerateTextInclude {
+    /// Creates include settings with all optional payload retention disabled.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets whether to retain provider request bodies in step results.
+    pub fn with_request_body(mut self, request_body: bool) -> Self {
+        self.request_body = request_body;
+        self
+    }
+
+    /// Sets whether to retain request messages in step results.
+    pub fn with_request_messages(mut self, request_messages: bool) -> Self {
+        self.request_messages = request_messages;
+        self
+    }
+
+    /// Sets whether to retain provider response bodies in step results.
+    pub fn with_response_body(mut self, response_body: bool) -> Self {
+        self.response_body = response_body;
+        self
+    }
+}
+
 /// Options for a high-level non-streaming text generation call.
 #[derive(Debug)]
 pub struct GenerateTextOptions<'a, M: LanguageModel + ?Sized> {
@@ -885,6 +931,9 @@ pub struct GenerateTextOptions<'a, M: LanguageModel + ?Sized> {
 
     /// Additional stop conditions checked after every completed step.
     pub stop_conditions: Vec<StopCondition>,
+
+    /// Settings controlling which large provider payloads are retained in step results.
+    pub include: GenerateTextInclude,
 }
 
 impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
@@ -897,6 +946,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             active_tools: None,
             max_steps: DEFAULT_MAX_STEPS,
             stop_conditions: Vec::new(),
+            include: GenerateTextInclude::default(),
         }
     }
 
@@ -909,6 +959,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             active_tools: None,
             max_steps: DEFAULT_MAX_STEPS,
             stop_conditions: Vec::new(),
+            include: GenerateTextInclude::default(),
         }
     }
 
@@ -1022,6 +1073,12 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
         stop_conditions: impl IntoIterator<Item = StopCondition>,
     ) -> Self {
         self.stop_conditions = stop_conditions.into_iter().collect();
+        self
+    }
+
+    /// Sets which provider payloads are retained in step results.
+    pub fn with_include(mut self, include: GenerateTextInclude) -> Self {
+        self.include = include;
         self
     }
 
@@ -1637,6 +1694,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         active_tools,
         max_steps,
         stop_conditions,
+        include,
     } = options;
     let model_info = GenerateTextModelInfo::new(model.provider(), model.model_id());
     let active_tools = active_tools.as_deref();
@@ -1674,6 +1732,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         mark_tool_result_metadata(&mut step.tool_results, &step.tool_calls, &tools);
         refresh_tool_result_views(&mut step);
         step.response_messages = response_messages_for_step(&step).unwrap_or_default();
+        apply_generate_text_include(&mut step, include, &step_prompt);
 
         let response_messages = step.response_messages.clone();
         steps.push(step);
@@ -1693,6 +1752,30 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
     }
 
     GenerateTextResult::from_steps(steps)
+}
+
+fn apply_generate_text_include(
+    step: &mut GenerateTextStep,
+    include: GenerateTextInclude,
+    step_prompt: &LanguageModelPrompt,
+) {
+    if include.request_messages {
+        step.request
+            .get_or_insert_with(LanguageModelRequest::new)
+            .messages = Some(step_prompt.to_vec());
+    }
+
+    if !include.request_body {
+        if let Some(request) = &mut step.request {
+            request.body = None;
+        }
+    }
+
+    if !include.response_body {
+        if let Some(response) = &mut step.response {
+            response.body = None;
+        }
+    }
 }
 
 fn extract_text(content: &[LanguageModelContent]) -> String {
@@ -2378,13 +2461,14 @@ fn add_optional_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning, GenerateTextResult,
-        GenerateTextStep, GenerateTextToolCall, GenerateTextToolResult, InvalidStreamPartError,
-        InvalidToolApprovalError, InvalidToolInputError, MissingToolResultsError,
-        NoObjectGeneratedError, NoOutputGeneratedError, NoSuchToolError, StopCondition,
-        ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOriginalError,
-        UiMessageStreamError, UnsupportedModelVersionError, filter_active_tools, generate_text,
-        has_tool_call, is_loop_finished, is_step_count, is_stop_condition_met,
+        GenerateTextInclude, GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning,
+        GenerateTextResult, GenerateTextStep, GenerateTextToolCall, GenerateTextToolResult,
+        InvalidStreamPartError, InvalidToolApprovalError, InvalidToolInputError,
+        MissingToolResultsError, NoObjectGeneratedError, NoOutputGeneratedError, NoSuchToolError,
+        StopCondition, ToolCallNotFoundForApprovalError, ToolCallRepairError,
+        ToolCallRepairOriginalError, UiMessageStreamError, UnsupportedModelVersionError,
+        filter_active_tools, generate_text, has_tool_call, is_loop_finished, is_step_count,
+        is_stop_condition_met,
     };
     use crate::file_data::FileDataContent;
     use crate::language_model::{
@@ -2392,13 +2476,13 @@ mod tests {
         LanguageModelCallOptions, LanguageModelContent, LanguageModelFile, LanguageModelFileData,
         LanguageModelFinishReason, LanguageModelFunctionTool, LanguageModelGenerateResult,
         LanguageModelMessage, LanguageModelProviderTool, LanguageModelReasoning,
-        LanguageModelReasoningFile, LanguageModelResponse, LanguageModelSource,
-        LanguageModelStreamPart, LanguageModelStreamResult, LanguageModelSupportedUrls,
-        LanguageModelText, LanguageModelTextDelta, LanguageModelTextPart, LanguageModelTool,
-        LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolContentPart,
-        LanguageModelToolResult, LanguageModelToolResultOutput, LanguageModelToolResultPart,
-        LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage,
-        OutputTokenUsage,
+        LanguageModelReasoningFile, LanguageModelRequest, LanguageModelResponse,
+        LanguageModelSource, LanguageModelStreamPart, LanguageModelStreamResult,
+        LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextDelta,
+        LanguageModelTextPart, LanguageModelTool, LanguageModelToolCall, LanguageModelToolCallPart,
+        LanguageModelToolContentPart, LanguageModelToolResult, LanguageModelToolResultOutput,
+        LanguageModelToolResultPart, LanguageModelUsage, LanguageModelUserContentPart,
+        LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::provider::{JsonParseError, ProviderMetadata, SpecificationVersion};
     use crate::provider_utils::{Tool, ToolExecutionError, dynamic_tool};
@@ -2522,6 +2606,30 @@ mod tests {
             ],
             &steps
         ));
+    }
+
+    #[test]
+    fn generate_text_include_serializes_optional_upstream_flags() {
+        let include = GenerateTextInclude::new()
+            .with_request_body(true)
+            .with_request_messages(true);
+
+        assert_eq!(
+            serde_json::to_value(include).expect("include serializes"),
+            json!({
+                "requestBody": true,
+                "requestMessages": true
+            })
+        );
+
+        let include: GenerateTextInclude = serde_json::from_value(json!({
+            "responseBody": true
+        }))
+        .expect("include deserializes");
+
+        assert!(!include.request_body);
+        assert!(!include.request_messages);
+        assert!(include.response_body);
     }
 
     #[test]
@@ -2906,13 +3014,20 @@ mod tests {
 
     struct FakeLanguageModel {
         calls: RefCell<Vec<LanguageModelCallOptions>>,
+        include_body_metadata: bool,
     }
 
     impl FakeLanguageModel {
         fn new() -> Self {
             Self {
                 calls: RefCell::new(Vec::new()),
+                include_body_metadata: false,
             }
+        }
+
+        fn with_body_metadata(mut self) -> Self {
+            self.include_body_metadata = true;
+            self
         }
     }
 
@@ -2949,7 +3064,7 @@ mod tests {
         fn do_generate(&self, options: LanguageModelCallOptions) -> Self::GenerateFuture<'_> {
             self.calls.borrow_mut().push(options);
 
-            ready(LanguageModelGenerateResult::new(
+            let mut result = LanguageModelGenerateResult::new(
                 vec![
                     LanguageModelContent::Text(LanguageModelText::new("Hello ")),
                     LanguageModelContent::Text(LanguageModelText::new("world")),
@@ -2970,7 +3085,26 @@ mod tests {
                     },
                     raw: None,
                 },
-            ))
+            );
+
+            if self.include_body_metadata {
+                result = result
+                    .with_request(LanguageModelRequest::new().with_body(json!({
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": "Say hello"
+                            }
+                        ]
+                    })))
+                    .with_response(LanguageModelResponse::new().with_id("resp_body").with_body(
+                        json!({
+                            "id": "resp_body"
+                        }),
+                    ));
+            }
+
+            ready(result)
         }
 
         fn do_stream(&self, _options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
@@ -3038,6 +3172,104 @@ mod tests {
         assert_eq!(
             result.final_step().expect("step exists").model,
             GenerateTextModelInfo::new("test-provider", "test-model")
+        );
+    }
+
+    #[test]
+    fn generate_text_include_controls_retained_provider_bodies() {
+        let model = FakeLanguageModel::new().with_body_metadata();
+        let prompt = vec![user_message("Say hello")];
+
+        let excluded = poll_ready(generate_text(GenerateTextOptions::new(
+            &model,
+            prompt.clone(),
+        )));
+
+        let excluded_step = excluded.final_step().expect("step exists");
+        assert_eq!(
+            excluded_step
+                .request
+                .as_ref()
+                .and_then(|request| request.body.as_ref()),
+            None
+        );
+        assert_eq!(
+            excluded_step
+                .request
+                .as_ref()
+                .and_then(|request| request.messages.as_ref()),
+            None
+        );
+        assert_eq!(
+            excluded_step
+                .response
+                .as_ref()
+                .and_then(|response| response.id.as_deref()),
+            Some("resp_body")
+        );
+        assert_eq!(
+            excluded_step
+                .response
+                .as_ref()
+                .and_then(|response| response.body.as_ref()),
+            None
+        );
+        assert_eq!(
+            excluded
+                .response
+                .as_ref()
+                .and_then(|response| response.body.as_ref()),
+            None
+        );
+
+        let included = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, prompt.clone()).with_include(
+                GenerateTextInclude::new()
+                    .with_request_body(true)
+                    .with_request_messages(true)
+                    .with_response_body(true),
+            ),
+        ));
+
+        let included_step = included.final_step().expect("step exists");
+        assert_eq!(
+            included_step
+                .request
+                .as_ref()
+                .and_then(|request| request.body.as_ref()),
+            Some(&json!({
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Say hello"
+                    }
+                ]
+            }))
+        );
+        assert_eq!(
+            included_step
+                .request
+                .as_ref()
+                .and_then(|request| request.messages.as_ref()),
+            Some(&prompt)
+        );
+        assert_eq!(
+            included_step
+                .response
+                .as_ref()
+                .and_then(|response| response.body.as_ref()),
+            Some(&json!({
+                "id": "resp_body"
+            }))
+        );
+        assert_eq!(
+            included
+                .response
+                .as_ref()
+                .and_then(|response| response.body.as_ref()),
+            Some(&json!({
+                "id": "resp_body"
+            }))
         );
     }
 

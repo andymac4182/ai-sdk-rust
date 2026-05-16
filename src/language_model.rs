@@ -172,6 +172,10 @@ pub struct LanguageModelResponseMetadata {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LanguageModelRequest {
+    /// Input messages sent to the model for a high-level generation step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages: Option<Vec<LanguageModelMessage>>,
+
     /// Request HTTP body that was sent to the provider API.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<JsonValue>,
@@ -186,6 +190,12 @@ impl LanguageModelRequest {
     /// Sets the raw provider request body.
     pub fn with_body(mut self, body: JsonValue) -> Self {
         self.body = Some(body);
+        self
+    }
+
+    /// Sets the input messages sent to the model for this request.
+    pub fn with_messages(mut self, messages: Vec<LanguageModelMessage>) -> Self {
+        self.messages = Some(messages);
         self
     }
 }
@@ -3722,6 +3732,44 @@ mod tests {
             "text": "No matching content variant"
         }))
         .expect_err("unsupported content variant is rejected");
+    }
+
+    #[test]
+    fn request_metadata_serializes_high_level_messages_and_body() {
+        let request = LanguageModelRequest::new()
+            .with_messages(vec![LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                    LanguageModelTextPart::new("Hello"),
+                )]),
+            )])
+            .with_body(json!({
+                "raw": true
+            }));
+
+        assert_eq!(
+            serde_json::to_value(request).expect("request metadata serializes"),
+            json!({
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "body": {
+                    "raw": true
+                }
+            })
+        );
+
+        let request: LanguageModelRequest =
+            serde_json::from_value(json!({})).expect("minimal request metadata deserializes");
+        assert_eq!(request.messages, None);
+        assert_eq!(request.body, None);
     }
 
     #[test]
