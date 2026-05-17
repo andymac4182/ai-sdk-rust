@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::future::{Future, Pending, Ready, ready};
 use std::pin::Pin;
 
@@ -6,9 +7,10 @@ use serde::{Deserialize, Serialize};
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
 use crate::language_model::{
-    LanguageModel, LanguageModelCallOptions, LanguageModelGenerateResult,
-    LanguageModelResponseFormat, LanguageModelStreamResult, LanguageModelSupportedUrls,
-    LanguageModelTool, LanguageModelToolChoice, LanguageModelToolInputExample,
+    LanguageModel, LanguageModelCallOptions, LanguageModelContent, LanguageModelGenerateResult,
+    LanguageModelResponseFormat, LanguageModelStreamPart, LanguageModelStreamResult,
+    LanguageModelSupportedUrls, LanguageModelTextDelta, LanguageModelTextStart, LanguageModelTool,
+    LanguageModelToolChoice, LanguageModelToolInputExample,
 };
 use crate::provider::{ProviderOptions, SpecificationVersion};
 
@@ -792,6 +794,129 @@ pub fn add_tool_input_examples_middleware() -> AddToolInputExamplesMiddleware {
     AddToolInputExamplesMiddleware::new()
 }
 
+/// Transforms text for [`ExtractJsonMiddleware`].
+pub type ExtractJsonTransformFunction = fn(&str) -> String;
+
+/// Removes common Markdown JSON code fences from generated text.
+pub fn default_extract_json_transform(text: &str) -> String {
+    let mut value = text;
+
+    if let Some(rest) = value.strip_prefix("```json") {
+        value = rest.trim_start();
+    } else if let Some(rest) = value.strip_prefix("```") {
+        value = rest.trim_start();
+    }
+
+    if let Some(rest) = value.strip_suffix("```") {
+        value = rest.trim_end();
+    }
+
+    value.trim().to_string()
+}
+
+/// Language model middleware that extracts JSON from text content.
+///
+/// Upstream `extractJsonMiddleware` strips Markdown JSON fences before object
+/// parsing. This Rust port applies the same default transform to non-streaming
+/// text parts and to collected `Vec<LanguageModelStreamPart>` text blocks.
+#[derive(Clone, Debug)]
+pub struct ExtractJsonMiddleware {
+    transform: ExtractJsonTransformFunction,
+}
+
+impl ExtractJsonMiddleware {
+    /// Creates middleware with the upstream default transform.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets a custom text transform.
+    pub fn with_transform(mut self, transform: ExtractJsonTransformFunction) -> Self {
+        self.transform = transform;
+        self
+    }
+
+    fn transform_content(&self, content: LanguageModelContent) -> LanguageModelContent {
+        match content {
+            LanguageModelContent::Text(mut text) => {
+                text.text = (self.transform)(&text.text);
+                LanguageModelContent::Text(text)
+            }
+            other => other,
+        }
+    }
+
+    fn transform_stream(
+        &self,
+        stream: Vec<LanguageModelStreamPart>,
+    ) -> Vec<LanguageModelStreamPart> {
+        let mut transformed = Vec::with_capacity(stream.len());
+        let mut text_starts: BTreeMap<String, LanguageModelTextStart> = BTreeMap::new();
+        let mut text_buffers: BTreeMap<String, String> = BTreeMap::new();
+
+        for part in stream {
+            match part {
+                LanguageModelStreamPart::TextStart(start) => {
+                    text_buffers.insert(start.id.clone(), String::new());
+                    text_starts.insert(start.id.clone(), start);
+                }
+                LanguageModelStreamPart::TextDelta(delta) => {
+                    if let Some(buffer) = text_buffers.get_mut(&delta.id) {
+                        buffer.push_str(&delta.delta);
+                    } else {
+                        transformed.push(LanguageModelStreamPart::TextDelta(delta));
+                    }
+                }
+                LanguageModelStreamPart::TextEnd(end) => {
+                    if let Some(start) = text_starts.remove(&end.id) {
+                        transformed.push(LanguageModelStreamPart::TextStart(start));
+                        let text = text_buffers.remove(&end.id).unwrap_or_default();
+                        let text = (self.transform)(&text);
+
+                        if !text.is_empty() {
+                            transformed.push(LanguageModelStreamPart::TextDelta(
+                                LanguageModelTextDelta::new(end.id.clone(), text),
+                            ));
+                        }
+
+                        transformed.push(LanguageModelStreamPart::TextEnd(end));
+                    } else {
+                        transformed.push(LanguageModelStreamPart::TextEnd(end));
+                    }
+                }
+                other => transformed.push(other),
+            }
+        }
+
+        for (_, start) in text_starts {
+            let text = text_buffers.remove(&start.id).unwrap_or_default();
+            transformed.push(LanguageModelStreamPart::TextStart(start.clone()));
+
+            let text = (self.transform)(&text);
+            if !text.is_empty() {
+                transformed.push(LanguageModelStreamPart::TextDelta(
+                    LanguageModelTextDelta::new(start.id, text),
+                ));
+            }
+        }
+
+        transformed
+    }
+}
+
+impl Default for ExtractJsonMiddleware {
+    fn default() -> Self {
+        Self {
+            transform: default_extract_json_transform,
+        }
+    }
+}
+
+/// Creates language model middleware that strips JSON formatting from text.
+pub fn extract_json_middleware() -> ExtractJsonMiddleware {
+    ExtractJsonMiddleware::new()
+}
+
 impl<M: LanguageModel> LanguageModelMiddleware<M> for DefaultSettingsMiddleware {
     type OverrideSupportedUrlsFuture<'a>
         = Ready<LanguageModelSupportedUrls>
@@ -864,6 +989,67 @@ impl<M: LanguageModel> LanguageModelMiddleware<M> for AddToolInputExamplesMiddle
     }
 }
 
+impl<M> LanguageModelMiddleware<M> for ExtractJsonMiddleware
+where
+    M: LanguageModel<Stream = Vec<LanguageModelStreamPart>>,
+{
+    type OverrideSupportedUrlsFuture<'a>
+        = Pending<LanguageModelSupportedUrls>
+    where
+        Self: 'a,
+        M: 'a;
+
+    type TransformParamsFuture<'a>
+        = Pending<LanguageModelCallOptions>
+    where
+        Self: 'a,
+        M: 'a;
+
+    type WrapGenerateFuture<'a>
+        = Pin<Box<dyn Future<Output = LanguageModelGenerateResult> + Send + 'a>>
+    where
+        Self: 'a,
+        M: 'a;
+
+    type WrapStreamFuture<'a>
+        = Pin<Box<dyn Future<Output = LanguageModelStreamResult<M::Stream>> + Send + 'a>>
+    where
+        Self: 'a,
+        M: 'a;
+
+    fn wrap_generate<'a>(
+        &'a self,
+        options: LanguageModelWrapGenerateOptions<'a, M>,
+    ) -> Option<Self::WrapGenerateFuture<'a>>
+    where
+        M: 'a,
+    {
+        Some(Box::pin(async move {
+            let mut result = (options.do_generate)().await;
+            result.content = result
+                .content
+                .into_iter()
+                .map(|content| self.transform_content(content))
+                .collect();
+            result
+        }))
+    }
+
+    fn wrap_stream<'a>(
+        &'a self,
+        options: LanguageModelWrapStreamOptions<'a, M>,
+    ) -> Option<Self::WrapStreamFuture<'a>>
+    where
+        M: 'a,
+    {
+        Some(Box::pin(async move {
+            let mut result = (options.do_stream)().await;
+            result.stream = self.transform_stream(result.stream);
+            result
+        }))
+    }
+}
+
 fn merge_headers(
     default_headers: Option<&Headers>,
     params_headers: Option<Headers>,
@@ -931,17 +1117,19 @@ fn merge_json_objects(default_object: &JsonObject, params_object: &JsonObject) -
 #[cfg(test)]
 mod tests {
     use super::{
-        AddToolInputExamplesMiddleware, LanguageModelDefaultSettings, LanguageModelMiddleware,
-        LanguageModelMiddlewareCallType, LanguageModelMiddlewareModelOptions,
-        LanguageModelTransformParamsOptions, LanguageModelWrapGenerateOptions,
-        LanguageModelWrapStreamOptions, add_tool_input_examples_middleware,
-        default_settings_middleware, wrap_language_model,
+        AddToolInputExamplesMiddleware, ExtractJsonMiddleware, LanguageModelDefaultSettings,
+        LanguageModelMiddleware, LanguageModelMiddlewareCallType,
+        LanguageModelMiddlewareModelOptions, LanguageModelTransformParamsOptions,
+        LanguageModelWrapGenerateOptions, LanguageModelWrapStreamOptions,
+        add_tool_input_examples_middleware, default_extract_json_transform,
+        default_settings_middleware, extract_json_middleware, wrap_language_model,
     };
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
         LanguageModelFinishReason, LanguageModelFunctionTool, LanguageModelGenerateResult,
         LanguageModelStreamPart, LanguageModelStreamResult, LanguageModelStreamStart,
-        LanguageModelSupportedUrls, LanguageModelText, LanguageModelTool, LanguageModelUsage,
+        LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextDelta,
+        LanguageModelTextEnd, LanguageModelTextStart, LanguageModelTool, LanguageModelUsage,
     };
     use crate::provider::SpecificationVersion;
     use crate::warning::Warning;
@@ -1543,6 +1731,88 @@ mod tests {
         assert!(!middleware.remove());
         assert_eq!(tool.description.as_deref(), Some("Examples:\n1: Brisbane"));
         assert_eq!(tool.input_examples.as_ref().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn extract_json_middleware_default_transform_strips_markdown_fences() {
+        assert_eq!(
+            default_extract_json_transform("```json\n{\"ok\":true}\n```"),
+            "{\"ok\":true}"
+        );
+        assert_eq!(
+            default_extract_json_transform("```\n{\"ok\":true}\n```"),
+            "{\"ok\":true}"
+        );
+        assert_eq!(
+            default_extract_json_transform("{\"ok\":true}"),
+            "{\"ok\":true}"
+        );
+    }
+
+    #[test]
+    fn extract_json_middleware_transforms_generate_text_parts() {
+        fn uppercase(text: &str) -> String {
+            text.to_uppercase()
+        }
+
+        let model = StaticLanguageModel;
+        let middleware = ExtractJsonMiddleware::new().with_transform(uppercase);
+        let wrapped_generate = middleware
+            .wrap_generate(LanguageModelWrapGenerateOptions::new(
+                Box::new(|| Box::pin(ready(language_result("json text")))),
+                Box::new(|| Box::pin(ready(LanguageModelStreamResult::new(Vec::new())))),
+                LanguageModelCallOptions::new(Vec::new()),
+                &model,
+            ))
+            .expect("extract JSON wrap-generate exists");
+        let result = poll_boxed(wrapped_generate);
+
+        assert_eq!(
+            result.content,
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "JSON TEXT"
+            ))]
+        );
+    }
+
+    #[test]
+    fn extract_json_middleware_transforms_vec_stream_text_blocks() {
+        let model = StaticLanguageModel;
+        let middleware = extract_json_middleware();
+        let wrapped_stream = middleware
+            .wrap_stream(LanguageModelWrapStreamOptions::new(
+                Box::new(|| Box::pin(ready(language_result("unused")))),
+                Box::new(|| {
+                    Box::pin(ready(LanguageModelStreamResult::new(vec![
+                        LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("0")),
+                        LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                            "0",
+                            "```json\n",
+                        )),
+                        LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                            "0",
+                            "{\"ok\":true}\n```",
+                        )),
+                        LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("0")),
+                    ])))
+                }),
+                LanguageModelCallOptions::new(Vec::new()),
+                &model,
+            ))
+            .expect("extract JSON wrap-stream exists");
+        let result = poll_boxed(wrapped_stream);
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("0")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "0",
+                    "{\"ok\":true}"
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("0")),
+            ]
+        );
     }
 
     #[test]
