@@ -207,12 +207,21 @@ mod tests {
     };
     use crate::embed::{EmbedManyOptions, EmbedOptions, embed, embed_many};
     use crate::embedding_model::EmbeddingModel;
+    use crate::file_data::{FileData, FileDataContent};
     use crate::generate_text::{GenerateTextOptions, generate_text};
     use crate::headers::Headers;
     use crate::json::JsonValue;
-    use crate::language_model::FinishReason;
+    use crate::language_model::{
+        FinishReason, LanguageModel, LanguageModelAssistantContentPart,
+        LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelFilePart,
+        LanguageModelMessage, LanguageModelReasoningPart, LanguageModelTextPart,
+        LanguageModelToolCallPart, LanguageModelToolContentPart, LanguageModelToolMessage,
+        LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUserContentPart,
+        LanguageModelUserMessage,
+    };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
+    use crate::provider::ProviderOptions;
     use crate::provider_utils::{
         ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     };
@@ -225,6 +234,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
+    use url::Url;
 
     #[test]
     fn vercel_ai_gateway_openai_compatible_generates_text_through_openai_chat() {
@@ -335,6 +345,224 @@ mod tests {
                 "max_tokens": 16,
                 "temperature": 0.0
             })
+        );
+    }
+
+    #[test]
+    fn vercel_ai_gateway_openai_compatible_converts_multimodal_and_tool_history() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "chatcmpl-vercel-gateway-history",
+                        "created": 1711115037,
+                        "model": "openai/gpt-4.1-mini",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Done"
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 10,
+                            "completion_tokens": 1,
+                            "total_tokens": 11
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_vercel_ai_gateway_openai_compatible(
+            VercelAiGatewayOpenAICompatibleSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://ai-gateway.test/v1")
+                .with_header("custom-header", "value"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("openai/gpt-4.1-mini");
+        let message_metadata: ProviderOptions = serde_json::from_value(json!({
+            "openaiCompatible": {
+                "priority": "high"
+            }
+        }))
+        .expect("message metadata deserializes");
+        let image_metadata: ProviderOptions = serde_json::from_value(json!({
+            "openaiCompatible": {
+                "alt_text": "A sample image"
+            }
+        }))
+        .expect("image metadata deserializes");
+        let assistant_metadata: ProviderOptions = serde_json::from_value(json!({
+            "openaiCompatible": {
+                "globalPriority": "high"
+            }
+        }))
+        .expect("assistant metadata deserializes");
+        let tool_call_metadata: ProviderOptions = serde_json::from_value(json!({
+            "openaiCompatible": {
+                "function_call_reason": "user request"
+            },
+            "google": {
+                "thoughtSignature": "<Signature A>"
+            }
+        }))
+        .expect("tool call metadata deserializes");
+        let tool_result_metadata: ProviderOptions = serde_json::from_value(json!({
+            "openaiCompatible": {
+                "partial": true
+            }
+        }))
+        .expect("tool result metadata deserializes");
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![
+                    LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
+                        "Summarize these inputs",
+                    )),
+                    LanguageModelUserContentPart::File(
+                        LanguageModelFilePart::new(
+                            FileData::Data {
+                                data: FileDataContent::Bytes(vec![0, 1, 2, 3]),
+                            },
+                            "image/png",
+                        )
+                        .with_provider_options(image_metadata),
+                    ),
+                    LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                        FileData::Url {
+                            url: Url::parse("https://example.com/image.jpg")
+                                .expect("URL parses"),
+                        },
+                        "image/*",
+                    )),
+                ])
+                .with_provider_options(message_metadata),
+            ),
+            LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "Checking that now...",
+                    )),
+                    LanguageModelAssistantContentPart::Reasoning(
+                        LanguageModelReasoningPart::new("Need weather data."),
+                    ),
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "call_1",
+                            "weather",
+                            json!({ "city": "Brisbane" }),
+                        )
+                        .with_provider_options(tool_call_metadata),
+                    ),
+                ])
+                .with_provider_options(assistant_metadata),
+            ),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolResult(
+                    LanguageModelToolResultPart::new(
+                        "call_1",
+                        "weather",
+                        LanguageModelToolResultOutput::json(json!({
+                            "temperature": 24
+                        })),
+                    )
+                    .with_provider_options(tool_result_metadata),
+                ),
+            ])),
+        ])));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://ai-gateway.test/v1/chat/completions");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "openai/gpt-4.1-mini",
+                "messages": [
+                    {
+                        "role": "user",
+                        "priority": "high",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Summarize these inputs"
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data:image/png;base64,AAECAw=="
+                                },
+                                "alt_text": "A sample image"
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "https://example.com/image.jpg"
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "Checking that now...",
+                        "reasoning_content": "Need weather data.",
+                        "globalPriority": "high",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "weather",
+                                    "arguments": "{\"city\":\"Brisbane\"}"
+                                },
+                                "function_call_reason": "user request",
+                                "extra_content": {
+                                    "google": {
+                                        "thought_signature": "<Signature A>"
+                                    }
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "role": "tool",
+                        "content": "{\"temperature\":24}",
+                        "tool_call_id": "call_1",
+                        "partial": true
+                    }
+                ]
+            }))
         );
     }
 
