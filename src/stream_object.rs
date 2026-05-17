@@ -2,6 +2,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -536,6 +537,7 @@ where
             .await;
     }
 
+    let stream_started_at = Instant::now();
     let stream_result = model.do_stream(call_options).await;
     let request = stream_result.request;
     let envelope_response = stream_result.response;
@@ -557,8 +559,15 @@ where
     let mut finish_reason = FinishReason::Other;
     let mut provider_metadata = None;
     let mut error = None;
+    let mut ms_to_first_chunk = None;
 
     for part in stream_result.stream {
+        if ms_to_first_chunk.is_none() && !matches!(&part, LanguageModelStreamPart::StreamStart(_))
+        {
+            ms_to_first_chunk =
+                Some(u64::try_from(stream_started_at.elapsed().as_millis()).unwrap_or(u64::MAX));
+        }
+
         match part {
             LanguageModelStreamPart::StreamStart(part) => {
                 warnings = part.warnings;
@@ -691,7 +700,7 @@ where
                 request: callback_request.clone(),
                 response: callback_response.clone(),
                 provider_metadata: provider_metadata.clone(),
-                ms_to_first_chunk: None,
+                ms_to_first_chunk,
             })
             .await;
     }
@@ -1011,9 +1020,9 @@ mod tests {
     use crate::language_model::{
         InputTokenUsage, LanguageModelErrorStreamPart, LanguageModelFinishReason,
         LanguageModelMessage, LanguageModelResponseFormat, LanguageModelStreamFinish,
-        LanguageModelStreamResponseMetadata, LanguageModelStreamResult, LanguageModelTextDelta,
-        LanguageModelTextPart, LanguageModelUserContentPart, LanguageModelUserMessage,
-        OutputTokenUsage,
+        LanguageModelStreamResponseMetadata, LanguageModelStreamResult, LanguageModelStreamStart,
+        LanguageModelTextDelta, LanguageModelTextPart, LanguageModelUserContentPart,
+        LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::mock_models::MockLanguageModel;
     use crate::provider_utils::{Schema, ValidationResult, json_schema};
@@ -1760,5 +1769,43 @@ mod tests {
         assert_eq!(call_ids.len(), 4);
         assert!(call_ids[0].starts_with("aiobj-"));
         assert!(call_ids.iter().all(|call_id| call_id == &call_ids[0]));
+    }
+
+    #[test]
+    fn stream_object_step_finish_reports_ms_to_first_chunk() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    r#"{ "content": "Hello, world!" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let chunk_timings = Arc::new(Mutex::new(Vec::new()));
+        let chunk_timings_for_callback = Arc::clone(&chunk_timings);
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_on_step_finish(move |event| {
+                    let chunk_timings = Arc::clone(&chunk_timings_for_callback);
+                    async move {
+                        chunk_timings
+                            .lock()
+                            .expect("chunk timings lock")
+                            .push(event.ms_to_first_chunk);
+                    }
+                }),
+        ));
+
+        assert_eq!(result.object, Some(json!({ "content": "Hello, world!" })));
+
+        let chunk_timings = chunk_timings.lock().expect("chunk timings lock");
+        assert_eq!(chunk_timings.len(), 1);
+        assert!(chunk_timings[0].is_some());
     }
 }
