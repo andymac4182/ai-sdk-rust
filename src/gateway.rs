@@ -39,9 +39,9 @@ use crate::provider_utils::{
     FetchErrorInfo, GetFromApiOptions, HandledFetchError, ParseJsonResult, PostJsonToApiOptions,
     ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     ProviderApiResponseHandlerError, ResponseHandlerResult, RuntimeEnvironment, combine_headers,
-    convert_to_base64, create_event_source_response_handler, create_json_error_response_handler,
-    create_json_response_handler, get_from_api, post_json_to_api, with_user_agent_suffix,
-    without_trailing_slash,
+    convert_bytes_to_base64, convert_to_base64, create_event_source_response_handler,
+    create_json_error_response_handler, create_json_response_handler, get_from_api,
+    post_json_to_api, with_user_agent_suffix, without_trailing_slash,
 };
 use crate::reranking_model::{
     RerankingModel, RerankingModelCallOptions, RerankingModelRanking, RerankingModelResponse,
@@ -997,11 +997,7 @@ impl GatewayLanguageModel {
         &self,
         options: LanguageModelCallOptions,
     ) -> LanguageModelGenerateResult {
-        let request_body = serde_json::to_value(&options).unwrap_or_else(|error| {
-            json!({
-                "serializationError": error.to_string()
-            })
-        });
+        let request_body = gateway_language_model_request_body(&options);
         let request_body_for_error = request_body.clone();
         let request_body_for_response = request_body.clone();
         let request_headers = self.request_headers(options.headers.as_ref(), false);
@@ -1046,11 +1042,7 @@ impl GatewayLanguageModel {
         options: LanguageModelCallOptions,
     ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
         let include_raw_chunks = options.include_raw_chunks.unwrap_or(false);
-        let request_body = serde_json::to_value(&options).unwrap_or_else(|error| {
-            json!({
-                "serializationError": error.to_string()
-            })
-        });
+        let request_body = gateway_language_model_request_body(&options);
         let request_body_for_error = request_body.clone();
         let request_body_for_response = request_body.clone();
         let request_headers = self.request_headers(options.headers.as_ref(), true);
@@ -2096,6 +2088,71 @@ fn gateway_credits_response(
     value: &JsonValue,
 ) -> Result<GatewayCreditsResponse, serde_json::Error> {
     serde_json::from_value(value.clone())
+}
+
+fn gateway_language_model_request_body(options: &LanguageModelCallOptions) -> JsonValue {
+    let mut request_body = serde_json::to_value(options).unwrap_or_else(|error| {
+        json!({
+            "serializationError": error.to_string()
+        })
+    });
+    encode_gateway_prompt_file_bytes(&mut request_body);
+    request_body
+}
+
+fn encode_gateway_prompt_file_bytes(request_body: &mut JsonValue) {
+    let Some(messages) = request_body
+        .get_mut("prompt")
+        .and_then(JsonValue::as_array_mut)
+    else {
+        return;
+    };
+
+    for message in messages {
+        let Some(parts) = message.get_mut("content").and_then(JsonValue::as_array_mut) else {
+            continue;
+        };
+
+        for part in parts {
+            encode_gateway_file_part_bytes(part);
+        }
+    }
+}
+
+fn encode_gateway_file_part_bytes(part: &mut JsonValue) {
+    let Some(part) = part.as_object_mut() else {
+        return;
+    };
+    if part.get("type").and_then(JsonValue::as_str) != Some("file") {
+        return;
+    }
+
+    let Some(data) = part.get_mut("data").and_then(JsonValue::as_object_mut) else {
+        return;
+    };
+    if data.get("type").and_then(JsonValue::as_str) != Some("data") {
+        return;
+    }
+
+    let Some(bytes) = data
+        .get("data")
+        .and_then(JsonValue::as_array)
+        .and_then(json_array_to_bytes)
+    else {
+        return;
+    };
+
+    data.insert(
+        "data".to_string(),
+        JsonValue::String(convert_bytes_to_base64(&bytes)),
+    );
+}
+
+fn json_array_to_bytes(array: &JsonArray) -> Option<Vec<u8>> {
+    array
+        .iter()
+        .map(|value| value.as_u64().and_then(|number| u8::try_from(number).ok()))
+        .collect()
 }
 
 fn gateway_embedding_request_body(options: &EmbeddingModelCallOptions) -> JsonValue {
@@ -3144,7 +3201,7 @@ mod tests {
     };
     use crate::embed::{EmbedOptions, embed};
     use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions};
-    use crate::file_data::FileDataContent;
+    use crate::file_data::{FileData, FileDataContent};
     use crate::generate_image::{GenerateImageOptions, generate_image};
     use crate::generate_text::{GenerateTextOptions, generate_text};
     use crate::generate_video::{GenerateVideoOptions, generate_video};
@@ -3153,7 +3210,8 @@ mod tests {
     use crate::json::JsonValue;
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
-        LanguageModelStreamPart,
+        LanguageModelFilePart, LanguageModelMessage, LanguageModelStreamPart,
+        LanguageModelTextPart, LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::prompt::Prompt;
     use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
@@ -3174,6 +3232,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Waker};
+    use url::Url;
 
     fn env_lookup<'a>(
         values: &'a [(&'a str, &'a str)],
@@ -3451,6 +3510,202 @@ mod tests {
                 .get("ai-o11y-request-id")
                 .map(String::as_str),
             Some("req_gateway_context")
+        );
+    }
+
+    #[test]
+    fn gateway_model_encodes_language_prompt_file_bytes_for_generate() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "id": "test-id",
+                    "created": 1711115037,
+                    "model": "openai/gpt-4.1-mini",
+                    "content": {
+                        "type": "text",
+                        "text": "ok"
+                    },
+                    "finish_reason": "stop",
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1
+                    }
+                })
+                .to_string(),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .language_model("openai/gpt-4.1-mini");
+        let prompt = vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("First text.")),
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Bytes(vec![1, 2, 3, 4]),
+                    },
+                    "image/gif",
+                )),
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Second text.")),
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Url {
+                        url: Url::parse("https://example.com/image2.png").expect("valid URL"),
+                    },
+                    "image/png",
+                )),
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Base64("already-base64".to_string()),
+                    },
+                    "image/jpeg",
+                )),
+            ],
+        ))];
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(prompt)));
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .and_then(|body| body.as_text().map(str::to_string))
+            .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok())
+            .expect("request body is JSON");
+        assert_eq!(
+            request_body
+                .get("prompt")
+                .and_then(JsonValue::as_array)
+                .and_then(|messages| messages.first())
+                .and_then(|message| message.get("content")),
+            Some(&json!([
+                {
+                    "type": "text",
+                    "text": "First text."
+                },
+                {
+                    "type": "file",
+                    "data": {
+                        "type": "data",
+                        "data": "AQIDBA=="
+                    },
+                    "mediaType": "image/gif"
+                },
+                {
+                    "type": "text",
+                    "text": "Second text."
+                },
+                {
+                    "type": "file",
+                    "data": {
+                        "type": "url",
+                        "url": "https://example.com/image2.png"
+                    },
+                    "mediaType": "image/png"
+                },
+                {
+                    "type": "file",
+                    "data": {
+                        "type": "data",
+                        "data": "already-base64"
+                    },
+                    "mediaType": "image/jpeg"
+                }
+            ]))
+        );
+    }
+
+    #[test]
+    fn gateway_model_encodes_language_prompt_file_bytes_for_stream() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                format!(
+                    "data: {}\n\n",
+                    json!({
+                        "type": "finish",
+                        "finishReason": {
+                            "unified": "stop",
+                            "raw": "stop"
+                        },
+                        "usage": {
+                            "inputTokens": {
+                                "total": 1
+                            },
+                            "outputTokens": {
+                                "total": 1
+                            }
+                        }
+                    })
+                ),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .language_model("openai/gpt-4.1-mini");
+        let prompt = vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![LanguageModelUserContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Bytes(vec![5, 6, 7, 8]),
+                    },
+                    "image/png",
+                ),
+            )],
+        ))];
+
+        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(prompt)));
+        assert!(matches!(
+            result.stream.last(),
+            Some(LanguageModelStreamPart::Finish(_))
+        ));
+
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .and_then(|body| body.as_text().map(str::to_string))
+            .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok())
+            .expect("request body is JSON");
+        assert_eq!(
+            request_body
+                .get("prompt")
+                .and_then(JsonValue::as_array)
+                .and_then(|messages| messages.first())
+                .and_then(|message| message.get("content"))
+                .and_then(JsonValue::as_array)
+                .and_then(|parts| parts.first())
+                .and_then(|part| part.get("data"))
+                .and_then(|data| data.get("data"))
+                .and_then(JsonValue::as_str),
+            Some("BQYHCA==")
         );
     }
 
