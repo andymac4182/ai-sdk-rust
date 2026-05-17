@@ -118,7 +118,7 @@ inventory.
 | Error types and messages | in-progress | `src/provider.rs`, `src/generate_text.rs`, `src/provider_utils.rs`, model modules | Existing error serialization/message tests | Many upstream errors exist; provider-specific error types and gateway errors are not ported. |
 | `generateText` non-streaming | verified | `src/generate_text.rs` | `generate_text_*` tests in `src/generate_text.rs`; `examples/kitchen_sink.rs` | Covers deterministic model calls, tool loops, result shaping, usage, warnings, metadata, and response messages. |
 | Tool calling, tool execution, tool approval, repair, refinement, active tools, pruning | verified | `src/generate_text.rs`, `src/provider_utils.rs` | Tool loop, approval, repair, execution, pruning, and mapping tests | Provider-executed deferred results are represented in Rust, but provider implementations are not ported. |
-| `streamText` and language model streaming orchestration | not-started | none | none | Upstream `packages/ai/src/generate-text/stream-text.ts` and related stream tests remain unported. |
+| `streamText` and language model streaming orchestration | in-progress | `src/stream_text.rs` | `stream_text_calls_language_model_do_stream_with_standardized_prompt`; `stream_text_collects_text_deltas_and_finish_metadata`; raw chunk and reasoning/source/custom mapping tests | Initial dependency-light collector over provider-v4 streams. It standardizes prompts, calls `do_stream`, maps text/reasoning/source/custom/tool/raw parts, collects final text, usage, warnings, request/response metadata, and raw chunks when requested. Multi-step tool execution from streams, UI/text response helpers, aborts, retries, callbacks, and stop conditions remain unported. |
 | Text stream response helpers | not-started | none | none | Upstream `text-stream/create-text-stream-response.ts` and pipe helpers remain unported. |
 | UI message streams | not-started | none | none | Upstream `ui-message-stream/*` remains unported. |
 | Chat/completion/object UI transport contracts | not-started | none | none | Portable request/response and transport contracts from `packages/ai/src/ui/*` remain unported; framework hooks are js-only rows. |
@@ -197,9 +197,9 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ## Next Unported Work Queue
 
-1. Port `streamText` over a dependency-light Rust stream abstraction, including
-   deterministic tests for text deltas, reasoning, sources, tool-call deltas,
-   tool execution from streams, final usage, errors, and stop conditions.
+1. Continue `streamText` parity with multi-step streamed tool execution,
+   callbacks, aborts/retries, tool-call deltas, text/UI response helpers, error
+   propagation, and stop conditions.
 2. Port `streamObject` and structured partial-object streaming once `streamText`
    event handling is available.
 3. Port provider wrapping middleware plus add-tool-input-examples,
