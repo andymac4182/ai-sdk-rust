@@ -67,7 +67,9 @@ pub use file_data::{
 };
 pub use files::{Files, FilesUploadFileCallOptions, FilesUploadFileData, FilesUploadFileResult};
 pub use gateway::{
-    DEFAULT_GATEWAY_BASE_URL, GatewayLanguageModel, GatewayProvider, GatewayProviderSettings,
+    DEFAULT_GATEWAY_BASE_URL, GatewayCreditsResponse, GatewayFetchMetadataResponse,
+    GatewayLanguageModel, GatewayLanguageModelEntry, GatewayLanguageModelPricing,
+    GatewayLanguageModelSpecification, GatewayModelType, GatewayProvider, GatewayProviderSettings,
     GatewayTransport, GatewayTransportFuture, create_gateway, gateway,
 };
 pub use generate_image::{
