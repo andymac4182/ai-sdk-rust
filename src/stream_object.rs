@@ -1,4 +1,7 @@
+use std::fmt;
 use std::future::Future;
+use std::pin::Pin;
+use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 
@@ -63,6 +66,55 @@ pub enum ObjectStreamPart {
 
     /// Final metadata for the object stream.
     Finish(Box<ObjectStreamFinishPart>),
+}
+
+/// Event passed to a stream-object error callback.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamObjectOnErrorEvent {
+    /// Provider error represented as JSON.
+    pub error: JsonValue,
+}
+
+/// Future returned by a stream-object error callback.
+pub type StreamObjectOnErrorFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+/// Callback invoked when a provider error stream part is received.
+pub type StreamObjectOnErrorFunction<'a> =
+    dyn Fn(StreamObjectOnErrorEvent) -> StreamObjectOnErrorFuture<'a> + 'a;
+
+/// Upstream callback alias for stream-object `onError`.
+pub type StreamObjectOnErrorCallback<'a> = StreamObjectOnErrorFunction<'a>;
+
+/// Callback wrapper for upstream stream-object `onError`.
+pub struct StreamObjectOnError<'a> {
+    on_error: Rc<StreamObjectOnErrorFunction<'a>>,
+}
+
+impl<'a> StreamObjectOnError<'a> {
+    /// Creates a stream-object error callback.
+    pub fn new<F, Fut>(on_error: F) -> Self
+    where
+        F: Fn(StreamObjectOnErrorEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        Self {
+            on_error: Rc::new(move |event| Box::pin(on_error(event))),
+        }
+    }
+
+    /// Runs the stream-object error callback.
+    pub fn error(&self, event: StreamObjectOnErrorEvent) -> StreamObjectOnErrorFuture<'a> {
+        (self.on_error)(event)
+    }
+}
+
+impl fmt::Debug for StreamObjectOnError<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StreamObjectOnError")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Final metadata emitted by an object stream.
@@ -137,6 +189,9 @@ pub struct StreamObjectOptions<'a, M: LanguageModel + ?Sized> {
 
     /// Optional callback invoked after final object parsing and validation.
     pub on_finish: Option<GenerateObjectOnFinish<'a>>,
+
+    /// Optional callback invoked for provider stream errors.
+    pub on_error: Option<StreamObjectOnError<'a>>,
 }
 
 impl<'a, M: LanguageModel + ?Sized> StreamObjectOptions<'a, M> {
@@ -168,6 +223,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamObjectOptions<'a, M> {
             on_step_start: None,
             on_step_finish: None,
             on_finish: None,
+            on_error: None,
         }
     }
 
@@ -319,6 +375,16 @@ impl<'a, M: LanguageModel + ?Sized> StreamObjectOptions<'a, M> {
         self.on_finish = Some(GenerateObjectOnFinish::new(on_finish));
         self
     }
+
+    /// Sets a callback that is invoked for provider stream errors.
+    pub fn with_on_error<F, Fut>(mut self, on_error: F) -> Self
+    where
+        F: Fn(StreamObjectOnErrorEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_error = Some(StreamObjectOnError::new(on_error));
+        self
+    }
 }
 
 /// Collected result of a high-level object streaming call.
@@ -413,6 +479,7 @@ where
         on_step_start,
         on_step_finish,
         on_finish,
+        on_error,
     } = options;
 
     let output_kind = generate_object_output_kind(&schema, enum_values.as_deref(), array_output);
@@ -541,6 +608,13 @@ where
                 provider_metadata = part.provider_metadata;
             }
             LanguageModelStreamPart::Error(part) => {
+                if let Some(on_error) = &on_error {
+                    on_error
+                        .error(StreamObjectOnErrorEvent {
+                            error: part.error.clone(),
+                        })
+                        .await;
+                }
                 finish_reason = FinishReason::Error;
                 error = Some(part.error.clone());
                 parts.push(ObjectStreamPart::Error { error: part.error });
@@ -1340,6 +1414,40 @@ mod tests {
                 .parts
                 .iter()
                 .any(|part| matches!(part, ObjectStreamPart::Error { .. }))
+        );
+    }
+
+    #[test]
+    fn stream_object_invokes_error_callback_for_error_parts() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(
+                    json!({"message": "chunk failed"}),
+                )),
+            ]));
+        let callback_errors = Arc::new(Mutex::new(Vec::new()));
+        let errors_for_callback = Arc::clone(&callback_errors);
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_on_error(move |event| {
+                let errors = Arc::clone(&errors_for_callback);
+                async move {
+                    errors
+                        .lock()
+                        .expect("callback errors lock")
+                        .push(event.error);
+                }
+            }),
+        ));
+
+        assert_eq!(result.finish_reason, FinishReason::Error);
+        assert_eq!(result.error, Some(json!({"message": "chunk failed"})));
+        assert_eq!(
+            callback_errors
+                .lock()
+                .expect("callback errors lock")
+                .as_slice(),
+            [json!({"message": "chunk failed"})]
         );
     }
 
