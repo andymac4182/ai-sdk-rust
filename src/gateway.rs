@@ -7,6 +7,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::OffsetDateTime;
+use url::Url;
 
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
@@ -19,11 +20,12 @@ use crate::language_model::{
 };
 use crate::provider::{ProviderMetadata, SpecificationVersion};
 use crate::provider_utils::{
-    FetchErrorInfo, HandledFetchError, ParseJsonResult, PostJsonToApiOptions, ProviderApiRequest,
-    ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+    FetchErrorInfo, GetFromApiOptions, HandledFetchError, ParseJsonResult, PostJsonToApiOptions,
+    ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     ProviderApiResponseHandlerError, RuntimeEnvironment, combine_headers,
     create_event_source_response_handler, create_json_error_response_handler,
-    create_json_response_handler, post_json_to_api, with_user_agent_suffix, without_trailing_slash,
+    create_json_response_handler, get_from_api, post_json_to_api, with_user_agent_suffix,
+    without_trailing_slash,
 };
 
 /// Default base URL used by upstream `@ai-sdk/gateway` provider calls.
@@ -39,6 +41,126 @@ pub type GatewayTransportFuture =
 
 /// HTTP transport used by [`GatewayLanguageModel`].
 pub type GatewayTransport = Arc<dyn Fn(ProviderApiRequest) -> GatewayTransportFuture + Send + Sync>;
+
+/// Known Gateway model categories returned by metadata discovery.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GatewayModelType {
+    /// Text generation language model.
+    Language,
+
+    /// Text embedding model.
+    Embedding,
+
+    /// Image generation model.
+    Image,
+
+    /// Document reranking model.
+    Reranking,
+
+    /// Video generation model.
+    Video,
+}
+
+impl GatewayModelType {
+    fn from_gateway_value(value: &str) -> Option<Self> {
+        match value {
+            "language" => Some(Self::Language),
+            "embedding" => Some(Self::Embedding),
+            "image" => Some(Self::Image),
+            "reranking" => Some(Self::Reranking),
+            "video" => Some(Self::Video),
+            _ => None,
+        }
+    }
+}
+
+/// Per-token price data returned by Gateway model metadata.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayLanguageModelPricing {
+    /// Cost per input token in USD.
+    pub input: String,
+
+    /// Cost per output token in USD.
+    pub output: String,
+
+    /// Cost per cached input token in USD.
+    #[serde(
+        default,
+        alias = "input_cache_read",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cached_input_tokens: Option<String>,
+
+    /// Cost per input token to create/write cache entries in USD.
+    #[serde(
+        default,
+        alias = "input_cache_write",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cache_creation_input_tokens: Option<String>,
+}
+
+/// Provider-v4 language model specification advertised by Gateway metadata.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayLanguageModelSpecification {
+    /// Provider interface version used by the advertised model.
+    pub specification_version: SpecificationVersion,
+
+    /// Provider id for the advertised model.
+    pub provider: String,
+
+    /// Provider-specific model id.
+    pub model_id: String,
+}
+
+/// A language model entry returned by Gateway metadata discovery.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayLanguageModelEntry {
+    /// The model id used with the Gateway provider.
+    pub id: String,
+
+    /// Display name for user-facing model lists.
+    pub name: String,
+
+    /// Optional model description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    /// Optional model pricing information.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<GatewayLanguageModelPricing>,
+
+    /// Provider-v4 specification for this model.
+    pub specification: GatewayLanguageModelSpecification,
+
+    /// Optional Gateway model category.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_type: Option<GatewayModelType>,
+}
+
+/// Available Gateway models returned by metadata discovery.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayFetchMetadataResponse {
+    /// Models available to the authenticated Gateway account.
+    pub models: Vec<GatewayLanguageModelEntry>,
+}
+
+/// Gateway credit balance information for the authenticated account.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayCreditsResponse {
+    /// Remaining credit balance available for Gateway API usage.
+    pub balance: String,
+
+    /// Total amount of Gateway credits consumed.
+    #[serde(rename = "totalUsed", alias = "total_used")]
+    pub total_used: String,
+}
 
 /// Configuration for a Vercel AI Gateway provider instance.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -140,6 +262,35 @@ impl GatewayProvider {
     /// Alias for [`GatewayProvider::language_model`].
     pub fn chat(&self, model_id: impl Into<String>) -> GatewayLanguageModel {
         self.language_model(model_id)
+    }
+
+    /// Returns available Gateway models for the authenticated account.
+    pub async fn get_available_models(
+        &self,
+    ) -> Result<GatewayFetchMetadataResponse, HandledFetchError> {
+        let request_headers = gateway_provider_headers(&self.settings);
+        let get_options = GetFromApiOptions::new(format!("{}/config", self.base_url()))
+            .with_headers(request_headers)
+            .with_environment(RuntimeEnvironment::unknown());
+        let transport = Arc::clone(&self.transport);
+
+        get_gateway_json(get_options, transport, gateway_fetch_metadata_response).await
+    }
+
+    /// Returns credit balance information for the authenticated Gateway account.
+    pub async fn get_credits(&self) -> Result<GatewayCreditsResponse, HandledFetchError> {
+        let request_headers = gateway_provider_headers(&self.settings);
+        let get_options =
+            GetFromApiOptions::new(gateway_origin_url(&self.base_url(), "/v1/credits")?)
+                .with_headers(request_headers)
+                .with_environment(RuntimeEnvironment::unknown());
+        let transport = Arc::clone(&self.transport);
+
+        get_gateway_json(get_options, transport, gateway_credits_response).await
+    }
+
+    fn base_url(&self) -> String {
+        gateway_base_url(&self.settings)
     }
 }
 
@@ -276,9 +427,7 @@ impl GatewayLanguageModel {
     }
 
     fn base_url(&self) -> String {
-        without_trailing_slash(self.settings.base_url.as_deref())
-            .unwrap_or(DEFAULT_GATEWAY_BASE_URL)
-            .to_string()
+        gateway_base_url(&self.settings)
     }
 
     fn request_headers(
@@ -307,48 +456,11 @@ impl GatewayLanguageModel {
     }
 
     fn provider_headers(&self) -> Option<Vec<(String, Option<String>)>> {
-        let mut headers = BTreeMap::from([
-            (
-                "ai-gateway-protocol-version".to_string(),
-                Some(AI_GATEWAY_PROTOCOL_VERSION.to_string()),
-            ),
-            (
-                GATEWAY_AUTH_METHOD_HEADER.to_string(),
-                Some("api-key".to_string()),
-            ),
-        ]);
-
-        if let Some(api_key) = self.resolve_api_key() {
-            headers.insert(
-                "Authorization".to_string(),
-                Some(format!("Bearer {api_key}")),
-            );
-        }
-
-        for (name, value) in &self.settings.headers {
-            headers.insert(name.clone(), Some(value.clone()));
-        }
-
-        let headers = with_user_agent_suffix(
-            Some(headers),
-            [format!("ai-sdk/gateway/{}", crate::VERSION)],
-        );
-
         Some(
-            headers
+            gateway_provider_headers(&self.settings)
                 .into_iter()
-                .map(|(name, value)| (name, Some(value)))
                 .collect(),
         )
-    }
-
-    fn resolve_api_key(&self) -> Option<String> {
-        self.settings
-            .api_key
-            .clone()
-            .or_else(|| env::var("AI_GATEWAY_API_KEY").ok())
-            .or_else(|| env::var("AI_SDK_RUST_AI_GATEWAY_API_KEY").ok())
-            .filter(|value| !value.trim().is_empty())
     }
 
     fn generate_result_from_response(
@@ -536,6 +648,165 @@ impl LanguageModel for GatewayLanguageModel {
     fn do_stream(&self, options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
         Box::pin(self.do_stream_result(options))
     }
+}
+
+fn gateway_base_url(settings: &GatewayProviderSettings) -> String {
+    without_trailing_slash(settings.base_url.as_deref())
+        .unwrap_or(DEFAULT_GATEWAY_BASE_URL)
+        .to_string()
+}
+
+fn resolve_gateway_api_key(settings: &GatewayProviderSettings) -> Option<String> {
+    settings
+        .api_key
+        .clone()
+        .or_else(|| env::var("AI_GATEWAY_API_KEY").ok())
+        .or_else(|| env::var("AI_SDK_RUST_AI_GATEWAY_API_KEY").ok())
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn gateway_provider_headers(
+    settings: &GatewayProviderSettings,
+) -> BTreeMap<String, Option<String>> {
+    let mut headers = BTreeMap::from([
+        (
+            "ai-gateway-protocol-version".to_string(),
+            Some(AI_GATEWAY_PROTOCOL_VERSION.to_string()),
+        ),
+        (
+            GATEWAY_AUTH_METHOD_HEADER.to_string(),
+            Some("api-key".to_string()),
+        ),
+    ]);
+
+    if let Some(api_key) = resolve_gateway_api_key(settings) {
+        headers.insert(
+            "Authorization".to_string(),
+            Some(format!("Bearer {api_key}")),
+        );
+    }
+
+    for (name, value) in &settings.headers {
+        headers.insert(name.clone(), Some(value.clone()));
+    }
+
+    with_user_agent_suffix(
+        Some(headers),
+        [format!("ai-sdk/gateway/{}", crate::VERSION)],
+    )
+    .into_iter()
+    .map(|(name, value)| (name, Some(value)))
+    .collect()
+}
+
+fn gateway_origin_url(base_url: &str, path: &str) -> Result<String, HandledFetchError> {
+    let url = Url::parse(base_url).map_err(|error| HandledFetchError::Original {
+        error: FetchErrorInfo::new(format!("invalid Gateway base URL: {error}"))
+            .with_name("TypeError"),
+    })?;
+    let mut origin = url.origin().ascii_serialization();
+    origin.push_str(path);
+
+    Ok(origin)
+}
+
+async fn get_gateway_json<T, V, E>(
+    options: GetFromApiOptions,
+    transport: GatewayTransport,
+    validate: V,
+) -> Result<T, HandledFetchError>
+where
+    V: FnOnce(&JsonValue) -> Result<T, E>,
+    E: std::fmt::Display,
+{
+    get_from_api(
+        options,
+        move |request| (transport)(request),
+        |request, response| {
+            create_json_response_handler(response.json_response_handler_options(request), validate)
+                .map_err(ProviderApiResponseHandlerError::from)
+        },
+        |request, response| {
+            Ok(create_json_error_response_handler(
+                response.json_error_response_handler_options(request),
+                clone_json_value,
+                gateway_error_to_message,
+                |_, _| None,
+            ))
+        },
+    )
+    .await
+    .map(|response| response.value)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawGatewayFetchMetadataResponse {
+    models: Vec<RawGatewayLanguageModelEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawGatewayLanguageModelEntry {
+    id: String,
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    pricing: Option<GatewayLanguageModelPricing>,
+    specification: GatewayLanguageModelSpecification,
+    #[serde(default)]
+    model_type: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for GatewayFetchMetadataResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawGatewayFetchMetadataResponse::deserialize(deserializer)?;
+
+        Ok(gateway_fetch_metadata_response_from_raw(raw))
+    }
+}
+
+fn gateway_fetch_metadata_response(
+    value: &JsonValue,
+) -> Result<GatewayFetchMetadataResponse, serde_json::Error> {
+    let raw = serde_json::from_value::<RawGatewayFetchMetadataResponse>(value.clone())?;
+    Ok(gateway_fetch_metadata_response_from_raw(raw))
+}
+
+fn gateway_fetch_metadata_response_from_raw(
+    raw: RawGatewayFetchMetadataResponse,
+) -> GatewayFetchMetadataResponse {
+    let models = raw
+        .models
+        .into_iter()
+        .filter_map(|model| {
+            let model_type = match model.model_type {
+                Some(model_type) => Some(GatewayModelType::from_gateway_value(&model_type)?),
+                None => None,
+            };
+
+            Some(GatewayLanguageModelEntry {
+                id: model.id,
+                name: model.name,
+                description: model.description,
+                pricing: model.pricing,
+                specification: model.specification,
+                model_type,
+            })
+        })
+        .collect();
+
+    GatewayFetchMetadataResponse { models }
+}
+
+fn gateway_credits_response(
+    value: &JsonValue,
+) -> Result<GatewayCreditsResponse, serde_json::Error> {
+    serde_json::from_value(value.clone())
 }
 
 fn optional_headers(headers: Option<&Headers>) -> Option<Vec<(String, Option<String>)>> {
@@ -843,7 +1114,8 @@ fn provider_api_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        GatewayProvider, GatewayProviderSettings, GatewayTransport, GatewayTransportFuture, gateway,
+        GatewayModelType, GatewayProvider, GatewayProviderSettings, GatewayTransport,
+        GatewayTransportFuture, gateway,
     };
     use crate::generate_text::{GenerateTextOptions, generate_text};
     use crate::headers::Headers;
@@ -1128,6 +1400,183 @@ mod tests {
         assert_eq!(model.model_id(), "openai/gpt-4.1-mini");
     }
 
+    #[test]
+    fn gateway_provider_fetches_available_models_metadata() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "models": [
+                        {
+                            "id": "openai/gpt-4.1-mini",
+                            "name": "GPT 4.1 mini",
+                            "description": "Small OpenAI model",
+                            "pricing": {
+                                "input": "0.0000004",
+                                "output": "0.0000016",
+                                "input_cache_read": "0.0000001",
+                                "input_cache_write": "0.0000002"
+                            },
+                            "specification": {
+                                "specificationVersion": "v4",
+                                "provider": "gateway",
+                                "modelId": "openai/gpt-4.1-mini"
+                            },
+                            "modelType": "language"
+                        },
+                        {
+                            "id": "future/model",
+                            "name": "Future Model",
+                            "specification": {
+                                "specificationVersion": "v4",
+                                "provider": "gateway",
+                                "modelId": "future/model"
+                            },
+                            "modelType": "future-model-family"
+                        }
+                    ]
+                })
+                .to_string(),
+            ))))
+        });
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com/v4/ai")
+                .with_api_key("test-token")
+                .with_header("x-provider", "provider-value"),
+        )
+        .with_transport(transport);
+        let result = poll_ready(provider.get_available_models()).expect("metadata fetch succeeds");
+
+        assert_eq!(result.models.len(), 1);
+        let model = &result.models[0];
+        assert_eq!(model.id, "openai/gpt-4.1-mini");
+        assert_eq!(model.model_type, Some(GatewayModelType::Language));
+        assert_eq!(
+            model
+                .pricing
+                .as_ref()
+                .and_then(|pricing| pricing.cached_input_tokens.as_deref()),
+            Some("0.0000001")
+        );
+        assert_eq!(
+            model
+                .pricing
+                .as_ref()
+                .and_then(|pricing| pricing.cache_creation_input_tokens.as_deref()),
+            Some("0.0000002")
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+
+        assert_eq!(request.method, ProviderApiRequestMethod::Get);
+        assert_eq!(request.url, "https://api.test.com/v4/ai/config");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-token")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-gateway-protocol-version")
+                .map(String::as_str),
+            Some("0.0.1")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-gateway-auth-method")
+                .map(String::as_str),
+            Some("api-key")
+        );
+        assert_eq!(
+            request.headers.get("x-provider").map(String::as_str),
+            Some("provider-value")
+        );
+    }
+
+    #[test]
+    fn gateway_provider_fetches_credits_from_gateway_origin() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "balance": "150.50",
+                    "total_used": "75.25"
+                })
+                .to_string(),
+            ))))
+        });
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com/v4/ai")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+        let result = poll_ready(provider.get_credits()).expect("credits fetch succeeds");
+
+        assert_eq!(result.balance, "150.50");
+        assert_eq!(result.total_used, "75.25");
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+
+        assert_eq!(request.method, ProviderApiRequestMethod::Get);
+        assert_eq!(request.url, "https://api.test.com/v1/credits");
+    }
+
+    #[test]
+    fn gateway_provider_metadata_surfaces_api_errors() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                429,
+                "Too Many Requests",
+                json!({
+                    "error": {
+                        "message": "Rate limit exceeded",
+                        "type": "rate_limit_exceeded"
+                    }
+                })
+                .to_string(),
+            ))))
+        });
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com/v4/ai")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+        let error = poll_ready(provider.get_available_models()).expect_err("request fails");
+        let api_error = error
+            .api_call_error()
+            .expect("gateway metadata errors are API call errors");
+
+        assert_eq!(api_error.status_code(), Some(429));
+        assert_eq!(api_error.message(), "Rate limit exceeded");
+        assert!(api_error.is_retryable());
+    }
+
     fn gateway_stream_body() -> String {
         [
             json!({
@@ -1244,6 +1693,26 @@ mod tests {
                 .to_lowercase()
                 .contains("rust-gateway-stream-ok"),
             "gateway stream response did not contain expected marker"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live metadata call"]
+    fn live_gateway_available_models() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!("skipping live Gateway metadata test because no API key is configured");
+            return;
+        };
+        let provider = GatewayProvider::new().with_api_key(api_key);
+        let result =
+            poll_ready(provider.get_available_models()).expect("gateway metadata fetch succeeds");
+
+        assert!(
+            result
+                .models
+                .iter()
+                .any(|model| model.id.starts_with("openai/")),
+            "gateway metadata did not include an OpenAI model"
         );
     }
 
