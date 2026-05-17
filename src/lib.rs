@@ -30,6 +30,7 @@ pub mod reranking_model;
 pub mod retry;
 pub mod skills;
 pub mod speech_model;
+pub mod stream_text;
 pub mod transcribe;
 pub mod transcription_model;
 pub mod upload_file;
@@ -274,6 +275,12 @@ pub use skills::{
 pub use speech_model::{
     NoSpeechGeneratedError, SpeechModel, SpeechModelAudio, SpeechModelCallOptions,
     SpeechModelRequest, SpeechModelResponse, SpeechModelResponseMetadata, SpeechModelResult,
+};
+pub use stream_text::{
+    StreamTextOptions, StreamTextResponseMetadata, StreamTextResult, StreamTextStep,
+    StreamTextStepPerformance, TextStreamFilePart, TextStreamFinishPart, TextStreamFinishStepPart,
+    TextStreamPart, TextStreamReasoningDeltaPart, TextStreamReasoningFilePart, TextStreamStartPart,
+    TextStreamStartStepPart, TextStreamTextDeltaPart, stream_text,
 };
 pub use transcribe::{
     ExperimentalTranscriptionResult, TranscribeAudio, TranscribeDownload,
