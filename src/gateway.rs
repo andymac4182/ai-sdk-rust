@@ -3421,8 +3421,9 @@ mod tests {
     use crate::json::{JsonObject, JsonValue};
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
-        LanguageModelFilePart, LanguageModelMessage, LanguageModelStreamPart,
-        LanguageModelTextPart, LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelFileData, LanguageModelFilePart, LanguageModelMessage, LanguageModelSource,
+        LanguageModelStreamPart, LanguageModelTextPart, LanguageModelUserContentPart,
+        LanguageModelUserMessage,
     };
     use crate::prompt::Prompt;
     use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
@@ -3961,6 +3962,146 @@ mod tests {
                 .get("ai-o11y-request-id")
                 .map(String::as_str),
             Some("req_gateway_context")
+        );
+    }
+
+    #[test]
+    fn gateway_model_maps_standard_generate_content_parts() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "id": "test-id",
+                    "created": 1711115037,
+                    "model": "openai/gpt-4.1-mini",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Summary",
+                            "providerMetadata": {
+                                "gateway": {
+                                    "text": true
+                                }
+                            }
+                        },
+                        {
+                            "type": "reasoning",
+                            "text": "Need search context."
+                        },
+                        {
+                            "type": "source",
+                            "sourceType": "url",
+                            "id": "src_1",
+                            "url": "https://example.com/source",
+                            "title": "Example Source"
+                        },
+                        {
+                            "type": "file",
+                            "mediaType": "text/plain",
+                            "data": {
+                                "type": "data",
+                                "data": "ZGF0YQ=="
+                            }
+                        },
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call_1",
+                            "toolName": "search",
+                            "result": {
+                                "status": "ok"
+                            }
+                        },
+                        {
+                            "type": "custom",
+                            "kind": "gateway.provider-annotation"
+                        }
+                    ],
+                    "finish_reason": "stop",
+                    "usage": {
+                        "prompt_tokens": 4,
+                        "completion_tokens": 3
+                    },
+                    "providerMetadata": {
+                        "gateway": {
+                            "generationId": "gen_123"
+                        }
+                    }
+                })
+                .to_string(),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .language_model("openai/gpt-4.1-mini");
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Summarize")),
+            ])),
+        ])));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(result.content.len(), 6);
+        assert!(matches!(
+            &result.content[0],
+            LanguageModelContent::Text(text)
+                if text.text == "Summary"
+                    && text
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("gateway"))
+                        .and_then(|metadata| metadata.get("text"))
+                        .and_then(JsonValue::as_bool)
+                        == Some(true)
+        ));
+        assert!(matches!(
+            &result.content[1],
+            LanguageModelContent::Reasoning(reasoning)
+                if reasoning.text == "Need search context."
+        ));
+        assert!(matches!(
+            &result.content[2],
+            LanguageModelContent::Source(LanguageModelSource::Url(source))
+                if source.id == "src_1"
+                    && source.url == "https://example.com/source"
+                    && source.title.as_deref() == Some("Example Source")
+        ));
+        assert!(matches!(
+            &result.content[3],
+            LanguageModelContent::File(file)
+                if file.media_type == "text/plain"
+                    && matches!(
+                        &file.data,
+                        LanguageModelFileData::Data { data }
+                            if serde_json::to_value(data)
+                                .expect("file data serializes")
+                                == json!("ZGF0YQ==")
+                    )
+        ));
+        assert!(matches!(
+            &result.content[4],
+            LanguageModelContent::ToolResult(tool_result)
+                if tool_result.tool_call_id == "call_1"
+                    && tool_result.tool_name == "search"
+                    && tool_result.result.as_value() == &json!({ "status": "ok" })
+        ));
+        assert!(matches!(
+            &result.content[5],
+            LanguageModelContent::Custom(custom)
+                if custom.kind == "gateway.provider-annotation"
+        ));
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("generationId"))
+                .and_then(JsonValue::as_str),
+            Some("gen_123")
         );
     }
 
