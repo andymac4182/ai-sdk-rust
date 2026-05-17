@@ -1,15 +1,23 @@
 use std::env;
+use std::future::{Future, Ready};
+use std::pin::Pin;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use crate::headers::Headers;
+use crate::json::{JsonObject, JsonValue};
+use crate::language_model::{
+    InputTokenUsage, LanguageModel, LanguageModelCallOptions, LanguageModelGenerateResult,
+    LanguageModelStreamPart, LanguageModelStreamResult, LanguageModelSupportedUrls,
+    LanguageModelUsage, OutputTokenUsage,
+};
 use crate::openai_compatible::{
     OpenAICompatibleChatLanguageModel, OpenAICompatibleCompletionLanguageModel,
     OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel, OpenAICompatibleProvider,
     OpenAICompatibleProviderSettings, OpenAICompatibleTransport,
 };
-use crate::provider::{ModelType, NoSuchModelError, Provider};
+use crate::provider::{ModelType, NoSuchModelError, Provider, SpecificationVersion};
 use crate::provider_utils::without_trailing_slash;
 
 /// Default base URL for upstream `@ai-sdk/deepinfra` API calls.
@@ -69,6 +77,88 @@ pub struct DeepInfraProvider {
     transport: Option<OpenAICompatibleTransport>,
 }
 
+/// DeepInfra chat language model with upstream DeepInfra usage correction.
+#[derive(Clone)]
+pub struct DeepInfraChatLanguageModel {
+    inner: OpenAICompatibleChatLanguageModel,
+}
+
+impl DeepInfraChatLanguageModel {
+    fn new(inner: OpenAICompatibleChatLanguageModel) -> Self {
+        Self { inner }
+    }
+
+    /// Returns the provider-specific model id.
+    pub fn model_id(&self) -> &str {
+        self.inner.model_id()
+    }
+
+    /// Returns the provider id for this model.
+    pub fn provider(&self) -> &str {
+        self.inner.provider()
+    }
+
+    /// Returns whether structured outputs are enabled for this chat model.
+    pub fn supports_structured_outputs(&self) -> bool {
+        self.inner.supports_structured_outputs()
+    }
+}
+
+impl LanguageModel for DeepInfraChatLanguageModel {
+    type SupportedUrlsFuture<'a>
+        = Ready<LanguageModelSupportedUrls>
+    where
+        Self: 'a;
+
+    type GenerateFuture<'a>
+        = Pin<Box<dyn Future<Output = LanguageModelGenerateResult> + Send + 'a>>
+    where
+        Self: 'a;
+
+    type Stream = Vec<LanguageModelStreamPart>;
+
+    type StreamFuture<'a>
+        = Pin<Box<dyn Future<Output = LanguageModelStreamResult<Self::Stream>> + Send + 'a>>
+    where
+        Self: 'a;
+
+    fn specification_version(&self) -> SpecificationVersion {
+        self.inner.specification_version()
+    }
+
+    fn provider(&self) -> &str {
+        self.inner.provider()
+    }
+
+    fn model_id(&self) -> &str {
+        self.inner.model_id()
+    }
+
+    fn supported_urls(&self) -> Self::SupportedUrlsFuture<'_> {
+        self.inner.supported_urls()
+    }
+
+    fn do_generate(&self, options: LanguageModelCallOptions) -> Self::GenerateFuture<'_> {
+        Box::pin(async move {
+            let mut result = self.inner.do_generate(options).await;
+            result.usage = correct_deepinfra_usage(result.usage);
+            result
+        })
+    }
+
+    fn do_stream(&self, options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
+        Box::pin(async move {
+            let mut result = self.inner.do_stream(options).await;
+            for part in &mut result.stream {
+                if let LanguageModelStreamPart::Finish(finish) = part {
+                    finish.usage = correct_deepinfra_usage(finish.usage.clone());
+                }
+            }
+            result
+        })
+    }
+}
+
 impl DeepInfraProvider {
     /// Creates a DeepInfra provider with default settings.
     pub fn new() -> Self {
@@ -108,17 +198,17 @@ impl DeepInfraProvider {
     }
 
     /// Creates a DeepInfra chat language model.
-    pub fn language_model(&self, model_id: impl Into<String>) -> OpenAICompatibleChatLanguageModel {
+    pub fn language_model(&self, model_id: impl Into<String>) -> DeepInfraChatLanguageModel {
         self.chat_model(model_id)
     }
 
     /// Creates a DeepInfra chat language model.
-    pub fn chat_model(&self, model_id: impl Into<String>) -> OpenAICompatibleChatLanguageModel {
-        self.openai_compatible_provider().chat_model(model_id)
+    pub fn chat_model(&self, model_id: impl Into<String>) -> DeepInfraChatLanguageModel {
+        DeepInfraChatLanguageModel::new(self.openai_compatible_provider().chat_model(model_id))
     }
 
     /// Alias for [`DeepInfraProvider::chat_model`].
-    pub fn chat(&self, model_id: impl Into<String>) -> OpenAICompatibleChatLanguageModel {
+    pub fn chat(&self, model_id: impl Into<String>) -> DeepInfraChatLanguageModel {
         self.chat_model(model_id)
     }
 
@@ -196,7 +286,7 @@ impl Default for DeepInfraProvider {
 }
 
 impl Provider for DeepInfraProvider {
-    type LanguageModel = OpenAICompatibleChatLanguageModel;
+    type LanguageModel = DeepInfraChatLanguageModel;
     type EmbeddingModel = OpenAICompatibleEmbeddingModel;
     type ImageModel = OpenAICompatibleImageModel;
 
@@ -219,7 +309,7 @@ pub fn create_deepinfra(settings: DeepInfraProviderSettings) -> DeepInfraProvide
 }
 
 /// Creates a DeepInfra chat language model using the default provider settings.
-pub fn deepinfra(model_id: impl Into<String>) -> OpenAICompatibleChatLanguageModel {
+pub fn deepinfra(model_id: impl Into<String>) -> DeepInfraChatLanguageModel {
     DeepInfraProvider::new().language_model(model_id)
 }
 
@@ -237,6 +327,91 @@ fn deepinfra_api_key(explicit_api_key: Option<&String>) -> Option<String> {
         .or_else(|| non_empty_optional_setting(env::var("DEEPINFRA_API_KEY").ok()))
 }
 
+fn correct_deepinfra_usage(usage: LanguageModelUsage) -> LanguageModelUsage {
+    let Some(mut raw) = usage.raw.clone() else {
+        return usage;
+    };
+    let Some(reasoning_tokens) = deepinfra_reasoning_tokens(&raw) else {
+        return usage;
+    };
+    let completion_tokens = json_u64(raw.get("completion_tokens")).unwrap_or_default();
+
+    if reasoning_tokens <= completion_tokens {
+        return usage;
+    }
+
+    let corrected_completion_tokens = completion_tokens.saturating_add(reasoning_tokens);
+    raw.insert(
+        "completion_tokens".to_string(),
+        JsonValue::from(corrected_completion_tokens),
+    );
+
+    if let Some(total_tokens) = json_u64(raw.get("total_tokens")) {
+        raw.insert(
+            "total_tokens".to_string(),
+            JsonValue::from(total_tokens.saturating_add(reasoning_tokens)),
+        );
+    }
+
+    deepinfra_usage_from_raw(raw)
+}
+
+fn deepinfra_usage_from_raw(raw: JsonObject) -> LanguageModelUsage {
+    let input_total = json_u64(
+        raw.get("prompt_tokens")
+            .or_else(|| raw.get("promptTokens"))
+            .or_else(|| raw.get("input_tokens"))
+            .or_else(|| raw.get("inputTokens")),
+    );
+    let output_total = json_u64(
+        raw.get("completion_tokens")
+            .or_else(|| raw.get("completionTokens"))
+            .or_else(|| raw.get("output_tokens"))
+            .or_else(|| raw.get("outputTokens")),
+    );
+    let cache_read = json_u64(raw.get("prompt_tokens_details").and_then(|details| {
+        details
+            .get("cached_tokens")
+            .or_else(|| details.get("cachedTokens"))
+    }));
+    let reasoning_tokens = deepinfra_reasoning_tokens(&raw);
+
+    LanguageModelUsage {
+        input_tokens: InputTokenUsage {
+            total: input_total,
+            no_cache: input_total
+                .zip(cache_read)
+                .map(|(total, cached)| total.saturating_sub(cached)),
+            cache_read,
+            cache_write: None,
+        },
+        output_tokens: OutputTokenUsage {
+            total: output_total,
+            text: output_total
+                .map(|total| total.saturating_sub(reasoning_tokens.unwrap_or_default())),
+            reasoning: reasoning_tokens,
+        },
+        raw: Some(raw),
+    }
+}
+
+fn deepinfra_reasoning_tokens(raw: &JsonObject) -> Option<u64> {
+    json_u64(
+        raw.get("completion_tokens_details")
+            .and_then(|details| {
+                details
+                    .get("reasoning_tokens")
+                    .or_else(|| details.get("reasoningTokens"))
+            })
+            .or_else(|| raw.get("reasoning_tokens"))
+            .or_else(|| raw.get("reasoningTokens")),
+    )
+}
+
+fn json_u64(value: Option<&JsonValue>) -> Option<u64> {
+    value.and_then(JsonValue::as_u64)
+}
+
 fn non_empty_optional_setting(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.is_empty())
 }
@@ -250,6 +425,10 @@ mod tests {
     use crate::generate_text::{GenerateTextOptions, generate_text};
     use crate::headers::Headers;
     use crate::json::JsonValue;
+    use crate::language_model::{
+        LanguageModel, LanguageModelCallOptions, LanguageModelMessage, LanguageModelStreamPart,
+        LanguageModelSystemMessage,
+    };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
     use crate::provider::{ModelType, Provider, ProviderMetadata};
@@ -387,6 +566,142 @@ mod tests {
                 "temperature": 0.0
             }))
         );
+    }
+
+    #[test]
+    fn deepinfra_chat_corrects_reasoning_usage_when_reasoning_exceeds_completion_tokens() {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(|_request| -> OpenAICompatibleTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "chatcmpl-deepinfra-reasoning",
+                        "created": 1711115037,
+                        "model": "google/gemma-2-9b-it",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Done"
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 10,
+                            "prompt_tokens_details": {
+                                "cached_tokens": 3
+                            },
+                            "completion_tokens": 4,
+                            "completion_tokens_details": {
+                                "reasoning_tokens": 10
+                            },
+                            "total_tokens": 14
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = DeepInfraProvider::new()
+            .with_transport(transport)
+            .chat_model("google/gemma-2-9b-it");
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::System(LanguageModelSystemMessage::new("Think carefully")),
+        ])));
+
+        assert_eq!(result.usage.input_tokens.total, Some(10));
+        assert_eq!(result.usage.input_tokens.no_cache, Some(7));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(3));
+        assert_eq!(result.usage.output_tokens.total, Some(14));
+        assert_eq!(result.usage.output_tokens.text, Some(4));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(10));
+        assert_eq!(
+            result
+                .usage
+                .raw
+                .as_ref()
+                .and_then(|raw| raw.get("completion_tokens"))
+                .and_then(JsonValue::as_u64),
+            Some(14)
+        );
+        assert_eq!(
+            result
+                .usage
+                .raw
+                .as_ref()
+                .and_then(|raw| raw.get("total_tokens"))
+                .and_then(JsonValue::as_u64),
+            Some(24)
+        );
+    }
+
+    #[test]
+    fn deepinfra_chat_corrects_stream_finish_reasoning_usage() {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(|_request| -> OpenAICompatibleTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    sse_body([
+                        json!({
+                            "id": "chatcmpl-deepinfra-stream",
+                            "created": 1711115037,
+                            "model": "google/gemma-2-9b-it",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "role": "assistant",
+                                        "content": "Done"
+                                    },
+                                    "finish_reason": null
+                                }
+                            ]
+                        }),
+                        json!({
+                            "id": "chatcmpl-deepinfra-stream",
+                            "created": 1711115037,
+                            "model": "google/gemma-2-9b-it",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": "stop"
+                                }
+                            ],
+                            "usage": {
+                                "prompt_tokens": 10,
+                                "completion_tokens": 4,
+                                "completion_tokens_details": {
+                                    "reasoning_tokens": 10
+                                },
+                                "total_tokens": 14
+                            }
+                        }),
+                    ]),
+                ))))
+            });
+        let model = DeepInfraProvider::new()
+            .with_transport(transport)
+            .chat_model("google/gemma-2-9b-it");
+        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(Vec::new())));
+
+        assert!(matches!(
+            result.stream.last(),
+            Some(LanguageModelStreamPart::Finish(finish))
+                if finish.usage.output_tokens.total == Some(14)
+                    && finish.usage.output_tokens.text == Some(4)
+                    && finish.usage.output_tokens.reasoning == Some(10)
+                    && finish
+                        .usage
+                        .raw
+                        .as_ref()
+                        .and_then(|raw| raw.get("total_tokens"))
+                        .and_then(JsonValue::as_u64)
+                        == Some(24)
+        ));
     }
 
     #[test]
@@ -599,6 +914,14 @@ mod tests {
                 }
             })
         );
+    }
+
+    fn sse_body(events: impl IntoIterator<Item = JsonValue>) -> String {
+        events
+            .into_iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .chain(["data: [DONE]\n\n".to_string()])
+            .collect()
     }
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
