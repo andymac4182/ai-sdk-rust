@@ -4,6 +4,7 @@
 /// The crate version compiled into the library.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod cerebras;
 pub mod deepinfra;
 pub mod embed;
 pub mod embedding_model;
@@ -54,6 +55,10 @@ pub mod vercel_ai_gateway;
 pub mod video_model;
 pub mod warning;
 
+pub use cerebras::{
+    CerebrasProvider, CerebrasProviderSettings, DEFAULT_CEREBRAS_BASE_URL, cerebras,
+    create_cerebras,
+};
 pub use deepinfra::{
     DEFAULT_DEEPINFRA_BASE_URL, DeepInfraChatLanguageModel, DeepInfraImageModel, DeepInfraProvider,
     DeepInfraProviderSettings, create_deepinfra, deepinfra,
