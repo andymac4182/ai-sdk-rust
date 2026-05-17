@@ -29,12 +29,12 @@ use crate::language_model::{
     LanguageModelStreamPart, LanguageModelStreamResult, LanguageModelStreamResultResponse,
     LanguageModelSupportedUrls, LanguageModelText, LanguageModelUsage, OutputTokenUsage,
 };
-use crate::provider::{ProviderMetadata, SpecificationVersion};
+use crate::provider::{ApiCallError, ProviderMetadata, SpecificationVersion};
 use crate::provider_utils::{
     FetchErrorInfo, GetFromApiOptions, HandledFetchError, ParseJsonResult, PostJsonToApiOptions,
     ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
-    ProviderApiResponseHandlerError, RuntimeEnvironment, combine_headers, convert_to_base64,
-    create_event_source_response_handler, create_json_error_response_handler,
+    ProviderApiResponseHandlerError, ResponseHandlerResult, RuntimeEnvironment, combine_headers,
+    convert_to_base64, create_event_source_response_handler, create_json_error_response_handler,
     create_json_response_handler, get_from_api, post_json_to_api, with_user_agent_suffix,
     without_trailing_slash,
 };
@@ -42,6 +42,11 @@ use crate::reranking_model::{
     RerankingModel, RerankingModelCallOptions, RerankingModelRanking, RerankingModelResponse,
     RerankingModelResult,
 };
+use crate::video_model::{
+    VideoModel, VideoModelCallOptions, VideoModelFile, VideoModelResponse, VideoModelResult,
+    VideoModelVideoData,
+};
+use crate::warning::Warning;
 
 /// Default base URL used by upstream `@ai-sdk/gateway` provider calls.
 pub const DEFAULT_GATEWAY_BASE_URL: &str = "https://ai-gateway.vercel.sh/v4/ai";
@@ -732,6 +737,20 @@ impl GatewayProvider {
         self.reranking_model(model_id)
     }
 
+    /// Creates a Gateway video model.
+    pub fn video_model(&self, model_id: impl Into<String>) -> GatewayVideoModel {
+        GatewayVideoModel {
+            model_id: model_id.into(),
+            settings: self.settings.clone(),
+            transport: Arc::clone(&self.transport),
+        }
+    }
+
+    /// Alias for [`GatewayProvider::video_model`].
+    pub fn video(&self, model_id: impl Into<String>) -> GatewayVideoModel {
+        self.video_model(model_id)
+    }
+
     /// Returns available Gateway models for the authenticated account.
     pub async fn get_available_models(
         &self,
@@ -872,6 +891,14 @@ pub struct GatewayImageModel {
 /// Native AI SDK Gateway reranking model.
 #[derive(Clone)]
 pub struct GatewayRerankingModel {
+    model_id: String,
+    settings: GatewayProviderSettings,
+    transport: GatewayTransport,
+}
+
+/// Native AI SDK Gateway video model.
+#[derive(Clone)]
+pub struct GatewayVideoModel {
     model_id: String,
     settings: GatewayProviderSettings,
     transport: GatewayTransport,
@@ -1383,6 +1410,81 @@ impl GatewayRerankingModel {
     }
 }
 
+impl GatewayVideoModel {
+    /// Returns a copy of this model that uses the supplied HTTP transport.
+    pub fn with_transport(mut self, transport: GatewayTransport) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    async fn do_generate_result(&self, options: VideoModelCallOptions) -> VideoModelResult {
+        let request_body = gateway_video_request_body(&options);
+        let request_headers = self.request_headers(options.headers.as_ref());
+        let post_options = PostJsonToApiOptions::new(self.video_model_url(), request_body)
+            .with_headers(request_headers)
+            .with_environment(RuntimeEnvironment::unknown());
+        let transport = Arc::clone(&self.transport);
+
+        match post_json_to_api(
+            post_options,
+            move |request| (transport)(request),
+            gateway_video_response_handler,
+            |request, response| {
+                Ok(create_json_error_response_handler(
+                    response.json_error_response_handler_options(request),
+                    clone_json_value,
+                    gateway_error_to_message,
+                    |_, _| None,
+                ))
+            },
+        )
+        .await
+        {
+            Ok(response) => video_result_from_response(
+                &self.model_id,
+                response.value,
+                response.response_headers,
+            ),
+            Err(error) => video_result_from_error(&self.model_id, error),
+        }
+    }
+
+    fn video_model_url(&self) -> String {
+        format!("{}/video-model", self.base_url())
+    }
+
+    fn base_url(&self) -> String {
+        gateway_base_url(&self.settings)
+    }
+
+    fn request_headers(&self, call_headers: Option<&Headers>) -> BTreeMap<String, Option<String>> {
+        let provider_headers = Some(
+            gateway_provider_headers(&self.settings)
+                .into_iter()
+                .collect::<Vec<_>>(),
+        );
+        let call_headers = optional_headers(call_headers);
+        let model_headers = Some(vec![
+            (
+                "ai-video-model-specification-version".to_string(),
+                Some("4".to_string()),
+            ),
+            ("ai-model-id".to_string(), Some(self.model_id.clone())),
+        ]);
+        let accept_headers = Some(vec![(
+            "accept".to_string(),
+            Some("text/event-stream".to_string()),
+        )]);
+
+        combine_headers([
+            provider_headers,
+            call_headers,
+            model_headers,
+            accept_headers,
+        ])
+    }
+}
+
 impl LanguageModel for GatewayLanguageModel {
     type SupportedUrlsFuture<'a>
         = Ready<LanguageModelSupportedUrls>
@@ -1522,6 +1624,38 @@ impl RerankingModel for GatewayRerankingModel {
 
     fn do_rerank(&self, options: RerankingModelCallOptions) -> Self::RerankFuture<'_> {
         Box::pin(self.do_rerank_result(options))
+    }
+}
+
+impl VideoModel for GatewayVideoModel {
+    type MaxVideosPerCallFuture<'a>
+        = Ready<Option<usize>>
+    where
+        Self: 'a;
+
+    type GenerateFuture<'a>
+        = Pin<Box<dyn Future<Output = VideoModelResult> + Send + 'a>>
+    where
+        Self: 'a;
+
+    fn specification_version(&self) -> SpecificationVersion {
+        SpecificationVersion::V4
+    }
+
+    fn provider(&self) -> &str {
+        GATEWAY_PROVIDER_ID
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    fn max_videos_per_call(&self) -> Self::MaxVideosPerCallFuture<'_> {
+        ready(Some(usize::MAX))
+    }
+
+    fn do_generate(&self, options: VideoModelCallOptions) -> Self::GenerateFuture<'_> {
+        Box::pin(self.do_generate_result(options))
     }
 }
 
@@ -2128,6 +2262,298 @@ fn reranking_result_from_error(
         .with_response(response)
 }
 
+fn gateway_video_request_body(options: &VideoModelCallOptions) -> JsonValue {
+    let mut body = JsonObject::new();
+
+    if let Some(prompt) = &options.prompt {
+        body.insert("prompt".to_string(), JsonValue::String(prompt.clone()));
+    }
+
+    body.insert("n".to_string(), json!(options.n));
+
+    if let Some(aspect_ratio) = &options.aspect_ratio
+        && !aspect_ratio.is_empty()
+    {
+        body.insert(
+            "aspectRatio".to_string(),
+            JsonValue::String(aspect_ratio.clone()),
+        );
+    }
+
+    if let Some(resolution) = &options.resolution
+        && !resolution.is_empty()
+    {
+        body.insert(
+            "resolution".to_string(),
+            JsonValue::String(resolution.clone()),
+        );
+    }
+
+    if let Some(duration) = options.duration
+        && is_non_zero_f64(duration)
+    {
+        body.insert("duration".to_string(), json!(duration));
+    }
+
+    if let Some(fps) = options.fps
+        && is_non_zero_f64(fps)
+    {
+        body.insert("fps".to_string(), json!(fps));
+    }
+
+    if let Some(seed) = options.seed
+        && seed != 0
+    {
+        body.insert("seed".to_string(), json!(seed));
+    }
+
+    body.insert(
+        "providerOptions".to_string(),
+        serde_json::to_value(&options.provider_options).unwrap_or(JsonValue::Null),
+    );
+
+    if let Some(image) = &options.image {
+        body.insert("image".to_string(), gateway_video_file_value(image));
+    }
+
+    JsonValue::Object(body)
+}
+
+fn gateway_video_file_value(file: &VideoModelFile) -> JsonValue {
+    match file {
+        VideoModelFile::File {
+            media_type,
+            data,
+            provider_options,
+        } => {
+            let mut value = JsonObject::new();
+            value.insert("type".to_string(), JsonValue::String("file".to_string()));
+            value.insert(
+                "mediaType".to_string(),
+                JsonValue::String(media_type.clone()),
+            );
+            value.insert(
+                "data".to_string(),
+                JsonValue::String(convert_to_base64(data)),
+            );
+
+            if let Some(provider_options) = provider_options {
+                value.insert(
+                    "providerOptions".to_string(),
+                    serde_json::to_value(provider_options).unwrap_or(JsonValue::Null),
+                );
+            }
+
+            JsonValue::Object(value)
+        }
+        VideoModelFile::Url {
+            url,
+            provider_options,
+        } => {
+            let mut value = JsonObject::new();
+            value.insert("type".to_string(), JsonValue::String("url".to_string()));
+            value.insert("url".to_string(), JsonValue::String(url.to_string()));
+
+            if let Some(provider_options) = provider_options {
+                value.insert(
+                    "providerOptions".to_string(),
+                    serde_json::to_value(provider_options).unwrap_or(JsonValue::Null),
+                );
+            }
+
+            JsonValue::Object(value)
+        }
+    }
+}
+
+fn is_non_zero_f64(value: f64) -> bool {
+    value.to_bits() & 0x7fff_ffff_ffff_ffff != 0
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct GatewayVideoResponse {
+    videos: Vec<VideoModelVideoData>,
+    #[serde(default)]
+    warnings: Vec<Warning>,
+    #[serde(default)]
+    provider_metadata: Option<ProviderMetadata>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(tag = "type")]
+enum GatewayVideoEvent {
+    #[serde(rename = "result")]
+    Result {
+        videos: Vec<VideoModelVideoData>,
+        #[serde(default)]
+        warnings: Vec<Warning>,
+        #[serde(default, rename = "providerMetadata")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    #[serde(rename = "error")]
+    Error {
+        message: String,
+        #[serde(rename = "errorType")]
+        error_type: String,
+        #[serde(rename = "statusCode")]
+        status_code: u16,
+        #[serde(default)]
+        param: Option<JsonValue>,
+    },
+}
+
+fn gateway_video_event(value: &JsonValue) -> Result<GatewayVideoEvent, serde_json::Error> {
+    serde_json::from_value(value.clone())
+}
+
+fn gateway_video_response_handler(
+    request: &ProviderApiRequest,
+    response: &ProviderApiResponse,
+) -> Result<ResponseHandlerResult<GatewayVideoResponse>, ProviderApiResponseHandlerError> {
+    let stream = create_event_source_response_handler(
+        response.event_source_response_handler_options(),
+        gateway_video_event,
+    )
+    .map_err(|_| {
+        ProviderApiResponseHandlerError::api_call(gateway_video_api_call_error(
+            "SSE response body is empty",
+            request,
+            response,
+        ))
+    })?;
+    let response_headers = stream.response_headers.clone();
+    let Some(event) = stream.value.into_iter().next() else {
+        return Err(ProviderApiResponseHandlerError::api_call(
+            gateway_video_api_call_error(
+                "SSE stream ended without a data event",
+                request,
+                response,
+            ),
+        ));
+    };
+
+    match event {
+        ParseJsonResult::Success { value, raw_value } => match value {
+            GatewayVideoEvent::Result {
+                videos,
+                warnings,
+                provider_metadata,
+            } => {
+                let mut result = ResponseHandlerResult::new(GatewayVideoResponse {
+                    videos,
+                    warnings,
+                    provider_metadata,
+                })
+                .with_raw_value(raw_value);
+
+                if let Some(headers) = response_headers {
+                    result = result.with_response_headers(headers);
+                }
+
+                Ok(result)
+            }
+            GatewayVideoEvent::Error {
+                message,
+                error_type,
+                status_code,
+                param,
+            } => {
+                let response_body = raw_value.to_string();
+                let data = json!({
+                    "error": {
+                        "message": message,
+                        "type": error_type,
+                        "param": param
+                    }
+                });
+
+                Err(ProviderApiResponseHandlerError::api_call(
+                    ApiCallError::new(
+                        data.pointer("/error/message")
+                            .and_then(JsonValue::as_str)
+                            .unwrap_or("Gateway video model error"),
+                        request.url.clone(),
+                        request.request_body_values.clone(),
+                    )
+                    .with_status_code(status_code)
+                    .with_response_headers(response.headers.clone())
+                    .with_response_body(response_body)
+                    .with_data(data),
+                ))
+            }
+        },
+        ParseJsonResult::Failure { error, raw_value } => {
+            let mut api_error =
+                gateway_video_api_call_error("Failed to parse video SSE event", request, response);
+
+            if let Some(raw_value) = raw_value {
+                api_error = api_error.with_response_body(raw_value.to_string());
+            } else {
+                api_error = api_error.with_response_body(error.to_string());
+            }
+
+            Err(ProviderApiResponseHandlerError::api_call(api_error))
+        }
+    }
+}
+
+fn gateway_video_api_call_error(
+    message: impl Into<String>,
+    request: &ProviderApiRequest,
+    response: &ProviderApiResponse,
+) -> ApiCallError {
+    ApiCallError::new(
+        message,
+        request.url.clone(),
+        request.request_body_values.clone(),
+    )
+    .with_status_code(response.status_code)
+    .with_response_headers(response.headers.clone())
+}
+
+fn video_result_from_response(
+    model_id: &str,
+    response: GatewayVideoResponse,
+    response_headers: Option<Headers>,
+) -> VideoModelResult {
+    let mut result =
+        VideoModelResult::new(response.videos, video_response(model_id, response_headers));
+
+    for warning in response.warnings {
+        result = result.with_warning(warning);
+    }
+
+    if let Some(provider_metadata) = response.provider_metadata {
+        result = result.with_provider_metadata(provider_metadata);
+    }
+
+    result
+}
+
+fn video_result_from_error(model_id: &str, error: HandledFetchError) -> VideoModelResult {
+    let (message, headers) = match error {
+        HandledFetchError::Original { error } => (error.message().to_string(), None),
+        HandledFetchError::ApiCall { error } => (
+            error.message().to_string(),
+            error.response_headers().cloned(),
+        ),
+    };
+
+    VideoModelResult::new(Vec::new(), video_response(model_id, headers))
+        .with_provider_metadata(gateway_error_metadata(message))
+}
+
+fn video_response(model_id: &str, headers: Option<Headers>) -> VideoModelResponse {
+    let mut response = VideoModelResponse::new(OffsetDateTime::now_utc(), model_id);
+
+    if let Some(headers) = headers {
+        response = with_video_response_headers(response, headers);
+    }
+
+    response
+}
+
 fn gateway_spend_report_response(
     value: &JsonValue,
 ) -> Result<GatewaySpendReportResponse, serde_json::Error> {
@@ -2401,6 +2827,17 @@ fn with_reranking_response_headers(
     response
 }
 
+fn with_video_response_headers(
+    mut response: VideoModelResponse,
+    headers: Headers,
+) -> VideoModelResponse {
+    for (name, value) in headers {
+        response = response.with_header(name, value);
+    }
+
+    response
+}
+
 fn default_gateway_transport() -> GatewayTransport {
     Arc::new(|request| Box::pin(ready(execute_gateway_request(request))))
 }
@@ -2493,6 +2930,7 @@ mod tests {
     use crate::file_data::FileDataContent;
     use crate::generate_image::{GenerateImageOptions, generate_image};
     use crate::generate_text::{GenerateTextOptions, generate_text};
+    use crate::generate_video::{GenerateVideoOptions, generate_video};
     use crate::headers::Headers;
     use crate::image_model::{ImageModel, ImageModelCallOptions, ImageModelFile};
     use crate::json::JsonValue;
@@ -2510,6 +2948,8 @@ mod tests {
         RerankingModel, RerankingModelCallOptions, RerankingModelDocuments,
     };
     use crate::stream_text::{StreamTextOptions, stream_text};
+    use crate::video_model::{VideoModel, VideoModelCallOptions, VideoModelFile};
+    use crate::warning::Warning;
     use serde_json::json;
     use std::env;
     use std::fs;
@@ -3460,6 +3900,308 @@ mod tests {
     }
 
     #[test]
+    fn gateway_video_model_generates_through_generate_video() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                format!(
+                    "data: {}\n\n",
+                    json!({
+                        "type": "result",
+                        "videos": [
+                            {
+                                "type": "base64",
+                                "data": "AAAAIGZ0eXBtcDQy",
+                                "mediaType": "video/mp4"
+                            }
+                        ],
+                        "warnings": [
+                            {
+                                "type": "compatibility",
+                                "feature": "resolution",
+                                "details": "Resolution was adjusted."
+                            }
+                        ],
+                        "providerMetadata": {
+                            "gateway": {
+                                "routing": {
+                                    "provider": "google"
+                                },
+                                "generationId": "gen_video_123"
+                            }
+                        }
+                    })
+                ),
+            )
+            .with_headers(Headers::from([(
+                "x-request-id".to_string(),
+                "video_req".to_string(),
+            )])))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token")
+                .with_header("x-provider", "provider-value"),
+        )
+        .with_transport(transport)
+        .video_model("google/veo-2.0-generate-001");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "google": {
+                "enhancePrompt": true
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = poll_ready(generate_video(
+            GenerateVideoOptions::new(&model, "A tiny animation")
+                .with_n(1)
+                .with_aspect_ratio("16:9")
+                .with_resolution("1280x720")
+                .with_duration(5.0)
+                .with_fps(24.0)
+                .with_seed(42)
+                .with_provider_options(provider_options)
+                .with_header("Custom-Header", "test-value"),
+        ))
+        .expect("video generation succeeds");
+
+        assert_eq!(result.video.media_type(), "video/mp4");
+        assert_eq!(result.video.base64(), "AAAAIGZ0eXBtcDQy");
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(
+            result
+                .provider_metadata
+                .get("gateway")
+                .and_then(|metadata| metadata.get("generationId"))
+                .and_then(JsonValue::as_str),
+            Some("gen_video_123")
+        );
+        assert_eq!(
+            result
+                .responses
+                .first()
+                .and_then(|response| response.headers.as_ref())
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("video_req")
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://api.test.com/video-model");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-token")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-video-model-specification-version")
+                .map(String::as_str),
+            Some("4")
+        );
+        assert_eq!(
+            request.headers.get("ai-model-id").map(String::as_str),
+            Some("google/veo-2.0-generate-001")
+        );
+        assert_eq!(
+            request.headers.get("accept").map(String::as_str),
+            Some("text/event-stream")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("test-value")
+        );
+        assert_eq!(
+            request.headers.get("x-provider").map(String::as_str),
+            Some("provider-value")
+        );
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+        assert_eq!(
+            request_body.get("prompt").and_then(JsonValue::as_str),
+            Some("A tiny animation")
+        );
+        assert_eq!(request_body.get("n").and_then(JsonValue::as_u64), Some(1));
+        assert_eq!(
+            request_body.get("aspectRatio").and_then(JsonValue::as_str),
+            Some("16:9")
+        );
+        assert_eq!(
+            request_body.get("resolution").and_then(JsonValue::as_str),
+            Some("1280x720")
+        );
+        assert_eq!(
+            request_body.get("duration").and_then(JsonValue::as_f64),
+            Some(5.0)
+        );
+        assert_eq!(
+            request_body.get("fps").and_then(JsonValue::as_f64),
+            Some(24.0)
+        );
+        assert_eq!(
+            request_body.get("seed").and_then(JsonValue::as_u64),
+            Some(42)
+        );
+        assert_eq!(
+            request_body
+                .pointer("/providerOptions/google/enhancePrompt")
+                .and_then(JsonValue::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_encodes_image_inputs_and_returns_url_videos() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                format!(
+                    ":\n\ndata: {}\n\n",
+                    json!({
+                        "type": "result",
+                        "videos": [
+                            {
+                                "type": "url",
+                                "url": "https://example.com/video.mp4",
+                                "mediaType": "video/mp4"
+                            }
+                        ]
+                    })
+                ),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .video_model("fal/luma-ray-2");
+        let file_options: ProviderMetadata = serde_json::from_value(json!({
+            "fal": {
+                "purpose": "first-frame"
+            }
+        }))
+        .expect("provider metadata deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                VideoModelCallOptions::new(1)
+                    .with_prompt("Animate this image")
+                    .with_duration(0.0)
+                    .with_fps(0.0)
+                    .with_seed(0)
+                    .with_image(
+                        VideoModelFile::file(
+                            "image/png",
+                            FileDataContent::Bytes(b"Hello".to_vec()),
+                        )
+                        .with_provider_options(file_options),
+                    ),
+            ),
+        );
+
+        assert_eq!(result.videos.len(), 1);
+        assert!(matches!(
+            result.videos[0],
+            crate::video_model::VideoModelVideoData::Url { .. }
+        ));
+        assert_eq!(result.warnings, Vec::<Warning>::new());
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body
+                .pointer("/image/data")
+                .and_then(JsonValue::as_str),
+            Some("SGVsbG8=")
+        );
+        assert_eq!(
+            request_body
+                .pointer("/image/providerOptions/fal/purpose")
+                .and_then(JsonValue::as_str),
+            Some("first-frame")
+        );
+        assert!(request_body.get("duration").is_none());
+        assert!(request_body.get("fps").is_none());
+        assert!(request_body.get("seed").is_none());
+    }
+
+    #[test]
+    fn gateway_video_model_maps_sse_error_to_metadata() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                format!(
+                    "data: {}\n\n",
+                    json!({
+                        "type": "error",
+                        "message": "Rate limit exceeded",
+                        "errorType": "rate_limit_exceeded",
+                        "statusCode": 429,
+                        "param": null
+                    })
+                ),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .video_model("google/veo-2.0-generate-001");
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("bad prompt")));
+
+        assert!(result.videos.is_empty());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("errorMessage"))
+                .and_then(JsonValue::as_str),
+            Some("Rate limit exceeded")
+        );
+    }
+
+    #[test]
     fn gateway_function_uses_default_gateway_provider() {
         let model = gateway("openai/gpt-4.1-mini");
 
@@ -3524,6 +4266,36 @@ mod tests {
         assert_eq!(
             provider.reranking_model("cohere/rerank-v3.5").provider(),
             "gateway"
+        );
+    }
+
+    #[test]
+    fn gateway_provider_creates_video_model_aliases() {
+        let provider = GatewayProvider::new();
+
+        assert_eq!(
+            provider.video("google/veo-2.0-generate-001").model_id(),
+            "google/veo-2.0-generate-001"
+        );
+        assert_eq!(
+            provider
+                .video_model("google/veo-2.0-generate-001")
+                .specification_version(),
+            SpecificationVersion::V4
+        );
+        assert_eq!(
+            provider
+                .video_model("google/veo-2.0-generate-001")
+                .provider(),
+            "gateway"
+        );
+        assert_eq!(
+            poll_ready(
+                provider
+                    .video_model("google/veo-2.0-generate-001")
+                    .max_videos_per_call()
+            ),
+            Some(usize::MAX)
         );
     }
 
@@ -4219,6 +4991,33 @@ mod tests {
         assert!(
             !result.ranking.is_empty(),
             "gateway reranking response was empty"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live video generation call"]
+    fn live_gateway_generate_video() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!("skipping live Gateway video test because no API key is configured");
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_GATEWAY_VIDEO_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_VIDEO_MODEL"))
+            .unwrap_or_else(|_| "google/veo-2.0-generate-001".to_string());
+        let model = GatewayProvider::new()
+            .with_api_key(api_key)
+            .video_model(model_id);
+        let result = poll_ready(
+            model.do_generate(
+                VideoModelCallOptions::new(1)
+                    .with_prompt("A minimal two second abstract color motion test")
+                    .with_duration(2.0),
+            ),
+        );
+
+        assert!(
+            !result.videos.is_empty(),
+            "gateway video response was empty"
         );
     }
 
