@@ -16,8 +16,8 @@ use crate::language_model::{
 };
 use crate::provider::{ProviderMetadata, TypeValidationError};
 use crate::provider_utils::{
-    FlexibleSchema, ParseJsonError, ParseJsonResult, generate_id, safe_parse_json,
-    safe_parse_json_with_schema, with_user_agent_suffix,
+    FlexibleSchema, ParseJsonError, ParseJsonResult, ValidateTypesResult, generate_id,
+    safe_parse_json, safe_parse_json_with_schema, safe_validate_types, with_user_agent_suffix,
 };
 use crate::warning::Warning;
 
@@ -303,6 +303,9 @@ pub struct GenerateObjectOptions<'a, M: LanguageModel + ?Sized> {
 
     /// Optional enum values for upstream enum output mode.
     pub enum_values: Option<Vec<String>>,
+
+    /// Whether schema validation should use upstream array output mode.
+    pub array_output: bool,
 }
 
 impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
@@ -322,6 +325,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
             schema_description: None,
             repair_text: None,
             enum_values: None,
+            array_output: false,
         }
     }
 
@@ -356,6 +360,19 @@ impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
     pub fn with_schema(mut self, schema: impl Into<FlexibleSchema>) -> Self {
         self.schema = Some(schema.into());
         self.enum_values = None;
+        self.array_output = false;
+        self
+    }
+
+    /// Uses upstream array output mode with a schema for each element.
+    ///
+    /// Upstream asks the provider for an object shaped as
+    /// `{ "elements": [<item>] }` and returns only the generated array to
+    /// callers.
+    pub fn with_array_schema(mut self, schema: impl Into<FlexibleSchema>) -> Self {
+        self.schema = Some(schema.into());
+        self.enum_values = None;
+        self.array_output = true;
         self
     }
 
@@ -385,6 +402,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
         self.schema_name = None;
         self.schema_description = None;
         self.enum_values = Some(enum_values.into_iter().map(Into::into).collect());
+        self.array_output = false;
         self
     }
 
@@ -436,6 +454,7 @@ where
         schema_description,
         repair_text,
         enum_values,
+        array_output,
     } = options;
 
     call_options.response_format = Some(generate_object_response_format(
@@ -443,6 +462,7 @@ where
         &schema_name,
         &schema_description,
         enum_values.as_deref(),
+        array_output,
     ));
     append_generate_object_user_agent(&mut call_options);
 
@@ -466,10 +486,13 @@ where
         text,
         schema,
         enum_values.as_deref(),
+        array_output,
         repair_text.as_ref(),
-        &response,
-        &usage,
-        &finish_reason,
+        GenerateObjectParseContext {
+            response: &response,
+            usage: &usage,
+            finish_reason: &finish_reason,
+        },
     )
     .await?;
 
@@ -493,13 +516,20 @@ fn generate_object_response_format(
     schema_name: &Option<String>,
     schema_description: &Option<String>,
     enum_values: Option<&[String]>,
+    array_output: bool,
 ) -> LanguageModelResponseFormat {
     let mut response_format = LanguageModelResponseFormat::json();
 
     if let Some(enum_values) = enum_values {
         response_format = response_format.with_schema(enum_json_schema(enum_values));
     } else if let Some(schema) = schema {
-        response_format = response_format.with_schema(schema.as_schema().json_schema().clone());
+        let json_schema = if array_output {
+            array_json_schema(schema)
+        } else {
+            schema.as_schema().json_schema().clone()
+        };
+
+        response_format = response_format.with_schema(json_schema);
 
         if let Some(schema_name) = schema_name {
             response_format = response_format.with_name(schema_name.clone());
@@ -511,6 +541,25 @@ fn generate_object_response_format(
     }
 
     response_format
+}
+
+fn array_json_schema(schema: &FlexibleSchema) -> JsonSchema {
+    let mut item_schema = schema.as_schema().json_schema().clone();
+    item_schema.remove("$schema");
+
+    serde_json::from_value(serde_json::json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+            "elements": {
+                "type": "array",
+                "items": item_schema
+            }
+        },
+        "required": ["elements"],
+        "additionalProperties": false
+    }))
+    .expect("array output schema is a JSON object")
 }
 
 fn enum_json_schema(enum_values: &[String]) -> JsonSchema {
@@ -544,11 +593,20 @@ fn parse_generated_object(
     text: &str,
     schema: Option<FlexibleSchema>,
     enum_values: Option<&[String]>,
+    array_output: bool,
 ) -> ParseJsonResult<JsonValue> {
-    let parse_result = schema.map_or_else(
-        || safe_parse_json(text),
-        |schema| safe_parse_json_with_schema(text, schema),
-    );
+    let parse_result = match schema {
+        Some(schema) if array_output => match safe_parse_json(text) {
+            ParseJsonResult::Success {
+                value, raw_value, ..
+            } => validate_array_generated_object(value, raw_value, schema),
+            ParseJsonResult::Failure { error, raw_value } => {
+                ParseJsonResult::Failure { error, raw_value }
+            }
+        },
+        Some(schema) => safe_parse_json_with_schema(text, schema),
+        None => safe_parse_json(text),
+    };
 
     match (parse_result, enum_values) {
         (
@@ -559,6 +617,49 @@ fn parse_generated_object(
         ) => validate_enum_generated_object(value, raw_value, enum_values),
         (parse_result, _) => parse_result,
     }
+}
+
+fn validate_array_generated_object(
+    value: JsonValue,
+    raw_value: JsonValue,
+    schema: FlexibleSchema,
+) -> ParseJsonResult<JsonValue> {
+    let elements = value
+        .as_object()
+        .and_then(|object| object.get("elements"))
+        .and_then(JsonValue::as_array);
+
+    let Some(elements) = elements else {
+        return array_validation_failure(
+            value,
+            raw_value,
+            "value must be an object that contains an array of elements",
+        );
+    };
+
+    let mut validated_elements = Vec::with_capacity(elements.len());
+
+    for element in elements {
+        match safe_validate_types(element.clone(), schema.clone(), None) {
+            ValidateTypesResult::Success { value, .. } => validated_elements.push(value),
+            ValidateTypesResult::Failure { error, .. } => {
+                return ParseJsonResult::failure(error, Some(raw_value));
+            }
+        }
+    }
+
+    ParseJsonResult::success(JsonValue::Array(validated_elements), raw_value)
+}
+
+fn array_validation_failure(
+    value: JsonValue,
+    raw_value: JsonValue,
+    cause_message: &'static str,
+) -> ParseJsonResult<JsonValue> {
+    ParseJsonResult::failure(
+        TypeValidationError::with_cause_message(value, cause_message, None),
+        Some(raw_value),
+    )
 }
 
 fn validate_enum_generated_object(
@@ -602,21 +703,20 @@ async fn parse_generated_object_with_repair(
     text: String,
     schema: Option<FlexibleSchema>,
     enum_values: Option<&[String]>,
+    array_output: bool,
     repair_text: Option<&GenerateObjectRepairText<'_>>,
-    response: &LanguageModelResponse,
-    usage: &LanguageModelUsage,
-    finish_reason: &FinishReason,
+    context: GenerateObjectParseContext<'_>,
 ) -> Result<JsonValue, NoObjectGeneratedError> {
-    match parse_generated_object(&text, schema.clone(), enum_values) {
+    match parse_generated_object(&text, schema.clone(), enum_values, array_output) {
         ParseJsonResult::Success { value, .. } => Ok(value),
         ParseJsonResult::Failure { error, .. } => {
             let Some(repair_text) = repair_text else {
                 return Err(parse_failure_error(
                     text,
                     error,
-                    response,
-                    usage,
-                    finish_reason,
+                    context.response,
+                    context.usage,
+                    context.finish_reason,
                 ));
             };
 
@@ -628,24 +728,30 @@ async fn parse_generated_object_with_repair(
                 return Err(parse_failure_error(
                     text,
                     original_error,
-                    response,
-                    usage,
-                    finish_reason,
+                    context.response,
+                    context.usage,
+                    context.finish_reason,
                 ));
             };
 
-            match parse_generated_object(&repaired_text, schema, enum_values) {
+            match parse_generated_object(&repaired_text, schema, enum_values, array_output) {
                 ParseJsonResult::Success { value, .. } => Ok(value),
                 ParseJsonResult::Failure { error, .. } => Err(parse_failure_error(
                     repaired_text,
                     error,
-                    response,
-                    usage,
-                    finish_reason,
+                    context.response,
+                    context.usage,
+                    context.finish_reason,
                 )),
             }
         }
     }
+}
+
+struct GenerateObjectParseContext<'a> {
+    response: &'a LanguageModelResponse,
+    usage: &'a LanguageModelUsage,
+    finish_reason: &'a FinishReason,
 }
 
 fn parse_failure_error(
@@ -753,7 +859,7 @@ mod tests {
 
     use super::{
         GenerateObjectOptions, GenerateObjectRequest, GenerateObjectResponse, GenerateObjectResult,
-        enum_json_schema, generate_object,
+        array_json_schema, enum_json_schema, generate_object,
     };
     use crate::VERSION;
     use crate::language_model::{
@@ -1187,6 +1293,107 @@ mod tests {
                     .with_name("answer")
                     .with_description("A numeric answer object.")
             )
+        );
+    }
+
+    #[test]
+    fn generate_object_forwards_array_schema_and_returns_elements() {
+        let result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"elements\":[{\"answer\":1},{\"answer\":2}]}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        );
+        let model = StaticObjectModel::new(result);
+        let schema = answer_schema();
+
+        let output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_array_schema(schema.clone())
+                .with_schema_name("answers")
+                .with_schema_description("A list of numeric answer objects."),
+        ))
+        .expect("array output is generated");
+
+        assert_eq!(output.object, json!([{ "answer": 1 }, { "answer": 2 }]));
+
+        let seen_options = model.seen_options();
+        assert_eq!(seen_options.len(), 1);
+        assert_eq!(
+            seen_options[0].response_format,
+            Some(
+                LanguageModelResponseFormat::json()
+                    .with_schema(array_json_schema(&schema.into()))
+                    .with_name("answers")
+                    .with_description("A list of numeric answer objects.")
+            )
+        );
+    }
+
+    #[test]
+    fn generate_object_reports_array_shape_failures_as_no_object_errors() {
+        let result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"items\":[{\"answer\":1}]}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        );
+        let model = StaticObjectModel::new(result);
+
+        let error = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt()).with_array_schema(answer_schema()),
+        ))
+        .expect_err("array output without elements should fail");
+
+        assert_eq!(
+            error.message(),
+            "No object generated: response did not match schema."
+        );
+        assert_eq!(error.text(), Some("{\"items\":[{\"answer\":1}]}"));
+        assert!(error.cause_message().is_some_and(|cause| {
+            cause.contains("value must be an object that contains an array of elements")
+        }));
+    }
+
+    #[test]
+    fn generate_object_reports_array_element_validation_failures() {
+        let result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"elements\":[{\"answer\":1},{\"answer\":\"wrong\"}]}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        );
+        let model = StaticObjectModel::new(result);
+
+        let error = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt()).with_array_schema(answer_schema()),
+        ))
+        .expect_err("schema-invalid array element should fail");
+
+        assert_eq!(
+            error.message(),
+            "No object generated: response did not match schema."
+        );
+        assert_eq!(
+            error.text(),
+            Some("{\"elements\":[{\"answer\":1},{\"answer\":\"wrong\"}]}")
+        );
+        assert!(
+            error
+                .cause_message()
+                .is_some_and(|cause| cause.contains("answer must be a number"))
         );
     }
 
