@@ -3090,16 +3090,15 @@ fn content_part(value: &JsonValue) -> Option<LanguageModelContent> {
     }
 
     let object = value.as_object()?;
+    if let Ok(content) = serde_json::from_value::<LanguageModelContent>(value.clone()) {
+        return Some(content);
+    }
+
     let part_type = object.get("type").and_then(JsonValue::as_str)?;
 
-    match part_type {
-        "text" => json_string(object.get("text"))
-            .map(LanguageModelText::new)
-            .map(LanguageModelContent::Text),
-        other => Some(LanguageModelContent::Custom(
-            LanguageModelCustomContent::new(format!("gateway.{other}")),
-        )),
-    }
+    Some(LanguageModelContent::Custom(
+        LanguageModelCustomContent::new(format!("gateway.{part_type}")),
+    ))
 }
 
 fn finish_reason(value: Option<&JsonValue>) -> LanguageModelFinishReason {
@@ -3429,6 +3428,7 @@ mod tests {
     use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
     use crate::provider_utils::{
         ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+        Tool,
     };
     use crate::rerank::{RerankDocuments, RerankOptions, rerank};
     use crate::reranking_model::{
@@ -3961,6 +3961,200 @@ mod tests {
                 .get("ai-o11y-request-id")
                 .map(String::as_str),
             Some("req_gateway_context")
+        );
+    }
+
+    #[test]
+    fn gateway_model_runs_generate_text_tool_loop_end_to_end() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let captured_requests_for_transport = Arc::clone(&captured_requests);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            let call_number = {
+                let mut requests = captured_requests_for_transport
+                    .lock()
+                    .expect("captured requests mutex is not poisoned");
+                requests.push(request.clone());
+                requests.len()
+            };
+
+            let response = match call_number {
+                1 => json!({
+                    "id": "gateway-tool-loop-1",
+                    "created": 1711115037,
+                    "model": "openai/gpt-4.1-mini",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call_1",
+                            "toolName": "weather",
+                            "input": "{\"city\":\"Brisbane\"}"
+                        }
+                    ],
+                    "finish_reason": "tool-calls",
+                    "usage": {
+                        "prompt_tokens": 6,
+                        "completion_tokens": 3
+                    }
+                }),
+                2 => json!({
+                    "id": "gateway-tool-loop-2",
+                    "created": 1711115040,
+                    "model": "openai/gpt-4.1-mini",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "The weather in Brisbane is sunny."
+                        }
+                    ],
+                    "finish_reason": "stop",
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 7
+                    }
+                }),
+                other => panic!("unexpected request #{other}"),
+            };
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                response.to_string(),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .language_model("openai/gpt-4.1-mini");
+        let input_schema: JsonObject = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "city": {
+                    "type": "string"
+                }
+            },
+            "required": ["city"]
+        }))
+        .expect("schema deserializes");
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(&model, Prompt::from_prompt("Weather?"))
+                .expect("prompt is valid")
+                .with_tool(
+                    Tool::new("weather", input_schema.clone())
+                        .with_description("Get weather")
+                        .with_execute(|input, options| async move {
+                            Ok(json!({
+                                "city": input["city"],
+                                "forecast": "sunny",
+                                "toolCallId": options.tool_call_id
+                            }))
+                        }),
+                )
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(result.text, "The weather in Brisbane is sunny.");
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.steps.len(), 2);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].output["forecast"], "sunny");
+
+        let request_bodies = captured_requests
+            .lock()
+            .expect("captured requests mutex is not poisoned")
+            .iter()
+            .map(|request| {
+                request
+                    .body
+                    .as_ref()
+                    .and_then(ProviderApiRequestBody::as_text)
+                    .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+                    .expect("request body is JSON")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(request_bodies.len(), 2);
+        assert_eq!(
+            request_bodies[0],
+            json!({
+                "prompt": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Weather?"
+                            }
+                        ]
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "weather",
+                        "description": "Get weather",
+                        "inputSchema": input_schema.clone()
+                    }
+                ]
+            })
+        );
+        assert_eq!(
+            request_bodies[1],
+            json!({
+                "prompt": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Weather?"
+                            }
+                        ]
+                    },
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool-call",
+                                "toolCallId": "call_1",
+                                "toolName": "weather",
+                                "input": {
+                                    "city": "Brisbane"
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "role": "tool",
+                        "content": [
+                            {
+                                "type": "tool-result",
+                                "toolCallId": "call_1",
+                                "toolName": "weather",
+                                "output": {
+                                    "type": "json",
+                                    "value": {
+                                        "city": "Brisbane",
+                                        "forecast": "sunny",
+                                        "toolCallId": "call_1"
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "weather",
+                        "description": "Get weather",
+                        "inputSchema": input_schema.clone()
+                    }
+                ]
+            })
         );
     }
 
