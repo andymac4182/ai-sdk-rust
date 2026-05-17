@@ -20,6 +20,10 @@ use crate::language_model::{
 use crate::prompt::{Prompt, standardize_prompt};
 use crate::provider::{InvalidPromptError, ProviderMetadata, ProviderOptions};
 use crate::provider_utils::with_user_agent_suffix;
+use crate::text_stream_response::{
+    TextStreamResponse, TextStreamResponseInit, TextStreamResponseOptions,
+    TextStreamResponseWriter, create_text_stream_response, pipe_text_stream_to_response,
+};
 use crate::warning::Warning;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -706,6 +710,29 @@ impl StreamTextResult {
     pub fn final_step(&self) -> Option<&StreamTextStep> {
         self.steps.last()
     }
+
+    /// Creates a text-stream response from the collected final-step text stream.
+    pub fn to_text_stream_response(&self, init: TextStreamResponseInit) -> TextStreamResponse {
+        create_text_stream_response(TextStreamResponseOptions::from_init(
+            self.text_stream.clone(),
+            init,
+        ))
+    }
+
+    /// Pipes the collected final-step text stream to a response writer.
+    pub fn pipe_text_stream_to_response<W>(
+        &self,
+        response: &mut W,
+        init: TextStreamResponseInit,
+    ) -> Result<(), W::Error>
+    where
+        W: TextStreamResponseWriter,
+    {
+        pipe_text_stream_to_response(
+            response,
+            TextStreamResponseOptions::from_init(self.text_stream.clone(), init),
+        )
+    }
 }
 
 /// Runs a text streaming call against a language model and collects the stream.
@@ -1200,6 +1227,29 @@ mod tests {
             result.parts.last(),
             Some(TextStreamPart::Finish(_))
         ));
+
+        let text_response = result.to_text_stream_response(
+            TextStreamResponseInit::new()
+                .with_status(202)
+                .with_header("x-stream", "text"),
+        );
+
+        assert_eq!(text_response.status, 202);
+        assert_eq!(
+            text_response
+                .headers
+                .get("content-type")
+                .map(String::as_str),
+            Some(crate::text_stream_response::TEXT_STREAM_CONTENT_TYPE)
+        );
+        assert_eq!(
+            text_response.headers.get("x-stream").map(String::as_str),
+            Some("text")
+        );
+        assert_eq!(
+            text_response.decoded_body().expect("response body decodes"),
+            result.text_stream
+        );
     }
 
     #[test]
