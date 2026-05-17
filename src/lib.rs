@@ -10,6 +10,7 @@ pub mod embedding_model_middleware;
 pub mod file_data;
 pub mod files;
 pub mod generate_image;
+pub mod generate_object;
 pub mod generate_speech;
 pub mod generate_text;
 pub mod generate_video;
@@ -61,6 +62,7 @@ pub use generate_image::{
     GenerateImagePromptImage, GenerateImagePromptImages, GenerateImageResult,
     experimental_generate_image, generate_image,
 };
+pub use generate_object::{GenerateObjectRequest, GenerateObjectResponse, GenerateObjectResult};
 pub use generate_speech::{
     DefaultGeneratedAudioFile, ExperimentalSpeechResult, GenerateSpeechOptions, GeneratedAudioFile,
     SpeechResult, experimental_generate_speech, generate_speech,
