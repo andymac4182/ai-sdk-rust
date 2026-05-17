@@ -8,8 +8,11 @@ use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
 use crate::language_model::{
     LanguageModel, LanguageModelCallOptions, LanguageModelContent, LanguageModelGenerateResult,
-    LanguageModelResponseFormat, LanguageModelStreamPart, LanguageModelStreamResult,
-    LanguageModelSupportedUrls, LanguageModelTextDelta, LanguageModelTextStart, LanguageModelTool,
+    LanguageModelReasoningDelta, LanguageModelReasoningEnd, LanguageModelReasoningStart,
+    LanguageModelResponse, LanguageModelResponseFormat, LanguageModelStreamFinish,
+    LanguageModelStreamPart, LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
+    LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
+    LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart, LanguageModelTool,
     LanguageModelToolChoice, LanguageModelToolInputExample,
 };
 use crate::provider::{ProviderOptions, SpecificationVersion};
@@ -917,6 +920,132 @@ pub fn extract_json_middleware() -> ExtractJsonMiddleware {
     ExtractJsonMiddleware::new()
 }
 
+/// Language model middleware that simulates streaming from `doGenerate`.
+///
+/// Upstream `simulateStreamingMiddleware` turns a non-streaming generation
+/// result into provider-v4 stream parts. This Rust port targets models that use
+/// the crate's deterministic `Vec<LanguageModelStreamPart>` stream boundary.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SimulateStreamingMiddleware;
+
+impl SimulateStreamingMiddleware {
+    /// Creates streaming simulation middleware.
+    pub fn new() -> Self {
+        Self
+    }
+
+    fn simulate_stream(
+        &self,
+        result: LanguageModelGenerateResult,
+    ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
+        let LanguageModelGenerateResult {
+            content,
+            finish_reason,
+            usage,
+            provider_metadata,
+            request,
+            response,
+            warnings,
+        } = result;
+
+        let mut stream = vec![LanguageModelStreamPart::StreamStart(
+            LanguageModelStreamStart::new(warnings),
+        )];
+
+        if let Some(response) = &response {
+            stream.push(LanguageModelStreamPart::ResponseMetadata(
+                response_metadata_from_generate_response(response),
+            ));
+        }
+
+        let mut id = 0usize;
+        for content in content {
+            match content {
+                LanguageModelContent::Text(text) => {
+                    if !text.text.is_empty() {
+                        let text_id = id.to_string();
+                        stream.push(LanguageModelStreamPart::TextStart(
+                            LanguageModelTextStart::new(text_id.clone()),
+                        ));
+                        stream.push(LanguageModelStreamPart::TextDelta(
+                            LanguageModelTextDelta::new(text_id.clone(), text.text),
+                        ));
+                        stream.push(LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new(
+                            text_id,
+                        )));
+                        id += 1;
+                    }
+                }
+                LanguageModelContent::Reasoning(reasoning) => {
+                    let reasoning_id = id.to_string();
+                    let mut start = LanguageModelReasoningStart::new(reasoning_id.clone());
+                    start.provider_metadata = reasoning.provider_metadata;
+                    stream.push(LanguageModelStreamPart::ReasoningStart(start));
+                    stream.push(LanguageModelStreamPart::ReasoningDelta(
+                        LanguageModelReasoningDelta::new(reasoning_id.clone(), reasoning.text),
+                    ));
+                    stream.push(LanguageModelStreamPart::ReasoningEnd(
+                        LanguageModelReasoningEnd::new(reasoning_id),
+                    ));
+                    id += 1;
+                }
+                LanguageModelContent::Custom(custom) => {
+                    stream.push(LanguageModelStreamPart::Custom(custom));
+                }
+                LanguageModelContent::ReasoningFile(reasoning_file) => {
+                    stream.push(LanguageModelStreamPart::ReasoningFile(reasoning_file));
+                }
+                LanguageModelContent::File(file) => {
+                    stream.push(LanguageModelStreamPart::File(file));
+                }
+                LanguageModelContent::ToolApprovalRequest(tool_approval_request) => {
+                    stream.push(LanguageModelStreamPart::ToolApprovalRequest(
+                        tool_approval_request,
+                    ));
+                }
+                LanguageModelContent::Source(source) => {
+                    stream.push(LanguageModelStreamPart::Source(source));
+                }
+                LanguageModelContent::ToolCall(tool_call) => {
+                    stream.push(LanguageModelStreamPart::ToolCall(tool_call));
+                }
+                LanguageModelContent::ToolResult(tool_result) => {
+                    stream.push(LanguageModelStreamPart::ToolResult(tool_result));
+                }
+            }
+        }
+
+        let mut finish = LanguageModelStreamFinish::new(usage, finish_reason);
+        if let Some(provider_metadata) = provider_metadata {
+            finish = finish.with_provider_metadata(provider_metadata);
+        }
+        stream.push(LanguageModelStreamPart::Finish(finish));
+
+        LanguageModelStreamResult {
+            stream,
+            request,
+            response: response.map(|response| LanguageModelStreamResultResponse {
+                headers: response.headers,
+            }),
+        }
+    }
+}
+
+fn response_metadata_from_generate_response(
+    response: &LanguageModelResponse,
+) -> LanguageModelStreamResponseMetadata {
+    let mut metadata = LanguageModelStreamResponseMetadata::new();
+    metadata.id = response.id.clone();
+    metadata.timestamp = response.timestamp;
+    metadata.model_id = response.model_id.clone();
+    metadata
+}
+
+/// Creates language model middleware that simulates streams from generate calls.
+pub fn simulate_streaming_middleware() -> SimulateStreamingMiddleware {
+    SimulateStreamingMiddleware::new()
+}
+
 impl<M: LanguageModel> LanguageModelMiddleware<M> for DefaultSettingsMiddleware {
     type OverrideSupportedUrlsFuture<'a>
         = Ready<LanguageModelSupportedUrls>
@@ -1050,6 +1179,47 @@ where
     }
 }
 
+impl<M> LanguageModelMiddleware<M> for SimulateStreamingMiddleware
+where
+    M: LanguageModel<Stream = Vec<LanguageModelStreamPart>>,
+{
+    type OverrideSupportedUrlsFuture<'a>
+        = Pending<LanguageModelSupportedUrls>
+    where
+        Self: 'a,
+        M: 'a;
+
+    type TransformParamsFuture<'a>
+        = Pending<LanguageModelCallOptions>
+    where
+        Self: 'a,
+        M: 'a;
+
+    type WrapGenerateFuture<'a>
+        = Pending<LanguageModelGenerateResult>
+    where
+        Self: 'a,
+        M: 'a;
+
+    type WrapStreamFuture<'a>
+        = Pin<Box<dyn Future<Output = LanguageModelStreamResult<M::Stream>> + Send + 'a>>
+    where
+        Self: 'a,
+        M: 'a;
+
+    fn wrap_stream<'a>(
+        &'a self,
+        options: LanguageModelWrapStreamOptions<'a, M>,
+    ) -> Option<Self::WrapStreamFuture<'a>>
+    where
+        M: 'a,
+    {
+        Some(Box::pin(async move {
+            self.simulate_stream((options.do_generate)().await)
+        }))
+    }
+}
+
 fn merge_headers(
     default_headers: Option<&Headers>,
     params_headers: Option<Headers>,
@@ -1122,14 +1292,18 @@ mod tests {
         LanguageModelMiddlewareModelOptions, LanguageModelTransformParamsOptions,
         LanguageModelWrapGenerateOptions, LanguageModelWrapStreamOptions,
         add_tool_input_examples_middleware, default_extract_json_transform,
-        default_settings_middleware, extract_json_middleware, wrap_language_model,
+        default_settings_middleware, extract_json_middleware, simulate_streaming_middleware,
+        wrap_language_model,
     };
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
         LanguageModelFinishReason, LanguageModelFunctionTool, LanguageModelGenerateResult,
-        LanguageModelStreamPart, LanguageModelStreamResult, LanguageModelStreamStart,
-        LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextDelta,
-        LanguageModelTextEnd, LanguageModelTextStart, LanguageModelTool, LanguageModelUsage,
+        LanguageModelReasoning, LanguageModelReasoningDelta, LanguageModelReasoningEnd,
+        LanguageModelReasoningStart, LanguageModelResponse, LanguageModelStreamFinish,
+        LanguageModelStreamPart, LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
+        LanguageModelStreamStart, LanguageModelSupportedUrls, LanguageModelText,
+        LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart, LanguageModelTool,
+        LanguageModelUsage,
     };
     use crate::provider::SpecificationVersion;
     use crate::warning::Warning;
@@ -1812,6 +1986,79 @@ mod tests {
                 )),
                 LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("0")),
             ]
+        );
+    }
+
+    #[test]
+    fn simulate_streaming_middleware_turns_generate_result_into_vec_stream() {
+        let model = StaticLanguageModel;
+        let middleware = simulate_streaming_middleware();
+        let finish_reason = LanguageModelFinishReason {
+            unified: FinishReason::Stop,
+            raw: None,
+        };
+        let response = LanguageModelResponse::new()
+            .with_id("response-id")
+            .with_model_id("model-id")
+            .with_header("x-test", "yes");
+
+        let wrapped_stream = middleware
+            .wrap_stream(LanguageModelWrapStreamOptions::new(
+                Box::new(|| {
+                    Box::pin(ready(
+                        LanguageModelGenerateResult::new(
+                            vec![
+                                LanguageModelContent::Text(LanguageModelText::new("hello")),
+                                LanguageModelContent::Reasoning(LanguageModelReasoning::new(
+                                    "thinking",
+                                )),
+                            ],
+                            finish_reason.clone(),
+                            LanguageModelUsage::default(),
+                        )
+                        .with_response(response.clone())
+                        .with_warning(Warning::Other {
+                            message: "simulated".to_string(),
+                        }),
+                    ))
+                }),
+                Box::new(|| Box::pin(ready(LanguageModelStreamResult::new(Vec::new())))),
+                LanguageModelCallOptions::new(Vec::new()),
+                &model,
+            ))
+            .expect("simulate streaming wrap-stream exists");
+        let result = poll_boxed(wrapped_stream);
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(vec![
+                    Warning::Other {
+                        message: "simulated".to_string()
+                    }
+                ])),
+                LanguageModelStreamPart::ResponseMetadata(
+                    LanguageModelStreamResponseMetadata::new()
+                        .with_id("response-id")
+                        .with_model_id("model-id")
+                ),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("0")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("0", "hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("0")),
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "1", "thinking"
+                )),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    LanguageModelUsage::default(),
+                    finish_reason,
+                )),
+            ]
+        );
+        assert_eq!(
+            result.response.expect("stream response exists").headers,
+            Some(BTreeMap::from([("x-test".to_string(), "yes".to_string())]))
         );
     }
 
