@@ -54,6 +54,7 @@ pub mod util;
 pub mod vercel;
 pub mod vercel_ai_gateway;
 pub mod video_model;
+pub mod voyage;
 pub mod warning;
 
 pub use baseten::{
@@ -418,6 +419,10 @@ pub use video_model::{
     ExperimentalVideoModelResult, ExperimentalVideoModelVideoData, NoVideoGeneratedError,
     VideoModel, VideoModelCallOptions, VideoModelFile, VideoModelResponse,
     VideoModelResponseMetadata, VideoModelResult, VideoModelVideoData,
+};
+pub use voyage::{
+    DEFAULT_VOYAGE_BASE_URL, VoyageEmbeddingModel, VoyageProvider, VoyageProviderSettings,
+    VoyageRerankingModel, VoyageTransport, VoyageTransportFuture, create_voyage, voyage,
 };
 pub use warning::Warning;
 
