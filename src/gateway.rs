@@ -3414,7 +3414,7 @@ mod tests {
     use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions};
     use crate::file_data::{FileData, FileDataContent};
     use crate::generate_image::{GenerateImageOptions, generate_image};
-    use crate::generate_text::{GenerateTextOptions, generate_text};
+    use crate::generate_text::{GenerateTextContentPart, GenerateTextOptions, generate_text};
     use crate::generate_video::{GenerateVideoOptions, generate_video};
     use crate::headers::Headers;
     use crate::image_model::{ImageModel, ImageModelCallOptions, ImageModelFile};
@@ -3435,7 +3435,7 @@ mod tests {
     use crate::reranking_model::{
         RerankingModel, RerankingModelCallOptions, RerankingModelDocuments,
     };
-    use crate::stream_text::{StreamTextOptions, stream_text};
+    use crate::stream_text::{StreamTextOptions, TextStreamPart, stream_text};
     use crate::video_model::{VideoModel, VideoModelCallOptions, VideoModelFile};
     use crate::warning::Warning;
     use serde_json::json;
@@ -4103,6 +4103,118 @@ mod tests {
                 .and_then(JsonValue::as_str),
             Some("gen_123")
         );
+    }
+
+    #[test]
+    fn gateway_model_maps_standard_generate_content_parts_through_generate_text() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "id": "test-id",
+                    "created": 1711115037,
+                    "model": "openai/gpt-4.1-mini",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Summary"
+                        },
+                        {
+                            "type": "reasoning",
+                            "text": "Need search context."
+                        },
+                        {
+                            "type": "source",
+                            "sourceType": "url",
+                            "id": "src_1",
+                            "url": "https://example.com/source",
+                            "title": "Example Source"
+                        },
+                        {
+                            "type": "file",
+                            "mediaType": "text/plain",
+                            "data": {
+                                "type": "data",
+                                "data": "ZGF0YQ=="
+                            }
+                        },
+                        {
+                            "type": "custom",
+                            "kind": "gateway.provider-annotation"
+                        }
+                    ],
+                    "finish_reason": "stop",
+                    "usage": {
+                        "prompt_tokens": 4,
+                        "completion_tokens": 3
+                    },
+                    "providerMetadata": {
+                        "gateway": {
+                            "generationId": "gen_123"
+                        }
+                    }
+                })
+                .to_string(),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .language_model("openai/gpt-4.1-mini");
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(&model, Prompt::from_prompt("Summarize"))
+                .expect("prompt is valid"),
+        ));
+
+        assert_eq!(result.text, "Summary");
+        assert_eq!(
+            result.reasoning_text,
+            Some("Need search context.".to_string())
+        );
+        assert_eq!(result.sources.len(), 1);
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].media_type(), "text/plain");
+        assert_eq!(result.files[0].base64(), "ZGF0YQ==");
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("generationId"))
+                .and_then(JsonValue::as_str),
+            Some("gen_123")
+        );
+        assert!(matches!(
+            &result.content[0],
+            GenerateTextContentPart::Text(text) if text.text == "Summary"
+        ));
+        assert!(matches!(
+            &result.content[1],
+            GenerateTextContentPart::Reasoning(reasoning)
+                if reasoning.text == "Need search context."
+        ));
+        assert!(matches!(
+            &result.content[2],
+            GenerateTextContentPart::Source(LanguageModelSource::Url(source))
+                if source.id == "src_1"
+                    && source.url == "https://example.com/source"
+                    && source.title.as_deref() == Some("Example Source")
+        ));
+        assert!(matches!(
+            &result.content[3],
+            GenerateTextContentPart::File(file)
+                if file.file.media_type() == "text/plain"
+                    && file.file.base64() == "ZGF0YQ=="
+        ));
+        assert!(matches!(
+            &result.content[4],
+            GenerateTextContentPart::Custom(custom)
+                if custom.kind == "gateway.provider-annotation"
+        ));
     }
 
     #[test]
@@ -4786,6 +4898,173 @@ mod tests {
                     }
                 ]
             })
+        );
+    }
+
+    #[test]
+    fn gateway_model_streams_standard_content_parts_through_stream_text() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                gateway_sse_body([
+                    json!({
+                        "type": "stream-start",
+                        "warnings": []
+                    }),
+                    json!({
+                        "type": "response-metadata",
+                        "id": "resp_gateway",
+                        "timestamp": "2024-01-02T03:04:05Z",
+                        "modelId": "openai/gpt-4.1-mini"
+                    }),
+                    json!({
+                        "type": "reasoning-start",
+                        "id": "r1"
+                    }),
+                    json!({
+                        "type": "reasoning-delta",
+                        "id": "r1",
+                        "delta": "Need search context."
+                    }),
+                    json!({
+                        "type": "reasoning-end",
+                        "id": "r1"
+                    }),
+                    json!({
+                        "type": "source",
+                        "sourceType": "url",
+                        "id": "src_1",
+                        "url": "https://example.com/source",
+                        "title": "Example Source"
+                    }),
+                    json!({
+                        "type": "file",
+                        "mediaType": "text/plain",
+                        "data": {
+                            "type": "data",
+                            "data": "ZGF0YQ=="
+                        }
+                    }),
+                    json!({
+                        "type": "custom",
+                        "kind": "gateway.provider-annotation"
+                    }),
+                    json!({
+                        "type": "text-start",
+                        "id": "0"
+                    }),
+                    json!({
+                        "type": "text-delta",
+                        "id": "0",
+                        "delta": "Summary"
+                    }),
+                    json!({
+                        "type": "text-end",
+                        "id": "0"
+                    }),
+                    json!({
+                        "type": "finish",
+                        "finishReason": {
+                            "unified": "stop",
+                            "raw": "stop"
+                        },
+                        "usage": {
+                            "inputTokens": {
+                                "total": 4
+                            },
+                            "outputTokens": {
+                                "total": 3
+                            }
+                        },
+                        "providerMetadata": {
+                            "gateway": {
+                                "stream": "complete"
+                            }
+                        }
+                    }),
+                ]),
+            )
+            .with_headers(Headers::from([(
+                "content-type".to_string(),
+                "text/event-stream".to_string(),
+            )])))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .language_model("openai/gpt-4.1-mini");
+        let result = poll_ready(stream_text(
+            StreamTextOptions::from_prompt(&model, Prompt::from_prompt("Summarize"))
+                .expect("prompt is valid"),
+        ));
+
+        assert_eq!(result.text, "Summary");
+        assert_eq!(
+            result.reasoning_text,
+            Some("Need search context.".to_string())
+        );
+        assert_eq!(result.sources.len(), 1);
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].media_type, "text/plain");
+        assert!(matches!(
+            &result.files[0].data,
+            LanguageModelFileData::Data { data }
+                if serde_json::to_value(data).expect("file data serializes")
+                    == json!("ZGF0YQ==")
+        ));
+        assert_eq!(result.custom_parts.len(), 1);
+        assert_eq!(result.custom_parts[0].kind, "gateway.provider-annotation");
+        assert_eq!(result.response.id.as_deref(), Some("resp_gateway"));
+        assert_eq!(
+            result.response.model_id.as_deref(),
+            Some("openai/gpt-4.1-mini")
+        );
+        assert_eq!(
+            result.response.timestamp,
+            Some(
+                time::OffsetDateTime::parse(
+                    "2024-01-02T03:04:05Z",
+                    &time::format_description::well_known::Rfc3339
+                )
+                .expect("timestamp parses")
+            )
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("stream"))
+                .and_then(JsonValue::as_str),
+            Some("complete")
+        );
+        assert!(
+            result
+                .parts
+                .iter()
+                .any(|part| matches!(part, TextStreamPart::ReasoningDelta(_)))
+        );
+        assert!(
+            result
+                .parts
+                .iter()
+                .any(|part| matches!(part, TextStreamPart::Source(_)))
+        );
+        assert!(
+            result
+                .parts
+                .iter()
+                .any(|part| matches!(part, TextStreamPart::File(_)))
+        );
+        assert!(
+            result
+                .parts
+                .iter()
+                .any(|part| matches!(part, TextStreamPart::Custom(_)))
         );
     }
 
