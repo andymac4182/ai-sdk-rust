@@ -1384,7 +1384,7 @@ fn generate_object_response(response: &LanguageModelResponse) -> GenerateObjectR
     }
 }
 
-fn generate_object_call_id() -> String {
+pub(crate) fn generate_object_call_id() -> String {
     let generate_call_id =
         create_id_generator(IdGeneratorOptions::new().with_prefix("aiobj").with_size(24))
             .expect("default generate_object call id configuration is valid");
