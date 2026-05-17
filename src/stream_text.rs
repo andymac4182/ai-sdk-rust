@@ -8,9 +8,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::VERSION;
 use crate::generate_text::{
-    ActiveTools, GenerateTextModelInfo, GenerateTextStep, GenerateTextTool, GenerateTextToolCall,
-    GenerateTextToolResult, StopCondition, ToolApprovalConfiguration, ToolCallRepair,
-    ToolCallRepairOptions, ToolInputRefinement, ToolInputRefinementError, execute_tool_calls,
+    ActiveTools, GenerateTextModelInfo, GenerateTextOnToolExecutionEnd,
+    GenerateTextOnToolExecutionStart, GenerateTextStep, GenerateTextTool, GenerateTextToolCall,
+    GenerateTextToolExecutionEndEvent, GenerateTextToolExecutionStartEvent, GenerateTextToolResult,
+    StopCondition, ToolApprovalConfiguration, ToolCallRepair, ToolCallRepairOptions,
+    ToolInputRefinement, ToolInputRefinementError, execute_tool_calls,
     filter_active_language_model_tools, generate_text_call_id,
     generate_text_tool_result_from_language_model_tool_result, is_stop_condition_met,
     mark_runtime_dynamic_tool_calls, mark_tool_call_metadata, mark_tool_call_titles,
@@ -503,6 +505,12 @@ pub struct StreamTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Optional callback used to repair invalid model tool calls before execution.
     pub tool_call_repair: Option<ToolCallRepair>,
 
+    /// Optional callback invoked before a local Rust tool executor is invoked.
+    pub on_tool_execution_start: Option<GenerateTextOnToolExecutionStart<'a>>,
+
+    /// Optional callback invoked after a local Rust tool executor completes.
+    pub on_tool_execution_end: Option<GenerateTextOnToolExecutionEnd<'a>>,
+
     /// Maximum number of model-call steps to run.
     pub max_steps: usize,
 
@@ -524,6 +532,8 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             tool_approval: None,
             tool_input_refinements: BTreeMap::new(),
             tool_call_repair: None,
+            on_tool_execution_start: None,
+            on_tool_execution_end: None,
             max_steps: 1,
             stop_conditions: Vec::new(),
         }
@@ -548,6 +558,8 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             tool_approval: None,
             tool_input_refinements: BTreeMap::new(),
             tool_call_repair: None,
+            on_tool_execution_start: None,
+            on_tool_execution_end: None,
             max_steps: 1,
             stop_conditions: Vec::new(),
         }
@@ -696,6 +708,47 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
     {
         self.tool_call_repair = Some(ToolCallRepair::new(repair));
         self
+    }
+
+    /// Sets a callback that is invoked before each local Rust tool execution.
+    pub fn with_on_tool_execution_start<F, Fut>(mut self, on_tool_execution_start: F) -> Self
+    where
+        F: Fn(GenerateTextToolExecutionStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_tool_execution_start = Some(GenerateTextOnToolExecutionStart::new(
+            on_tool_execution_start,
+        ));
+        self
+    }
+
+    /// Sets a callback that is invoked after each local Rust tool execution completes.
+    pub fn with_on_tool_execution_end<F, Fut>(mut self, on_tool_execution_end: F) -> Self
+    where
+        F: Fn(GenerateTextToolExecutionEndEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_tool_execution_end =
+            Some(GenerateTextOnToolExecutionEnd::new(on_tool_execution_end));
+        self
+    }
+
+    /// Deprecated upstream alias for [`StreamTextOptions::with_on_tool_execution_start`].
+    pub fn with_experimental_on_tool_call_start<F, Fut>(self, on_tool_execution_start: F) -> Self
+    where
+        F: Fn(GenerateTextToolExecutionStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.with_on_tool_execution_start(on_tool_execution_start)
+    }
+
+    /// Deprecated upstream alias for [`StreamTextOptions::with_on_tool_execution_end`].
+    pub fn with_experimental_on_tool_call_finish<F, Fut>(self, on_tool_execution_end: F) -> Self
+    where
+        F: Fn(GenerateTextToolExecutionEndEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.with_on_tool_execution_end(on_tool_execution_end)
     }
 
     /// Sets the maximum number of model-call steps.
@@ -920,6 +973,8 @@ where
         tool_approval,
         tool_input_refinements,
         tool_call_repair,
+        on_tool_execution_start,
+        on_tool_execution_end,
         max_steps,
         stop_conditions,
     } = options;
@@ -1033,7 +1088,11 @@ where
             &step_prompt,
             &tools_context,
             &tool_approvals.blocked_tool_call_ids,
-            (experimental_sandbox.as_ref(), None, None),
+            (
+                experimental_sandbox.as_ref(),
+                on_tool_execution_start.as_ref(),
+                on_tool_execution_end.as_ref(),
+            ),
         )
         .await;
         let should_continue = should_continue_after_tool_results(
@@ -1614,8 +1673,8 @@ fn append_stream_text_user_agent(call_options: &mut LanguageModelCallOptions) {
 mod tests {
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Waker};
 
     use serde_json::{Map, json};
@@ -2179,6 +2238,74 @@ mod tests {
                 "finish-step",
                 "finish"
             ]
+        );
+    }
+
+    #[test]
+    fn stream_text_invokes_tool_execution_callbacks_for_local_tools() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "weather",
+                    r#"{"city":"Brisbane"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let callback_events = Arc::new(Mutex::new(Vec::new()));
+        let start_events = Arc::clone(&callback_events);
+        let end_events = Arc::clone(&callback_events);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |input, _options| async move {
+                        Ok(json!({
+                            "city": input["city"],
+                            "forecast": "sunny"
+                        }))
+                    },
+                ))
+                .with_on_tool_execution_start(move |event| {
+                    let start_events = Arc::clone(&start_events);
+                    async move {
+                        start_events.lock().expect("events lock").push(format!(
+                            "start:{}:{}:{}",
+                            event.tool_call.tool_call_id,
+                            event.tool_call.input["city"]
+                                .as_str()
+                                .expect("city is a string"),
+                            event.messages.len()
+                        ));
+                    }
+                })
+                .with_on_tool_execution_end(move |event| {
+                    let end_events = Arc::clone(&end_events);
+                    async move {
+                        end_events.lock().expect("events lock").push(format!(
+                            "end:{}:{}:{}",
+                            event.tool_call.tool_call_id,
+                            event.tool_output.output["forecast"]
+                                .as_str()
+                                .expect("forecast is a string"),
+                            event.messages.len()
+                        ));
+                    }
+                }),
+        ));
+
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].output["forecast"], "sunny");
+        assert_eq!(
+            callback_events.lock().expect("events lock").as_slice(),
+            ["start:call-1:Brisbane:1", "end:call-1:sunny:1"]
         );
     }
 
