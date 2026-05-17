@@ -18,6 +18,10 @@ use crate::provider_utils::{
     with_user_agent_suffix,
 };
 use crate::stream_text::StreamTextResponseMetadata;
+use crate::text_stream_response::{
+    TextStreamResponse, TextStreamResponseInit, TextStreamResponseOptions,
+    TextStreamResponseWriter, create_text_stream_response, pipe_text_stream_to_response,
+};
 use crate::util::{ParsePartialJsonState, is_deep_equal_data, parse_partial_json};
 use crate::warning::Warning;
 
@@ -259,6 +263,31 @@ pub struct StreamObjectResult {
     /// Provider-specific metadata returned with the finish part.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_metadata: Option<ProviderMetadata>,
+}
+
+impl StreamObjectResult {
+    /// Creates a text-stream response from the collected object text stream.
+    pub fn to_text_stream_response(&self, init: TextStreamResponseInit) -> TextStreamResponse {
+        create_text_stream_response(TextStreamResponseOptions::from_init(
+            self.text_stream.clone(),
+            init,
+        ))
+    }
+
+    /// Pipes the collected object text stream to a response writer.
+    pub fn pipe_text_stream_to_response<W>(
+        &self,
+        response: &mut W,
+        init: TextStreamResponseInit,
+    ) -> Result<(), W::Error>
+    where
+        W: TextStreamResponseWriter,
+    {
+        pipe_text_stream_to_response(
+            response,
+            TextStreamResponseOptions::from_init(self.text_stream.clone(), init),
+        )
+    }
 }
 
 /// Runs an object streaming call against a language model and collects the stream.
@@ -867,6 +896,29 @@ mod tests {
                 r#"{"content":"one"}"#.to_string(),
                 r#",{"content":"two"}]"#.to_string()
             ]
+        );
+
+        let text_response = result.to_text_stream_response(
+            TextStreamResponseInit::new()
+                .with_status(206)
+                .with_header("x-stream", "object"),
+        );
+
+        assert_eq!(text_response.status, 206);
+        assert_eq!(
+            text_response
+                .headers
+                .get("content-type")
+                .map(String::as_str),
+            Some(crate::text_stream_response::TEXT_STREAM_CONTENT_TYPE)
+        );
+        assert_eq!(
+            text_response.headers.get("x-stream").map(String::as_str),
+            Some("object")
+        );
+        assert_eq!(
+            text_response.decoded_body().expect("response body decodes"),
+            result.text_stream
         );
     }
 

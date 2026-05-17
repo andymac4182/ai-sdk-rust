@@ -298,8 +298,9 @@ pub use stream_text::{
     TextStreamStartStepPart, TextStreamTextDeltaPart, stream_text,
 };
 pub use text_stream_response::{
-    TEXT_STREAM_CONTENT_TYPE, TextStreamResponse, TextStreamResponseOptions,
-    TextStreamResponseWriter, create_text_stream_response, pipe_text_stream_to_response,
+    TEXT_STREAM_CONTENT_TYPE, TextStreamResponse, TextStreamResponseInit,
+    TextStreamResponseOptions, TextStreamResponseWriter, create_text_stream_response,
+    pipe_text_stream_to_response,
 };
 pub use transcribe::{
     ExperimentalTranscriptionResult, TranscribeAudio, TranscribeDownload,

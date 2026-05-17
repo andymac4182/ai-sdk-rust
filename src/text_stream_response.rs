@@ -4,6 +4,52 @@ use crate::provider_utils::normalize_headers;
 /// Default content type used by upstream text-stream response helpers.
 pub const TEXT_STREAM_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
 
+/// Response metadata supplied to text-stream response helpers.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TextStreamResponseInit {
+    /// HTTP status code. Defaults to `200`.
+    pub status: Option<u16>,
+
+    /// Optional HTTP status text.
+    pub status_text: Option<String>,
+
+    /// Optional response headers.
+    pub headers: Option<Headers>,
+}
+
+impl TextStreamResponseInit {
+    /// Creates empty response initialization options.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the response status code.
+    pub fn with_status(mut self, status: u16) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    /// Sets the response status text.
+    pub fn with_status_text(mut self, status_text: impl Into<String>) -> Self {
+        self.status_text = Some(status_text.into());
+        self
+    }
+
+    /// Replaces response headers.
+    pub fn with_headers(mut self, headers: Headers) -> Self {
+        self.headers = Some(headers);
+        self
+    }
+
+    /// Adds a response header.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers
+            .get_or_insert_with(Headers::new)
+            .insert(name.into(), value.into());
+        self
+    }
+}
+
 /// Options shared by text-stream response helpers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TextStreamResponseOptions {
@@ -27,11 +73,20 @@ impl TextStreamResponseOptions {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
+        Self::from_init(text_stream, TextStreamResponseInit::default())
+    }
+
+    /// Creates options for a text stream and response initialization values.
+    pub fn from_init<I, S>(text_stream: I, init: TextStreamResponseInit) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
         Self {
             text_stream: text_stream.into_iter().map(Into::into).collect(),
-            status: None,
-            status_text: None,
-            headers: None,
+            status: init.status,
+            status_text: init.status_text,
+            headers: init.headers,
         }
     }
 
