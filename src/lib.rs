@@ -11,6 +11,7 @@ pub mod file_data;
 pub mod files;
 pub mod gateway;
 pub mod gateway_error;
+pub mod gateway_tools;
 pub mod generate_image;
 pub mod generate_object;
 pub mod generate_speech;
@@ -85,6 +86,17 @@ pub use gateway_error::{
     GatewayResponseError, GatewayTimeoutError, as_gateway_error,
     create_gateway_error_from_api_call, create_gateway_error_from_response,
     extract_gateway_api_call_response, gateway_headers_from_auth_method, parse_gateway_auth_method,
+};
+pub use gateway_tools::{
+    GatewayTools, ParallelSearchConfig, ParallelSearchError, ParallelSearchErrorType,
+    ParallelSearchExcerpts, ParallelSearchFetchPolicy, ParallelSearchInput,
+    ParallelSearchInputExcerpts, ParallelSearchInputFetchPolicy, ParallelSearchInputSourcePolicy,
+    ParallelSearchMode, ParallelSearchOutput, ParallelSearchResponse, ParallelSearchResult,
+    ParallelSearchSourcePolicy, PerplexitySearchConfig, PerplexitySearchError,
+    PerplexitySearchErrorType, PerplexitySearchInput, PerplexitySearchOutput,
+    PerplexitySearchQuery, PerplexitySearchRecencyFilter, PerplexitySearchResponse,
+    PerplexitySearchResult, gateway_tools, parallel_search, parallel_search_tool_factory,
+    perplexity_search, perplexity_search_tool_factory,
 };
 pub use generate_image::{
     ExperimentalGenerateImageResult, GenerateImageOptions, GenerateImagePrompt,
