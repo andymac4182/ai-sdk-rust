@@ -13,9 +13,12 @@ use crate::language_model::{
 };
 use crate::prompt::{Prompt, standardize_prompt};
 use crate::provider::{InvalidPromptError, ProviderMetadata, ProviderOptions};
-use crate::provider_utils::{FlexibleSchema, ParseJsonResult, with_user_agent_suffix};
+use crate::provider_utils::{
+    FlexibleSchema, ParseJsonResult, ValidateTypesResult, safe_validate_types,
+    with_user_agent_suffix,
+};
 use crate::stream_text::StreamTextResponseMetadata;
-use crate::util::{is_deep_equal_data, parse_partial_json};
+use crate::util::{ParsePartialJsonState, is_deep_equal_data, parse_partial_json};
 use crate::warning::Warning;
 
 /// Response metadata returned by high-level object streaming.
@@ -300,6 +303,7 @@ where
     let mut text = String::new();
     let mut pending_text_delta = String::new();
     let mut latest_partial: Option<JsonValue> = None;
+    let mut is_first_text_delta = true;
     let mut warnings = Vec::new();
     let mut usage = LanguageModelUsage::default();
     let mut finish_reason = FinishReason::Other;
@@ -325,13 +329,28 @@ where
                 text.push_str(&part.delta);
                 pending_text_delta.push_str(&part.delta);
 
-                if let Some(partial) =
-                    next_partial_object(&text, output_kind, latest_partial.as_ref())
-                {
-                    latest_partial = Some(partial.clone());
-                    partial_object_stream.push(partial.clone());
-                    parts.push(ObjectStreamPart::Object { object: partial });
-                    flush_pending_text_delta(&mut pending_text_delta, &mut text_stream, &mut parts);
+                if let Some(partial_delta) = next_partial_object_delta(
+                    &text,
+                    &pending_text_delta,
+                    output_kind,
+                    latest_partial.as_ref(),
+                    schema.as_ref(),
+                    is_first_text_delta,
+                ) {
+                    append_new_array_elements(
+                        &mut element_stream,
+                        latest_partial.as_ref(),
+                        &partial_delta.partial,
+                        output_kind,
+                    );
+                    latest_partial = Some(partial_delta.partial.clone());
+                    partial_object_stream.push(partial_delta.partial.clone());
+                    parts.push(ObjectStreamPart::Object {
+                        object: partial_delta.partial,
+                    });
+                    push_text_delta(partial_delta.text_delta, &mut text_stream, &mut parts);
+                    pending_text_delta.clear();
+                    is_first_text_delta = false;
                 }
             }
             LanguageModelStreamPart::Finish(part) => {
@@ -348,16 +367,13 @@ where
         }
     }
 
-    flush_pending_text_delta(&mut pending_text_delta, &mut text_stream, &mut parts);
+    if output_kind != GenerateObjectOutputKind::Array {
+        flush_pending_text_delta(&mut pending_text_delta, &mut text_stream, &mut parts);
+    }
 
     let object =
         match parse_generated_object(&text, schema.clone(), enum_values.as_deref(), array_output) {
-            ParseJsonResult::Success { value, .. } => {
-                if output_kind == GenerateObjectOutputKind::Array {
-                    element_stream = value.as_array().cloned().unwrap_or_default();
-                }
-                Some(value)
-            }
+            ParseJsonResult::Success { value, .. } => Some(value),
             ParseJsonResult::Failure { error: cause, .. } => {
                 if error.is_none() {
                     error = Some(JsonValue::String(cause.to_string()));
@@ -392,20 +408,111 @@ where
     }
 }
 
-fn next_partial_object(
+#[derive(Clone, Debug, PartialEq)]
+struct PartialObjectDelta {
+    partial: JsonValue,
+    text_delta: String,
+}
+
+fn next_partial_object_delta(
     text: &str,
+    text_delta: &str,
     output_kind: GenerateObjectOutputKind,
     latest_partial: Option<&JsonValue>,
-) -> Option<JsonValue> {
-    let (value, _) = parse_partial_json(Some(text)).into_parts();
+    schema: Option<&FlexibleSchema>,
+    is_first_delta: bool,
+) -> Option<PartialObjectDelta> {
+    let (value, parse_state) = parse_partial_json(Some(text)).into_parts();
     let value = value?;
+
+    if output_kind == GenerateObjectOutputKind::Array {
+        return array_partial_object_delta(
+            value,
+            latest_partial,
+            schema,
+            is_first_delta,
+            parse_state == ParsePartialJsonState::SuccessfulParse,
+        );
+    }
+
     let partial = partial_value_for_output(value, output_kind)?;
 
     if latest_partial.is_some_and(|latest| is_deep_equal_data(latest, &partial)) {
         None
     } else {
-        Some(partial)
+        Some(PartialObjectDelta {
+            partial,
+            text_delta: text_delta.to_string(),
+        })
     }
+}
+
+fn array_partial_object_delta(
+    value: JsonValue,
+    latest_partial: Option<&JsonValue>,
+    schema: Option<&FlexibleSchema>,
+    is_first_delta: bool,
+    is_final_delta: bool,
+) -> Option<PartialObjectDelta> {
+    let elements = value
+        .as_object()
+        .and_then(|object| object.get("elements"))
+        .and_then(JsonValue::as_array)?;
+
+    let mut result_array = Vec::with_capacity(elements.len());
+
+    for (index, element) in elements.iter().enumerate() {
+        if index == elements.len().saturating_sub(1) && !is_final_delta {
+            continue;
+        }
+
+        let element = match schema {
+            Some(schema) => match safe_validate_types(element.clone(), schema.clone(), None) {
+                ValidateTypesResult::Success { value, .. } => value,
+                ValidateTypesResult::Failure { .. } => return None,
+            },
+            None => element.clone(),
+        };
+
+        result_array.push(element);
+    }
+
+    let partial = JsonValue::Array(result_array.clone());
+
+    if latest_partial.is_some_and(|latest| is_deep_equal_data(latest, &partial)) {
+        return None;
+    }
+
+    let published_element_count = latest_partial
+        .and_then(JsonValue::as_array)
+        .map_or(0, Vec::len);
+    let mut text_delta = String::new();
+
+    if is_first_delta {
+        text_delta.push('[');
+    }
+
+    if published_element_count > 0 {
+        text_delta.push(',');
+    }
+
+    let new_element_start = published_element_count.min(result_array.len());
+    text_delta.push_str(
+        &result_array[new_element_start..]
+            .iter()
+            .map(|element| serde_json::to_string(element).expect("JSON value serializes"))
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+
+    if is_final_delta {
+        text_delta.push(']');
+    }
+
+    Some(PartialObjectDelta {
+        partial,
+        text_delta,
+    })
 }
 
 fn partial_value_for_output(
@@ -435,8 +542,42 @@ fn flush_pending_text_delta(
     }
 
     let text_delta = std::mem::take(pending_text_delta);
+    push_text_delta(text_delta, text_stream, parts);
+}
+
+fn push_text_delta(
+    text_delta: String,
+    text_stream: &mut Vec<String>,
+    parts: &mut Vec<ObjectStreamPart>,
+) {
+    if text_delta.is_empty() {
+        return;
+    }
+
     text_stream.push(text_delta.clone());
     parts.push(ObjectStreamPart::TextDelta { text_delta });
+}
+
+fn append_new_array_elements(
+    element_stream: &mut Vec<JsonValue>,
+    latest_partial: Option<&JsonValue>,
+    partial: &JsonValue,
+    output_kind: GenerateObjectOutputKind,
+) {
+    if output_kind != GenerateObjectOutputKind::Array {
+        return;
+    }
+
+    let Some(partial_array) = partial.as_array() else {
+        return;
+    };
+
+    let published_element_count = latest_partial
+        .and_then(JsonValue::as_array)
+        .map_or(0, Vec::len);
+
+    let new_element_start = published_element_count.min(partial_array.len());
+    element_stream.extend(partial_array[new_element_start..].iter().cloned());
 }
 
 fn append_stream_object_user_agent(call_options: &mut LanguageModelCallOptions) {
@@ -664,6 +805,54 @@ mod tests {
                 {"content": "one"},
                 {"content": "two"}
             ]))
+        );
+        assert_eq!(
+            result.element_stream,
+            vec![json!({"content": "one"}), json!({"content": "two"})]
+        );
+        assert_eq!(
+            result.partial_object_stream,
+            vec![
+                json!([]),
+                json!([{"content": "one"}]),
+                json!([{"content": "one"}, {"content": "two"}])
+            ]
+        );
+        assert_eq!(
+            result.text_stream,
+            vec![
+                "[".to_string(),
+                r#"{"content":"one"}"#.to_string(),
+                r#",{"content":"two"}]"#.to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn stream_object_array_output_formats_single_chunk_text_delta() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    r#"{"elements":[{"content":"one"},{"content":"two"}]}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_array_schema(answer_schema()),
+        ));
+
+        assert_eq!(
+            result.partial_object_stream,
+            vec![json!([{"content": "one"}, {"content": "two"}])]
+        );
+        assert_eq!(
+            result.text_stream,
+            vec![r#"[{"content":"one"},{"content":"two"}]"#.to_string()]
         );
         assert_eq!(
             result.element_stream,
