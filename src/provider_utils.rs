@@ -3741,6 +3741,119 @@ impl From<&str> for ToolExecutionError {
     }
 }
 
+/// Typed tool call returned by high-level text generation APIs.
+///
+/// This mirrors upstream provider-utils `ToolCall` while using [`JsonValue`] for
+/// the generic input payload at the Rust JSON boundary.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCall {
+    /// ID of the tool call used to match it with the tool result.
+    pub tool_call_id: String,
+
+    /// Name of the tool that is being called.
+    pub tool_name: String,
+
+    /// JSON-serializable input arguments for the tool.
+    pub input: JsonValue,
+
+    /// Whether the tool call will be executed by the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_executed: Option<bool>,
+
+    /// Whether the tool is dynamic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic: Option<bool>,
+}
+
+impl ToolCall {
+    /// Creates a typed high-level tool call.
+    pub fn new(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        input: JsonValue,
+    ) -> Self {
+        Self {
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            input,
+            provider_executed: None,
+            dynamic: None,
+        }
+    }
+
+    /// Sets whether the provider will execute this tool call.
+    pub fn with_provider_executed(mut self, provider_executed: bool) -> Self {
+        self.provider_executed = Some(provider_executed);
+        self
+    }
+
+    /// Sets whether this tool call is dynamic.
+    pub fn with_dynamic(mut self, dynamic: bool) -> Self {
+        self.dynamic = Some(dynamic);
+        self
+    }
+}
+
+/// Typed tool result returned by high-level text generation APIs.
+///
+/// This mirrors upstream provider-utils `ToolResult` while using [`JsonValue`]
+/// for the generic input and output payloads at the Rust JSON boundary.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolResult {
+    /// ID of the tool call used to match it with the tool result.
+    pub tool_call_id: String,
+
+    /// Name of the tool that was called.
+    pub tool_name: String,
+
+    /// JSON-serializable input arguments for the tool.
+    pub input: JsonValue,
+
+    /// JSON-serializable output returned by the tool.
+    pub output: JsonValue,
+
+    /// Whether the tool result was executed by the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_executed: Option<bool>,
+
+    /// Whether the tool is dynamic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic: Option<bool>,
+}
+
+impl ToolResult {
+    /// Creates a typed high-level tool result.
+    pub fn new(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        input: JsonValue,
+        output: JsonValue,
+    ) -> Self {
+        Self {
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            input,
+            output,
+            provider_executed: None,
+            dynamic: None,
+        }
+    }
+
+    /// Sets whether the provider executed this tool result.
+    pub fn with_provider_executed(mut self, provider_executed: bool) -> Self {
+        self.provider_executed = Some(provider_executed);
+        self
+    }
+
+    /// Sets whether this tool result is for a dynamic tool.
+    pub fn with_dynamic(mut self, dynamic: bool) -> Self {
+        self.dynamic = Some(dynamic);
+        self
+    }
+}
+
 /// Options passed when resolving a runtime-dependent tool description.
 #[derive(Clone, Debug)]
 pub struct ToolDescriptionOptions {
@@ -7146,13 +7259,14 @@ mod tests {
         Schema, SerializedModelOptions, StatusCodeErrorResponseHandlerOptions,
         StreamingToolCallDelta, StreamingToolCallDeltaFunction, StreamingToolCallTracker,
         StreamingToolCallTrackerOptions, StreamingToolCallTypeValidation, Tool,
-        ToolApprovalRequest, ToolApprovalResponse, ToolDescriptionOptions, ToolExecutionError,
-        ToolExecutionOptions, ToolModelOutputOptions, ValidateTypesResult, ValidationResult,
-        add_additional_properties_to_json_schema, as_array, as_flexible_schema, as_schema,
-        combine_headers, convert_base64_to_bytes, convert_bytes_to_base64,
-        convert_image_model_file_to_data_uri, convert_inline_file_data_to_bytes, convert_to_base64,
-        convert_to_form_data, create_binary_response_handler, create_event_source_response_handler,
-        create_id_generator, create_json_error_response_handler, create_json_response_handler,
+        ToolApprovalRequest, ToolApprovalResponse, ToolCall, ToolDescriptionOptions,
+        ToolExecutionError, ToolExecutionOptions, ToolModelOutputOptions, ToolResult,
+        ValidateTypesResult, ValidationResult, add_additional_properties_to_json_schema, as_array,
+        as_flexible_schema, as_schema, combine_headers, convert_base64_to_bytes,
+        convert_bytes_to_base64, convert_image_model_file_to_data_uri,
+        convert_inline_file_data_to_bytes, convert_to_base64, convert_to_form_data,
+        create_binary_response_handler, create_event_source_response_handler, create_id_generator,
+        create_json_error_response_handler, create_json_response_handler,
         create_provider_defined_tool_factory,
         create_provider_defined_tool_factory_with_output_schema,
         create_provider_executed_tool_factory, create_status_code_error_response_handler,
@@ -7230,6 +7344,111 @@ mod tests {
         assert_eq!(
             get_error_message(Some(&json!({ "code": "bad_request" }))),
             "{\"code\":\"bad_request\"}"
+        );
+    }
+
+    #[test]
+    fn tool_call_serializes_upstream_provider_utils_shape() {
+        let tool_call = ToolCall::new("call-1", "weather", json!({ "city": "Brisbane" }))
+            .with_provider_executed(true)
+            .with_dynamic(false);
+
+        assert_eq!(
+            serde_json::to_value(&tool_call).expect("tool call serializes"),
+            json!({
+                "toolCallId": "call-1",
+                "toolName": "weather",
+                "input": {
+                    "city": "Brisbane"
+                },
+                "providerExecuted": true,
+                "dynamic": false
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ToolCall>(json!({
+                "toolCallId": "call-1",
+                "toolName": "weather",
+                "input": {
+                    "city": "Brisbane"
+                },
+                "providerExecuted": true,
+                "dynamic": false
+            }))
+            .expect("tool call deserializes"),
+            tool_call
+        );
+        assert_eq!(
+            serde_json::to_value(ToolCall::new("call-2", "search", json!({ "q": "rust" })))
+                .expect("minimal tool call serializes"),
+            json!({
+                "toolCallId": "call-2",
+                "toolName": "search",
+                "input": {
+                    "q": "rust"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn tool_result_serializes_upstream_provider_utils_shape() {
+        let tool_result = ToolResult::new(
+            "call-1",
+            "weather",
+            json!({ "city": "Brisbane" }),
+            json!({ "temperature": 24 }),
+        )
+        .with_provider_executed(false)
+        .with_dynamic(true);
+
+        assert_eq!(
+            serde_json::to_value(&tool_result).expect("tool result serializes"),
+            json!({
+                "toolCallId": "call-1",
+                "toolName": "weather",
+                "input": {
+                    "city": "Brisbane"
+                },
+                "output": {
+                    "temperature": 24
+                },
+                "providerExecuted": false,
+                "dynamic": true
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ToolResult>(json!({
+                "toolCallId": "call-1",
+                "toolName": "weather",
+                "input": {
+                    "city": "Brisbane"
+                },
+                "output": {
+                    "temperature": 24
+                },
+                "providerExecuted": false,
+                "dynamic": true
+            }))
+            .expect("tool result deserializes"),
+            tool_result
+        );
+        assert_eq!(
+            serde_json::to_value(ToolResult::new(
+                "call-2",
+                "search",
+                json!({ "q": "rust" }),
+                json!(["result"])
+            ))
+            .expect("minimal tool result serializes"),
+            json!({
+                "toolCallId": "call-2",
+                "toolName": "search",
+                "input": {
+                    "q": "rust"
+                },
+                "output": ["result"]
+            })
         );
     }
 
