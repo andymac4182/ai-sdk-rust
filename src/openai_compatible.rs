@@ -14,17 +14,21 @@ use crate::language_model::{
     FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
     LanguageModelCallOptions, LanguageModelContent, LanguageModelErrorStreamPart,
     LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelMessage,
-    LanguageModelReasoning, LanguageModelRequest, LanguageModelResponse,
-    LanguageModelResponseFormat, LanguageModelStreamPart, LanguageModelStreamResult,
-    LanguageModelSupportedUrls, LanguageModelText, LanguageModelUsage, OutputTokenUsage,
+    LanguageModelRawStreamPart, LanguageModelReasoning, LanguageModelReasoningDelta,
+    LanguageModelReasoningEnd, LanguageModelReasoningStart, LanguageModelRequest,
+    LanguageModelResponse, LanguageModelResponseFormat, LanguageModelStreamFinish,
+    LanguageModelStreamPart, LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
+    LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
+    LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
+    LanguageModelUsage, OutputTokenUsage,
 };
 use crate::provider::{ProviderMetadata, SpecificationVersion};
 use crate::provider_utils::{
-    FetchErrorInfo, HandledFetchError, PostJsonToApiOptions, ProviderApiRequest,
+    FetchErrorInfo, HandledFetchError, ParseJsonResult, PostJsonToApiOptions, ProviderApiRequest,
     ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     ProviderApiResponseHandlerError, RuntimeEnvironment, combine_headers,
-    create_json_error_response_handler, create_json_response_handler, post_json_to_api,
-    with_user_agent_suffix, without_trailing_slash,
+    create_event_source_response_handler, create_json_error_response_handler,
+    create_json_response_handler, post_json_to_api, with_user_agent_suffix, without_trailing_slash,
 };
 use crate::warning::Warning;
 
@@ -298,6 +302,68 @@ impl OpenAICompatibleChatLanguageModel {
         }
     }
 
+    async fn do_stream_result(
+        &self,
+        options: LanguageModelCallOptions,
+    ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
+        let include_raw_chunks = options.include_raw_chunks.unwrap_or(false);
+        let (request_body, warnings) = openai_compatible_chat_stream_request_body(
+            &self.model_id,
+            &self.config.settings,
+            &options,
+        );
+        let request_body_for_error = request_body.clone();
+        let request_body_for_response = request_body.clone();
+        let request_headers = self.request_headers(options.headers.as_ref());
+        let url = match self.model_url("/chat/completions") {
+            Ok(url) => url,
+            Err(message) => {
+                return openai_compatible_error_stream_result(
+                    message,
+                    request_body_for_error,
+                    None,
+                    None,
+                );
+            }
+        };
+        let post_options = PostJsonToApiOptions::new(url, request_body)
+            .with_headers(request_headers)
+            .with_environment(RuntimeEnvironment::unknown());
+        let transport = Arc::clone(&self.config.transport);
+
+        match post_json_to_api(
+            post_options,
+            move |request| (transport)(request),
+            |_request, response| {
+                create_event_source_response_handler(
+                    response.event_source_response_handler_options(),
+                    clone_json_value,
+                )
+                .map_err(|error| ProviderApiResponseHandlerError::other(error.to_string()))
+            },
+            |request, response| {
+                Ok(create_json_error_response_handler(
+                    response.json_error_response_handler_options(request),
+                    clone_json_value,
+                    openai_compatible_error_message,
+                    |_, _| None,
+                ))
+            },
+        )
+        .await
+        {
+            Ok(response) => openai_compatible_stream_result_from_response(
+                &self.config.settings.name,
+                response.value,
+                response.response_headers,
+                request_body_for_response,
+                warnings,
+                include_raw_chunks,
+            ),
+            Err(error) => self.stream_result_from_error(error, request_body_for_error),
+        }
+    }
+
     fn model_url(&self, path: &str) -> Result<String, String> {
         openai_compatible_url(&self.config.settings, path)
     }
@@ -380,6 +446,23 @@ impl OpenAICompatibleChatLanguageModel {
 
         openai_compatible_error_generate_result(&self.config.settings.name, message, request_body)
     }
+
+    fn stream_result_from_error(
+        &self,
+        error: HandledFetchError,
+        request_body: JsonValue,
+    ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
+        let (message, headers, body) = match error {
+            HandledFetchError::Original { error } => (error.message().to_string(), None, None),
+            HandledFetchError::ApiCall { error } => (
+                error.message().to_string(),
+                error.response_headers().cloned(),
+                error.response_body().map(String::from),
+            ),
+        };
+
+        openai_compatible_error_stream_result(message, request_body, headers, body.as_deref())
+    }
 }
 
 impl LanguageModel for OpenAICompatibleChatLanguageModel {
@@ -420,12 +503,8 @@ impl LanguageModel for OpenAICompatibleChatLanguageModel {
         Box::pin(self.do_generate_result(options))
     }
 
-    fn do_stream(&self, _options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
-        Box::pin(ready(LanguageModelStreamResult::new(vec![
-            LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(json!({
-                "message": "OpenAI-compatible streaming is not implemented yet"
-            }))),
-        ])))
+    fn do_stream(&self, options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
+        Box::pin(self.do_stream_result(options))
     }
 }
 
@@ -652,6 +731,29 @@ fn openai_compatible_chat_request_body(
     (JsonValue::Object(body), warnings)
 }
 
+fn openai_compatible_chat_stream_request_body(
+    model_id: &str,
+    settings: &OpenAICompatibleProviderSettings,
+    options: &LanguageModelCallOptions,
+) -> (JsonValue, Vec<Warning>) {
+    let (mut body, warnings) = openai_compatible_chat_request_body(model_id, settings, options);
+
+    if let Some(body) = body.as_object_mut() {
+        body.insert("stream".to_string(), JsonValue::Bool(true));
+
+        if settings.include_usage == Some(true) {
+            body.insert(
+                "stream_options".to_string(),
+                json!({
+                    "include_usage": true
+                }),
+            );
+        }
+    }
+
+    (body, warnings)
+}
+
 fn openai_compatible_response_format(
     response_format: &LanguageModelResponseFormat,
     settings: &OpenAICompatibleProviderSettings,
@@ -835,7 +937,8 @@ fn openai_compatible_usage(value: Option<&JsonValue>) -> LanguageModelUsage {
         },
         output_tokens: OutputTokenUsage {
             total: output_total,
-            text: output_total,
+            text: output_total
+                .map(|total| total.saturating_sub(reasoning_tokens.unwrap_or_default())),
             reasoning: reasoning_tokens,
         },
         raw,
@@ -849,9 +952,226 @@ fn openai_compatible_provider_metadata(
     let mut metadata = ProviderMetadata::new();
     let mut provider_metadata = JsonObject::new();
 
-    if let Some(completion_token_details) = response
-        .get("usage")
-        .and_then(|usage| usage.get("completion_tokens_details"))
+    add_openai_compatible_prediction_metadata(&mut provider_metadata, response.get("usage"));
+
+    if !provider_metadata.is_empty() {
+        metadata.insert(provider_name.to_string(), provider_metadata);
+    }
+
+    metadata
+}
+
+fn openai_compatible_stream_result_from_response(
+    provider_name: &str,
+    events: Vec<ParseJsonResult<JsonValue>>,
+    response_headers: Option<Headers>,
+    request_body: JsonValue,
+    warnings: Vec<Warning>,
+    include_raw_chunks: bool,
+) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
+    let mut stream = vec![LanguageModelStreamPart::StreamStart(
+        LanguageModelStreamStart::new(warnings),
+    )];
+    let mut finish_reason = LanguageModelFinishReason {
+        unified: FinishReason::Other,
+        raw: None,
+    };
+    let mut usage = None::<JsonValue>;
+    let mut is_first_chunk = true;
+    let mut is_active_reasoning = false;
+    let mut is_active_text = false;
+
+    for event in events {
+        match event {
+            ParseJsonResult::Success { value, raw_value } => {
+                if include_raw_chunks {
+                    stream.push(LanguageModelStreamPart::Raw(
+                        LanguageModelRawStreamPart::new(raw_value.clone()),
+                    ));
+                }
+
+                if value.get("error").is_some() {
+                    finish_reason = LanguageModelFinishReason {
+                        unified: FinishReason::Error,
+                        raw: Some("openai-compatible-error".to_string()),
+                    };
+                    stream.push(openai_compatible_stream_error(
+                        openai_compatible_error_message(&value),
+                        Some(&raw_value.to_string()),
+                    ));
+                    continue;
+                }
+
+                if is_first_chunk {
+                    is_first_chunk = false;
+                    stream.push(LanguageModelStreamPart::ResponseMetadata(
+                        openai_compatible_stream_response_metadata(&value),
+                    ));
+                }
+
+                if let Some(event_usage) = value.get("usage") {
+                    usage = Some(event_usage.clone());
+                }
+
+                let Some(choice) = value
+                    .get("choices")
+                    .and_then(JsonValue::as_array)
+                    .and_then(|choices| choices.first())
+                else {
+                    continue;
+                };
+
+                if let Some(raw_finish_reason) = choice.get("finish_reason") {
+                    finish_reason = openai_compatible_finish_reason(Some(raw_finish_reason));
+                }
+
+                let Some(delta) = choice.get("delta") else {
+                    continue;
+                };
+
+                let reasoning = delta
+                    .get("reasoning_content")
+                    .or_else(|| delta.get("reasoning"))
+                    .and_then(JsonValue::as_str)
+                    .filter(|reasoning| !reasoning.is_empty());
+                if let Some(reasoning) = reasoning {
+                    if !is_active_reasoning {
+                        stream.push(LanguageModelStreamPart::ReasoningStart(
+                            LanguageModelReasoningStart::new("reasoning-0"),
+                        ));
+                        is_active_reasoning = true;
+                    }
+
+                    stream.push(LanguageModelStreamPart::ReasoningDelta(
+                        LanguageModelReasoningDelta::new("reasoning-0", reasoning),
+                    ));
+                }
+
+                let text = delta
+                    .get("content")
+                    .and_then(JsonValue::as_str)
+                    .filter(|text| !text.is_empty());
+                if let Some(text) = text {
+                    if is_active_reasoning {
+                        stream.push(LanguageModelStreamPart::ReasoningEnd(
+                            LanguageModelReasoningEnd::new("reasoning-0"),
+                        ));
+                        is_active_reasoning = false;
+                    }
+
+                    if !is_active_text {
+                        stream.push(LanguageModelStreamPart::TextStart(
+                            LanguageModelTextStart::new("txt-0"),
+                        ));
+                        is_active_text = true;
+                    }
+
+                    stream.push(LanguageModelStreamPart::TextDelta(
+                        LanguageModelTextDelta::new("txt-0", text),
+                    ));
+                }
+
+                if delta.get("tool_calls").is_some() {
+                    if is_active_reasoning {
+                        stream.push(LanguageModelStreamPart::ReasoningEnd(
+                            LanguageModelReasoningEnd::new("reasoning-0"),
+                        ));
+                        is_active_reasoning = false;
+                    }
+
+                    finish_reason = LanguageModelFinishReason {
+                        unified: FinishReason::Error,
+                        raw: Some("openai-compatible-unported-tool-calls".to_string()),
+                    };
+                    stream.push(openai_compatible_stream_error(
+                        "OpenAI-compatible streamed tool calls are not implemented yet",
+                        Some(&raw_value.to_string()),
+                    ));
+                }
+            }
+            ParseJsonResult::Failure { error, raw_value } => {
+                finish_reason = LanguageModelFinishReason {
+                    unified: FinishReason::Error,
+                    raw: Some("openai-compatible-parse-error".to_string()),
+                };
+                stream.push(openai_compatible_stream_error(
+                    error.to_string(),
+                    raw_value.as_ref().map(JsonValue::to_string).as_deref(),
+                ));
+            }
+        }
+    }
+
+    if is_active_reasoning {
+        stream.push(LanguageModelStreamPart::ReasoningEnd(
+            LanguageModelReasoningEnd::new("reasoning-0"),
+        ));
+    }
+
+    if is_active_text {
+        stream.push(LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new(
+            "txt-0",
+        )));
+    }
+
+    stream.push(LanguageModelStreamPart::Finish(
+        LanguageModelStreamFinish::new(openai_compatible_usage(usage.as_ref()), finish_reason)
+            .with_provider_metadata(openai_compatible_stream_provider_metadata(
+                provider_name,
+                usage.as_ref(),
+            )),
+    ));
+
+    let mut result = LanguageModelStreamResult::new(stream)
+        .with_request(LanguageModelRequest::new().with_body(request_body));
+
+    if let Some(headers) = response_headers {
+        result = result.with_response(with_stream_response_headers(
+            LanguageModelStreamResultResponse::new(),
+            headers,
+        ));
+    }
+
+    result
+}
+
+fn openai_compatible_stream_response_metadata(
+    value: &JsonValue,
+) -> LanguageModelStreamResponseMetadata {
+    let mut metadata = LanguageModelStreamResponseMetadata::new();
+
+    if let Some(id) = json_string(value.get("id")) {
+        metadata = metadata.with_id(id);
+    }
+
+    if let Some(timestamp) = openai_compatible_response_timestamp(value.get("created")) {
+        metadata = metadata.with_timestamp(timestamp);
+    }
+
+    if let Some(model_id) = json_string(value.get("model")) {
+        metadata = metadata.with_model_id(model_id);
+    }
+
+    metadata
+}
+
+fn openai_compatible_stream_provider_metadata(
+    provider_name: &str,
+    usage: Option<&JsonValue>,
+) -> ProviderMetadata {
+    let mut metadata = ProviderMetadata::new();
+    let mut provider_metadata = JsonObject::new();
+    add_openai_compatible_prediction_metadata(&mut provider_metadata, usage);
+    metadata.insert(provider_name.to_string(), provider_metadata);
+    metadata
+}
+
+fn add_openai_compatible_prediction_metadata(
+    provider_metadata: &mut JsonObject,
+    usage: Option<&JsonValue>,
+) {
+    if let Some(completion_token_details) =
+        usage.and_then(|usage| usage.get("completion_tokens_details"))
     {
         if let Some(accepted_prediction_tokens) = json_u64(
             completion_token_details
@@ -875,12 +1195,6 @@ fn openai_compatible_provider_metadata(
             );
         }
     }
-
-    if !provider_metadata.is_empty() {
-        metadata.insert(provider_name.to_string(), provider_metadata);
-    }
-
-    metadata
 }
 
 fn openai_compatible_error_generate_result(
@@ -898,6 +1212,40 @@ fn openai_compatible_error_generate_result(
     )
     .with_request(LanguageModelRequest::new().with_body(request_body))
     .with_provider_metadata(openai_compatible_error_metadata(provider_name, message))
+}
+
+fn openai_compatible_error_stream_result(
+    message: String,
+    request_body: JsonValue,
+    response_headers: Option<Headers>,
+    raw_body: Option<&str>,
+) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
+    let mut result =
+        LanguageModelStreamResult::new(vec![openai_compatible_stream_error(message, raw_body)])
+            .with_request(LanguageModelRequest::new().with_body(request_body));
+
+    if let Some(headers) = response_headers {
+        result = result.with_response(with_stream_response_headers(
+            LanguageModelStreamResultResponse::new(),
+            headers,
+        ));
+    }
+
+    result
+}
+
+fn openai_compatible_stream_error(
+    message: impl Into<String>,
+    raw_body: Option<&str>,
+) -> LanguageModelStreamPart {
+    let mut error = JsonObject::new();
+    error.insert("message".to_string(), JsonValue::String(message.into()));
+
+    if let Some(raw_body) = raw_body {
+        error.insert("body".to_string(), JsonValue::String(raw_body.to_string()));
+    }
+
+    LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(JsonValue::Object(error)))
 }
 
 fn openai_compatible_error_metadata(provider_name: &str, message: String) -> ProviderMetadata {
@@ -954,6 +1302,17 @@ fn with_response_headers(
     mut response: LanguageModelResponse,
     headers: Headers,
 ) -> LanguageModelResponse {
+    for (name, value) in headers {
+        response = response.with_header(name, value);
+    }
+
+    response
+}
+
+fn with_stream_response_headers(
+    mut response: LanguageModelStreamResultResponse,
+    headers: Headers,
+) -> LanguageModelStreamResultResponse {
     for (name, value) in headers {
         response = response.with_header(name, value);
     }
@@ -1052,12 +1411,13 @@ mod tests {
     use crate::json::JsonValue;
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelMessage,
-        LanguageModelResponseFormat, LanguageModelSystemMessage,
+        LanguageModelResponseFormat, LanguageModelStreamPart, LanguageModelSystemMessage,
     };
     use crate::prompt::Prompt;
     use crate::provider_utils::{
         ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     };
+    use crate::stream_text::{StreamTextOptions, stream_text};
     use crate::warning::Warning;
     use serde_json::json;
     use std::future::Future;
@@ -1275,6 +1635,264 @@ mod tests {
     }
 
     #[test]
+    fn openai_compatible_chat_streams_text_through_stream_text() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    openai_compatible_chat_stream_body(),
+                )
+                .with_headers(Headers::from([
+                    ("content-type".to_string(), "text/event-stream".to_string()),
+                    (
+                        "x-request-id".to_string(),
+                        "req_openai_compatible_stream".to_string(),
+                    ),
+                ])))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com")
+                .with_api_key("test-api-key")
+                .with_query_param("api-version", "2026-01-01")
+                .with_include_usage(true),
+        )
+        .with_transport(transport)
+        .chat_model("test-chat-model");
+        let result = poll_ready(stream_text(
+            StreamTextOptions::from_prompt(&model, Prompt::from_prompt("Say hello"))
+                .expect("prompt is valid")
+                .with_max_output_tokens(12)
+                .with_temperature(0.0),
+        ));
+
+        assert_eq!(result.text, "Hello stream");
+        assert_eq!(result.text_stream, vec!["Hello ", "stream"]);
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(4));
+        assert_eq!(result.usage.output_tokens.total, Some(5));
+        assert_eq!(result.usage.output_tokens.text, Some(4));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(1));
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("test-provider"))
+                .and_then(|metadata| metadata.get("acceptedPredictionTokens"))
+                .and_then(JsonValue::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("req_openai_compatible_stream")
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(
+            request.url,
+            "https://api.example.com/chat/completions?api-version=2026-01-01"
+        );
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "test-chat-model",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Say hello"
+                    }
+                ],
+                "max_tokens": 12,
+                "temperature": 0.0,
+                "stream": true,
+                "stream_options": {
+                    "include_usage": true
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_streams_reasoning_raw_chunks_and_parse_errors() {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(|_request| -> OpenAICompatibleTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    sse_body([
+                        json!({
+                            "id": "chatcmpl-stream-test",
+                            "created": 1711357598,
+                            "model": "test-chat-model",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "role": "assistant",
+                                        "reasoning_content": "Let me think"
+                                    },
+                                    "finish_reason": null
+                                }
+                            ]
+                        }),
+                        json!({
+                            "id": "chatcmpl-stream-test",
+                            "created": 1711357598,
+                            "model": "test-chat-model",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "reasoning": " about this"
+                                    },
+                                    "finish_reason": null
+                                }
+                            ]
+                        }),
+                        json!({
+                            "id": "chatcmpl-stream-test",
+                            "created": 1711357598,
+                            "model": "test-chat-model",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "content": "Here's my response"
+                                    },
+                                    "finish_reason": null
+                                }
+                            ]
+                        }),
+                        json!({
+                            "id": "chatcmpl-stream-test",
+                            "created": 1711357598,
+                            "model": "test-chat-model",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": "stop"
+                                }
+                            ],
+                            "usage": {
+                                "prompt_tokens": 2,
+                                "completion_tokens": 3
+                            }
+                        }),
+                    ]),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
+            "test-provider",
+            "https://api.example.com",
+        ))
+        .with_transport(transport)
+        .chat_model("test-chat-model");
+        let result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::System(
+                    LanguageModelSystemMessage::new("Think first"),
+                )])
+                .with_include_raw_chunks(true),
+            ),
+        );
+
+        assert!(matches!(
+            result.stream.first(),
+            Some(LanguageModelStreamPart::StreamStart(_))
+        ));
+        assert!(
+            result
+                .stream
+                .iter()
+                .any(|part| matches!(part, LanguageModelStreamPart::Raw(_)))
+        );
+        assert_eq!(
+            result
+                .stream
+                .iter()
+                .filter_map(|part| match part {
+                    LanguageModelStreamPart::ReasoningDelta(part) => Some(part.delta.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["Let me think", " about this"]
+        );
+        assert_eq!(
+            result
+                .stream
+                .iter()
+                .filter_map(|part| match part {
+                    LanguageModelStreamPart::TextDelta(part) => Some(part.delta.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["Here's my response"]
+        );
+        assert!(matches!(
+            result.stream.last(),
+            Some(LanguageModelStreamPart::Finish(finish))
+                if finish.finish_reason.unified == FinishReason::Stop
+                    && finish.usage.input_tokens.total == Some(2)
+        ));
+
+        let parse_error_transport: OpenAICompatibleTransport =
+            Arc::new(|_request| -> OpenAICompatibleTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    "data: {not json}\n\ndata: [DONE]\n\n",
+                ))))
+            });
+        let parse_error_model = OpenAICompatibleProvider::from_settings(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com"),
+        )
+        .with_transport(parse_error_transport)
+        .chat_model("test-chat-model");
+        let parse_error_result =
+            poll_ready(parse_error_model.do_stream(LanguageModelCallOptions::new(Vec::new())));
+
+        assert!(
+            parse_error_result
+                .stream
+                .iter()
+                .any(|part| matches!(part, LanguageModelStreamPart::Error(_)))
+        );
+        assert!(matches!(
+            parse_error_result.stream.last(),
+            Some(LanguageModelStreamPart::Finish(finish))
+                if finish.finish_reason.unified == FinishReason::Error
+        ));
+    }
+
+    #[test]
     fn openai_compatible_chat_maps_response_formats_and_warnings() {
         let transport: OpenAICompatibleTransport =
             Arc::new(|_request| -> OpenAICompatibleTransportFuture {
@@ -1333,6 +1951,83 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    fn openai_compatible_chat_stream_body() -> String {
+        sse_body([
+            json!({
+                "id": "chatcmpl-stream-test",
+                "created": 1711115037,
+                "model": "test-chat-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": ""
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-stream-test",
+                "created": 1711115037,
+                "model": "test-chat-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "content": "Hello "
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-stream-test",
+                "created": 1711115037,
+                "model": "test-chat-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "content": "stream"
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-stream-test",
+                "created": 1711115037,
+                "model": "test-chat-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 4,
+                    "completion_tokens": 5,
+                    "completion_tokens_details": {
+                        "reasoning_tokens": 1,
+                        "accepted_prediction_tokens": 2,
+                        "rejected_prediction_tokens": 3
+                    }
+                }
+            }),
+        ])
+    }
+
+    fn sse_body(events: impl IntoIterator<Item = JsonValue>) -> String {
+        events
+            .into_iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .chain(["data: [DONE]\n\n".to_string()])
+            .collect()
     }
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
