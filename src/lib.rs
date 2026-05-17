@@ -23,6 +23,7 @@ pub mod language_model_middleware;
 pub mod mock_models;
 pub mod prompt;
 pub mod provider;
+pub mod provider_middleware;
 pub mod provider_utils;
 pub mod registry;
 pub mod rerank;
@@ -202,6 +203,10 @@ pub use provider::{
     ProviderWithTranscriptionModel, ProviderWithVideoModel, SpecificationVersion,
     TooManyEmbeddingValuesForCallError, TypeValidationContext, TypeValidationError,
     UnsupportedFunctionalityError, get_error_message,
+};
+pub use provider_middleware::{
+    WrappedProvider, WrappedProviderWithImageMiddleware, wrap_provider,
+    wrap_provider_with_image_middleware,
 };
 pub use provider_utils::{
     Arrayable, Base64DecodeError, BinaryResponseHandlerOptions, ConvertToFormDataOptions,
