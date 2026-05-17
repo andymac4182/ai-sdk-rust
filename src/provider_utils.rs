@@ -4448,6 +4448,14 @@ pub fn dynamic_tool(name: impl Into<String>, input_schema: JsonSchema) -> Tool {
     Tool::dynamic(name, input_schema)
 }
 
+/// Returns whether a tool exposes a Rust executor.
+///
+/// This mirrors upstream provider-utils `isExecutableTool`. Rust callers can
+/// also use [`Tool::is_executable`] directly when they already have a tool.
+pub fn is_executable_tool(tool: Option<&Tool>) -> bool {
+    tool.is_some_and(Tool::is_executable)
+}
+
 /// Bidirectional mapping between caller-facing and provider-facing tool names.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ToolNameMapping {
@@ -7026,19 +7034,20 @@ mod tests {
         get_error_message, get_from_api, get_runtime_environment_user_agent,
         get_top_level_media_type, handle_fetch_error, handle_provider_api_response,
         inject_json_instruction, inject_json_instruction_into_messages, is_abort_error,
-        is_custom_reasoning, is_full_media_type, is_non_nullable, is_parsable_json,
-        is_provider_reference, is_url_supported, json_schema, lazy_json_schema, lazy_schema,
-        load_api_key, load_api_key_with_env, load_optional_setting_with_env, load_setting,
-        load_setting_with_env, map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
-        media_type_to_extension, normalize_headers, parse_json, parse_json_event_stream,
-        parse_json_with_schema, parse_provider_options, post_form_data_to_api, post_json_to_api,
-        post_to_api, prepare_get_from_api_request, prepare_post_form_data_to_api_request,
-        prepare_post_json_to_api_request, prepare_post_to_api_request, prepare_tools,
-        prepare_tools_with_context, read_response_with_size_limit, remove_undefined_entries,
-        resolve, resolve_full_media_type, resolve_provider_reference, safe_parse_json,
-        safe_parse_json_with_schema, safe_validate_types, serialize_model_options,
-        strip_file_extension, validate_download_url, validate_types,
-        with_provider_utils_user_agent, with_user_agent_suffix, without_trailing_slash,
+        is_custom_reasoning, is_executable_tool, is_full_media_type, is_non_nullable,
+        is_parsable_json, is_provider_reference, is_url_supported, json_schema, lazy_json_schema,
+        lazy_schema, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
+        load_setting, load_setting_with_env, map_reasoning_to_provider_budget,
+        map_reasoning_to_provider_effort, media_type_to_extension, normalize_headers, parse_json,
+        parse_json_event_stream, parse_json_with_schema, parse_provider_options,
+        post_form_data_to_api, post_json_to_api, post_to_api, prepare_get_from_api_request,
+        prepare_post_form_data_to_api_request, prepare_post_json_to_api_request,
+        prepare_post_to_api_request, prepare_tools, prepare_tools_with_context,
+        read_response_with_size_limit, remove_undefined_entries, resolve, resolve_full_media_type,
+        resolve_provider_reference, safe_parse_json, safe_parse_json_with_schema,
+        safe_validate_types, serialize_model_options, strip_file_extension, validate_download_url,
+        validate_types, with_provider_utils_user_agent, with_user_agent_suffix,
+        without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -13378,6 +13387,20 @@ mod tests {
                 "messages": []
             })
         );
+    }
+
+    #[test]
+    fn is_executable_tool_matches_upstream_helper_behavior() {
+        let executable = Tool::new("weather", object_schema()).with_execute(|_input, _options| {
+            ready(Ok(json!({
+                "forecast": "sunny"
+            })))
+        });
+        let non_executable = Tool::new("lookup", object_schema());
+
+        assert!(is_executable_tool(Some(&executable)));
+        assert!(!is_executable_tool(Some(&non_executable)));
+        assert!(!is_executable_tool(None));
     }
 
     #[test]

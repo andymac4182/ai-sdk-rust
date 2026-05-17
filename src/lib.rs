@@ -223,7 +223,7 @@ pub use provider_utils::{
     execute_provider_api_request, extract_response_headers, filter_nullable, generate_id,
     get_from_api, get_runtime_environment_user_agent, get_top_level_media_type, handle_fetch_error,
     handle_provider_api_response, inject_json_instruction_into_messages, is_abort_error,
-    is_custom_reasoning, is_full_media_type, is_non_nullable, is_parsable_json,
+    is_custom_reasoning, is_executable_tool, is_full_media_type, is_non_nullable, is_parsable_json,
     is_provider_reference, is_url_supported, json_schema, lazy_json_schema, lazy_schema,
     load_api_key, load_optional_setting, load_setting, map_reasoning_to_provider_budget,
     map_reasoning_to_provider_effort, media_type_to_extension, normalize_headers, parse_json,
