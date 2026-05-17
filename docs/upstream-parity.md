@@ -64,7 +64,7 @@ inventory.
 | `packages/cerebras` (`@ai-sdk/cerebras`) | provider package | not-started | none | none | Needs language provider and error mapping. |
 | `packages/cohere` (`@ai-sdk/cohere`) | provider package | not-started | none | none | Needs chat, embeddings, reranking, prompt conversion, and tool preparation. |
 | `packages/deepgram` (`@ai-sdk/deepgram`) | provider package | not-started | none | none | Needs speech, transcription, and error mapping. |
-| `packages/deepinfra` (`@ai-sdk/deepinfra`) | provider package | not-started | none | none | Needs OpenAI-compatible chat/image provider wrapper and errors. |
+| `packages/deepinfra` (`@ai-sdk/deepinfra`) | provider package | in-progress | `src/deepinfra.rs`, `src/openai_compatible.rs` | `deepinfra_provider_creates_chat_model_with_headers_and_base_url`; `deepinfra_provider_creates_completion_model`; `deepinfra_provider_creates_embedding_model_aliases`; `deepinfra_provider_uses_default_base_url_and_function_alias`; `deepinfra_provider_reports_unported_image_model`; `deepinfra_provider_implements_provider_trait`; `deepinfra_provider_settings_serde_accepts_upstream_base_url` | Initial provider foundation mirrors upstream `createDeepInfra` settings for default/custom base URL, `DEEPINFRA_API_KEY`, custom headers, DeepInfra user-agent suffix, callable-style `deepinfra(...)`, provider-v4 trait integration, and OpenAI-compatible `/openai/chat/completions`, `/openai/completions`, and `/openai/embeddings` models with provider ids `deepinfra.chat`, `deepinfra.completion`, and `deepinfra.embedding`. DeepInfra's custom chat usage correction and custom `/inference` image model remain unported. |
 | `packages/deepseek` (`@ai-sdk/deepseek`) | provider package | not-started | none | none | Needs chat language model, messages, tools, and error data. |
 | `packages/elevenlabs` (`@ai-sdk/elevenlabs`) | provider package | not-started | none | none | Needs speech, transcription, and error mapping. |
 | `packages/fal` (`@ai-sdk/fal`) | provider package | not-started | none | none | Needs image, speech, transcription, video, provider settings, and error mapping. |
@@ -156,7 +156,7 @@ inventory.
 | OpenAI-compatible images | in-progress | `src/openai_compatible.rs` | `openai_compatible_image_model_generates_through_generate_image`; `openai_compatible_image_model_edits_with_files_and_mask`; `openai_compatible_image_model_passes_options_warnings_and_errors` | Mirrors upstream OpenAI-compatible image generation and edit request boundaries for `/images/generations` JSON requests, `/images/edits` form-data requests, base64 image responses, provider option raw/camel-case precedence, unsupported aspect-ratio/seed warnings, response headers, and API error metadata. URL-image download remains intentionally not implemented in this dependency-light provider boundary. |
 | Vercel AI Gateway OpenAI-compatible text and embeddings | in-progress | `src/vercel_ai_gateway.rs`, `src/openai_compatible.rs` | `vercel_ai_gateway_openai_compatible_generates_text_through_openai_chat`; `vercel_ai_gateway_openai_compatible_streams_text_through_openai_chat`; `vercel_ai_gateway_openai_compatible_embeds_through_openai_embeddings`; ignored `live_vercel_ai_gateway_openai_compatible_generate_text`; ignored `live_vercel_ai_gateway_openai_compatible_stream_text`; ignored `live_vercel_ai_gateway_openai_compatible_embed` | Thin Rust provider factory over `https://ai-gateway.vercel.sh/v1` proves `generate_text`, `stream_text`, and `embed`/`embed_many` can call Gateway OpenAI-compatible `/chat/completions` and `/embeddings` with `openai/...` model ids. Broader Gateway OpenAI-compatible endpoint coverage can expand from this slice. |
 | Vercel v0 provider package | in-progress | `src/vercel.rs`, `src/openai_compatible.rs` | `vercel_provider_creates_openai_compatible_chat_model`; `vercel_provider_uses_default_base_url_and_function_alias`; `vercel_provider_reports_unsupported_model_families`; `vercel_provider_implements_provider_trait` | Mirrors upstream `createVercel` construction around OpenAI-compatible chat models with default/custom base URLs, headers, `VERCEL_API_KEY`, provider id `vercel.chat`, Vercel-specific user-agent suffix, and unsupported embedding/image lookups. Live v0 API validation remains optional and unported because this goal currently only has AI Gateway credentials. |
-| Concrete provider packages | in-progress | `src/openai.rs`, `src/open_responses.rs`, `src/vercel.rs`, `src/vercel_ai_gateway.rs` | OpenAI, Open Responses, Vercel, and Vercel AI Gateway provider-wrapper tests listed above | OpenAI, Open Responses, Vercel, and Vercel AI Gateway have initial Rust provider-wrapper slices. Most concrete provider package rows above remain unported. |
+| Concrete provider packages | in-progress | `src/openai.rs`, `src/open_responses.rs`, `src/vercel.rs`, `src/vercel_ai_gateway.rs`, `src/deepinfra.rs` | OpenAI, Open Responses, Vercel, Vercel AI Gateway, and DeepInfra provider-wrapper tests listed above | OpenAI, Open Responses, Vercel, Vercel AI Gateway, and DeepInfra have initial Rust provider-wrapper slices. Most concrete provider package rows above remain unported. |
 
 ## Examples Inventory
 
@@ -194,7 +194,7 @@ focused tests for each portable behavior before changing rows to `verified`.
 | Upstream area | Test files scanned | Status | Notes |
 | --- | ---: | --- | --- |
 | `packages/ai` | 128 | in-progress | Many non-streaming high-level API tests are represented in Rust; stream, UI, agent, telemetry, compatibility, and public mock model tests remain. |
-| Provider package tests | 195 | in-progress | Gateway, Vercel AI Gateway OpenAI-compatible, Vercel v0, OpenAI foundation, and Open Responses foundation provider tests now exist. Concrete provider package test files remain largely unported across OpenAI's broader Responses streaming/tools/files/speech/transcription surfaces, Anthropic, Google, Bedrock, xAI, and the remaining provider packages. |
+| Provider package tests | 195 | in-progress | Gateway, Vercel AI Gateway OpenAI-compatible, Vercel v0, OpenAI foundation, Open Responses foundation, and DeepInfra foundation provider tests now exist. Concrete provider package test files remain largely unported across OpenAI's broader Responses streaming/tools/files/speech/transcription surfaces, DeepInfra custom chat/image behavior, Anthropic, Google, Bedrock, xAI, and the remaining provider packages. |
 | `packages/provider` | 1 | in-progress | Upstream provider contract test is partially covered by Rust provider/model module tests. |
 | `packages/provider-utils` | 77 | in-progress | Many provider support behaviors are represented, but stream/browser/fetch parity is incomplete. |
 | Framework adapter tests | 21 | js-only-documented | Angular, React, RSC, Svelte, and Vue bindings are JavaScript framework-specific; portable transport/message semantics are tracked separately. |
@@ -214,9 +214,10 @@ focused tests for each portable behavior before changing rows to `verified`.
    provider-executed tools, and error-classification slices with broader
    provider package tests.
 4. Continue layering concrete OpenAI-compatible wrappers: expand the OpenAI and
-   Open Responses foundations into files/tools/speech/transcription, full
-   Responses streaming/tool/provider-option parity, then add DeepInfra, Hugging
-   Face, and Together AI. Expand the Vercel AI Gateway OpenAI-compatible
+   Open Responses foundations into files/tools/speech/transcription and full
+   Responses streaming/tool/provider-option parity, expand DeepInfra with its
+   custom chat usage correction and `/inference` image model, then add Hugging
+   Face and Together AI. Expand the Vercel AI Gateway OpenAI-compatible
    vertical slice beyond text/streaming/embeddings as needed.
 5. Continue provider package slices until every provider row above is `verified`.
 6. Port MCP, OTel, Workflow, UI-message, chat/completion transport, telemetry,

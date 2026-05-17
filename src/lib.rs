@@ -4,6 +4,7 @@
 /// The crate version compiled into the library.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod deepinfra;
 pub mod embed;
 pub mod embedding_model;
 pub mod embedding_model_middleware;
@@ -51,6 +52,10 @@ pub mod vercel_ai_gateway;
 pub mod video_model;
 pub mod warning;
 
+pub use deepinfra::{
+    DEFAULT_DEEPINFRA_BASE_URL, DeepInfraProvider, DeepInfraProviderSettings, create_deepinfra,
+    deepinfra,
+};
 pub use embed::{
     EmbedEndEvent, EmbedEventEmbedding, EmbedEventResponse, EmbedEventValue, EmbedManyOptions,
     EmbedManyResult, EmbedOnEnd, EmbedOnEndCallback, EmbedOnEndFunction, EmbedOnEndFuture,
