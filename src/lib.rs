@@ -20,6 +20,7 @@ pub mod image_model_middleware;
 pub mod json;
 pub mod language_model;
 pub mod language_model_middleware;
+pub mod mock_models;
 pub mod prompt;
 pub mod provider;
 pub mod provider_utils;
@@ -180,6 +181,10 @@ pub use language_model_middleware::{
     LanguageModelMiddlewareModelOptions, LanguageModelTransformParamsOptions,
     LanguageModelWrapGenerateOptions, LanguageModelWrapStreamOptions, WrappedLanguageModel,
     default_settings_middleware, wrap_language_model,
+};
+pub use mock_models::{
+    MockEmbeddingModel, MockImageModel, MockLanguageModel, MockProvider, MockRerankingModel,
+    MockSpeechModel, MockTranscriptionModel, MockVideoModel,
 };
 pub use prompt::{
     Instructions, InvalidDataContentError, InvalidMessageRoleError, MessageConversionError, Prompt,
