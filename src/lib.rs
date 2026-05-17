@@ -73,7 +73,8 @@ pub use gateway::{
     GatewayLanguageModelPricing, GatewayLanguageModelSpecification, GatewayModelType,
     GatewayProvider, GatewayProviderSettings, GatewayRerankingModel, GatewaySpendReportDatePart,
     GatewaySpendReportGroupBy, GatewaySpendReportParams, GatewaySpendReportResponse,
-    GatewaySpendReportRow, GatewayTransport, GatewayTransportFuture, create_gateway, gateway,
+    GatewaySpendReportRow, GatewayTransport, GatewayTransportFuture, GatewayVideoModel,
+    create_gateway, gateway,
 };
 pub use generate_image::{
     ExperimentalGenerateImageResult, GenerateImageOptions, GenerateImagePrompt,
