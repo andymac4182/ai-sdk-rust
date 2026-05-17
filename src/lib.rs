@@ -142,7 +142,8 @@ pub use image_model::{
 };
 pub use image_model_middleware::{
     ImageModelDoGenerate, ImageModelMiddleware, ImageModelMiddlewareModelOptions,
-    ImageModelTransformParamsOptions, ImageModelWrapGenerateOptions,
+    ImageModelTransformParamsOptions, ImageModelWrapGenerateOptions, WrappedImageModel,
+    wrap_image_model,
 };
 pub use json::{
     JsonArray, JsonObject, JsonSchema, JsonValue, NonNullJsonValue, NullJsonValueError,

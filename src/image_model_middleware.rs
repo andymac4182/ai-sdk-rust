@@ -151,11 +151,158 @@ pub trait ImageModelMiddleware<M: ImageModel> {
     }
 }
 
+/// Image model wrapper that applies one middleware around a provider-v4 model.
+///
+/// Upstream `wrapImageModel` accepts one or more middlewares. This Rust wrapper
+/// models the same behavior for a single middleware without allocating a
+/// middleware collection; callers can wrap the returned model again to compose
+/// additional middleware.
+#[derive(Clone, Debug)]
+pub struct WrappedImageModel<M, W> {
+    model: M,
+    middleware: W,
+    provider_id: String,
+    model_id: String,
+}
+
+impl<M, W> WrappedImageModel<M, W>
+where
+    M: ImageModel,
+    W: ImageModelMiddleware<M>,
+{
+    /// Creates an image model wrapper using middleware-provided identity
+    /// overrides when present.
+    pub fn new(model: M, middleware: W) -> Self {
+        let provider_id = middleware
+            .override_provider(ImageModelMiddlewareModelOptions::new(&model))
+            .unwrap_or_else(|| model.provider().to_string());
+        let model_id = middleware
+            .override_model_id(ImageModelMiddlewareModelOptions::new(&model))
+            .unwrap_or_else(|| model.model_id().to_string());
+
+        Self {
+            model,
+            middleware,
+            provider_id,
+            model_id,
+        }
+    }
+
+    /// Sets an explicit provider id, taking precedence over middleware identity
+    /// overrides and the wrapped model's provider id.
+    pub fn with_provider_id(mut self, provider_id: impl Into<String>) -> Self {
+        self.provider_id = provider_id.into();
+        self
+    }
+
+    /// Sets an explicit model id, taking precedence over middleware identity
+    /// overrides and the wrapped model's model id.
+    pub fn with_model_id(mut self, model_id: impl Into<String>) -> Self {
+        self.model_id = model_id.into();
+        self
+    }
+
+    /// Returns the wrapped base image model.
+    pub fn model(&self) -> &M {
+        &self.model
+    }
+
+    /// Returns the middleware applied by this wrapper.
+    pub fn middleware(&self) -> &W {
+        &self.middleware
+    }
+
+    /// Consumes the wrapper into the base model and middleware.
+    pub fn into_parts(self) -> (M, W) {
+        (self.model, self.middleware)
+    }
+}
+
+/// Wraps an image model with middleware.
+pub fn wrap_image_model<M, W>(model: M, middleware: W) -> WrappedImageModel<M, W>
+where
+    M: ImageModel,
+    W: ImageModelMiddleware<M>,
+{
+    WrappedImageModel::new(model, middleware)
+}
+
+impl<M, W> ImageModel for WrappedImageModel<M, W>
+where
+    M: ImageModel + Sync,
+    W: ImageModelMiddleware<M> + Sync,
+{
+    type MaxImagesPerCallFuture<'a>
+        = Pin<Box<dyn Future<Output = Option<usize>> + Send + 'a>>
+    where
+        Self: 'a;
+
+    type GenerateFuture<'a>
+        = Pin<Box<dyn Future<Output = ImageModelResult> + Send + 'a>>
+    where
+        Self: 'a;
+
+    fn provider(&self) -> &str {
+        &self.provider_id
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    fn max_images_per_call(&self) -> Self::MaxImagesPerCallFuture<'_> {
+        Box::pin(async move {
+            if let Some(max_images_per_call) = self
+                .middleware
+                .override_max_images_per_call(ImageModelMiddlewareModelOptions::new(&self.model))
+            {
+                max_images_per_call.await
+            } else {
+                self.model.max_images_per_call().await
+            }
+        })
+    }
+
+    fn do_generate(&self, options: ImageModelCallOptions) -> Self::GenerateFuture<'_> {
+        Box::pin(async move {
+            let params = if let Some(transform_params) =
+                self.middleware
+                    .transform_params(ImageModelTransformParamsOptions::new(
+                        options.clone(),
+                        &self.model,
+                    )) {
+                transform_params.await
+            } else {
+                options
+            };
+
+            let do_generate_params = params.clone();
+            let fallback_params = params.clone();
+            let model = &self.model;
+            let do_generate: ImageModelDoGenerate<'_> =
+                Box::new(move || Box::pin(model.do_generate(do_generate_params)));
+
+            if let Some(wrap_generate) =
+                self.middleware
+                    .wrap_generate(ImageModelWrapGenerateOptions::new(
+                        do_generate,
+                        params,
+                        &self.model,
+                    ))
+            {
+                wrap_generate.await
+            } else {
+                self.model.do_generate(fallback_params).await
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ImageModelMiddleware, ImageModelMiddlewareModelOptions, ImageModelTransformParamsOptions,
-        ImageModelWrapGenerateOptions,
+        ImageModelWrapGenerateOptions, wrap_image_model,
     };
     use crate::file_data::FileDataContent;
     use crate::image_model::{
@@ -278,6 +425,96 @@ mod tests {
         }
     }
 
+    struct ParamEchoImageModel;
+
+    impl ImageModel for ParamEchoImageModel {
+        type MaxImagesPerCallFuture<'a>
+            = Ready<Option<usize>>
+        where
+            Self: 'a;
+
+        type GenerateFuture<'a>
+            = Ready<ImageModelResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "echo-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            "echo-image"
+        }
+
+        fn max_images_per_call(&self) -> Self::MaxImagesPerCallFuture<'_> {
+            ready(Some(2))
+        }
+
+        fn do_generate(&self, options: ImageModelCallOptions) -> Self::GenerateFuture<'_> {
+            let prompt = options.prompt.unwrap_or_default();
+            ready(
+                image_result("echo-image", "echo-generated")
+                    .with_warning(Warning::Other { message: prompt }),
+            )
+        }
+    }
+
+    struct TransformAndWrapImageMiddleware;
+
+    impl ImageModelMiddleware<ParamEchoImageModel> for TransformAndWrapImageMiddleware {
+        type OverrideMaxImagesPerCallFuture<'a>
+            = Ready<Option<usize>>
+        where
+            Self: 'a,
+            ParamEchoImageModel: 'a;
+
+        type TransformParamsFuture<'a>
+            = Ready<ImageModelCallOptions>
+        where
+            Self: 'a,
+            ParamEchoImageModel: 'a;
+
+        type WrapGenerateFuture<'a>
+            = Pin<Box<dyn Future<Output = ImageModelResult> + Send + 'a>>
+        where
+            Self: 'a,
+            ParamEchoImageModel: 'a;
+
+        fn transform_params<'a>(
+            &'a self,
+            mut options: ImageModelTransformParamsOptions<'a, ParamEchoImageModel>,
+        ) -> Option<Self::TransformParamsFuture<'a>>
+        where
+            Self: 'a,
+            ParamEchoImageModel: 'a,
+        {
+            options.params.prompt = Some(format!(
+                "{} transformed",
+                options.params.prompt.as_deref().unwrap_or_default()
+            ));
+            Some(ready(options.params))
+        }
+
+        fn wrap_generate<'a>(
+            &'a self,
+            options: ImageModelWrapGenerateOptions<'a, ParamEchoImageModel>,
+        ) -> Option<Self::WrapGenerateFuture<'a>>
+        where
+            Self: 'a,
+            ParamEchoImageModel: 'a,
+        {
+            assert_eq!(options.params.prompt.as_deref(), Some("input transformed"));
+
+            Some(Box::pin(async move {
+                let mut result = (options.do_generate)().await;
+                result.warnings.push(Warning::Other {
+                    message: format!("wrapped {}", options.model.model_id()),
+                });
+                result
+            }))
+        }
+    }
+
     fn image_result(model_id: &str, image: &str) -> ImageModelResult {
         let response_timestamp = OffsetDateTime::parse(
             "2024-01-02T03:04:05Z",
@@ -360,6 +597,47 @@ mod tests {
             vec![Warning::Other {
                 message: "wrapped".to_string(),
             }]
+        );
+    }
+
+    #[test]
+    fn wrap_image_model_applies_identity_and_capability_overrides() {
+        let wrapped = wrap_image_model(StaticImageModel, StaticImageMiddleware);
+
+        assert_eq!(wrapped.specification_version(), SpecificationVersion::V4);
+        assert_eq!(wrapped.provider(), "base-provider-middleware");
+        assert_eq!(wrapped.model_id(), "image-base-wrapped");
+        assert_eq!(poll_boxed(wrapped.max_images_per_call()), Some(8));
+
+        let explicit = wrap_image_model(StaticImageModel, StaticImageMiddleware)
+            .with_provider_id("explicit-provider")
+            .with_model_id("explicit-model");
+
+        assert_eq!(explicit.provider(), "explicit-provider");
+        assert_eq!(explicit.model_id(), "explicit-model");
+    }
+
+    #[test]
+    fn wrap_image_model_transforms_params_before_wrapping_generate() {
+        let wrapped = wrap_image_model(ParamEchoImageModel, TransformAndWrapImageMiddleware);
+
+        let result =
+            poll_boxed(wrapped.do_generate(ImageModelCallOptions::new(1).with_prompt("input")));
+
+        assert_eq!(
+            result.images,
+            vec![FileDataContent::Base64("echo-generated".to_string())]
+        );
+        assert_eq!(
+            result.warnings,
+            vec![
+                Warning::Other {
+                    message: "input transformed".to_string(),
+                },
+                Warning::Other {
+                    message: "wrapped echo-image".to_string(),
+                }
+            ]
         );
     }
 
