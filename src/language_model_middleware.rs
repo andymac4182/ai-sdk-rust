@@ -8,12 +8,13 @@ use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
 use crate::language_model::{
     LanguageModel, LanguageModelCallOptions, LanguageModelContent, LanguageModelGenerateResult,
-    LanguageModelReasoningDelta, LanguageModelReasoningEnd, LanguageModelReasoningStart,
-    LanguageModelResponse, LanguageModelResponseFormat, LanguageModelStreamFinish,
-    LanguageModelStreamPart, LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
-    LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
-    LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart, LanguageModelTool,
-    LanguageModelToolChoice, LanguageModelToolInputExample,
+    LanguageModelReasoning, LanguageModelReasoningDelta, LanguageModelReasoningEnd,
+    LanguageModelReasoningStart, LanguageModelResponse, LanguageModelResponseFormat,
+    LanguageModelStreamFinish, LanguageModelStreamPart, LanguageModelStreamResponseMetadata,
+    LanguageModelStreamResult, LanguageModelStreamResultResponse, LanguageModelStreamStart,
+    LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd,
+    LanguageModelTextStart, LanguageModelTool, LanguageModelToolChoice,
+    LanguageModelToolInputExample,
 };
 use crate::provider::{ProviderOptions, SpecificationVersion};
 
@@ -920,6 +921,357 @@ pub fn extract_json_middleware() -> ExtractJsonMiddleware {
     ExtractJsonMiddleware::new()
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReasoningTextMatch {
+    start: usize,
+    end: usize,
+    text: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReasoningExtractionState {
+    is_first_reasoning: bool,
+    is_first_text: bool,
+    after_switch: bool,
+    is_reasoning: bool,
+    buffer: String,
+    id_counter: usize,
+    text_id: String,
+}
+
+impl ReasoningExtractionState {
+    fn new(text_id: String, start_with_reasoning: bool) -> Self {
+        Self {
+            is_first_reasoning: true,
+            is_first_text: true,
+            after_switch: false,
+            is_reasoning: start_with_reasoning,
+            buffer: String::new(),
+            id_counter: 0,
+            text_id,
+        }
+    }
+
+    fn reasoning_id(&self) -> String {
+        format!("reasoning-{}", self.id_counter)
+    }
+}
+
+/// Language model middleware that extracts XML-tagged reasoning from text.
+///
+/// Upstream `extractReasoningMiddleware` converts text between configured XML
+/// tags into reasoning content while leaving the remaining text as normal text.
+/// This Rust port applies the same behavior to non-streaming content and to the
+/// crate's deterministic `Vec<LanguageModelStreamPart>` stream boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtractReasoningMiddleware {
+    tag_name: String,
+    separator: String,
+    start_with_reasoning: bool,
+}
+
+impl ExtractReasoningMiddleware {
+    /// Creates middleware that extracts reasoning from `<tag_name>...</tag_name>`.
+    pub fn new(tag_name: impl Into<String>) -> Self {
+        Self {
+            tag_name: tag_name.into(),
+            separator: "\n".to_string(),
+            start_with_reasoning: false,
+        }
+    }
+
+    /// Sets the separator inserted between extracted reasoning or text sections.
+    pub fn with_separator(mut self, separator: impl Into<String>) -> Self {
+        self.separator = separator.into();
+        self
+    }
+
+    /// Treats the first text delta/content as already inside a reasoning block.
+    pub fn with_start_with_reasoning(mut self, start_with_reasoning: bool) -> Self {
+        self.start_with_reasoning = start_with_reasoning;
+        self
+    }
+
+    /// Returns the configured reasoning tag name.
+    pub fn tag_name(&self) -> &str {
+        &self.tag_name
+    }
+
+    /// Returns the configured section separator.
+    pub fn separator(&self) -> &str {
+        &self.separator
+    }
+
+    /// Returns whether generation starts inside a reasoning block.
+    pub fn start_with_reasoning(&self) -> bool {
+        self.start_with_reasoning
+    }
+
+    fn opening_tag(&self) -> String {
+        format!("<{}>", self.tag_name)
+    }
+
+    fn closing_tag(&self) -> String {
+        format!("</{}>", self.tag_name)
+    }
+
+    fn transform_content(&self, content: LanguageModelContent) -> Vec<LanguageModelContent> {
+        match content {
+            LanguageModelContent::Text(text) => {
+                let opening_tag = self.opening_tag();
+                let closing_tag = self.closing_tag();
+                let source_text = if self.start_with_reasoning {
+                    format!("{opening_tag}{}", text.text)
+                } else {
+                    text.text.clone()
+                };
+                let matches = extract_reasoning_matches(&source_text, &opening_tag, &closing_tag);
+
+                if matches.is_empty() {
+                    return vec![LanguageModelContent::Text(text)];
+                }
+
+                let reasoning_text = matches
+                    .iter()
+                    .map(|reasoning_match| reasoning_match.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(&self.separator);
+                let text_without_reasoning =
+                    remove_reasoning_matches(&source_text, &matches, &self.separator);
+
+                vec![
+                    LanguageModelContent::Reasoning(LanguageModelReasoning::new(reasoning_text)),
+                    LanguageModelContent::Text(LanguageModelText::new(text_without_reasoning)),
+                ]
+            }
+            other => vec![other],
+        }
+    }
+
+    fn transform_stream(
+        &self,
+        stream: Vec<LanguageModelStreamPart>,
+    ) -> Vec<LanguageModelStreamPart> {
+        let opening_tag = self.opening_tag();
+        let closing_tag = self.closing_tag();
+        let mut transformed = Vec::with_capacity(stream.len());
+        let mut reasoning_extractions: BTreeMap<String, ReasoningExtractionState> = BTreeMap::new();
+        let mut delayed_text_start: Option<LanguageModelTextStart> = None;
+
+        for part in stream {
+            match part {
+                LanguageModelStreamPart::TextStart(start) => {
+                    delayed_text_start = Some(start);
+                }
+                LanguageModelStreamPart::TextEnd(end) => {
+                    if let Some(start) = delayed_text_start.take() {
+                        transformed.push(LanguageModelStreamPart::TextStart(start));
+                    }
+                    transformed.push(LanguageModelStreamPart::TextEnd(end));
+                }
+                LanguageModelStreamPart::TextDelta(delta) => {
+                    let active_extraction = reasoning_extractions
+                        .entry(delta.id.clone())
+                        .or_insert_with(|| {
+                            ReasoningExtractionState::new(
+                                delta.id.clone(),
+                                self.start_with_reasoning,
+                            )
+                        });
+                    active_extraction.buffer.push_str(&delta.delta);
+
+                    loop {
+                        let next_tag = if active_extraction.is_reasoning {
+                            &closing_tag
+                        } else {
+                            &opening_tag
+                        };
+
+                        let Some(start_index) =
+                            get_potential_start_index(&active_extraction.buffer, next_tag)
+                        else {
+                            let text = active_extraction.buffer.clone();
+                            publish_reasoning_extraction_text(
+                                &mut transformed,
+                                &mut delayed_text_start,
+                                active_extraction,
+                                &self.separator,
+                                &text,
+                            );
+                            active_extraction.buffer.clear();
+                            break;
+                        };
+
+                        let text = active_extraction.buffer[..start_index].to_string();
+                        publish_reasoning_extraction_text(
+                            &mut transformed,
+                            &mut delayed_text_start,
+                            active_extraction,
+                            &self.separator,
+                            &text,
+                        );
+
+                        let found_full_match =
+                            start_index + next_tag.len() <= active_extraction.buffer.len();
+
+                        if found_full_match {
+                            active_extraction.buffer = active_extraction.buffer
+                                [start_index + next_tag.len()..]
+                                .to_string();
+
+                            if active_extraction.is_reasoning {
+                                if active_extraction.is_first_reasoning {
+                                    transformed.push(LanguageModelStreamPart::ReasoningStart(
+                                        LanguageModelReasoningStart::new(
+                                            active_extraction.reasoning_id(),
+                                        ),
+                                    ));
+                                }
+
+                                transformed.push(LanguageModelStreamPart::ReasoningEnd(
+                                    LanguageModelReasoningEnd::new(
+                                        active_extraction.reasoning_id(),
+                                    ),
+                                ));
+                                active_extraction.id_counter += 1;
+                            }
+
+                            active_extraction.is_reasoning = !active_extraction.is_reasoning;
+                            active_extraction.after_switch = true;
+                        } else {
+                            active_extraction.buffer =
+                                active_extraction.buffer[start_index..].to_string();
+                            break;
+                        }
+                    }
+                }
+                other => transformed.push(other),
+            }
+        }
+
+        transformed
+    }
+}
+
+/// Creates language model middleware that extracts tagged reasoning from text.
+pub fn extract_reasoning_middleware(tag_name: impl Into<String>) -> ExtractReasoningMiddleware {
+    ExtractReasoningMiddleware::new(tag_name)
+}
+
+fn extract_reasoning_matches(
+    text: &str,
+    opening_tag: &str,
+    closing_tag: &str,
+) -> Vec<ReasoningTextMatch> {
+    let mut matches = Vec::new();
+    let mut search_start = 0usize;
+
+    while let Some(opening_index) = text[search_start..].find(opening_tag) {
+        let start = search_start + opening_index;
+        let reasoning_start = start + opening_tag.len();
+
+        let Some(closing_index) = text[reasoning_start..].find(closing_tag) else {
+            break;
+        };
+
+        let reasoning_end = reasoning_start + closing_index;
+        let end = reasoning_end + closing_tag.len();
+        matches.push(ReasoningTextMatch {
+            start,
+            end,
+            text: text[reasoning_start..reasoning_end].to_string(),
+        });
+        search_start = end;
+    }
+
+    matches
+}
+
+fn remove_reasoning_matches(text: &str, matches: &[ReasoningTextMatch], separator: &str) -> String {
+    let mut text_without_reasoning = text.to_string();
+
+    for reasoning_match in matches.iter().rev() {
+        let before_match = text_without_reasoning[..reasoning_match.start].to_string();
+        let after_match = text_without_reasoning[reasoning_match.end..].to_string();
+        let separator = if !before_match.is_empty() && !after_match.is_empty() {
+            separator
+        } else {
+            ""
+        };
+        text_without_reasoning = format!("{before_match}{separator}{after_match}");
+    }
+
+    text_without_reasoning
+}
+
+fn get_potential_start_index(text: &str, searched_text: &str) -> Option<usize> {
+    if searched_text.is_empty() {
+        return None;
+    }
+
+    if let Some(index) = text.find(searched_text) {
+        return Some(index);
+    }
+
+    text.char_indices()
+        .rev()
+        .map(|(index, _)| index)
+        .find(|index| searched_text.starts_with(&text[*index..]))
+}
+
+fn publish_reasoning_extraction_text(
+    transformed: &mut Vec<LanguageModelStreamPart>,
+    delayed_text_start: &mut Option<LanguageModelTextStart>,
+    active_extraction: &mut ReasoningExtractionState,
+    separator: &str,
+    text: &str,
+) {
+    if text.is_empty() {
+        return;
+    }
+
+    let should_prefix = active_extraction.after_switch
+        && if active_extraction.is_reasoning {
+            !active_extraction.is_first_reasoning
+        } else {
+            !active_extraction.is_first_text
+        };
+    let delta = if should_prefix {
+        format!("{separator}{text}")
+    } else {
+        text.to_string()
+    };
+
+    if active_extraction.is_reasoning
+        && (active_extraction.after_switch || active_extraction.is_first_reasoning)
+    {
+        transformed.push(LanguageModelStreamPart::ReasoningStart(
+            LanguageModelReasoningStart::new(active_extraction.reasoning_id()),
+        ));
+    }
+
+    if active_extraction.is_reasoning {
+        transformed.push(LanguageModelStreamPart::ReasoningDelta(
+            LanguageModelReasoningDelta::new(active_extraction.reasoning_id(), delta),
+        ));
+    } else {
+        if let Some(start) = delayed_text_start.take() {
+            transformed.push(LanguageModelStreamPart::TextStart(start));
+        }
+        transformed.push(LanguageModelStreamPart::TextDelta(
+            LanguageModelTextDelta::new(active_extraction.text_id.clone(), delta),
+        ));
+    }
+
+    active_extraction.after_switch = false;
+
+    if active_extraction.is_reasoning {
+        active_extraction.is_first_reasoning = false;
+    } else {
+        active_extraction.is_first_text = false;
+    }
+}
+
 /// Language model middleware that simulates streaming from `doGenerate`.
 ///
 /// Upstream `simulateStreamingMiddleware` turns a non-streaming generation
@@ -1179,6 +1531,67 @@ where
     }
 }
 
+impl<M> LanguageModelMiddleware<M> for ExtractReasoningMiddleware
+where
+    M: LanguageModel<Stream = Vec<LanguageModelStreamPart>>,
+{
+    type OverrideSupportedUrlsFuture<'a>
+        = Pending<LanguageModelSupportedUrls>
+    where
+        Self: 'a,
+        M: 'a;
+
+    type TransformParamsFuture<'a>
+        = Pending<LanguageModelCallOptions>
+    where
+        Self: 'a,
+        M: 'a;
+
+    type WrapGenerateFuture<'a>
+        = Pin<Box<dyn Future<Output = LanguageModelGenerateResult> + Send + 'a>>
+    where
+        Self: 'a,
+        M: 'a;
+
+    type WrapStreamFuture<'a>
+        = Pin<Box<dyn Future<Output = LanguageModelStreamResult<M::Stream>> + Send + 'a>>
+    where
+        Self: 'a,
+        M: 'a;
+
+    fn wrap_generate<'a>(
+        &'a self,
+        options: LanguageModelWrapGenerateOptions<'a, M>,
+    ) -> Option<Self::WrapGenerateFuture<'a>>
+    where
+        M: 'a,
+    {
+        Some(Box::pin(async move {
+            let mut result = (options.do_generate)().await;
+            result.content = result
+                .content
+                .into_iter()
+                .flat_map(|content| self.transform_content(content))
+                .collect();
+            result
+        }))
+    }
+
+    fn wrap_stream<'a>(
+        &'a self,
+        options: LanguageModelWrapStreamOptions<'a, M>,
+    ) -> Option<Self::WrapStreamFuture<'a>>
+    where
+        M: 'a,
+    {
+        Some(Box::pin(async move {
+            let mut result = (options.do_stream)().await;
+            result.stream = self.transform_stream(result.stream);
+            result
+        }))
+    }
+}
+
 impl<M> LanguageModelMiddleware<M> for SimulateStreamingMiddleware
 where
     M: LanguageModel<Stream = Vec<LanguageModelStreamPart>>,
@@ -1287,13 +1700,13 @@ fn merge_json_objects(default_object: &JsonObject, params_object: &JsonObject) -
 #[cfg(test)]
 mod tests {
     use super::{
-        AddToolInputExamplesMiddleware, ExtractJsonMiddleware, LanguageModelDefaultSettings,
-        LanguageModelMiddleware, LanguageModelMiddlewareCallType,
+        AddToolInputExamplesMiddleware, ExtractJsonMiddleware, ExtractReasoningMiddleware,
+        LanguageModelDefaultSettings, LanguageModelMiddleware, LanguageModelMiddlewareCallType,
         LanguageModelMiddlewareModelOptions, LanguageModelTransformParamsOptions,
         LanguageModelWrapGenerateOptions, LanguageModelWrapStreamOptions,
         add_tool_input_examples_middleware, default_extract_json_transform,
-        default_settings_middleware, extract_json_middleware, simulate_streaming_middleware,
-        wrap_language_model,
+        default_settings_middleware, extract_json_middleware, extract_reasoning_middleware,
+        simulate_streaming_middleware, wrap_language_model,
     };
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
@@ -1985,6 +2398,199 @@ mod tests {
                     "{\"ok\":true}"
                 )),
                 LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("0")),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_reasoning_middleware_extracts_generate_text_tags() {
+        let model = StaticLanguageModel;
+        let middleware = extract_reasoning_middleware("think");
+        let wrapped_generate = middleware
+            .wrap_generate(LanguageModelWrapGenerateOptions::new(
+                Box::new(|| {
+                    Box::pin(ready(LanguageModelGenerateResult::new(
+                        vec![LanguageModelContent::Text(LanguageModelText::new(
+                            "<think>analyzing</think>Here<think>more</think>done",
+                        ))],
+                        LanguageModelFinishReason {
+                            unified: FinishReason::Stop,
+                            raw: None,
+                        },
+                        LanguageModelUsage::default(),
+                    )))
+                }),
+                Box::new(|| Box::pin(ready(LanguageModelStreamResult::new(Vec::new())))),
+                LanguageModelCallOptions::new(Vec::new()),
+                &model,
+            ))
+            .expect("extract reasoning wrap-generate exists");
+        let result = poll_boxed(wrapped_generate);
+
+        assert_eq!(
+            result.content,
+            vec![
+                LanguageModelContent::Reasoning(LanguageModelReasoning::new("analyzing\nmore")),
+                LanguageModelContent::Text(LanguageModelText::new("Here\ndone")),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_reasoning_middleware_supports_start_with_reasoning_for_generate() {
+        let model = StaticLanguageModel;
+        let middleware = ExtractReasoningMiddleware::new("think").with_start_with_reasoning(true);
+        let wrapped_generate = middleware
+            .wrap_generate(LanguageModelWrapGenerateOptions::new(
+                Box::new(|| {
+                    Box::pin(ready(LanguageModelGenerateResult::new(
+                        vec![LanguageModelContent::Text(LanguageModelText::new(
+                            "analyzing</think>Here",
+                        ))],
+                        LanguageModelFinishReason {
+                            unified: FinishReason::Stop,
+                            raw: None,
+                        },
+                        LanguageModelUsage::default(),
+                    )))
+                }),
+                Box::new(|| Box::pin(ready(LanguageModelStreamResult::new(Vec::new())))),
+                LanguageModelCallOptions::new(Vec::new()),
+                &model,
+            ))
+            .expect("extract reasoning wrap-generate exists");
+        let result = poll_boxed(wrapped_generate);
+
+        assert_eq!(
+            result.content,
+            vec![
+                LanguageModelContent::Reasoning(LanguageModelReasoning::new("analyzing")),
+                LanguageModelContent::Text(LanguageModelText::new("Here")),
+            ]
+        );
+
+        let middleware = extract_reasoning_middleware("think");
+        let wrapped_generate = middleware
+            .wrap_generate(LanguageModelWrapGenerateOptions::new(
+                Box::new(|| Box::pin(ready(language_result("analyzing</think>Here")))),
+                Box::new(|| Box::pin(ready(LanguageModelStreamResult::new(Vec::new())))),
+                LanguageModelCallOptions::new(Vec::new()),
+                &model,
+            ))
+            .expect("extract reasoning wrap-generate exists");
+        let result = poll_boxed(wrapped_generate);
+
+        assert_eq!(
+            result.content,
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "analyzing</think>Here"
+            ))]
+        );
+    }
+
+    #[test]
+    fn extract_reasoning_middleware_extracts_split_stream_tags() {
+        let model = StaticLanguageModel;
+        let middleware = extract_reasoning_middleware("think");
+        let wrapped_stream = middleware
+            .wrap_stream(LanguageModelWrapStreamOptions::new(
+                Box::new(|| Box::pin(ready(language_result("unused")))),
+                Box::new(|| {
+                    Box::pin(ready(LanguageModelStreamResult::new(vec![
+                        LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                        LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                            "1", "<thi",
+                        )),
+                        LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                            "1", "nk>ana",
+                        )),
+                        LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                            "1",
+                            "lyzing</think>Here",
+                        )),
+                        LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                    ])))
+                }),
+                LanguageModelCallOptions::new(Vec::new()),
+                &model,
+            ))
+            .expect("extract reasoning wrap-stream exists");
+        let result = poll_boxed(wrapped_stream);
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new(
+                    "reasoning-0"
+                )),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "reasoning-0",
+                    "ana"
+                )),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "reasoning-0",
+                    "lyzing"
+                )),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new(
+                    "reasoning-0"
+                )),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Here")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_reasoning_middleware_separates_multiple_stream_tags() {
+        let model = StaticLanguageModel;
+        let middleware = extract_reasoning_middleware("think");
+        let wrapped_stream = middleware
+            .wrap_stream(LanguageModelWrapStreamOptions::new(
+                Box::new(|| Box::pin(ready(language_result("unused")))),
+                Box::new(|| {
+                    Box::pin(ready(LanguageModelStreamResult::new(vec![
+                        LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                        LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                            "1",
+                            "<think>first</think>text<think>second</think>more",
+                        )),
+                        LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                    ])))
+                }),
+                LanguageModelCallOptions::new(Vec::new()),
+                &model,
+            ))
+            .expect("extract reasoning wrap-stream exists");
+        let result = poll_boxed(wrapped_stream);
+
+        assert_eq!(
+            result.stream,
+            vec![
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new(
+                    "reasoning-0"
+                )),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "reasoning-0",
+                    "first"
+                )),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new(
+                    "reasoning-0"
+                )),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "text")),
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new(
+                    "reasoning-1"
+                )),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "reasoning-1",
+                    "\nsecond"
+                )),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new(
+                    "reasoning-1"
+                )),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "\nmore")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
             ]
         );
     }

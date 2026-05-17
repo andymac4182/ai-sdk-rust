@@ -180,13 +180,14 @@ pub use language_model::{
 };
 pub use language_model_middleware::{
     AddToolInputExamplesMiddleware, DefaultSettingsMiddleware, ExtractJsonMiddleware,
-    ExtractJsonTransformFunction, LanguageModelDefaultSettings, LanguageModelDoGenerate,
-    LanguageModelDoStream, LanguageModelMiddleware, LanguageModelMiddlewareCallType,
-    LanguageModelMiddlewareModelOptions, LanguageModelTransformParamsOptions,
-    LanguageModelWrapGenerateOptions, LanguageModelWrapStreamOptions, SimulateStreamingMiddleware,
-    ToolInputExampleFormatFunction, WrappedLanguageModel, add_tool_input_examples_middleware,
-    default_extract_json_transform, default_format_tool_input_example, default_settings_middleware,
-    extract_json_middleware, simulate_streaming_middleware, wrap_language_model,
+    ExtractJsonTransformFunction, ExtractReasoningMiddleware, LanguageModelDefaultSettings,
+    LanguageModelDoGenerate, LanguageModelDoStream, LanguageModelMiddleware,
+    LanguageModelMiddlewareCallType, LanguageModelMiddlewareModelOptions,
+    LanguageModelTransformParamsOptions, LanguageModelWrapGenerateOptions,
+    LanguageModelWrapStreamOptions, SimulateStreamingMiddleware, ToolInputExampleFormatFunction,
+    WrappedLanguageModel, add_tool_input_examples_middleware, default_extract_json_transform,
+    default_format_tool_input_example, default_settings_middleware, extract_json_middleware,
+    extract_reasoning_middleware, simulate_streaming_middleware, wrap_language_model,
 };
 pub use mock_models::{
     MockEmbeddingModel, MockImageModel, MockLanguageModel, MockProvider, MockRerankingModel,

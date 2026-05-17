@@ -134,13 +134,13 @@ inventory.
 | File upload: `uploadFile` | verified | `src/upload_file.rs` | `upload_file_*` tests | Provider implementations remain unported. |
 | Skill upload: `uploadSkill` | verified | `src/upload_skill.rs` | `upload_skill_*` tests | Provider implementations remain unported. |
 | Provider registry | verified | `src/registry.rs` | `create_provider_registry_*` tests | Gateway-specific registry helpers remain unported. |
-| Language model middleware: wrap/default settings | verified | `src/language_model_middleware.rs` | `wrap_language_model_*`; `default_settings_middleware_*`; `add_tool_input_examples_middleware_*`; `extract_json_middleware_*`; `simulate_streaming_middleware_*` tests | Mirrors upstream v4 model-level hooks plus default settings, tool input example description transforms, extract-JSON transforms, and simulated streaming over Rust `Vec<LanguageModelStreamPart>` streams. |
+| Language model middleware: wrap/default settings | verified | `src/language_model_middleware.rs` | `wrap_language_model_*`; `default_settings_middleware_*`; `add_tool_input_examples_middleware_*`; `extract_json_middleware_*`; `extract_reasoning_middleware_*`; `simulate_streaming_middleware_*` tests | Mirrors upstream v4 model-level hooks plus default settings, tool input example description transforms, extract-JSON transforms, extract-reasoning transforms, and simulated streaming over Rust `Vec<LanguageModelStreamPart>` streams. |
 | Embedding model middleware: wrap/default settings | verified | `src/embedding_model_middleware.rs` | `wrap_embedding_model_*`; `default_embedding_settings_middleware_*` tests | Mirrors upstream v4 hooks. |
 | Image model middleware: wrap | verified | `src/image_model_middleware.rs` | `image_model_middleware_exposes_upstream_v4_hooks`; wrap tests | Additional upstream AI middleware remains unported. |
 | Provider wrapping middleware | verified | `src/provider_middleware.rs` | `wrap_provider_wraps_all_language_model_lookups`; `wrap_provider_with_image_middleware_wraps_all_image_model_lookups`; passthrough and optional-interface tests | Mirrors upstream `middleware/wrap-provider.ts` for provider-v4 Rust providers: wraps every language lookup, optionally wraps image lookups, forwards embedding and optional provider extensions. Provider-v2/v3 conversion remains tracked separately. |
 | Add tool input examples middleware | verified | `src/language_model_middleware.rs` | `add_tool_input_examples_middleware_appends_examples_and_removes_them_by_default`; `add_tool_input_examples_middleware_supports_custom_options` | Mirrors upstream `middleware/add-tool-input-examples-middleware.ts`: formats function tool `inputExamples` into descriptions, defaults to the `Input Examples:` prefix, supports custom formatters, and removes structured examples by default. |
 | Extract JSON middleware | verified | `src/language_model_middleware.rs` | `extract_json_middleware_default_transform_strips_markdown_fences`; `extract_json_middleware_transforms_generate_text_parts`; `extract_json_middleware_transforms_vec_stream_text_blocks` | Mirrors upstream `middleware/extract-json-middleware.ts` for non-streaming text parts and this crate's deterministic `Vec<LanguageModelStreamPart>` stream boundary. Browser stream transform details are represented as collected Rust stream transformation. |
-| Extract reasoning middleware | not-started | none | none | Upstream `middleware/extract-reasoning-middleware.ts` remains unported. |
+| Extract reasoning middleware | verified | `src/language_model_middleware.rs` | `extract_reasoning_middleware_extracts_generate_text_tags`; `extract_reasoning_middleware_supports_start_with_reasoning_for_generate`; `extract_reasoning_middleware_extracts_split_stream_tags`; `extract_reasoning_middleware_separates_multiple_stream_tags` | Mirrors upstream `middleware/extract-reasoning-middleware.ts` for non-streaming text parts and this crate's deterministic `Vec<LanguageModelStreamPart>` stream boundary, including split tags, delayed text starts, multiple reasoning blocks, separators, and start-with-reasoning mode. |
 | Simulate streaming middleware | verified | `src/language_model_middleware.rs` | `simulate_streaming_middleware_turns_generate_result_into_vec_stream` | Mirrors upstream `middleware/simulate-streaming-middleware.ts` for Rust models whose stream type is `Vec<LanguageModelStreamPart>`, turning `do_generate` content into stream start, response metadata, text/reasoning/content parts, finish metadata, and stream result response headers. |
 | Prompt standardization, model-message conversion, request options | in-progress | `src/prompt.rs`, `src/language_model.rs` | Prompt conversion and call-option tests | Many prompt parts are covered; UI/model-message conversion helpers and v2/v3 adapters remain unported. |
 | Provider-v2/v3 compatibility adapters | not-started | none | none | Upstream `packages/ai/src/model/as-*-v3.ts` and `as-*-v4.ts` compatibility helpers remain unported. |
@@ -204,12 +204,11 @@ focused tests for each portable behavior before changing rows to `verified`.
 2. Continue `streamObject` parity with repair callbacks, telemetry,
    retries/abort, text response helpers, and fuller partial-output strategy
    edge cases.
-3. Port extract-reasoning middleware.
-4. Start the Gateway provider package with contract-first models and fake HTTP
+3. Start the Gateway provider package with contract-first models and fake HTTP
    tests, then add optional `.env.local` integration tests that skip when keys
    are absent.
-5. Start the OpenAI-compatible provider foundation, then layer concrete
+4. Start the OpenAI-compatible provider foundation, then layer concrete
    OpenAI, Vercel, DeepInfra, Hugging Face, and Together AI provider wrappers.
-6. Continue provider package slices until every provider row above is `verified`.
-7. Port MCP, OTel, Workflow, UI-message, chat/completion transport, telemetry,
+5. Continue provider package slices until every provider row above is `verified`.
+6. Port MCP, OTel, Workflow, UI-message, chat/completion transport, telemetry,
    logger, and HTTP server example surfaces.
