@@ -5981,20 +5981,20 @@ fn denied_initial_tool_approval_output(
 }
 
 #[derive(Clone, Debug, Default)]
-struct StepToolApprovals {
-    requests: Vec<LanguageModelToolApprovalRequestPart>,
-    responses: Vec<StepToolApprovalResponse>,
-    blocked_tool_call_ids: BTreeSet<String>,
-    denied_client_tool_call_count: usize,
+pub(crate) struct StepToolApprovals {
+    pub(crate) requests: Vec<LanguageModelToolApprovalRequestPart>,
+    pub(crate) responses: Vec<StepToolApprovalResponse>,
+    pub(crate) blocked_tool_call_ids: BTreeSet<String>,
+    pub(crate) denied_client_tool_call_count: usize,
 }
 
 #[derive(Clone, Debug)]
-struct StepToolApprovalResponse {
-    response: LanguageModelToolApprovalResponsePart,
-    tool_call: GenerateTextToolCall,
+pub(crate) struct StepToolApprovalResponse {
+    pub(crate) response: LanguageModelToolApprovalResponsePart,
+    pub(crate) tool_call: GenerateTextToolCall,
 }
 
-async fn resolve_tool_approvals_for_step(
+pub(crate) async fn resolve_tool_approvals_for_step(
     tool_calls: &[GenerateTextToolCall],
     tools: &[Tool],
     tool_approval: Option<&ToolApprovalConfiguration>,
@@ -6233,7 +6233,7 @@ pub(crate) fn should_continue_after_tool_results(
             && tool_results.len() + denied_client_tool_call_count == client_tool_call_count)
 }
 
-async fn response_messages_for_step(
+pub(crate) async fn response_messages_for_step(
     step: &GenerateTextStep,
     provider_content: &[LanguageModelContent],
     tool_approvals: &StepToolApprovals,
@@ -6269,14 +6269,6 @@ async fn response_messages_for_step(
     } else {
         Some(messages)
     }
-}
-
-pub(crate) async fn response_messages_for_step_without_approvals(
-    step: &GenerateTextStep,
-    provider_content: &[LanguageModelContent],
-    tools: &[Tool],
-) -> Option<Vec<LanguageModelMessage>> {
-    response_messages_for_step(step, provider_content, &StepToolApprovals::default(), tools).await
 }
 
 fn assistant_message_from_step(
