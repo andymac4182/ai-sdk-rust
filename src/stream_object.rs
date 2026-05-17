@@ -335,6 +335,7 @@ where
                     output_kind,
                     latest_partial.as_ref(),
                     schema.as_ref(),
+                    enum_values.as_deref(),
                     is_first_text_delta,
                 ) {
                     append_new_array_elements(
@@ -420,6 +421,7 @@ fn next_partial_object_delta(
     output_kind: GenerateObjectOutputKind,
     latest_partial: Option<&JsonValue>,
     schema: Option<&FlexibleSchema>,
+    enum_values: Option<&[String]>,
     is_first_delta: bool,
 ) -> Option<PartialObjectDelta> {
     let (value, parse_state) = parse_partial_json(Some(text)).into_parts();
@@ -433,6 +435,10 @@ fn next_partial_object_delta(
             is_first_delta,
             parse_state == ParsePartialJsonState::SuccessfulParse,
         );
+    }
+
+    if output_kind == GenerateObjectOutputKind::Enum {
+        return enum_partial_object_delta(value, latest_partial, enum_values, text_delta);
     }
 
     let partial = partial_value_for_output(value, output_kind)?;
@@ -513,6 +519,42 @@ fn array_partial_object_delta(
         partial,
         text_delta,
     })
+}
+
+fn enum_partial_object_delta(
+    value: JsonValue,
+    latest_partial: Option<&JsonValue>,
+    enum_values: Option<&[String]>,
+    text_delta: &str,
+) -> Option<PartialObjectDelta> {
+    let result = value
+        .as_object()
+        .and_then(|object| object.get("result"))
+        .and_then(JsonValue::as_str)?;
+
+    if result.is_empty() {
+        return None;
+    }
+
+    let possible_enum_values = enum_values?
+        .iter()
+        .filter(|enum_value| enum_value.starts_with(result))
+        .collect::<Vec<_>>();
+
+    let partial = match possible_enum_values.as_slice() {
+        [] => return None,
+        [enum_value] => JsonValue::String((*enum_value).clone()),
+        _ => JsonValue::String(result.to_string()),
+    };
+
+    if latest_partial.is_some_and(|latest| is_deep_equal_data(latest, &partial)) {
+        None
+    } else {
+        Some(PartialObjectDelta {
+            partial,
+            text_delta: text_delta.to_string(),
+        })
+    }
 }
 
 fn partial_value_for_output(
@@ -880,6 +922,78 @@ mod tests {
 
         assert_eq!(result.object, Some(json!("green")));
         assert_eq!(result.partial_object_stream, vec![json!("green")]);
+    }
+
+    #[test]
+    fn stream_object_enum_output_completes_unambiguous_prefixes() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "{\"result\":\"su",
+                )),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "nny\"}")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_enum_values(["sunny", "rainy"]),
+        ));
+
+        assert_eq!(result.object, Some(json!("sunny")));
+        assert_eq!(result.partial_object_stream, vec![json!("sunny")]);
+    }
+
+    #[test]
+    fn stream_object_enum_output_keeps_ambiguous_prefixes_until_resolved() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "{\"result\":\"foo",
+                )),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "bar\"}")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_enum_values(["foobar", "foobar2"]),
+        ));
+
+        assert_eq!(result.object, Some(json!("foobar")));
+        assert_eq!(
+            result.partial_object_stream,
+            vec![json!("foo"), json!("foobar")]
+        );
+    }
+
+    #[test]
+    fn stream_object_enum_output_suppresses_impossible_prefixes() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "{\"result\":\"foo",
+                )),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "bar\"}")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_enum_values(["sunny", "rainy"]),
+        ));
+
+        assert_eq!(result.object, None);
+        assert_eq!(result.partial_object_stream, Vec::<JsonValue>::new());
     }
 
     #[test]
