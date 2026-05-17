@@ -31,6 +31,7 @@ pub mod speech_model;
 pub mod transcribe;
 pub mod transcription_model;
 pub mod upload_file;
+pub mod upload_skill;
 pub mod util;
 pub mod video_model;
 pub mod warning;
@@ -260,6 +261,9 @@ pub use transcription_model::{
     TranscriptionModelSegment,
 };
 pub use upload_file::{UploadFileData, UploadFileOptions, UploadFileResult, upload_file};
+pub use upload_skill::{
+    UploadSkillFile, UploadSkillFileData, UploadSkillOptions, UploadSkillResult, upload_skill,
+};
 pub use util::{
     DataUrlTextError, InvalidArgumentError as AiInvalidArgumentError, ParsePartialJsonResult,
     ParsePartialJsonState, cosine_similarity, get_text_from_data_url, is_deep_equal_data,
