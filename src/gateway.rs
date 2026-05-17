@@ -11,6 +11,10 @@ use time::OffsetDateTime;
 use url::Url;
 use url::form_urlencoded::Serializer as FormUrlEncodedSerializer;
 
+use crate::embedding_model::{
+    EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelResponse, EmbeddingModelResult,
+    EmbeddingModelUsage,
+};
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
 use crate::language_model::{
@@ -672,6 +676,25 @@ impl GatewayProvider {
         self.language_model(model_id)
     }
 
+    /// Creates a Gateway embedding model.
+    pub fn embedding_model(&self, model_id: impl Into<String>) -> GatewayEmbeddingModel {
+        GatewayEmbeddingModel {
+            model_id: model_id.into(),
+            settings: self.settings.clone(),
+            transport: Arc::clone(&self.transport),
+        }
+    }
+
+    /// Alias for [`GatewayProvider::embedding_model`].
+    pub fn embedding(&self, model_id: impl Into<String>) -> GatewayEmbeddingModel {
+        self.embedding_model(model_id)
+    }
+
+    /// Deprecated upstream alias for [`GatewayProvider::embedding_model`].
+    pub fn text_embedding_model(&self, model_id: impl Into<String>) -> GatewayEmbeddingModel {
+        self.embedding_model(model_id)
+    }
+
     /// Returns available Gateway models for the authenticated account.
     pub async fn get_available_models(
         &self,
@@ -788,6 +811,14 @@ pub fn gateway(model_id: impl Into<String>) -> GatewayLanguageModel {
 /// Native AI SDK Gateway language model.
 #[derive(Clone)]
 pub struct GatewayLanguageModel {
+    model_id: String,
+    settings: GatewayProviderSettings,
+    transport: GatewayTransport,
+}
+
+/// Native AI SDK Gateway embedding model.
+#[derive(Clone)]
+pub struct GatewayEmbeddingModel {
     model_id: String,
     settings: GatewayProviderSettings,
     transport: GatewayTransport,
@@ -1079,6 +1110,81 @@ impl GatewayLanguageModel {
     }
 }
 
+impl GatewayEmbeddingModel {
+    /// Returns a copy of this model that uses the supplied HTTP transport.
+    pub fn with_transport(mut self, transport: GatewayTransport) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    async fn do_embed_result(&self, options: EmbeddingModelCallOptions) -> EmbeddingModelResult {
+        let request_body = gateway_embedding_request_body(&options);
+        let request_body_for_error = request_body.clone();
+        let request_body_for_response = request_body.clone();
+        let request_headers = self.request_headers(options.headers.as_ref());
+        let post_options = PostJsonToApiOptions::new(self.embedding_model_url(), request_body)
+            .with_headers(request_headers)
+            .with_environment(RuntimeEnvironment::unknown());
+        let transport = Arc::clone(&self.transport);
+
+        match post_json_to_api(
+            post_options,
+            move |request| (transport)(request),
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    gateway_embedding_response,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_json_error_response_handler(
+                    response.json_error_response_handler_options(request),
+                    clone_json_value,
+                    gateway_error_to_message,
+                    |_, _| None,
+                ))
+            },
+        )
+        .await
+        {
+            Ok(response) => embedding_result_from_response(
+                response.value,
+                response.raw_value,
+                response.response_headers,
+                request_body_for_response,
+            ),
+            Err(error) => embedding_result_from_error(error, request_body_for_error),
+        }
+    }
+
+    fn embedding_model_url(&self) -> String {
+        format!("{}/embedding-model", self.base_url())
+    }
+
+    fn base_url(&self) -> String {
+        gateway_base_url(&self.settings)
+    }
+
+    fn request_headers(&self, call_headers: Option<&Headers>) -> BTreeMap<String, Option<String>> {
+        let provider_headers = Some(
+            gateway_provider_headers(&self.settings)
+                .into_iter()
+                .collect::<Vec<_>>(),
+        );
+        let call_headers = optional_headers(call_headers);
+        let model_headers = Some(vec![
+            (
+                "ai-embedding-model-specification-version".to_string(),
+                Some("4".to_string()),
+            ),
+            ("ai-model-id".to_string(), Some(self.model_id.clone())),
+        ]);
+
+        combine_headers([provider_headers, call_headers, model_headers])
+    }
+}
+
 impl LanguageModel for GatewayLanguageModel {
     type SupportedUrlsFuture<'a>
         = Ready<LanguageModelSupportedUrls>
@@ -1122,6 +1228,47 @@ impl LanguageModel for GatewayLanguageModel {
 
     fn do_stream(&self, options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
         Box::pin(self.do_stream_result(options))
+    }
+}
+
+impl EmbeddingModel for GatewayEmbeddingModel {
+    type MaxEmbeddingsPerCallFuture<'a>
+        = Ready<Option<usize>>
+    where
+        Self: 'a;
+
+    type SupportsParallelCallsFuture<'a>
+        = Ready<bool>
+    where
+        Self: 'a;
+
+    type EmbedFuture<'a>
+        = Pin<Box<dyn Future<Output = EmbeddingModelResult> + Send + 'a>>
+    where
+        Self: 'a;
+
+    fn specification_version(&self) -> SpecificationVersion {
+        SpecificationVersion::V4
+    }
+
+    fn provider(&self) -> &str {
+        GATEWAY_PROVIDER_ID
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    fn max_embeddings_per_call(&self) -> Self::MaxEmbeddingsPerCallFuture<'_> {
+        ready(Some(2048))
+    }
+
+    fn supports_parallel_calls(&self) -> Self::SupportsParallelCallsFuture<'_> {
+        ready(true)
+    }
+
+    fn do_embed(&self, options: EmbeddingModelCallOptions) -> Self::EmbedFuture<'_> {
+        Box::pin(self.do_embed_result(options))
     }
 }
 
@@ -1347,6 +1494,90 @@ fn gateway_credits_response(
     value: &JsonValue,
 ) -> Result<GatewayCreditsResponse, serde_json::Error> {
     serde_json::from_value(value.clone())
+}
+
+fn gateway_embedding_request_body(options: &EmbeddingModelCallOptions) -> JsonValue {
+    let mut body = JsonObject::new();
+    body.insert("values".to_string(), json!(&options.values));
+
+    if let Some(provider_options) = &options.provider_options {
+        body.insert(
+            "providerOptions".to_string(),
+            serde_json::to_value(provider_options).unwrap_or(JsonValue::Null),
+        );
+    }
+
+    JsonValue::Object(body)
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct GatewayEmbeddingResponse {
+    embeddings: Vec<Vec<f64>>,
+    #[serde(default)]
+    usage: Option<EmbeddingModelUsage>,
+    #[serde(default)]
+    provider_metadata: Option<ProviderMetadata>,
+}
+
+fn gateway_embedding_response(
+    value: &JsonValue,
+) -> Result<GatewayEmbeddingResponse, serde_json::Error> {
+    serde_json::from_value(value.clone())
+}
+
+fn embedding_result_from_response(
+    response: GatewayEmbeddingResponse,
+    raw_response: Option<JsonValue>,
+    response_headers: Option<Headers>,
+    request_body: JsonValue,
+) -> EmbeddingModelResult {
+    let mut result = EmbeddingModelResult::new(response.embeddings);
+
+    if let Some(usage) = response.usage {
+        result = result.with_usage(usage);
+    }
+
+    if let Some(provider_metadata) = response.provider_metadata {
+        result = result.with_provider_metadata(provider_metadata);
+    }
+
+    let mut response_metadata =
+        EmbeddingModelResponse::new().with_body(raw_response.unwrap_or(request_body));
+
+    if let Some(headers) = response_headers {
+        response_metadata = with_embedding_response_headers(response_metadata, headers);
+    }
+
+    result.with_response(response_metadata)
+}
+
+fn embedding_result_from_error(
+    error: HandledFetchError,
+    request_body: JsonValue,
+) -> EmbeddingModelResult {
+    let (message, headers, body) = match error {
+        HandledFetchError::Original { error } => (error.message().to_string(), None, None),
+        HandledFetchError::ApiCall { error } => (
+            error.message().to_string(),
+            error.response_headers().cloned(),
+            error.response_body().map(String::from),
+        ),
+    };
+    let response_body = body
+        .as_deref()
+        .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+        .or_else(|| body.map(JsonValue::String))
+        .unwrap_or(request_body);
+    let mut response = EmbeddingModelResponse::new().with_body(response_body);
+
+    if let Some(headers) = headers {
+        response = with_embedding_response_headers(response, headers);
+    }
+
+    EmbeddingModelResult::new(Vec::new())
+        .with_provider_metadata(gateway_error_metadata(message))
+        .with_response(response)
 }
 
 fn gateway_spend_report_response(
@@ -1589,6 +1820,17 @@ fn with_stream_response_headers(
     response
 }
 
+fn with_embedding_response_headers(
+    mut response: EmbeddingModelResponse,
+    headers: Headers,
+) -> EmbeddingModelResponse {
+    for (name, value) in headers {
+        response = response.with_header(name, value);
+    }
+
+    response
+}
+
 fn default_gateway_transport() -> GatewayTransport {
     Arc::new(|request| Box::pin(ready(execute_gateway_request(request))))
 }
@@ -1676,6 +1918,8 @@ mod tests {
         GatewayProviderSettings, GatewaySpendReportDatePart, GatewaySpendReportGroupBy,
         GatewaySpendReportParams, GatewayTransport, GatewayTransportFuture, gateway,
     };
+    use crate::embed::{EmbedOptions, embed};
+    use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions};
     use crate::generate_text::{GenerateTextOptions, generate_text};
     use crate::headers::Headers;
     use crate::json::JsonValue;
@@ -1684,6 +1928,7 @@ mod tests {
         LanguageModelStreamPart,
     };
     use crate::prompt::Prompt;
+    use crate::provider::ProviderOptions;
     use crate::provider_utils::{
         ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     };
@@ -1952,11 +2197,175 @@ mod tests {
     }
 
     #[test]
+    fn gateway_embedding_model_embeds_through_embed() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "embeddings": [[0.1, 0.2, 0.3]],
+                    "usage": {
+                        "tokens": 4
+                    },
+                    "providerMetadata": {
+                        "gateway": {
+                            "routing": "test"
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .with_headers(Headers::from([(
+                "x-request-id".to_string(),
+                "embed_req".to_string(),
+            )])))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .embedding_model("openai/text-embedding-3-small");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "dimensions": 64
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = poll_ready(embed(
+            EmbedOptions::new(&model, "sunny day at the beach")
+                .with_provider_options(provider_options)
+                .with_header("Custom-Header", "test-value"),
+        ));
+
+        assert_eq!(result.embedding, vec![0.1, 0.2, 0.3]);
+        assert_eq!(result.usage.tokens, 4);
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("routing"))
+                .and_then(JsonValue::as_str),
+            Some("test")
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://api.test.com/embedding-model");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-token")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-embedding-model-specification-version")
+                .map(String::as_str),
+            Some("4")
+        );
+        assert_eq!(
+            request.headers.get("ai-model-id").map(String::as_str),
+            Some("openai/text-embedding-3-small")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("test-value")
+        );
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+        assert_eq!(
+            request_body.get("values").cloned(),
+            Some(json!(["sunny day at the beach"]))
+        );
+        assert_eq!(
+            request_body
+                .get("providerOptions")
+                .and_then(|options| options.get("openai"))
+                .and_then(|openai| openai.get("dimensions"))
+                .and_then(JsonValue::as_u64),
+            Some(64)
+        );
+    }
+
+    #[test]
+    fn gateway_embedding_model_maps_gateway_error_to_metadata() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                400,
+                "Bad Request",
+                json!({
+                    "error": {
+                        "message": "Invalid input",
+                        "type": "invalid_request_error"
+                    }
+                })
+                .to_string(),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .embedding_model("openai/text-embedding-3-small");
+        let result = poll_ready(model.do_embed(EmbeddingModelCallOptions::new(vec![
+            "bad input".to_string(),
+        ])));
+
+        assert!(result.embeddings.is_empty());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("errorMessage"))
+                .and_then(JsonValue::as_str),
+            Some("Invalid input")
+        );
+    }
+
+    #[test]
     fn gateway_function_uses_default_gateway_provider() {
         let model = gateway("openai/gpt-4.1-mini");
 
         assert_eq!(model.provider(), "gateway");
         assert_eq!(model.model_id(), "openai/gpt-4.1-mini");
+    }
+
+    #[test]
+    fn gateway_provider_creates_embedding_model_aliases() {
+        let provider = GatewayProvider::new();
+
+        assert_eq!(
+            provider
+                .embedding("openai/text-embedding-3-small")
+                .model_id(),
+            "openai/text-embedding-3-small"
+        );
+        assert_eq!(
+            provider
+                .text_embedding_model("openai/text-embedding-3-small")
+                .provider(),
+            "gateway"
+        );
     }
 
     #[test]
@@ -2573,6 +2982,30 @@ mod tests {
                 .to_lowercase()
                 .contains("rust-gateway-stream-ok"),
             "gateway stream response did not contain expected marker"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI embedding call"]
+    fn live_gateway_openai_embed() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!("skipping live Gateway embedding test because no API key is configured");
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_GATEWAY_EMBEDDING_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_EMBEDDING_MODEL"))
+            .unwrap_or_else(|_| "openai/text-embedding-3-small".to_string());
+        let model = GatewayProvider::new()
+            .with_api_key(api_key)
+            .embedding_model(model_id);
+        let result = poll_ready(embed(EmbedOptions::new(
+            &model,
+            "rust gateway embedding ok",
+        )));
+
+        assert!(
+            !result.embedding.is_empty(),
+            "gateway embedding response was empty"
         );
     }
 
