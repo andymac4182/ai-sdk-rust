@@ -8,17 +8,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::VERSION;
 use crate::generate_text::{
-    ActiveTools, GenerateTextModelInfo, GenerateTextOnToolExecutionEnd,
-    GenerateTextOnToolExecutionStart, GenerateTextStep, GenerateTextTool, GenerateTextToolCall,
+    ActiveTools, GenerateTextFinishEvent, GenerateTextModelInfo, GenerateTextOnFinish,
+    GenerateTextOnLanguageModelCallEnd, GenerateTextOnLanguageModelCallStart, GenerateTextOnStart,
+    GenerateTextOnStepFinish, GenerateTextOnStepStart, GenerateTextOnToolExecutionEnd,
+    GenerateTextOnToolExecutionStart, GenerateTextStartEvent, GenerateTextStep,
+    GenerateTextStepStartEvent, GenerateTextTool, GenerateTextToolCall,
     GenerateTextToolExecutionEndEvent, GenerateTextToolExecutionStartEvent, GenerateTextToolResult,
-    StopCondition, ToolApprovalConfiguration, ToolCallRepair, ToolCallRepairOptions,
-    ToolInputRefinement, ToolInputRefinementError, execute_tool_calls,
+    LanguageModelCallEndEvent, LanguageModelCallStartEvent, StopCondition,
+    ToolApprovalConfiguration, ToolCallRepair, ToolCallRepairOptions, ToolInputRefinement,
+    ToolInputRefinementError, apply_generate_text_response_metadata, execute_tool_calls,
     filter_active_language_model_tools, generate_text_call_id,
     generate_text_tool_result_from_language_model_tool_result, is_stop_condition_met,
     mark_runtime_dynamic_tool_calls, mark_tool_call_metadata, mark_tool_call_titles,
     mark_tool_result_metadata, mark_unavailable_tool_calls, refine_tool_inputs,
-    refresh_tool_call_views, refresh_tool_result_views, repair_tool_calls,
-    resolve_tool_approvals_for_step, response_messages_for_step,
+    refresh_generate_text_content, refresh_tool_call_views, refresh_tool_result_views,
+    repair_tool_calls, resolve_tool_approvals_for_step, response_messages_for_step,
     should_continue_after_tool_results, sync_tool_result_inputs,
 };
 use crate::headers::Headers;
@@ -505,11 +509,29 @@ pub struct StreamTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Optional callback used to repair invalid model tool calls before execution.
     pub tool_call_repair: Option<ToolCallRepair>,
 
+    /// Optional callback invoked before any streamed model work begins.
+    pub on_start: Option<GenerateTextOnStart<'a>>,
+
+    /// Optional callback invoked before each streamed model step begins.
+    pub on_step_start: Option<GenerateTextOnStepStart<'a>>,
+
+    /// Optional callback invoked immediately before each provider stream call begins.
+    pub on_language_model_call_start: Option<GenerateTextOnLanguageModelCallStart<'a>>,
+
+    /// Optional callback invoked after each provider stream call completes.
+    pub on_language_model_call_end: Option<GenerateTextOnLanguageModelCallEnd<'a>>,
+
     /// Optional callback invoked before a local Rust tool executor is invoked.
     pub on_tool_execution_start: Option<GenerateTextOnToolExecutionStart<'a>>,
 
     /// Optional callback invoked after a local Rust tool executor completes.
     pub on_tool_execution_end: Option<GenerateTextOnToolExecutionEnd<'a>>,
+
+    /// Optional callback invoked after each completed streamed generation step.
+    pub on_step_finish: Option<GenerateTextOnStepFinish<'a>>,
+
+    /// Optional callback invoked after the full streamed generation result is complete.
+    pub on_finish: Option<GenerateTextOnFinish<'a>>,
 
     /// Maximum number of model-call steps to run.
     pub max_steps: usize,
@@ -532,8 +554,14 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             tool_approval: None,
             tool_input_refinements: BTreeMap::new(),
             tool_call_repair: None,
+            on_start: None,
+            on_step_start: None,
+            on_language_model_call_start: None,
+            on_language_model_call_end: None,
             on_tool_execution_start: None,
             on_tool_execution_end: None,
+            on_step_finish: None,
+            on_finish: None,
             max_steps: 1,
             stop_conditions: Vec::new(),
         }
@@ -558,8 +586,14 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             tool_approval: None,
             tool_input_refinements: BTreeMap::new(),
             tool_call_repair: None,
+            on_start: None,
+            on_step_start: None,
+            on_language_model_call_start: None,
+            on_language_model_call_end: None,
             on_tool_execution_start: None,
             on_tool_execution_end: None,
+            on_step_finish: None,
+            on_finish: None,
             max_steps: 1,
             stop_conditions: Vec::new(),
         }
@@ -710,6 +744,56 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
         self
     }
 
+    /// Sets a callback that is invoked when streaming starts before model work.
+    pub fn with_on_start<F, Fut>(mut self, on_start: F) -> Self
+    where
+        F: Fn(GenerateTextStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_start = Some(GenerateTextOnStart::new(on_start));
+        self
+    }
+
+    /// Sets a callback that is invoked before every streamed model step.
+    pub fn with_on_step_start<F, Fut>(mut self, on_step_start: F) -> Self
+    where
+        F: Fn(GenerateTextStepStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_step_start = Some(GenerateTextOnStepStart::new(on_step_start));
+        self
+    }
+
+    /// Sets a callback that is invoked immediately before each provider stream call begins.
+    pub fn with_experimental_on_language_model_call_start<F, Fut>(
+        mut self,
+        on_language_model_call_start: F,
+    ) -> Self
+    where
+        F: Fn(LanguageModelCallStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_language_model_call_start = Some(GenerateTextOnLanguageModelCallStart::new(
+            on_language_model_call_start,
+        ));
+        self
+    }
+
+    /// Sets a callback that is invoked after each provider stream call completes.
+    pub fn with_experimental_on_language_model_call_end<F, Fut>(
+        mut self,
+        on_language_model_call_end: F,
+    ) -> Self
+    where
+        F: Fn(LanguageModelCallEndEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_language_model_call_end = Some(GenerateTextOnLanguageModelCallEnd::new(
+            on_language_model_call_end,
+        ));
+        self
+    }
+
     /// Sets a callback that is invoked before each local Rust tool execution.
     pub fn with_on_tool_execution_start<F, Fut>(mut self, on_tool_execution_start: F) -> Self
     where
@@ -749,6 +833,26 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
         Fut: Future<Output = ()> + 'a,
     {
         self.with_on_tool_execution_end(on_tool_execution_end)
+    }
+
+    /// Sets a callback that is invoked after every completed streamed step.
+    pub fn with_on_step_finish<F, Fut>(mut self, on_step_finish: F) -> Self
+    where
+        F: Fn(GenerateTextStep) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_step_finish = Some(GenerateTextOnStepFinish::new(on_step_finish));
+        self
+    }
+
+    /// Sets a callback that is invoked after the streamed generation result is complete.
+    pub fn with_on_finish<F, Fut>(mut self, on_finish: F) -> Self
+    where
+        F: Fn(GenerateTextFinishEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_finish = Some(GenerateTextOnFinish::new(on_finish));
+        self
     }
 
     /// Sets the maximum number of model-call steps.
@@ -973,8 +1077,14 @@ where
         tool_approval,
         tool_input_refinements,
         tool_call_repair,
+        on_start,
+        on_step_start,
+        on_language_model_call_start,
+        on_language_model_call_end,
         on_tool_execution_start,
         on_tool_execution_end,
+        on_step_finish,
+        on_finish,
         max_steps,
         stop_conditions,
     } = options;
@@ -982,11 +1092,48 @@ where
     let mut parts = vec![TextStreamPart::Start(TextStreamStartPart::new())];
     let base_language_model_tools = call_options.tools.take();
     let mut current_prompt = call_options.prompt.clone();
+    let initial_messages = current_prompt.clone();
+    let active_tools_for_start = active_tools.clone();
     let active_tools = active_tools.as_deref();
     let call_id = generate_text_call_id();
     let max_steps = max_steps.max(1);
     let mut stream_steps = Vec::new();
     let mut generate_steps = Vec::new();
+
+    if let Some(on_start) = &on_start {
+        let mut start_tools = base_language_model_tools.clone().unwrap_or_default();
+        if let Some(mut prepared_tools) =
+            prepare_tools_with_context(&tools, Some(&tools_context), experimental_sandbox.as_ref())
+        {
+            start_tools.append(&mut prepared_tools);
+        }
+
+        on_start
+            .start(GenerateTextStartEvent {
+                call_id: call_id.clone(),
+                operation_id: "ai.streamText".to_string(),
+                provider: model.provider().to_string(),
+                model_id: model.model_id().to_string(),
+                messages: initial_messages.clone(),
+                tools: start_tools,
+                tool_choice: call_options.tool_choice.clone(),
+                active_tools: active_tools_for_start,
+                max_output_tokens: call_options.max_output_tokens,
+                temperature: call_options.temperature,
+                top_p: call_options.top_p,
+                top_k: call_options.top_k,
+                presence_penalty: call_options.presence_penalty,
+                frequency_penalty: call_options.frequency_penalty,
+                stop_sequences: call_options.stop_sequences.clone(),
+                seed: call_options.seed,
+                reasoning: call_options.reasoning.clone(),
+                headers: call_options.headers.clone(),
+                provider_options: call_options.provider_options.clone(),
+                runtime_context: runtime_context.clone(),
+                tools_context: tools_context.clone(),
+            })
+            .await;
+    }
 
     for step_number in 0..max_steps {
         let step_prompt = current_prompt.clone();
@@ -1011,6 +1158,37 @@ where
         step_call_options.tools = step_language_model_tools;
         append_stream_text_user_agent(&mut step_call_options);
 
+        if let Some(on_step_start) = &on_step_start {
+            on_step_start
+                .start(GenerateTextStepStartEvent {
+                    call_id: call_id.clone(),
+                    provider: model.provider().to_string(),
+                    model_id: model.model_id().to_string(),
+                    step_number,
+                    messages: step_prompt.clone(),
+                    tools: step_call_options.tools.clone().unwrap_or_default(),
+                    tool_choice: step_call_options.tool_choice.clone(),
+                    active_tools: active_tools.map(|tools| tools.to_vec()),
+                    steps: generate_steps.clone(),
+                    provider_options: step_call_options.provider_options.clone(),
+                    runtime_context: runtime_context.clone(),
+                    tools_context: tools_context.clone(),
+                })
+                .await;
+        }
+
+        if let Some(on_language_model_call_start) = &on_language_model_call_start {
+            on_language_model_call_start
+                .start(LanguageModelCallStartEvent::from_call_options(
+                    &call_id,
+                    model.provider(),
+                    model.model_id(),
+                    &step_call_options,
+                ))
+                .await;
+        }
+
+        let model_call_started_at = Instant::now();
         let mut collected_step = collect_stream_text_step(
             model,
             step_call_options.clone(),
@@ -1018,6 +1196,8 @@ where
             &mut parts,
         )
         .await;
+        let response_time_ms =
+            u64::try_from(model_call_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         mark_unavailable_tool_calls(
             &mut collected_step.tool_calls,
@@ -1050,6 +1230,22 @@ where
             runtime_context.clone(),
             tools_context.clone(),
         );
+        refresh_generate_text_content(
+            &mut generate_step,
+            &collected_step.provider_content,
+            &Default::default(),
+        );
+        apply_generate_text_response_metadata(&mut generate_step);
+
+        if let Some(on_language_model_call_end) = &on_language_model_call_end {
+            on_language_model_call_end
+                .end(LanguageModelCallEndEvent::from_step(
+                    &generate_step,
+                    response_time_ms,
+                ))
+                .await;
+        }
+
         let tool_approvals = resolve_tool_approvals_for_step(
             &generate_step.tool_calls,
             &step_tools,
@@ -1129,6 +1325,12 @@ where
             .response
             .get_or_insert_with(LanguageModelResponse::new)
             .messages = Some(response_messages.clone());
+        refresh_generate_text_content(
+            &mut generate_step,
+            &collected_step.provider_content,
+            &tool_approvals,
+        );
+        apply_generate_text_response_metadata(&mut generate_step);
 
         parts.push(TextStreamPart::FinishStep(TextStreamFinishStepPart::new(
             collected_step.response.clone(),
@@ -1138,6 +1340,10 @@ where
             collected_step.raw_finish_reason.clone(),
             collected_step.provider_metadata.clone(),
         )));
+
+        if let Some(on_step_finish) = &on_step_finish {
+            on_step_finish.finish(generate_step.clone()).await;
+        }
 
         stream_steps.push(collected_step.into_stream_text_step());
         generate_steps.push(generate_step);
@@ -1166,6 +1372,12 @@ where
         final_step.raw_finish_reason.clone(),
         total_usage.clone(),
     )));
+
+    if let Some(on_finish) = &on_finish {
+        on_finish
+            .finish(GenerateTextFinishEvent::from_steps(&[], &generate_steps))
+            .await;
+    }
 
     StreamTextResult {
         parts,
@@ -2306,6 +2518,118 @@ mod tests {
         assert_eq!(
             callback_events.lock().expect("events lock").as_slice(),
             ["start:call-1:Brisbane:1", "end:call-1:sunny:1"]
+        );
+    }
+
+    #[test]
+    fn stream_text_invokes_lifecycle_callbacks_with_streamed_steps() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let callback_events = Arc::new(Mutex::new(Vec::new()));
+        let start_events = Arc::clone(&callback_events);
+        let step_start_events = Arc::clone(&callback_events);
+        let model_start_events = Arc::clone(&callback_events);
+        let model_end_events = Arc::clone(&callback_events);
+        let step_finish_events = Arc::clone(&callback_events);
+        let finish_events = Arc::clone(&callback_events);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_on_start(move |event| {
+                    let start_events = Arc::clone(&start_events);
+                    async move {
+                        assert_eq!(event.operation_id, "ai.streamText");
+                        assert_eq!(event.messages.len(), 1);
+                        start_events
+                            .lock()
+                            .expect("events lock")
+                            .push("on-start".to_string());
+                    }
+                })
+                .with_on_step_start(move |event| {
+                    let step_start_events = Arc::clone(&step_start_events);
+                    async move {
+                        assert_eq!(event.step_number, 0);
+                        assert_eq!(event.messages.len(), 1);
+                        assert!(event.steps.is_empty());
+                        step_start_events
+                            .lock()
+                            .expect("events lock")
+                            .push("on-step-start".to_string());
+                    }
+                })
+                .with_experimental_on_language_model_call_start(move |event| {
+                    let model_start_events = Arc::clone(&model_start_events);
+                    async move {
+                        assert_eq!(event.messages.len(), 1);
+                        model_start_events
+                            .lock()
+                            .expect("events lock")
+                            .push("on-language-model-call-start".to_string());
+                    }
+                })
+                .with_experimental_on_language_model_call_end(move |event| {
+                    let model_end_events = Arc::clone(&model_end_events);
+                    async move {
+                        assert_eq!(event.finish_reason, FinishReason::Stop);
+                        assert_eq!(event.usage, usage());
+                        assert!(!event.response_id.is_empty());
+                        model_end_events
+                            .lock()
+                            .expect("events lock")
+                            .push("on-language-model-call-end".to_string());
+                    }
+                })
+                .with_on_step_finish(move |step| {
+                    let step_finish_events = Arc::clone(&step_finish_events);
+                    async move {
+                        assert_eq!(step.step_number, 0);
+                        assert_eq!(step.text, "Hello");
+                        assert!(
+                            step.response
+                                .and_then(|response| response.messages)
+                                .is_some()
+                        );
+                        step_finish_events
+                            .lock()
+                            .expect("events lock")
+                            .push("on-step-finish".to_string());
+                    }
+                })
+                .with_on_finish(move |event| {
+                    let finish_events = Arc::clone(&finish_events);
+                    async move {
+                        assert_eq!(event.text, "Hello");
+                        assert_eq!(event.finish_reason, FinishReason::Stop);
+                        assert_eq!(event.steps.len(), 1);
+                        assert_eq!(event.total_usage, usage());
+                        finish_events
+                            .lock()
+                            .expect("events lock")
+                            .push("on-finish".to_string());
+                    }
+                }),
+        ));
+
+        assert_eq!(result.text, "Hello");
+        assert_eq!(
+            callback_events.lock().expect("events lock").as_slice(),
+            [
+                "on-start",
+                "on-step-start",
+                "on-language-model-call-start",
+                "on-language-model-call-end",
+                "on-step-finish",
+                "on-finish"
+            ]
         );
     }
 
