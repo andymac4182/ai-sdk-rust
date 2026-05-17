@@ -174,6 +174,30 @@ pub enum FileDataContent {
     Base64(String),
 }
 
+impl From<Vec<u8>> for FileDataContent {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::Bytes(bytes)
+    }
+}
+
+impl From<&[u8]> for FileDataContent {
+    fn from(bytes: &[u8]) -> Self {
+        Self::Bytes(bytes.to_vec())
+    }
+}
+
+impl From<String> for FileDataContent {
+    fn from(base64: String) -> Self {
+        Self::Base64(base64)
+    }
+}
+
+impl From<&str> for FileDataContent {
+    fn from(base64: &str) -> Self {
+        Self::Base64(base64.to_string())
+    }
+}
+
 /// File data as a tagged discriminated union.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
