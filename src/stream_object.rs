@@ -1,9 +1,11 @@
+use std::future::Future;
+
 use serde::{Deserialize, Serialize};
 
 use crate::VERSION;
 use crate::generate_object::{
-    GenerateObjectOutputKind, generate_object_output_kind, generate_object_response_format,
-    parse_generated_object,
+    GenerateObjectOutputKind, GenerateObjectRepairText, GenerateObjectRepairTextOptions,
+    generate_object_output_kind, generate_object_response_format, parse_generated_object,
 };
 use crate::headers::Headers;
 use crate::json::JsonValue;
@@ -115,6 +117,9 @@ pub struct StreamObjectOptions<'a, M: LanguageModel + ?Sized> {
 
     /// Whether schema validation should use upstream array output mode.
     pub array_output: bool,
+
+    /// Optional callback that can repair invalid final object text.
+    pub repair_text: Option<GenerateObjectRepairText<'a>>,
 }
 
 impl<'a, M: LanguageModel + ?Sized> StreamObjectOptions<'a, M> {
@@ -141,6 +146,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamObjectOptions<'a, M> {
             schema_description: None,
             enum_values: None,
             array_output: false,
+            repair_text: None,
         }
     }
 
@@ -214,6 +220,25 @@ impl<'a, M: LanguageModel + ?Sized> StreamObjectOptions<'a, M> {
     pub fn with_schema_description(mut self, schema_description: impl Into<String>) -> Self {
         self.schema_description = Some(schema_description.into());
         self
+    }
+
+    /// Sets a callback that can repair streamed text after parse or validation failure.
+    pub fn with_repair_text<F, Fut>(mut self, repair_text: F) -> Self
+    where
+        F: Fn(GenerateObjectRepairTextOptions) -> Fut + 'a,
+        Fut: Future<Output = Option<String>> + 'a,
+    {
+        self.repair_text = Some(GenerateObjectRepairText::new(repair_text));
+        self
+    }
+
+    /// Sets the upstream experimental repair-text callback alias.
+    pub fn with_experimental_repair_text<F, Fut>(self, repair_text: F) -> Self
+    where
+        F: Fn(GenerateObjectRepairTextOptions) -> Fut + 'a,
+        Fut: Future<Output = Option<String>> + 'a,
+    {
+        self.with_repair_text(repair_text)
     }
 }
 
@@ -304,6 +329,7 @@ where
         schema_description,
         enum_values,
         array_output,
+        repair_text,
     } = options;
 
     let output_kind = generate_object_output_kind(&schema, enum_values.as_deref(), array_output);
@@ -405,10 +431,46 @@ where
         match parse_generated_object(&text, schema.clone(), enum_values.as_deref(), array_output) {
             ParseJsonResult::Success { value, .. } => Some(value),
             ParseJsonResult::Failure { error: cause, .. } => {
-                if error.is_none() {
-                    error = Some(JsonValue::String(cause.to_string()));
+                let original_error = cause.clone();
+                match repair_text.as_ref() {
+                    Some(repair_text) => {
+                        let repaired_text = repair_text
+                            .repair(GenerateObjectRepairTextOptions::new(text.clone(), cause))
+                            .await;
+
+                        match repaired_text {
+                            Some(repaired_text) => match parse_generated_object(
+                                &repaired_text,
+                                schema,
+                                enum_values.as_deref(),
+                                array_output,
+                            ) {
+                                ParseJsonResult::Success { value, .. } => Some(value),
+                                ParseJsonResult::Failure {
+                                    error: repair_error,
+                                    ..
+                                } => {
+                                    if error.is_none() {
+                                        error = Some(JsonValue::String(repair_error.to_string()));
+                                    }
+                                    None
+                                }
+                            },
+                            None => {
+                                if error.is_none() {
+                                    error = Some(JsonValue::String(original_error.to_string()));
+                                }
+                                None
+                            }
+                        }
+                    }
+                    None => {
+                        if error.is_none() {
+                            error = Some(JsonValue::String(original_error.to_string()));
+                        }
+                        None
+                    }
                 }
-                None
             }
         };
 
@@ -680,7 +742,7 @@ mod tests {
         OutputTokenUsage,
     };
     use crate::mock_models::MockLanguageModel;
-    use crate::provider_utils::{Schema, json_schema};
+    use crate::provider_utils::{Schema, ValidationResult, json_schema};
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
         let waker = Waker::noop();
@@ -740,6 +802,13 @@ mod tests {
             }))
             .expect("schema should be an object"),
         )
+        .with_validator(|value| {
+            if value.get("content").is_some_and(JsonValue::is_string) {
+                ValidationResult::success(value.clone())
+            } else {
+                ValidationResult::failure("content must be a string")
+            }
+        })
     }
 
     fn object_stream() -> Vec<LanguageModelStreamPart> {
@@ -1072,5 +1141,130 @@ mod tests {
                 .iter()
                 .any(|part| matches!(part, ObjectStreamPart::Error { .. }))
         );
+    }
+
+    #[test]
+    fn stream_object_repairs_parse_failures() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    r#"{ "content": "provider metadata test" "#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_experimental_repair_text(|options| async move {
+                    assert_eq!(options.text(), r#"{ "content": "provider metadata test" "#);
+                    assert!(options.error().as_json_parse_error().is_some());
+
+                    Some(format!("{}}}", options.text()))
+                }),
+        ));
+
+        assert_eq!(
+            result.object,
+            Some(json!({ "content": "provider metadata test" }))
+        );
+        assert_eq!(result.error, None);
+    }
+
+    #[test]
+    fn stream_object_repairs_schema_validation_failures() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    r#"{ "content-a": "provider metadata test" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_repair_text(|options| async move {
+                    assert_eq!(
+                        options.text(),
+                        r#"{ "content-a": "provider metadata test" }"#
+                    );
+                    assert!(options.error().as_type_validation_error().is_some());
+
+                    Some(r#"{ "content": "provider metadata test" }"#.to_string())
+                }),
+        ));
+
+        assert_eq!(
+            result.object,
+            Some(json!({ "content": "provider metadata test" }))
+        );
+        assert_eq!(result.error, None);
+    }
+
+    #[test]
+    fn stream_object_keeps_original_error_when_repair_returns_none() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    r#"{ "content-a": "provider metadata test" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_repair_text(|options| async move {
+                    assert_eq!(
+                        options.text(),
+                        r#"{ "content-a": "provider metadata test" }"#
+                    );
+                    assert!(options.error().as_type_validation_error().is_some());
+
+                    None
+                }),
+        ));
+
+        assert_eq!(result.object, None);
+        assert!(result.error.is_some());
+    }
+
+    #[test]
+    fn stream_object_reports_repaired_text_error_when_repair_fails() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "{ bad")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_repair_text(|options| async move {
+                    assert_eq!(options.text(), "{ bad");
+                    assert!(options.error().as_json_parse_error().is_some());
+
+                    Some(format!("{}{{", options.text()))
+                }),
+        ));
+
+        assert_eq!(result.object, None);
+        assert!(result.error.is_some());
     }
 }
