@@ -43,7 +43,7 @@ inventory.
 
 | Upstream item | Kind | Status | Rust path | Evidence | Notes |
 | --- | --- | --- | --- | --- | --- |
-| `packages/ai` (`ai`) | core package | in-progress | `src/lib.rs`, `src/generate_text.rs`, `src/generate_object.rs`, `src/embed.rs`, `src/generate_image.rs`, `src/generate_speech.rs`, `src/generate_video.rs`, `src/transcribe.rs`, `src/rerank.rs`, `src/upload_file.rs`, `src/upload_skill.rs`, `src/registry.rs` | Unit tests in matching modules; `examples/kitchen_sink.rs` | Non-streaming generation, object, image, speech, video, transcription, embeddings, reranking, upload, registry, tool loops, and many provider-v4 shapes exist. Agent, stream APIs, UI-message APIs, telemetry, logger, text-stream response helpers, and public mock models remain unported. |
+| `packages/ai` (`ai`) | core package | in-progress | `src/lib.rs`, `src/generate_text.rs`, `src/generate_object.rs`, `src/embed.rs`, `src/generate_image.rs`, `src/generate_speech.rs`, `src/generate_video.rs`, `src/transcribe.rs`, `src/rerank.rs`, `src/upload_file.rs`, `src/upload_skill.rs`, `src/registry.rs`, `src/mock_models.rs` | Unit tests in matching modules; `mock_models::tests::*`; `examples/kitchen_sink.rs` | Non-streaming generation, object, image, speech, video, transcription, embeddings, reranking, upload, registry, tool loops, public mock provider-v4 models, and many provider-v4 shapes exist. Agent, stream APIs, UI-message APIs, telemetry, logger, and text-stream response helpers remain unported. |
 | `packages/provider` (`@ai-sdk/provider`) | provider contracts | in-progress | `src/provider.rs`, `src/language_model.rs`, `src/embedding_model.rs`, `src/image_model.rs`, `src/speech_model.rs`, `src/transcription_model.rs`, `src/reranking_model.rs`, `src/video_model.rs`, `src/files.rs`, `src/skills.rs`, `src/json.rs`, `src/warning.rs`, `src/file_data.rs` | Contract and serialization tests in each module | Provider-v4 shapes are partially verified. Upstream v2/v3 compatibility surfaces and exact stream abstractions remain unported. |
 | `packages/provider-utils` (`@ai-sdk/provider-utils`) | provider support library | in-progress | `src/provider_utils.rs`, `src/retry.rs`, `src/headers.rs` | Large upstream-shape unit-test coverage in `src/provider_utils.rs` and `src/retry.rs` | Many schema, header, retry, media, response-handler, tool, API-request, and user-agent helpers exist. Browser stream adapters and exact fetch/runtime integration remain incomplete. |
 | `packages/gateway` (`@ai-sdk/gateway`) | provider package | not-started | none | none | Needs Vercel AI Gateway provider, metadata, credits, spend report, language/embedding/image/reranking/video model contracts, gateway error types, and optional integration tests using ignored `.env.local` keys. |
@@ -143,7 +143,7 @@ inventory.
 | Simulate streaming middleware | not-started | none | none | Upstream `middleware/simulate-streaming-middleware.ts` remains unported. |
 | Prompt standardization, model-message conversion, request options | in-progress | `src/prompt.rs`, `src/language_model.rs` | Prompt conversion and call-option tests | Many prompt parts are covered; UI/model-message conversion helpers and v2/v3 adapters remain unported. |
 | Provider-v2/v3 compatibility adapters | not-started | none | none | Upstream `packages/ai/src/model/as-*-v3.ts` and `as-*-v4.ts` compatibility helpers remain unported. |
-| Public mock models and test fixtures | not-started | none | none | Tests use private fakes; upstream `packages/ai/src/test/mock-*.ts` public test helpers remain unported. |
+| Public mock models and test fixtures | verified | `src/mock_models.rs` | `mock_language_model_records_calls_and_returns_scripted_results`; `mock_language_model_can_drive_generate_text`; `mock_provider_resolves_registered_models_and_reports_missing_ids` | Provides scriptable provider-v4 mock language, embedding, image, speech, transcription, reranking, video models, and a mock provider with shared call recording. Upstream v2/v3 mock helpers are intentionally not exposed yet because the Rust provider-v4 contracts are the active portable boundary. |
 | Telemetry and logger | not-started | none | none | Upstream `packages/ai/src/telemetry/*`, `packages/otel`, and `logger/log-warnings.ts` remain unported. |
 | MCP client and tool bridge | not-started | none | none | Upstream `packages/mcp` remains unported. |
 | Workflow agent package | not-started | none | none | Upstream `packages/workflow` remains unported. |
@@ -197,21 +197,18 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ## Next Unported Work Queue
 
-1. Port a public deterministic mock model/test fixture module equivalent to
-   upstream `packages/ai/src/test/mock-*.ts` so future slices can verify stream,
-   provider, and high-level API behavior without duplicating private fakes.
-2. Port `streamText` over a dependency-light Rust stream abstraction, including
+1. Port `streamText` over a dependency-light Rust stream abstraction, including
    deterministic tests for text deltas, reasoning, sources, tool-call deltas,
    tool execution from streams, final usage, errors, and stop conditions.
-3. Port `streamObject` and structured partial-object streaming once `streamText`
+2. Port `streamObject` and structured partial-object streaming once `streamText`
    event handling is available.
-4. Port provider wrapping middleware plus add-tool-input-examples,
+3. Port provider wrapping middleware plus add-tool-input-examples,
    extract-json, extract-reasoning, and simulate-streaming middleware.
-5. Start the Gateway provider package with contract-first models and fake HTTP
+4. Start the Gateway provider package with contract-first models and fake HTTP
    tests, then add optional `.env.local` integration tests that skip when keys
    are absent.
-6. Start the OpenAI-compatible provider foundation, then layer concrete
+5. Start the OpenAI-compatible provider foundation, then layer concrete
    OpenAI, Vercel, DeepInfra, Hugging Face, and Together AI provider wrappers.
-7. Continue provider package slices until every provider row above is `verified`.
-8. Port MCP, OTel, Workflow, UI-message, chat/completion transport, telemetry,
+6. Continue provider package slices until every provider row above is `verified`.
+7. Port MCP, OTel, Workflow, UI-message, chat/completion transport, telemetry,
    logger, and HTTP server example surfaces.
