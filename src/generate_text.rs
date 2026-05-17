@@ -28,8 +28,10 @@ use crate::language_model::{
     LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
     OutputTokenUsage,
 };
+use crate::prompt::{Prompt, standardize_prompt};
 use crate::provider::{
-    JsonParseError, TypeValidationContext, TypeValidationError, get_error_message,
+    InvalidPromptError, JsonParseError, TypeValidationContext, TypeValidationError,
+    get_error_message,
 };
 use crate::provider::{ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{
@@ -3424,6 +3426,15 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             stop_conditions: Vec::new(),
             include: GenerateTextInclude::default(),
         }
+    }
+
+    /// Creates generation options from the high-level upstream prompt shape.
+    ///
+    /// This standardizes text prompts and instructions before delegating to
+    /// the provider-v4 language model prompt boundary.
+    pub fn from_prompt(model: &'a M, prompt: Prompt) -> Result<Self, InvalidPromptError> {
+        let prompt = standardize_prompt(prompt)?.into_language_model_prompt();
+        Ok(Self::new(model, prompt))
     }
 
     /// Creates generation options from already prepared provider call options.
@@ -7356,8 +7367,8 @@ mod tests {
         LanguageModelProviderTool, LanguageModelReasoning, LanguageModelReasoningFile,
         LanguageModelReasoningPart, LanguageModelRequest, LanguageModelResponse,
         LanguageModelResponseFormat, LanguageModelSource, LanguageModelStreamPart,
-        LanguageModelStreamResult, LanguageModelSupportedUrls, LanguageModelText,
-        LanguageModelTextDelta, LanguageModelTextPart, LanguageModelTool,
+        LanguageModelStreamResult, LanguageModelSupportedUrls, LanguageModelSystemMessage,
+        LanguageModelText, LanguageModelTextDelta, LanguageModelTextPart, LanguageModelTool,
         LanguageModelToolApprovalRequest, LanguageModelToolApprovalRequestPart,
         LanguageModelToolApprovalResponsePart, LanguageModelToolCall, LanguageModelToolCallPart,
         LanguageModelToolChoice, LanguageModelToolContentPart, LanguageModelToolMessage,
@@ -7365,6 +7376,7 @@ mod tests {
         LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage,
         OutputTokenUsage,
     };
+    use crate::prompt::Prompt;
     use crate::provider::{
         JsonParseError, ProviderMetadata, ProviderOptions, SpecificationVersion,
     };
@@ -9026,6 +9038,44 @@ mod tests {
         assert_eq!(performance.input_tokens_per_second, None);
         assert_eq!(performance.tool_execution_ms, BTreeMap::new());
         assert_eq!(performance.time_to_first_output_token_ms, None);
+    }
+
+    #[test]
+    fn generate_text_from_prompt_standardizes_text_and_instructions() {
+        let model = FakeLanguageModel::new();
+        let options = GenerateTextOptions::from_prompt(
+            &model,
+            Prompt::from_prompt("Say hello").with_instructions("Use concise JSON-free text."),
+        )
+        .expect("prompt standardizes");
+
+        let result = poll_ready(generate_text(options));
+
+        let expected_prompt = vec![
+            LanguageModelMessage::System(LanguageModelSystemMessage::new(
+                "Use concise JSON-free text.",
+            )),
+            user_message("Say hello"),
+        ];
+
+        assert_eq!(model.calls.borrow()[0].prompt, expected_prompt);
+        assert_eq!(result.text, "Hello world");
+    }
+
+    #[test]
+    fn generate_text_from_prompt_rejects_invalid_high_level_prompt() {
+        let model = FakeLanguageModel::new();
+        let error =
+            match GenerateTextOptions::from_prompt(&model, Prompt::from_messages(Vec::new())) {
+                Ok(_) => panic!("empty messages are invalid"),
+                Err(error) => error,
+            };
+
+        assert_eq!(
+            error.message(),
+            "Invalid prompt: messages must not be empty"
+        );
+        assert!(model.calls.borrow().is_empty());
     }
 
     #[test]
