@@ -71,7 +71,7 @@ pub use gateway::{
     GatewayFetchMetadataResponse, GatewayGenerationInfo, GatewayGenerationInfoParams,
     GatewayImageModel, GatewayLanguageModel, GatewayLanguageModelEntry,
     GatewayLanguageModelPricing, GatewayLanguageModelSpecification, GatewayModelType,
-    GatewayProvider, GatewayProviderSettings, GatewaySpendReportDatePart,
+    GatewayProvider, GatewayProviderSettings, GatewayRerankingModel, GatewaySpendReportDatePart,
     GatewaySpendReportGroupBy, GatewaySpendReportParams, GatewaySpendReportResponse,
     GatewaySpendReportRow, GatewayTransport, GatewayTransportFuture, create_gateway, gateway,
 };
