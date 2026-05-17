@@ -49,8 +49,10 @@ pub use embedding_model::{
     EmbeddingModelResult, EmbeddingModelUsage,
 };
 pub use embedding_model_middleware::{
-    EmbeddingModelDoEmbed, EmbeddingModelMiddleware, EmbeddingModelMiddlewareModelOptions,
+    DefaultEmbeddingSettingsMiddleware, EmbeddingModelDefaultSettings, EmbeddingModelDoEmbed,
+    EmbeddingModelMiddleware, EmbeddingModelMiddlewareModelOptions,
     EmbeddingModelTransformParamsOptions, EmbeddingModelWrapEmbedOptions,
+    default_embedding_settings_middleware,
 };
 pub use file_data::{
     FileData, FileDataContent, NoSuchProviderReferenceError, ProviderReference,

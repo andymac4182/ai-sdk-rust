@@ -1,8 +1,12 @@
-use std::future::Future;
+use std::future::{Future, Pending, Ready, ready};
 use std::pin::Pin;
 
+use serde::{Deserialize, Serialize};
+
 use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelResult};
-use crate::provider::SpecificationVersion;
+use crate::headers::Headers;
+use crate::json::{JsonObject, JsonValue};
+use crate::provider::{ProviderOptions, SpecificationVersion};
 
 /// Original embedding operation passed to middleware wrappers.
 pub type EmbeddingModelDoEmbed<'a> = Box<
@@ -170,15 +174,188 @@ pub trait EmbeddingModelMiddleware<M: EmbeddingModel> {
     }
 }
 
+/// Default provider call settings applied by [`DefaultEmbeddingSettingsMiddleware`].
+///
+/// Upstream `defaultEmbeddingSettingsMiddleware` accepts a partial provider-v4
+/// embedding call options object with `headers` and `providerOptions`. Rust
+/// keeps that same boundary as an explicit settings record and treats `None`
+/// as "no default".
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingModelDefaultSettings {
+    /// Default HTTP headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Headers>,
+
+    /// Default provider-specific options.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+}
+
+impl EmbeddingModelDefaultSettings {
+    /// Creates an empty default-settings record.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds a default HTTP header.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers
+            .get_or_insert_with(Headers::new)
+            .insert(name.into(), value.into());
+        self
+    }
+
+    /// Sets the default provider-specific options.
+    pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
+        self.provider_options = Some(provider_options);
+        self
+    }
+}
+
+/// Embedding model middleware that applies default call settings.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultEmbeddingSettingsMiddleware {
+    /// Settings applied when callers leave the corresponding call option unset.
+    pub settings: EmbeddingModelDefaultSettings,
+}
+
+impl DefaultEmbeddingSettingsMiddleware {
+    /// Creates default-settings middleware from a settings record.
+    pub fn new(settings: EmbeddingModelDefaultSettings) -> Self {
+        Self { settings }
+    }
+
+    fn apply_settings(&self, mut params: EmbeddingModelCallOptions) -> EmbeddingModelCallOptions {
+        params.headers = merge_headers(self.settings.headers.as_ref(), params.headers);
+        params.provider_options = merge_provider_options_deep(
+            self.settings.provider_options.as_ref(),
+            params.provider_options,
+        );
+
+        params
+    }
+}
+
+/// Creates embedding model middleware that applies default call settings.
+pub fn default_embedding_settings_middleware(
+    settings: EmbeddingModelDefaultSettings,
+) -> DefaultEmbeddingSettingsMiddleware {
+    DefaultEmbeddingSettingsMiddleware::new(settings)
+}
+
+impl<M: EmbeddingModel> EmbeddingModelMiddleware<M> for DefaultEmbeddingSettingsMiddleware {
+    type OverrideMaxEmbeddingsPerCallFuture<'a>
+        = Pending<Option<usize>>
+    where
+        Self: 'a,
+        M: 'a;
+
+    type OverrideSupportsParallelCallsFuture<'a>
+        = Pending<bool>
+    where
+        Self: 'a,
+        M: 'a;
+
+    type TransformParamsFuture<'a>
+        = Ready<EmbeddingModelCallOptions>
+    where
+        Self: 'a,
+        M: 'a;
+
+    type WrapEmbedFuture<'a>
+        = Pending<EmbeddingModelResult>
+    where
+        Self: 'a,
+        M: 'a;
+
+    fn transform_params<'a>(
+        &'a self,
+        options: EmbeddingModelTransformParamsOptions<'a, M>,
+    ) -> Option<Self::TransformParamsFuture<'a>>
+    where
+        M: 'a,
+    {
+        Some(ready(self.apply_settings(options.params)))
+    }
+}
+
+fn merge_headers(
+    default_headers: Option<&Headers>,
+    params_headers: Option<Headers>,
+) -> Option<Headers> {
+    if default_headers.is_none() && params_headers.is_none() {
+        return None;
+    }
+
+    let mut headers = default_headers.cloned().unwrap_or_default();
+
+    if let Some(params_headers) = params_headers {
+        headers.extend(params_headers);
+    }
+
+    Some(headers)
+}
+
+fn merge_provider_options_deep(
+    default_provider_options: Option<&ProviderOptions>,
+    params_provider_options: Option<ProviderOptions>,
+) -> Option<ProviderOptions> {
+    if default_provider_options.is_none() && params_provider_options.is_none() {
+        return None;
+    }
+
+    let mut provider_options = default_provider_options.cloned().unwrap_or_default();
+
+    if let Some(params_provider_options) = params_provider_options {
+        for (provider, params_options) in params_provider_options {
+            match provider_options.get_mut(&provider) {
+                Some(default_options) => {
+                    *default_options = merge_json_objects(default_options, &params_options);
+                }
+                None => {
+                    provider_options.insert(provider, params_options);
+                }
+            }
+        }
+    }
+
+    Some(provider_options)
+}
+
+fn merge_json_objects(default_object: &JsonObject, params_object: &JsonObject) -> JsonObject {
+    let mut merged = default_object.clone();
+
+    for (key, params_value) in params_object {
+        if matches!(key.as_str(), "__proto__" | "constructor" | "prototype") {
+            continue;
+        }
+
+        let merged_value = match (merged.get(key), params_value) {
+            (Some(JsonValue::Object(default_nested)), JsonValue::Object(params_nested)) => {
+                JsonValue::Object(merge_json_objects(default_nested, params_nested))
+            }
+            _ => params_value.clone(),
+        };
+
+        merged.insert(key.clone(), merged_value);
+    }
+
+    merged
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        EmbeddingModelMiddleware, EmbeddingModelMiddlewareModelOptions,
-        EmbeddingModelTransformParamsOptions, EmbeddingModelWrapEmbedOptions,
+        EmbeddingModelDefaultSettings, EmbeddingModelMiddleware,
+        EmbeddingModelMiddlewareModelOptions, EmbeddingModelTransformParamsOptions,
+        EmbeddingModelWrapEmbedOptions, default_embedding_settings_middleware,
     };
     use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelResult};
     use crate::provider::SpecificationVersion;
     use crate::warning::Warning;
+    use serde_json::json;
     use std::future::{Future, Ready, ready};
     use std::pin::Pin;
     use std::task::{Context, Poll, Waker};
@@ -465,5 +642,140 @@ mod tests {
                 ))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn embedding_model_default_settings_serialize_as_upstream_partial_call_options() {
+        let provider_options = serde_json::from_value(json!({
+            "google": {
+                "outputDimensionality": 512
+            }
+        }))
+        .expect("provider options deserialize");
+        let settings = EmbeddingModelDefaultSettings::new()
+            .with_header("X-Default-Header", "default")
+            .with_provider_options(provider_options);
+
+        assert_eq!(
+            serde_json::to_value(settings).expect("settings serialize"),
+            json!({
+                "headers": {
+                    "X-Default-Header": "default"
+                },
+                "providerOptions": {
+                    "google": {
+                        "outputDimensionality": 512
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn default_embedding_settings_middleware_applies_headers_without_overriding_params() {
+        let model = StaticEmbeddingModel;
+        let middleware = default_embedding_settings_middleware(
+            EmbeddingModelDefaultSettings::new()
+                .with_header("X-Default-Header", "default")
+                .with_header("X-Custom-Header", "default-custom"),
+        );
+
+        let transformed = middleware
+            .transform_params(EmbeddingModelTransformParamsOptions::new(
+                EmbeddingModelCallOptions::new(vec!["hello world".to_string()])
+                    .with_header("X-Custom-Header", "caller-custom"),
+                &model,
+            ))
+            .expect("default settings implements transform params");
+        let params = poll_ready(transformed);
+
+        assert_eq!(params.values, ["hello world"]);
+        assert_eq!(
+            params.headers,
+            Some(
+                serde_json::from_value(json!({
+                    "X-Default-Header": "default",
+                    "X-Custom-Header": "caller-custom"
+                }))
+                .expect("headers deserialize")
+            )
+        );
+    }
+
+    #[test]
+    fn default_embedding_settings_middleware_deep_merges_provider_options() {
+        let model = StaticEmbeddingModel;
+        let default_provider_options = serde_json::from_value(json!({
+            "google": {
+                "outputDimensionality": 512,
+                "nested": {
+                    "default": true,
+                    "caller": false
+                }
+            },
+            "openai": {
+                "dimensions": 256
+            }
+        }))
+        .expect("default provider options deserialize");
+        let caller_provider_options = serde_json::from_value(json!({
+            "google": {
+                "taskType": "SEMANTIC_SIMILARITY",
+                "nested": {
+                    "caller": true
+                }
+            }
+        }))
+        .expect("caller provider options deserialize");
+        let middleware = default_embedding_settings_middleware(
+            EmbeddingModelDefaultSettings::new().with_provider_options(default_provider_options),
+        );
+
+        let transformed = middleware
+            .transform_params(EmbeddingModelTransformParamsOptions::new(
+                EmbeddingModelCallOptions::new(vec!["hello world".to_string()])
+                    .with_provider_options(caller_provider_options),
+                &model,
+            ))
+            .expect("default settings implements transform params");
+        let params = poll_ready(transformed);
+
+        assert_eq!(
+            params.provider_options,
+            Some(
+                serde_json::from_value(json!({
+                    "google": {
+                        "outputDimensionality": 512,
+                        "taskType": "SEMANTIC_SIMILARITY",
+                        "nested": {
+                            "default": true,
+                            "caller": true
+                        }
+                    },
+                    "openai": {
+                        "dimensions": 256
+                    }
+                }))
+                .expect("provider options deserialize")
+            )
+        );
+    }
+
+    #[test]
+    fn default_embedding_settings_middleware_preserves_none_when_no_defaults_or_params() {
+        let model = StaticEmbeddingModel;
+        let middleware =
+            default_embedding_settings_middleware(EmbeddingModelDefaultSettings::new());
+
+        let transformed = middleware
+            .transform_params(EmbeddingModelTransformParamsOptions::new(
+                EmbeddingModelCallOptions::new(vec!["hello world".to_string()]),
+                &model,
+            ))
+            .expect("default settings implements transform params");
+        let params = poll_ready(transformed);
+
+        assert_eq!(params.headers, None);
+        assert_eq!(params.provider_options, None);
     }
 }
