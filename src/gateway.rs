@@ -20,6 +20,7 @@ use crate::gateway_error::{
     GATEWAY_AUTH_METHOD_HEADER, GatewayAuthMethod, GatewayAuthenticationError, GatewayError,
     GatewayInvalidRequestError, as_gateway_error, parse_gateway_auth_method,
 };
+use crate::gateway_tools::GatewayTools;
 use crate::headers::Headers;
 use crate::image_model::{
     ImageModel, ImageModelCallOptions, ImageModelFile, ImageModelProviderMetadata,
@@ -795,6 +796,11 @@ impl GatewayProvider {
     /// Alias for [`GatewayProvider::video_model`].
     pub fn video(&self, model_id: impl Into<String>) -> GatewayVideoModel {
         self.video_model(model_id)
+    }
+
+    /// Returns Gateway-specific provider-executed tools.
+    pub fn tools(&self) -> GatewayTools {
+        GatewayTools::new()
     }
 
     /// Returns available Gateway models for the authenticated account.
@@ -4672,6 +4678,17 @@ mod tests {
             ),
             Some(usize::MAX)
         );
+    }
+
+    #[test]
+    fn gateway_provider_exposes_gateway_tools() {
+        let tool = GatewayProvider::new().tools().parallel_search(
+            "parallelSearch",
+            crate::gateway_tools::ParallelSearchConfig::new(),
+        );
+
+        assert!(tool.is_provider_executed());
+        assert_eq!(tool.provider_tool_id(), Some("gateway.parallel_search"));
     }
 
     #[test]
