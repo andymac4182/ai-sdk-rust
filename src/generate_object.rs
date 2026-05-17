@@ -11,7 +11,8 @@ use crate::language_model::{
 };
 use crate::provider::ProviderMetadata;
 use crate::provider_utils::{
-    ParseJsonResult, generate_id, safe_parse_json, with_user_agent_suffix,
+    FlexibleSchema, ParseJsonResult, generate_id, safe_parse_json, safe_parse_json_with_schema,
+    with_user_agent_suffix,
 };
 use crate::warning::Warning;
 
@@ -203,6 +204,15 @@ pub struct GenerateObjectOptions<'a, M: LanguageModel + ?Sized> {
 
     /// Provider-level call options sent to the model.
     pub call_options: LanguageModelCallOptions,
+
+    /// Optional schema used for object output validation and provider guidance.
+    pub schema: Option<FlexibleSchema>,
+
+    /// Optional schema name sent to providers that support named JSON outputs.
+    pub schema_name: Option<String>,
+
+    /// Optional schema description sent to providers that support JSON output descriptions.
+    pub schema_description: Option<String>,
 }
 
 impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
@@ -217,6 +227,9 @@ impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
         Self {
             model,
             call_options,
+            schema: None,
+            schema_name: None,
+            schema_description: None,
         }
     }
 
@@ -247,6 +260,24 @@ impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
         self
     }
 
+    /// Sets the schema used to validate the generated object and guide the provider.
+    pub fn with_schema(mut self, schema: impl Into<FlexibleSchema>) -> Self {
+        self.schema = Some(schema.into());
+        self
+    }
+
+    /// Sets the provider-facing schema name.
+    pub fn with_schema_name(mut self, schema_name: impl Into<String>) -> Self {
+        self.schema_name = Some(schema_name.into());
+        self
+    }
+
+    /// Sets the provider-facing schema description.
+    pub fn with_schema_description(mut self, schema_description: impl Into<String>) -> Self {
+        self.schema_description = Some(schema_description.into());
+        self
+    }
+
     /// Adds an HTTP header.
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.call_options
@@ -272,9 +303,16 @@ where
     let GenerateObjectOptions {
         model,
         mut call_options,
+        schema,
+        schema_name,
+        schema_description,
     } = options;
 
-    call_options.response_format = Some(LanguageModelResponseFormat::json());
+    call_options.response_format = Some(generate_object_response_format(
+        &schema,
+        &schema_name,
+        &schema_description,
+    ));
     append_generate_object_user_agent(&mut call_options);
 
     let generate_result = model.do_generate(call_options).await;
@@ -293,11 +331,17 @@ where
         ));
     };
 
-    let object = match safe_parse_json(&text) {
+    let object = match parse_generated_object(&text, schema) {
         ParseJsonResult::Success { value, .. } => value,
         ParseJsonResult::Failure { error, .. } => {
+            let message = if error.as_type_validation_error().is_some() {
+                "No object generated: response did not match schema."
+            } else {
+                "No object generated: could not parse the response."
+            };
+
             return Err(NoObjectGeneratedError::with_message(
-                "No object generated: could not parse the response.",
+                message,
                 response,
                 usage,
                 finish_reason,
@@ -322,6 +366,28 @@ where
     Ok(result)
 }
 
+fn generate_object_response_format(
+    schema: &Option<FlexibleSchema>,
+    schema_name: &Option<String>,
+    schema_description: &Option<String>,
+) -> LanguageModelResponseFormat {
+    let mut response_format = LanguageModelResponseFormat::json();
+
+    if let Some(schema) = schema {
+        response_format = response_format.with_schema(schema.as_schema().json_schema().clone());
+    }
+
+    if let Some(schema_name) = schema_name {
+        response_format = response_format.with_name(schema_name.clone());
+    }
+
+    if let Some(schema_description) = schema_description {
+        response_format = response_format.with_description(schema_description.clone());
+    }
+
+    response_format
+}
+
 fn append_generate_object_user_agent(call_options: &mut LanguageModelCallOptions) {
     let headers = call_options.headers.take().map(|headers| {
         headers
@@ -331,6 +397,16 @@ fn append_generate_object_user_agent(call_options: &mut LanguageModelCallOptions
     });
 
     call_options.headers = Some(with_user_agent_suffix(headers, [format!("ai/{VERSION}")]));
+}
+
+fn parse_generated_object(
+    text: &str,
+    schema: Option<FlexibleSchema>,
+) -> ParseJsonResult<JsonValue> {
+    schema.map_or_else(
+        || safe_parse_json(text),
+        |schema| safe_parse_json_with_schema(text, schema),
+    )
 }
 
 fn generate_object_request(request: Option<LanguageModelRequest>) -> GenerateObjectRequest {
@@ -426,6 +502,7 @@ mod tests {
         LanguageModelSystemMessage, LanguageModelText, LanguageModelUsage, OutputTokenUsage,
     };
     use crate::provider::ProviderMetadata;
+    use crate::provider_utils::{Schema, ValidationResult, json_schema};
     use crate::warning::Warning;
 
     #[derive(Debug)]
@@ -524,6 +601,34 @@ mod tests {
             },
             raw: None,
         }
+    }
+
+    fn answer_json_schema() -> crate::json::JsonSchema {
+        serde_json::from_value(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": {
+                "answer": {
+                    "type": "number"
+                }
+            },
+            "required": ["answer"],
+            "additionalProperties": false
+        }))
+        .expect("answer schema is a JSON object")
+    }
+
+    fn answer_schema() -> Schema {
+        json_schema(answer_json_schema()).with_validator(|value| {
+            if value
+                .get("answer")
+                .is_some_and(serde_json::Value::is_number)
+            {
+                ValidationResult::success(value.clone())
+            } else {
+                ValidationResult::failure("answer must be a number")
+            }
+        })
     }
 
     #[test]
@@ -784,6 +889,77 @@ mod tests {
             headers.get("user-agent").map(String::as_str),
             Some(format!("ai/{VERSION}").as_str())
         );
+    }
+
+    #[test]
+    fn generate_object_forwards_schema_metadata_and_validates_output() {
+        let result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"answer\":42}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        );
+        let model = StaticObjectModel::new(result);
+
+        let output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_schema_name("answer")
+                .with_schema_description("A numeric answer object."),
+        ))
+        .expect("schema-valid object is generated");
+
+        assert_eq!(output.object, json!({ "answer": 42 }));
+
+        let seen_options = model.seen_options();
+        assert_eq!(seen_options.len(), 1);
+        assert_eq!(
+            seen_options[0].response_format,
+            Some(
+                LanguageModelResponseFormat::json()
+                    .with_schema(answer_json_schema())
+                    .with_name("answer")
+                    .with_description("A numeric answer object.")
+            )
+        );
+    }
+
+    #[test]
+    fn generate_object_reports_schema_validation_failures_as_no_object_errors() {
+        let result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"answer\":\"wrong\"}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        );
+        let model = StaticObjectModel::new(result);
+
+        let error = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ))
+        .expect_err("schema-invalid JSON should fail");
+
+        assert_eq!(
+            error.message(),
+            "No object generated: response did not match schema."
+        );
+        assert_eq!(error.text(), Some("{\"answer\":\"wrong\"}"));
+        assert!(
+            error
+                .cause_message()
+                .is_some_and(|cause| cause.contains("answer must be a number"))
+        );
+        assert_eq!(error.usage(), &object_usage());
+        assert_eq!(error.finish_reason(), &FinishReason::Stop);
+        assert_eq!(error.response().model_id.as_deref(), Some("object-test"));
     }
 
     #[test]
