@@ -44,6 +44,7 @@ pub mod ui_message_stream;
 pub mod upload_file;
 pub mod upload_skill;
 pub mod util;
+pub mod vercel;
 pub mod vercel_ai_gateway;
 pub mod video_model;
 pub mod warning;
@@ -369,6 +370,9 @@ pub use util::{
     DataUrlTextError, InvalidArgumentError as AiInvalidArgumentError, ParsePartialJsonResult,
     ParsePartialJsonState, cosine_similarity, get_text_from_data_url, is_deep_equal_data,
     parse_partial_json,
+};
+pub use vercel::{
+    DEFAULT_VERCEL_BASE_URL, VercelProvider, VercelProviderSettings, create_vercel, vercel,
 };
 pub use vercel_ai_gateway::{
     VERCEL_AI_GATEWAY_OPENAI_COMPATIBLE_BASE_URL, VercelAiGatewayOpenAICompatibleProvider,
