@@ -1,0 +1,954 @@
+use std::collections::BTreeMap;
+use std::env;
+use std::future::{Future, Ready, ready};
+use std::pin::Pin;
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use time::OffsetDateTime;
+
+use crate::headers::Headers;
+use crate::json::{JsonObject, JsonValue};
+use crate::language_model::{
+    FinishReason, InputTokenUsage, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
+    LanguageModelCustomContent, LanguageModelErrorStreamPart, LanguageModelFinishReason,
+    LanguageModelGenerateResult, LanguageModelRequest, LanguageModelResponse,
+    LanguageModelStreamPart, LanguageModelStreamResult, LanguageModelSupportedUrls,
+    LanguageModelText, LanguageModelUsage, OutputTokenUsage,
+};
+use crate::provider::{ProviderMetadata, SpecificationVersion};
+use crate::provider_utils::{
+    FetchErrorInfo, HandledFetchError, PostJsonToApiOptions, ProviderApiRequest,
+    ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+    ProviderApiResponseHandlerError, RuntimeEnvironment, combine_headers,
+    create_json_error_response_handler, create_json_response_handler, post_json_to_api,
+    with_user_agent_suffix, without_trailing_slash,
+};
+
+/// Default base URL used by upstream `@ai-sdk/gateway` provider calls.
+pub const DEFAULT_GATEWAY_BASE_URL: &str = "https://ai-gateway.vercel.sh/v4/ai";
+
+const AI_GATEWAY_PROTOCOL_VERSION: &str = "0.0.1";
+const GATEWAY_AUTH_METHOD_HEADER: &str = "ai-gateway-auth-method";
+const GATEWAY_PROVIDER_ID: &str = "gateway";
+
+/// Future returned by an injected Gateway HTTP transport.
+pub type GatewayTransportFuture =
+    Pin<Box<dyn Future<Output = Result<ProviderApiResponse, FetchErrorInfo>> + Send>>;
+
+/// HTTP transport used by [`GatewayLanguageModel`].
+pub type GatewayTransport = Arc<dyn Fn(ProviderApiRequest) -> GatewayTransportFuture + Send + Sync>;
+
+/// Configuration for a Vercel AI Gateway provider instance.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayProviderSettings {
+    /// Base URL prefix for native AI SDK Gateway API calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+
+    /// AI Gateway API key. When omitted, `AI_GATEWAY_API_KEY` and then
+    /// `AI_SDK_RUST_AI_GATEWAY_API_KEY` are read at call time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+
+    /// Custom provider-level headers included with each request.
+    #[serde(default, skip_serializing_if = "Headers::is_empty")]
+    pub headers: Headers,
+}
+
+impl GatewayProviderSettings {
+    /// Creates empty Gateway provider settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the native AI SDK Gateway base URL.
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = Some(base_url.into());
+        self
+    }
+
+    /// Sets the AI Gateway API key.
+    pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
+        self.api_key = Some(api_key.into());
+        self
+    }
+
+    /// Adds a provider-level request header.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(name.into(), value.into());
+        self
+    }
+}
+
+/// Vercel AI Gateway provider.
+#[derive(Clone)]
+pub struct GatewayProvider {
+    settings: GatewayProviderSettings,
+    transport: GatewayTransport,
+}
+
+impl GatewayProvider {
+    /// Creates a Gateway provider with default settings.
+    pub fn new() -> Self {
+        Self::from_settings(GatewayProviderSettings::new())
+    }
+
+    /// Creates a Gateway provider with explicit settings.
+    pub fn from_settings(settings: GatewayProviderSettings) -> Self {
+        Self {
+            settings,
+            transport: default_gateway_transport(),
+        }
+    }
+
+    /// Sets the AI Gateway API key for this provider.
+    pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
+        self.settings.api_key = Some(api_key.into());
+        self
+    }
+
+    /// Sets the native AI SDK Gateway base URL for this provider.
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.settings.base_url = Some(base_url.into());
+        self
+    }
+
+    /// Adds a provider-level request header.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.settings.headers.insert(name.into(), value.into());
+        self
+    }
+
+    /// Replaces the HTTP transport. This is primarily useful for tests.
+    pub fn with_transport(mut self, transport: GatewayTransport) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    /// Creates a Gateway language model.
+    pub fn language_model(&self, model_id: impl Into<String>) -> GatewayLanguageModel {
+        GatewayLanguageModel {
+            model_id: model_id.into(),
+            settings: self.settings.clone(),
+            transport: Arc::clone(&self.transport),
+        }
+    }
+
+    /// Alias for [`GatewayProvider::language_model`].
+    pub fn chat(&self, model_id: impl Into<String>) -> GatewayLanguageModel {
+        self.language_model(model_id)
+    }
+}
+
+impl Default for GatewayProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Creates a Gateway provider with explicit settings.
+pub fn create_gateway(settings: GatewayProviderSettings) -> GatewayProvider {
+    GatewayProvider::from_settings(settings)
+}
+
+/// Creates a Gateway language model using the default provider settings.
+pub fn gateway(model_id: impl Into<String>) -> GatewayLanguageModel {
+    GatewayProvider::new().language_model(model_id)
+}
+
+/// Native AI SDK Gateway language model.
+#[derive(Clone)]
+pub struct GatewayLanguageModel {
+    model_id: String,
+    settings: GatewayProviderSettings,
+    transport: GatewayTransport,
+}
+
+impl GatewayLanguageModel {
+    /// Returns a copy of this model that uses the supplied HTTP transport.
+    pub fn with_transport(mut self, transport: GatewayTransport) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    async fn do_generate_result(
+        &self,
+        options: LanguageModelCallOptions,
+    ) -> LanguageModelGenerateResult {
+        let request_body = serde_json::to_value(&options).unwrap_or_else(|error| {
+            json!({
+                "serializationError": error.to_string()
+            })
+        });
+        let request_body_for_error = request_body.clone();
+        let request_body_for_response = request_body.clone();
+        let request_headers = self.request_headers(options.headers.as_ref(), false);
+        let post_options = PostJsonToApiOptions::new(self.language_model_url(), request_body)
+            .with_headers(request_headers)
+            .with_environment(RuntimeEnvironment::unknown());
+        let transport = Arc::clone(&self.transport);
+
+        match post_json_to_api(
+            post_options,
+            move |request| (transport)(request),
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    clone_json_value,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_json_error_response_handler(
+                    response.json_error_response_handler_options(request),
+                    clone_json_value,
+                    gateway_error_to_message,
+                    |_, _| None,
+                ))
+            },
+        )
+        .await
+        {
+            Ok(response) => self.generate_result_from_response(
+                response.value,
+                response.raw_value,
+                response.response_headers,
+                request_body_for_response,
+            ),
+            Err(error) => self.generate_result_from_error(error, request_body_for_error),
+        }
+    }
+
+    fn language_model_url(&self) -> String {
+        format!("{}/language-model", self.base_url())
+    }
+
+    fn base_url(&self) -> String {
+        without_trailing_slash(self.settings.base_url.as_deref())
+            .unwrap_or(DEFAULT_GATEWAY_BASE_URL)
+            .to_string()
+    }
+
+    fn request_headers(
+        &self,
+        call_headers: Option<&Headers>,
+        streaming: bool,
+    ) -> BTreeMap<String, Option<String>> {
+        let provider_headers = self.provider_headers();
+        let call_headers = optional_headers(call_headers);
+        let model_headers = Some(vec![
+            (
+                "ai-language-model-specification-version".to_string(),
+                Some("4".to_string()),
+            ),
+            (
+                "ai-language-model-id".to_string(),
+                Some(self.model_id.clone()),
+            ),
+            (
+                "ai-language-model-streaming".to_string(),
+                Some(streaming.to_string()),
+            ),
+        ]);
+
+        combine_headers([provider_headers, call_headers, model_headers])
+    }
+
+    fn provider_headers(&self) -> Option<Vec<(String, Option<String>)>> {
+        let mut headers = BTreeMap::from([
+            (
+                "ai-gateway-protocol-version".to_string(),
+                Some(AI_GATEWAY_PROTOCOL_VERSION.to_string()),
+            ),
+            (
+                GATEWAY_AUTH_METHOD_HEADER.to_string(),
+                Some("api-key".to_string()),
+            ),
+        ]);
+
+        if let Some(api_key) = self.resolve_api_key() {
+            headers.insert(
+                "Authorization".to_string(),
+                Some(format!("Bearer {api_key}")),
+            );
+        }
+
+        for (name, value) in &self.settings.headers {
+            headers.insert(name.clone(), Some(value.clone()));
+        }
+
+        let headers = with_user_agent_suffix(
+            Some(headers),
+            [format!("ai-sdk/gateway/{}", crate::VERSION)],
+        );
+
+        Some(
+            headers
+                .into_iter()
+                .map(|(name, value)| (name, Some(value)))
+                .collect(),
+        )
+    }
+
+    fn resolve_api_key(&self) -> Option<String> {
+        self.settings
+            .api_key
+            .clone()
+            .or_else(|| env::var("AI_GATEWAY_API_KEY").ok())
+            .or_else(|| env::var("AI_SDK_RUST_AI_GATEWAY_API_KEY").ok())
+            .filter(|value| !value.trim().is_empty())
+    }
+
+    fn generate_result_from_response(
+        &self,
+        response: JsonValue,
+        raw_response: Option<JsonValue>,
+        response_headers: Option<Headers>,
+        request_body: JsonValue,
+    ) -> LanguageModelGenerateResult {
+        let content = language_model_content(response.get("content"));
+        let finish_reason = finish_reason(
+            response
+                .get("finish_reason")
+                .or(response.get("finishReason")),
+        );
+        let usage = usage(response.get("usage"));
+        let raw_body = raw_response.unwrap_or_else(|| response.clone());
+
+        let mut result = LanguageModelGenerateResult::new(content, finish_reason, usage)
+            .with_request(LanguageModelRequest::new().with_body(request_body));
+
+        let mut response_metadata = LanguageModelResponse::new().with_body(raw_body);
+
+        if let Some(id) = json_string(response.get("id")) {
+            response_metadata = response_metadata.with_id(id);
+        }
+
+        if let Some(timestamp) = response_timestamp(response.get("created")) {
+            response_metadata = response_metadata.with_timestamp(timestamp);
+        }
+
+        if let Some(model_id) = json_string(response.get("model").or(response.get("modelId"))) {
+            response_metadata = response_metadata.with_model_id(model_id);
+        }
+
+        if let Some(headers) = response_headers {
+            response_metadata = with_response_headers(response_metadata, headers);
+        }
+
+        if let Some(provider_metadata) = response
+            .get("providerMetadata")
+            .and_then(|value| serde_json::from_value::<ProviderMetadata>(value.clone()).ok())
+        {
+            result = result.with_provider_metadata(provider_metadata);
+        }
+
+        result.with_response(response_metadata)
+    }
+
+    fn generate_result_from_error(
+        &self,
+        error: HandledFetchError,
+        request_body: JsonValue,
+    ) -> LanguageModelGenerateResult {
+        let (message, headers, body) = match error {
+            HandledFetchError::Original { error } => (error.message().to_string(), None, None),
+            HandledFetchError::ApiCall { error } => (
+                error.message().to_string(),
+                error.response_headers().cloned(),
+                error.response_body().map(String::from),
+            ),
+        };
+        let response_body = body
+            .as_deref()
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .or_else(|| body.map(JsonValue::String));
+        let mut response = LanguageModelResponse::new();
+
+        if let Some(headers) = headers {
+            response = with_response_headers(response, headers);
+        }
+
+        if let Some(body) = response_body {
+            response = response.with_body(body);
+        }
+
+        let mut result = LanguageModelGenerateResult::new(
+            Vec::new(),
+            LanguageModelFinishReason {
+                unified: FinishReason::Error,
+                raw: Some("gateway-error".to_string()),
+            },
+            LanguageModelUsage::default(),
+        )
+        .with_request(LanguageModelRequest::new().with_body(request_body))
+        .with_response(response);
+
+        result = result.with_provider_metadata(gateway_error_metadata(message));
+        result
+    }
+}
+
+impl LanguageModel for GatewayLanguageModel {
+    type SupportedUrlsFuture<'a>
+        = Ready<LanguageModelSupportedUrls>
+    where
+        Self: 'a;
+
+    type GenerateFuture<'a>
+        = Pin<Box<dyn Future<Output = LanguageModelGenerateResult> + Send + 'a>>
+    where
+        Self: 'a;
+
+    type Stream = Vec<LanguageModelStreamPart>;
+
+    type StreamFuture<'a>
+        = Ready<LanguageModelStreamResult<Self::Stream>>
+    where
+        Self: 'a;
+
+    fn specification_version(&self) -> SpecificationVersion {
+        SpecificationVersion::V4
+    }
+
+    fn provider(&self) -> &str {
+        GATEWAY_PROVIDER_ID
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    fn supported_urls(&self) -> Self::SupportedUrlsFuture<'_> {
+        ready(BTreeMap::from([(
+            "*/*".to_string(),
+            vec![".*".to_string()],
+        )]))
+    }
+
+    fn do_generate(&self, options: LanguageModelCallOptions) -> Self::GenerateFuture<'_> {
+        Box::pin(self.do_generate_result(options))
+    }
+
+    fn do_stream(&self, _options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
+        ready(LanguageModelStreamResult::new(vec![
+            LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(json!({
+                "message": "Gateway streaming is not implemented in this vertical slice"
+            }))),
+        ]))
+    }
+}
+
+fn optional_headers(headers: Option<&Headers>) -> Option<Vec<(String, Option<String>)>> {
+    headers.map(|headers| {
+        headers
+            .iter()
+            .map(|(name, value)| (name.clone(), Some(value.clone())))
+            .collect()
+    })
+}
+
+fn clone_json_value(value: &JsonValue) -> Result<JsonValue, &'static str> {
+    Ok(value.clone())
+}
+
+fn gateway_error_to_message(error: &JsonValue) -> String {
+    error
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(JsonValue::as_str)
+        .or_else(|| error.get("message").and_then(JsonValue::as_str))
+        .map_or_else(|| error.to_string(), String::from)
+}
+
+fn language_model_content(content: Option<&JsonValue>) -> Vec<LanguageModelContent> {
+    match content {
+        Some(JsonValue::Array(parts)) => parts.iter().filter_map(content_part).collect(),
+        Some(value) => content_part(value).into_iter().collect(),
+        None => Vec::new(),
+    }
+}
+
+fn content_part(value: &JsonValue) -> Option<LanguageModelContent> {
+    if let Some(text) = value.as_str() {
+        return Some(LanguageModelContent::Text(LanguageModelText::new(text)));
+    }
+
+    let object = value.as_object()?;
+    let part_type = object.get("type").and_then(JsonValue::as_str)?;
+
+    match part_type {
+        "text" => json_string(object.get("text"))
+            .map(LanguageModelText::new)
+            .map(LanguageModelContent::Text),
+        other => Some(LanguageModelContent::Custom(
+            LanguageModelCustomContent::new(format!("gateway.{other}")),
+        )),
+    }
+}
+
+fn finish_reason(value: Option<&JsonValue>) -> LanguageModelFinishReason {
+    let raw = json_string(value).unwrap_or_else(|| "unknown".to_string());
+    let unified = match raw.as_str() {
+        "stop" => FinishReason::Stop,
+        "length" | "max_tokens" => FinishReason::Length,
+        "content-filter" | "content_filter" => FinishReason::ContentFilter,
+        "tool-calls" | "tool_calls" => FinishReason::ToolCalls,
+        "error" => FinishReason::Error,
+        _ => FinishReason::Other,
+    };
+
+    LanguageModelFinishReason {
+        unified,
+        raw: Some(raw),
+    }
+}
+
+fn usage(value: Option<&JsonValue>) -> LanguageModelUsage {
+    let Some(value) = value else {
+        return LanguageModelUsage::default();
+    };
+
+    let input_total = json_u64(
+        value
+            .get("prompt_tokens")
+            .or_else(|| value.get("promptTokens"))
+            .or_else(|| value.get("input_tokens"))
+            .or_else(|| value.get("inputTokens")),
+    );
+    let output_total = json_u64(
+        value
+            .get("completion_tokens")
+            .or_else(|| value.get("completionTokens"))
+            .or_else(|| value.get("output_tokens"))
+            .or_else(|| value.get("outputTokens")),
+    );
+    let cache_read = json_u64(
+        value
+            .get("cached_prompt_tokens")
+            .or_else(|| value.get("cachedPromptTokens"))
+            .or_else(|| {
+                value.get("input_tokens_details").and_then(|details| {
+                    details
+                        .get("cached_tokens")
+                        .or_else(|| details.get("cachedTokens"))
+                })
+            }),
+    );
+    let raw = value.as_object().cloned();
+
+    LanguageModelUsage {
+        input_tokens: InputTokenUsage {
+            total: input_total,
+            no_cache: input_total
+                .zip(cache_read)
+                .map(|(total, cached)| total.saturating_sub(cached)),
+            cache_read,
+            cache_write: None,
+        },
+        output_tokens: OutputTokenUsage {
+            total: output_total,
+            text: output_total,
+            reasoning: json_u64(
+                value
+                    .get("reasoning_tokens")
+                    .or_else(|| value.get("reasoningTokens")),
+            ),
+        },
+        raw,
+    }
+}
+
+fn json_string(value: Option<&JsonValue>) -> Option<String> {
+    match value {
+        Some(JsonValue::String(value)) => Some(value.clone()),
+        Some(JsonValue::Number(value)) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn json_u64(value: Option<&JsonValue>) -> Option<u64> {
+    match value {
+        Some(JsonValue::Number(value)) => value.as_u64(),
+        Some(JsonValue::String(value)) => value.parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
+fn response_timestamp(value: Option<&JsonValue>) -> Option<OffsetDateTime> {
+    match value {
+        Some(JsonValue::Number(value)) => value
+            .as_i64()
+            .and_then(|seconds| OffsetDateTime::from_unix_timestamp(seconds).ok()),
+        Some(JsonValue::String(value)) => value
+            .parse::<i64>()
+            .ok()
+            .and_then(|seconds| OffsetDateTime::from_unix_timestamp(seconds).ok()),
+        _ => None,
+    }
+}
+
+fn gateway_error_metadata(message: String) -> ProviderMetadata {
+    let mut metadata = ProviderMetadata::new();
+    let mut gateway = JsonObject::new();
+    gateway.insert("errorMessage".to_string(), JsonValue::String(message));
+    metadata.insert(GATEWAY_PROVIDER_ID.to_string(), gateway);
+    metadata
+}
+
+fn with_response_headers(
+    mut response: LanguageModelResponse,
+    headers: Headers,
+) -> LanguageModelResponse {
+    for (name, value) in headers {
+        response = response.with_header(name, value);
+    }
+
+    response
+}
+
+fn default_gateway_transport() -> GatewayTransport {
+    Arc::new(|request| Box::pin(ready(execute_gateway_request(request))))
+}
+
+fn execute_gateway_request(
+    request: ProviderApiRequest,
+) -> Result<ProviderApiResponse, FetchErrorInfo> {
+    match request.method {
+        ProviderApiRequestMethod::Get => execute_gateway_get_request(request),
+        ProviderApiRequestMethod::Post => execute_gateway_post_request(request),
+    }
+}
+
+fn execute_gateway_get_request(
+    request: ProviderApiRequest,
+) -> Result<ProviderApiResponse, FetchErrorInfo> {
+    let mut builder = ureq::get(&request.url);
+
+    for (name, value) in &request.headers {
+        builder = builder.header(name.as_str(), value.as_str());
+    }
+
+    let response = builder.config().http_status_as_error(false).build().call();
+
+    provider_api_response(response)
+}
+
+fn execute_gateway_post_request(
+    request: ProviderApiRequest,
+) -> Result<ProviderApiResponse, FetchErrorInfo> {
+    let mut builder = ureq::post(&request.url);
+
+    for (name, value) in &request.headers {
+        builder = builder.header(name.as_str(), value.as_str());
+    }
+
+    let builder = builder.config().http_status_as_error(false).build();
+    let response = match request.body {
+        Some(ProviderApiRequestBody::Text { content }) => builder.send(content),
+        Some(ProviderApiRequestBody::Bytes { content }) => builder.send(content),
+        Some(ProviderApiRequestBody::FormData { .. }) => {
+            return Err(FetchErrorInfo::new(
+                "multipart form data is not supported by the Gateway transport",
+            ));
+        }
+        None => builder.send_empty(),
+    };
+
+    provider_api_response(response)
+}
+
+fn provider_api_response(
+    response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+) -> Result<ProviderApiResponse, FetchErrorInfo> {
+    let mut response = response.map_err(|error| {
+        FetchErrorInfo::new("fetch failed")
+            .with_name("Error")
+            .with_cause_message(error.to_string())
+    })?;
+    let status = response.status();
+    let status_text = status.canonical_reason().unwrap_or("").to_string();
+    let headers = response
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_string(), value.to_string()))
+        })
+        .collect::<Headers>();
+    let body = response.body_mut().read_to_string().map_err(|error| {
+        FetchErrorInfo::new("failed to read response body")
+            .with_name("Error")
+            .with_cause_message(error.to_string())
+    })?;
+
+    Ok(ProviderApiResponse::text(status.as_u16(), status_text, body).with_headers(headers))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        GatewayProvider, GatewayProviderSettings, GatewayTransport, GatewayTransportFuture, gateway,
+    };
+    use crate::generate_text::{GenerateTextOptions, generate_text};
+    use crate::headers::Headers;
+    use crate::json::JsonValue;
+    use crate::language_model::{FinishReason, LanguageModel, LanguageModelContent};
+    use crate::prompt::Prompt;
+    use crate::provider_utils::{
+        ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+    };
+    use serde_json::json;
+    use std::env;
+    use std::fs;
+    use std::future::{Future, ready};
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll, Waker};
+
+    #[test]
+    fn gateway_model_generates_text_through_generate_text() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "id": "test-id",
+                    "created": 1711115037,
+                    "model": "openai/gpt-4.1-mini",
+                    "content": {
+                        "type": "text",
+                        "text": "Hello from Gateway"
+                    },
+                    "finish_reason": "stop",
+                    "usage": {
+                        "prompt_tokens": 4,
+                        "completion_tokens": 3
+                    }
+                })
+                .to_string(),
+            )
+            .with_headers(Headers::from([(
+                "x-request-id".to_string(),
+                "req_gateway".to_string(),
+            )])))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token")
+                .with_header("x-provider", "provider-value"),
+        )
+        .with_transport(transport)
+        .language_model("openai/gpt-4.1-mini");
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(&model, Prompt::from_prompt("Say hello"))
+                .expect("prompt is valid")
+                .with_max_output_tokens(12)
+                .with_temperature(0.0),
+        ));
+
+        assert_eq!(result.text, "Hello from Gateway");
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(4));
+        assert_eq!(result.usage.output_tokens.total, Some(3));
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://api.test.com/language-model");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+                .and_then(|body| body.get("maxOutputTokens").cloned()),
+            Some(json!(12))
+        );
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-token")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-gateway-protocol-version")
+                .map(String::as_str),
+            Some("0.0.1")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-gateway-auth-method")
+                .map(String::as_str),
+            Some("api-key")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-language-model-specification-version")
+                .map(String::as_str),
+            Some("4")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-language-model-id")
+                .map(String::as_str),
+            Some("openai/gpt-4.1-mini")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-language-model-streaming")
+                .map(String::as_str),
+            Some("false")
+        );
+        assert_eq!(
+            request.headers.get("x-provider").map(String::as_str),
+            Some("provider-value")
+        );
+    }
+
+    #[test]
+    fn gateway_model_maps_gateway_error_to_error_finish_reason() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                401,
+                "Unauthorized",
+                json!({
+                    "error": {
+                        "message": "Invalid API key",
+                        "type": "authentication_error"
+                    }
+                })
+                .to_string(),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .language_model("openai/gpt-4.1-mini");
+        let result = poll_ready(model.do_generate(
+            crate::language_model::LanguageModelCallOptions::new(Vec::new()),
+        ));
+
+        assert_eq!(result.content, Vec::<LanguageModelContent>::new());
+        assert_eq!(result.finish_reason.unified, FinishReason::Error);
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("errorMessage"))
+                .and_then(JsonValue::as_str),
+            Some("Invalid API key")
+        );
+    }
+
+    #[test]
+    fn gateway_function_uses_default_gateway_provider() {
+        let model = gateway("openai/gpt-4.1-mini");
+
+        assert_eq!(model.provider(), "gateway");
+        assert_eq!(model.model_id(), "openai/gpt-4.1-mini");
+    }
+
+    #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI model call"]
+    fn live_gateway_openai_generate_text() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!("skipping live Gateway test because no API key is configured");
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_GATEWAY_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_MODEL"))
+            .unwrap_or_else(|_| "openai/gpt-4.1-mini".to_string());
+        let model = GatewayProvider::new()
+            .with_api_key(api_key)
+            .language_model(model_id);
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(
+                &model,
+                Prompt::from_prompt("Reply with exactly: rust-gateway-ok"),
+            )
+            .expect("prompt is valid")
+            .with_max_output_tokens(16)
+            .with_temperature(0.0),
+        ));
+
+        assert!(
+            result.text.to_lowercase().contains("rust-gateway-ok"),
+            "gateway response did not contain expected marker"
+        );
+    }
+
+    fn live_gateway_api_key() -> Option<String> {
+        env::var("AI_SDK_RUST_AI_GATEWAY_API_KEY")
+            .or_else(|_| env::var("AI_GATEWAY_API_KEY"))
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(load_gateway_api_key_from_dotenv)
+    }
+
+    fn load_gateway_api_key_from_dotenv() -> Option<String> {
+        let contents = fs::read_to_string(".env.local").ok()?;
+
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            let Some((name, value)) = line.split_once('=') else {
+                continue;
+            };
+
+            if matches!(
+                name.trim(),
+                "AI_SDK_RUST_AI_GATEWAY_API_KEY" | "AI_GATEWAY_API_KEY"
+            ) {
+                let value = value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string();
+                if !value.is_empty() {
+                    return Some(value);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn poll_ready<T>(future: impl Future<Output = T>) -> T {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut future = Box::pin(future);
+
+        match Pin::new(&mut future).poll(&mut context) {
+            Poll::Ready(value) => value,
+            Poll::Pending => unreachable!("test futures should be ready"),
+        }
+    }
+}
