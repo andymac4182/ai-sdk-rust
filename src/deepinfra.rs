@@ -10,8 +10,8 @@ use time::OffsetDateTime;
 use crate::file_data::FileDataContent;
 use crate::headers::Headers;
 use crate::image_model::{
-    ImageModel, ImageModelCallOptions, ImageModelProviderMetadata, ImageModelProviderMetadataEntry,
-    ImageModelResponse, ImageModelResult,
+    ImageModel, ImageModelCallOptions, ImageModelFile, ImageModelProviderMetadata,
+    ImageModelProviderMetadataEntry, ImageModelResponse, ImageModelResult,
 };
 use crate::json::{JsonObject, JsonValue};
 use crate::language_model::{
@@ -26,11 +26,12 @@ use crate::openai_compatible::{
 };
 use crate::provider::{NoSuchModelError, Provider, SpecificationVersion};
 use crate::provider_utils::{
-    FetchErrorInfo, HandledFetchError, PostJsonToApiOptions, ProviderApiRequest,
-    ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
-    ProviderApiResponseHandlerError, RuntimeEnvironment, combine_headers,
-    create_json_error_response_handler, create_json_response_handler, post_json_to_api,
-    with_user_agent_suffix, without_trailing_slash,
+    ConvertToFormDataOptions, FetchErrorInfo, FormDataInputValue, FormDataValue, HandledFetchError,
+    PostFormDataToApiOptions, PostJsonToApiOptions, ProviderApiRequest, ProviderApiRequestBody,
+    ProviderApiRequestMethod, ProviderApiResponse, ProviderApiResponseHandlerError,
+    RuntimeEnvironment, combine_headers, convert_base64_to_bytes, convert_to_form_data,
+    create_json_error_response_handler, create_json_response_handler, post_form_data_to_api,
+    post_json_to_api, with_user_agent_suffix, without_trailing_slash,
 };
 
 /// Default base URL for upstream `@ai-sdk/deepinfra` API calls.
@@ -207,8 +208,32 @@ impl DeepInfraImageModel {
     }
 
     async fn do_generate_result(&self, options: ImageModelCallOptions) -> ImageModelResult {
-        let request_body = deepinfra_image_generation_request_body(&options);
         let request_headers = self.request_headers(options.headers.as_ref());
+        let response = if options
+            .files
+            .as_ref()
+            .is_some_and(|files| !files.is_empty())
+        {
+            self.do_generate_edit_result(options, request_headers).await
+        } else {
+            self.do_generate_image_result(options, request_headers)
+                .await
+        };
+
+        match response {
+            Ok((response, response_headers)) => {
+                deepinfra_image_result_from_response(&self.model_id, response, response_headers)
+            }
+            Err(error) => deepinfra_image_result_from_error(&self.model_id, error),
+        }
+    }
+
+    async fn do_generate_image_result(
+        &self,
+        options: ImageModelCallOptions,
+        request_headers: BTreeMap<String, Option<String>>,
+    ) -> Result<(DeepInfraImageResponse, Option<Headers>), HandledFetchError> {
+        let request_body = deepinfra_image_generation_request_body(&options);
         let post_options =
             PostJsonToApiOptions::new(format!("{}/{}", self.base_url, self.model_id), request_body)
                 .with_headers(request_headers)
@@ -236,13 +261,53 @@ impl DeepInfraImageModel {
         )
         .await
         {
-            Ok(response) => deepinfra_image_result_from_response(
-                &self.model_id,
-                response.value,
-                response.response_headers,
-            ),
-            Err(error) => deepinfra_image_result_from_error(&self.model_id, error),
+            Ok(response) => Ok((response.value, response.response_headers)),
+            Err(error) => Err(error),
         }
+    }
+
+    async fn do_generate_edit_result(
+        &self,
+        options: ImageModelCallOptions,
+        request_headers: BTreeMap<String, Option<String>>,
+    ) -> Result<(DeepInfraImageResponse, Option<Headers>), HandledFetchError> {
+        let form_data = deepinfra_image_edit_form_data(&self.model_id, &options);
+        let post_options = PostFormDataToApiOptions::new(self.edit_url(), form_data)
+            .with_headers(request_headers)
+            .with_environment(RuntimeEnvironment::unknown());
+        let transport = Arc::clone(&self.transport);
+
+        match post_form_data_to_api(
+            post_options,
+            move |request| (transport)(request),
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    deepinfra_image_edit_response,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_json_error_response_handler(
+                    response.json_error_response_handler_options(request),
+                    deepinfra_image_error_response,
+                    deepinfra_image_error_message,
+                    |_, _| None,
+                ))
+            },
+        )
+        .await
+        {
+            Ok(response) => Ok((response.value, response.response_headers)),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn edit_url(&self) -> String {
+        format!(
+            "{}/images/edits",
+            self.base_url.replacen("/inference", "/openai", 1)
+        )
     }
 
     fn request_headers(&self, call_headers: Option<&Headers>) -> BTreeMap<String, Option<String>> {
@@ -610,10 +675,126 @@ fn deepinfra_image_generation_request_body(options: &ImageModelCallOptions) -> J
     JsonValue::Object(body)
 }
 
+fn deepinfra_image_edit_form_data(
+    model_id: &str,
+    options: &ImageModelCallOptions,
+) -> crate::provider_utils::FormData {
+    let mut input = vec![
+        (
+            "model".to_string(),
+            Some(FormDataInputValue::text(model_id.to_string())),
+        ),
+        (
+            "prompt".to_string(),
+            options.prompt.clone().map(FormDataInputValue::text),
+        ),
+        (
+            "image".to_string(),
+            options.files.as_ref().map(|files| {
+                FormDataInputValue::array(
+                    files
+                        .iter()
+                        .map(|file| FormDataValue::bytes(deepinfra_image_file_bytes(file)))
+                        .collect(),
+                )
+            }),
+        ),
+        (
+            "mask".to_string(),
+            options
+                .mask
+                .as_ref()
+                .map(|mask| FormDataInputValue::bytes(deepinfra_image_file_bytes(mask))),
+        ),
+        (
+            "n".to_string(),
+            Some(FormDataInputValue::text(options.n.to_string())),
+        ),
+        (
+            "size".to_string(),
+            options.size.clone().map(FormDataInputValue::text),
+        ),
+    ];
+
+    if let Some(provider_options) = options.provider_options.get("deepinfra") {
+        for (name, value) in provider_options {
+            set_deepinfra_image_form_field(
+                &mut input,
+                name.clone(),
+                deepinfra_image_form_value(value.clone()),
+            );
+        }
+    }
+
+    convert_to_form_data(
+        input,
+        ConvertToFormDataOptions::new().with_use_array_brackets(false),
+    )
+}
+
+fn set_deepinfra_image_form_field(
+    input: &mut Vec<(String, Option<FormDataInputValue>)>,
+    name: String,
+    value: Option<FormDataInputValue>,
+) {
+    input.retain(|(existing_name, _)| existing_name != &name);
+    input.push((name, value));
+}
+
+fn deepinfra_image_file_bytes(file: &ImageModelFile) -> Vec<u8> {
+    match file {
+        ImageModelFile::File { data, .. } => match data {
+            FileDataContent::Bytes(bytes) => bytes.clone(),
+            FileDataContent::Base64(base64) => {
+                convert_base64_to_bytes(base64).unwrap_or_else(|_| base64.as_bytes().to_vec())
+            }
+        },
+        ImageModelFile::Url { url, .. } => url.as_str().as_bytes().to_vec(),
+    }
+}
+
+fn deepinfra_image_form_value(value: JsonValue) -> Option<FormDataInputValue> {
+    match value {
+        JsonValue::Null => None,
+        JsonValue::String(value) => Some(FormDataInputValue::text(value)),
+        JsonValue::Bool(value) => Some(FormDataInputValue::text(value.to_string())),
+        JsonValue::Number(value) => Some(FormDataInputValue::text(value.to_string())),
+        JsonValue::Array(values) => Some(FormDataInputValue::array(
+            values
+                .into_iter()
+                .filter_map(|value| {
+                    deepinfra_image_form_value(value).and_then(|value| match value {
+                        FormDataInputValue::Text { value } => Some(FormDataValue::text(value)),
+                        FormDataInputValue::Bytes { value } => Some(FormDataValue::bytes(value)),
+                        FormDataInputValue::Array { .. } => None,
+                    })
+                })
+                .collect(),
+        )),
+        JsonValue::Object(value) => Some(FormDataInputValue::text(
+            JsonValue::Object(value).to_string(),
+        )),
+    }
+}
+
 fn deepinfra_image_response(
     value: &JsonValue,
 ) -> Result<DeepInfraImageResponse, serde_json::Error> {
     serde_json::from_value(value.clone())
+}
+
+fn deepinfra_image_edit_response(
+    value: &JsonValue,
+) -> Result<DeepInfraImageResponse, serde_json::Error> {
+    let response: DeepInfraImageEditResponse = serde_json::from_value(value.clone())?;
+
+    Ok(DeepInfraImageResponse {
+        images: response
+            .data
+            .into_iter()
+            .map(|image| image.b64_json)
+            .collect(),
+    })
 }
 
 fn deepinfra_image_error_response(value: &JsonValue) -> Result<JsonValue, serde_json::Error> {
@@ -703,6 +884,16 @@ fn strip_deepinfra_image_data_prefix(image: String) -> String {
 #[derive(Clone, Debug, Deserialize)]
 struct DeepInfraImageResponse {
     images: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct DeepInfraImageEditResponse {
+    data: Vec<DeepInfraImageEditResponseData>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct DeepInfraImageEditResponseData {
+    b64_json: String,
 }
 
 fn default_deepinfra_transport() -> OpenAICompatibleTransport {
@@ -798,7 +989,7 @@ mod tests {
     use crate::file_data::FileDataContent;
     use crate::generate_text::{GenerateTextOptions, generate_text};
     use crate::headers::Headers;
-    use crate::image_model::{ImageModel, ImageModelCallOptions};
+    use crate::image_model::{ImageModel, ImageModelCallOptions, ImageModelFile};
     use crate::json::JsonValue;
     use crate::language_model::{
         LanguageModel, LanguageModelCallOptions, LanguageModelMessage, LanguageModelStreamPart,
@@ -808,7 +999,8 @@ mod tests {
     use crate::prompt::Prompt;
     use crate::provider::{Provider, ProviderMetadata, ProviderOptions};
     use crate::provider_utils::{
-        ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+        FormDataValue, ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod,
+        ProviderApiResponse,
     };
     use serde_json::json;
     use std::future::Future;
@@ -1352,7 +1544,154 @@ mod tests {
     }
 
     #[test]
-    fn deepinfra_image_model_maps_api_error_to_metadata() {
+    fn deepinfra_image_model_edits_with_files_mask_and_provider_options() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "data": [
+                            {
+                                "b64_json": "edited-image-base64"
+                            }
+                        ]
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from([(
+                    "x-request-id".to_string(),
+                    "req_deepinfra_edit".to_string(),
+                )])))))
+            });
+        let model = DeepInfraProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://edit.example.com")
+            .with_header("custom-header", "value")
+            .with_transport(transport)
+            .image_model("black-forest-labs/FLUX.1-Kontext-dev");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "deepinfra": {
+                "guidance": 7.5,
+                "n": 3
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Turn the cat into a dog")
+                    .with_files(vec![
+                        ImageModelFile::file(
+                            "image/png",
+                            FileDataContent::Bytes(vec![137, 80, 78, 71]),
+                        ),
+                        ImageModelFile::file(
+                            "image/png",
+                            FileDataContent::Base64("AQID".to_string()),
+                        ),
+                    ])
+                    .with_mask(ImageModelFile::file(
+                        "image/png",
+                        FileDataContent::Base64("BAUG".to_string()),
+                    ))
+                    .with_size("1024x1024")
+                    .with_aspect_ratio("16:9")
+                    .with_seed(42)
+                    .with_provider_options(provider_options)
+                    .with_header("x-call", "edit"),
+            ),
+        );
+
+        assert_eq!(
+            result.images,
+            vec![FileDataContent::Base64("edited-image-base64".to_string())]
+        );
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("req_deepinfra_edit")
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://edit.example.com/openai/images/edits");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+        assert_eq!(
+            request.headers.get("x-call").map(String::as_str),
+            Some("edit")
+        );
+        assert!(
+            request
+                .headers
+                .get("user-agent")
+                .is_some_and(|value| value.contains("ai-sdk/deepinfra/0.1.0")),
+            "DeepInfra user-agent suffix is included"
+        );
+
+        let form_data = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_form_data)
+            .expect("request body is form data");
+        assert_eq!(
+            form_data.get("model"),
+            Some(&FormDataValue::text("black-forest-labs/FLUX.1-Kontext-dev"))
+        );
+        assert_eq!(
+            form_data.get("prompt"),
+            Some(&FormDataValue::text("Turn the cat into a dog"))
+        );
+        assert_eq!(
+            form_data
+                .get_all("image")
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![
+                FormDataValue::bytes(vec![137, 80, 78, 71]),
+                FormDataValue::bytes(vec![1, 2, 3])
+            ]
+        );
+        assert_eq!(
+            form_data.get("mask"),
+            Some(&FormDataValue::bytes(vec![4, 5, 6]))
+        );
+        assert_eq!(form_data.get_all("image[]"), Vec::<&FormDataValue>::new());
+        assert_eq!(form_data.get_all("n").len(), 1);
+        assert_eq!(form_data.get("n"), Some(&FormDataValue::text("3")));
+        assert_eq!(
+            form_data.get("size"),
+            Some(&FormDataValue::text("1024x1024"))
+        );
+        assert_eq!(form_data.get("guidance"), Some(&FormDataValue::text("7.5")));
+        assert_eq!(form_data.get("aspect_ratio"), None);
+        assert_eq!(form_data.get("seed"), None);
+    }
+
+    #[test]
+    fn deepinfra_image_model_maps_generation_api_error_to_metadata() {
         let transport: OpenAICompatibleTransport =
             Arc::new(|_request| -> OpenAICompatibleTransportFuture {
                 Box::pin(ready(Ok(ProviderApiResponse::text(
@@ -1394,6 +1733,60 @@ mod tests {
                 .and_then(|headers| headers.get("x-request-id"))
                 .map(String::as_str),
             Some("req_deepinfra_image_error")
+        );
+    }
+
+    #[test]
+    fn deepinfra_image_model_maps_edit_api_error_to_metadata() {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(|_request| -> OpenAICompatibleTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    400,
+                    "Bad Request",
+                    json!({
+                        "error": {
+                            "message": "bad edit"
+                        }
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from([(
+                    "x-request-id".to_string(),
+                    "req_deepinfra_edit_error".to_string(),
+                )])))))
+            });
+        let model = DeepInfraProvider::new()
+            .with_transport(transport)
+            .image_model("black-forest-labs/FLUX.1-Kontext-dev");
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("bad edit")
+                    .with_files(vec![ImageModelFile::file(
+                        "image/png",
+                        FileDataContent::Bytes(vec![137, 80, 78, 71]),
+                    )]),
+            ),
+        );
+
+        assert!(result.images.is_empty());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("deepinfra"))
+                .and_then(|metadata| metadata.extra.get("errorMessage"))
+                .and_then(JsonValue::as_str),
+            Some("bad edit")
+        );
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("req_deepinfra_edit_error")
         );
     }
 
