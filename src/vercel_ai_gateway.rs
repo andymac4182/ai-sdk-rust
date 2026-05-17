@@ -208,6 +208,7 @@ mod tests {
     use crate::embed::{EmbedManyOptions, EmbedOptions, embed, embed_many};
     use crate::embedding_model::EmbeddingModel;
     use crate::file_data::{FileData, FileDataContent};
+    use crate::generate_object::{GenerateObjectOptions, generate_object};
     use crate::generate_text::{GenerateTextOptions, PrepareStepResult, generate_text};
     use crate::headers::Headers;
     use crate::json::{JsonObject, JsonValue};
@@ -224,9 +225,10 @@ mod tests {
     use crate::provider::ProviderOptions;
     use crate::provider_utils::{
         ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
-        Tool,
+        Tool, json_schema,
     };
     use crate::stream_text::{StreamTextOptions, stream_text};
+    use crate::warning::Warning;
     use serde_json::json;
     use std::env;
     use std::fs;
@@ -773,6 +775,141 @@ mod tests {
                     }
                 ]
             })
+        );
+    }
+
+    #[test]
+    fn vercel_ai_gateway_openai_compatible_generates_object_through_openai_chat() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "chatcmpl-gateway-object",
+                        "created": 1711115037,
+                        "model": "openai/gpt-4.1-mini",
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "{\"answer\":\"Gateway object\",\"count\":2}"
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 8,
+                            "completion_tokens": 6
+                        }
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from([(
+                    "x-request-id".to_string(),
+                    "req_vercel_ai_gateway_object".to_string(),
+                )])))))
+            });
+        let provider = create_vercel_ai_gateway_openai_compatible(
+            VercelAiGatewayOpenAICompatibleSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://ai-gateway.test/v1")
+                .with_header("custom-header", "value"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("openai/gpt-4.1-mini");
+        let object_schema: JsonObject = serde_json::from_value(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": {
+                "answer": {
+                    "type": "string"
+                },
+                "count": {
+                    "type": "integer"
+                }
+            },
+            "required": ["answer", "count"],
+            "additionalProperties": false
+        }))
+        .expect("schema deserializes");
+
+        let result = poll_ready(generate_object(
+            GenerateObjectOptions::from_prompt(
+                &model,
+                Prompt::from_prompt("Return a JSON object with answer and count."),
+            )
+            .expect("prompt is valid")
+            .with_schema(json_schema(object_schema))
+            .with_max_output_tokens(32)
+            .with_temperature(0.0),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(result.object["answer"], "Gateway object");
+        assert_eq!(result.object["count"], 2);
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(8));
+        assert_eq!(result.usage.output_tokens.total, Some(6));
+        assert!(
+            result.warnings.as_ref().is_some_and(|warnings| {
+                warnings.iter().any(|warning| {
+                    matches!(
+                        warning,
+                        Warning::Unsupported { feature, .. } if feature == "responseFormat"
+                    )
+                })
+            }),
+            "schema warning is surfaced when structured outputs are not enabled"
+        );
+        assert_eq!(
+            result.response.headers.as_ref().and_then(|headers| {
+                headers.get("x-request-id").map(std::string::String::as_str)
+            }),
+            Some("req_vercel_ai_gateway_object")
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://ai-gateway.test/v1/chat/completions");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "openai/gpt-4.1-mini",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Return a JSON object with answer and count."
+                    }
+                ],
+                "max_tokens": 32,
+                "temperature": 0.0,
+                "response_format": {
+                    "type": "json_object"
+                }
+            }))
         );
     }
 
