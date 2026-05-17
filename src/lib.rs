@@ -362,8 +362,8 @@ pub use text_stream_response::{
     pipe_text_stream_to_response,
 };
 pub use togetherai::{
-    DEFAULT_TOGETHERAI_BASE_URL, TogetherAIProvider, TogetherAIProviderSettings, create_togetherai,
-    togetherai,
+    DEFAULT_TOGETHERAI_BASE_URL, TogetherAIImageModel, TogetherAIProvider,
+    TogetherAIProviderSettings, TogetherAIRerankingModel, create_togetherai, togetherai,
 };
 pub use transcribe::{
     ExperimentalTranscriptionResult, TranscribeAudio, TranscribeDownload,
