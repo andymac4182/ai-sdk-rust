@@ -12,7 +12,7 @@ use crate::embedding_model::{
     EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelResponse, EmbeddingModelResult,
     EmbeddingModelUsage,
 };
-use crate::file_data::FileDataContent;
+use crate::file_data::{FileData, FileDataContent};
 use crate::headers::Headers;
 use crate::image_model::{
     ImageModel, ImageModelCallOptions, ImageModelFile, ImageModelProviderMetadata,
@@ -39,9 +39,10 @@ use crate::provider_utils::{
     ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     ProviderApiResponseHandlerError, RuntimeEnvironment, StreamingToolCallDelta,
     StreamingToolCallDeltaFunction, StreamingToolCallTracker, combine_headers,
-    convert_base64_to_bytes, convert_to_form_data, create_event_source_response_handler,
-    create_json_error_response_handler, create_json_response_handler, generate_id,
-    post_form_data_to_api, post_json_to_api, with_user_agent_suffix, without_trailing_slash,
+    convert_base64_to_bytes, convert_to_base64, convert_to_form_data,
+    create_event_source_response_handler, create_json_error_response_handler,
+    create_json_response_handler, detect_media_type, generate_id, post_form_data_to_api,
+    post_json_to_api, with_user_agent_suffix, without_trailing_slash,
 };
 use crate::warning::Warning;
 
@@ -274,8 +275,20 @@ impl OpenAICompatibleChatLanguageModel {
         &self,
         options: LanguageModelCallOptions,
     ) -> LanguageModelGenerateResult {
-        let (request_body, warnings) =
-            openai_compatible_chat_request_body(&self.model_id, &self.config.settings, &options);
+        let (request_body, warnings) = match openai_compatible_chat_request_body(
+            &self.model_id,
+            &self.config.settings,
+            &options,
+        ) {
+            Ok(result) => result,
+            Err(message) => {
+                return openai_compatible_error_generate_result(
+                    &self.config.settings.name,
+                    message,
+                    json!({ "model": self.model_id }),
+                );
+            }
+        };
         let request_body_for_error = request_body.clone();
         let request_body_for_response = request_body.clone();
         let request_headers = self.request_headers(options.headers.as_ref());
@@ -331,11 +344,21 @@ impl OpenAICompatibleChatLanguageModel {
         options: LanguageModelCallOptions,
     ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
         let include_raw_chunks = options.include_raw_chunks.unwrap_or(false);
-        let (request_body, warnings) = openai_compatible_chat_stream_request_body(
+        let (request_body, warnings) = match openai_compatible_chat_stream_request_body(
             &self.model_id,
             &self.config.settings,
             &options,
-        );
+        ) {
+            Ok(result) => result,
+            Err(message) => {
+                return openai_compatible_error_stream_result(
+                    message,
+                    json!({ "model": self.model_id }),
+                    None,
+                    None,
+                );
+            }
+        };
         let request_body_for_error = request_body.clone();
         let request_body_for_response = request_body.clone();
         let request_headers = self.request_headers(options.headers.as_ref());
@@ -1272,7 +1295,7 @@ fn openai_compatible_chat_request_body(
     model_id: &str,
     settings: &OpenAICompatibleProviderSettings,
     options: &LanguageModelCallOptions,
-) -> (JsonValue, Vec<Warning>) {
+) -> Result<(JsonValue, Vec<Warning>), String> {
     let mut body = JsonObject::new();
     let mut warnings = Vec::new();
     let OpenAICompatibleChatProviderOptions {
@@ -1352,7 +1375,7 @@ fn openai_compatible_chat_request_body(
 
     body.insert(
         "messages".to_string(),
-        JsonValue::Array(openai_compatible_messages(&options.prompt)),
+        JsonValue::Array(openai_compatible_messages(&options.prompt)?),
     );
 
     let (tools, tool_choice) =
@@ -1364,15 +1387,15 @@ fn openai_compatible_chat_request_body(
         body.insert("tool_choice".to_string(), tool_choice);
     }
 
-    (JsonValue::Object(body), warnings)
+    Ok((JsonValue::Object(body), warnings))
 }
 
 fn openai_compatible_chat_stream_request_body(
     model_id: &str,
     settings: &OpenAICompatibleProviderSettings,
     options: &LanguageModelCallOptions,
-) -> (JsonValue, Vec<Warning>) {
-    let (mut body, warnings) = openai_compatible_chat_request_body(model_id, settings, options);
+) -> Result<(JsonValue, Vec<Warning>), String> {
+    let (mut body, warnings) = openai_compatible_chat_request_body(model_id, settings, options)?;
 
     if let Some(body) = body.as_object_mut() {
         body.insert("stream".to_string(), JsonValue::Bool(true));
@@ -1387,7 +1410,7 @@ fn openai_compatible_chat_stream_request_body(
         }
     }
 
-    (body, warnings)
+    Ok((body, warnings))
 }
 
 fn openai_compatible_completion_request_body(
@@ -2111,43 +2134,419 @@ fn openai_compatible_response_format(
     }
 }
 
-fn openai_compatible_messages(prompt: &[LanguageModelMessage]) -> Vec<JsonValue> {
-    prompt
-        .iter()
-        .filter_map(|message| match message {
-            LanguageModelMessage::System(message) => Some(json!({
-                "role": "system",
-                "content": message.content
-            })),
-            LanguageModelMessage::User(message) => Some(json!({
-                "role": "user",
-                "content": message
-                    .content
-                    .iter()
-                    .filter_map(|part| match part {
-                        crate::language_model::LanguageModelUserContentPart::Text(text) => {
-                            Some(text.text.as_str())
-                        }
-                        crate::language_model::LanguageModelUserContentPart::File(_) => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("")
-            })),
-            LanguageModelMessage::Assistant(message) => Some(json!({
-                "role": "assistant",
-                "content": message
-                    .content
-                    .iter()
-                    .filter_map(|part| match part {
-                        LanguageModelAssistantContentPart::Text(text) => Some(text.text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("")
-            })),
-            LanguageModelMessage::Tool(_) => None,
-        })
-        .collect()
+fn openai_compatible_messages(prompt: &[LanguageModelMessage]) -> Result<Vec<JsonValue>, String> {
+    let mut messages = Vec::new();
+
+    for message in prompt {
+        match message {
+            LanguageModelMessage::System(message) => {
+                let mut object = JsonObject::new();
+                object.insert("role".to_string(), JsonValue::String("system".to_string()));
+                object.insert(
+                    "content".to_string(),
+                    JsonValue::String(message.content.clone()),
+                );
+                openai_compatible_insert_metadata(&mut object, message.provider_options.as_ref());
+                messages.push(JsonValue::Object(object));
+            }
+            LanguageModelMessage::User(message) => {
+                messages.push(openai_compatible_user_message(message)?);
+            }
+            LanguageModelMessage::Assistant(message) => {
+                messages.push(openai_compatible_assistant_message(message));
+            }
+            LanguageModelMessage::Tool(message) => {
+                for part in &message.content {
+                    if let crate::language_model::LanguageModelToolContentPart::ToolResult(
+                        tool_result,
+                    ) = part
+                    {
+                        messages.push(openai_compatible_tool_message(tool_result));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(messages)
+}
+
+fn openai_compatible_user_message(
+    message: &crate::language_model::LanguageModelUserMessage,
+) -> Result<JsonValue, String> {
+    if let [crate::language_model::LanguageModelUserContentPart::Text(text_part)] =
+        message.content.as_slice()
+    {
+        let mut object = JsonObject::new();
+        object.insert("role".to_string(), JsonValue::String("user".to_string()));
+        object.insert(
+            "content".to_string(),
+            JsonValue::String(text_part.text.clone()),
+        );
+        openai_compatible_insert_metadata(&mut object, text_part.provider_options.as_ref());
+        return Ok(JsonValue::Object(object));
+    }
+
+    let mut object = JsonObject::new();
+    object.insert("role".to_string(), JsonValue::String("user".to_string()));
+    object.insert(
+        "content".to_string(),
+        JsonValue::Array(
+            message
+                .content
+                .iter()
+                .map(openai_compatible_user_content_part)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+    );
+    openai_compatible_insert_metadata(&mut object, message.provider_options.as_ref());
+    Ok(JsonValue::Object(object))
+}
+
+fn openai_compatible_user_content_part(
+    part: &crate::language_model::LanguageModelUserContentPart,
+) -> Result<JsonValue, String> {
+    match part {
+        crate::language_model::LanguageModelUserContentPart::Text(text) => {
+            let mut object = JsonObject::new();
+            object.insert("type".to_string(), JsonValue::String("text".to_string()));
+            object.insert("text".to_string(), JsonValue::String(text.text.clone()));
+            openai_compatible_insert_metadata(&mut object, text.provider_options.as_ref());
+            Ok(JsonValue::Object(object))
+        }
+        crate::language_model::LanguageModelUserContentPart::File(file) => {
+            openai_compatible_user_file_part(file)
+        }
+    }
+}
+
+fn openai_compatible_user_file_part(
+    part: &crate::language_model::LanguageModelFilePart,
+) -> Result<JsonValue, String> {
+    match &part.data {
+        FileData::Reference { .. } => {
+            return Err(openai_compatible_unsupported_functionality(
+                "file parts with provider references",
+            ));
+        }
+        FileData::Text { .. } => {
+            return Err(openai_compatible_unsupported_functionality(
+                "text file parts",
+            ));
+        }
+        FileData::Url { .. } | FileData::Data { .. } => {}
+    }
+
+    let top_level = openai_compatible_top_level_media_type(&part.media_type);
+    match top_level {
+        "image" => openai_compatible_image_part(part),
+        "audio" => openai_compatible_audio_part(part),
+        "application" => openai_compatible_application_part(part),
+        "text" => openai_compatible_text_part(part),
+        _ => Err(openai_compatible_unsupported_functionality(format!(
+            "file part media type {}",
+            part.media_type
+        ))),
+    }
+}
+
+fn openai_compatible_image_part(
+    part: &crate::language_model::LanguageModelFilePart,
+) -> Result<JsonValue, String> {
+    let url = match &part.data {
+        FileData::Url { url } => url.to_string(),
+        FileData::Data { data } => format!(
+            "data:{};base64,{}",
+            openai_compatible_resolve_full_media_type(part),
+            convert_to_base64(data)
+        ),
+        FileData::Reference { .. } | FileData::Text { .. } => unreachable!(),
+    };
+    let mut object = JsonObject::new();
+    object.insert(
+        "type".to_string(),
+        JsonValue::String("image_url".to_string()),
+    );
+    object.insert(
+        "image_url".to_string(),
+        json!({
+            "url": url
+        }),
+    );
+    openai_compatible_insert_metadata(&mut object, part.provider_options.as_ref());
+    Ok(JsonValue::Object(object))
+}
+
+fn openai_compatible_audio_part(
+    part: &crate::language_model::LanguageModelFilePart,
+) -> Result<JsonValue, String> {
+    let FileData::Data { data } = &part.data else {
+        return Err(openai_compatible_unsupported_functionality(
+            "audio file parts with URLs",
+        ));
+    };
+    let full_media_type = openai_compatible_resolve_full_media_type(part);
+    let Some(format) = openai_compatible_audio_format(&full_media_type) else {
+        return Err(openai_compatible_unsupported_functionality(format!(
+            "audio media type {full_media_type}"
+        )));
+    };
+
+    let mut object = JsonObject::new();
+    object.insert(
+        "type".to_string(),
+        JsonValue::String("input_audio".to_string()),
+    );
+    object.insert(
+        "input_audio".to_string(),
+        json!({
+            "data": convert_to_base64(data),
+            "format": format
+        }),
+    );
+    openai_compatible_insert_metadata(&mut object, part.provider_options.as_ref());
+    Ok(JsonValue::Object(object))
+}
+
+fn openai_compatible_application_part(
+    part: &crate::language_model::LanguageModelFilePart,
+) -> Result<JsonValue, String> {
+    let FileData::Data { data } = &part.data else {
+        return Err(openai_compatible_unsupported_functionality(
+            "PDF file parts with URLs",
+        ));
+    };
+    let full_media_type = openai_compatible_resolve_full_media_type(part);
+    if full_media_type != "application/pdf" {
+        return Err(openai_compatible_unsupported_functionality(format!(
+            "file part media type {full_media_type}"
+        )));
+    }
+
+    let mut object = JsonObject::new();
+    object.insert("type".to_string(), JsonValue::String("file".to_string()));
+    object.insert(
+        "file".to_string(),
+        json!({
+            "filename": part
+                .filename
+                .clone()
+                .unwrap_or_else(|| "document.pdf".to_string()),
+            "file_data": format!("data:application/pdf;base64,{}", convert_to_base64(data))
+        }),
+    );
+    openai_compatible_insert_metadata(&mut object, part.provider_options.as_ref());
+    Ok(JsonValue::Object(object))
+}
+
+fn openai_compatible_text_part(
+    part: &crate::language_model::LanguageModelFilePart,
+) -> Result<JsonValue, String> {
+    let text = match &part.data {
+        FileData::Url { url } => url.to_string(),
+        FileData::Data { data } => openai_compatible_text_file_content(data)?,
+        FileData::Reference { .. } | FileData::Text { .. } => unreachable!(),
+    };
+    let mut object = JsonObject::new();
+    object.insert("type".to_string(), JsonValue::String("text".to_string()));
+    object.insert("text".to_string(), JsonValue::String(text));
+    openai_compatible_insert_metadata(&mut object, part.provider_options.as_ref());
+    Ok(JsonValue::Object(object))
+}
+
+fn openai_compatible_text_file_content(data: &FileDataContent) -> Result<String, String> {
+    match data {
+        FileDataContent::Bytes(bytes) => Ok(String::from_utf8_lossy(bytes).into_owned()),
+        FileDataContent::Base64(base64) => {
+            let bytes = convert_base64_to_bytes(base64).map_err(|_| {
+                openai_compatible_unsupported_functionality("invalid base64 text file parts")
+            })?;
+            Ok(String::from_utf8_lossy(&bytes).into_owned())
+        }
+    }
+}
+
+fn openai_compatible_assistant_message(
+    message: &crate::language_model::LanguageModelAssistantMessage,
+) -> JsonValue {
+    let mut text = String::new();
+    let mut reasoning = String::new();
+    let mut tool_calls = Vec::new();
+
+    for part in &message.content {
+        match part {
+            LanguageModelAssistantContentPart::Text(text_part) => {
+                text.push_str(&text_part.text);
+            }
+            LanguageModelAssistantContentPart::Reasoning(reasoning_part) => {
+                reasoning.push_str(&reasoning_part.text);
+            }
+            LanguageModelAssistantContentPart::ToolCall(tool_call) => {
+                tool_calls.push(openai_compatible_tool_call_prompt_part(tool_call));
+            }
+            LanguageModelAssistantContentPart::File(_)
+            | LanguageModelAssistantContentPart::Custom(_)
+            | LanguageModelAssistantContentPart::ReasoningFile(_)
+            | LanguageModelAssistantContentPart::ToolResult(_)
+            | LanguageModelAssistantContentPart::ToolApprovalRequest(_) => {}
+        }
+    }
+
+    let mut object = JsonObject::new();
+    object.insert(
+        "role".to_string(),
+        JsonValue::String("assistant".to_string()),
+    );
+    object.insert(
+        "content".to_string(),
+        if tool_calls.is_empty() || !text.is_empty() {
+            JsonValue::String(text)
+        } else {
+            JsonValue::Null
+        },
+    );
+    if !reasoning.is_empty() {
+        object.insert(
+            "reasoning_content".to_string(),
+            JsonValue::String(reasoning),
+        );
+    }
+    if !tool_calls.is_empty() {
+        object.insert("tool_calls".to_string(), JsonValue::Array(tool_calls));
+    }
+    openai_compatible_insert_metadata(&mut object, message.provider_options.as_ref());
+    JsonValue::Object(object)
+}
+
+fn openai_compatible_tool_call_prompt_part(
+    tool_call: &crate::language_model::LanguageModelToolCallPart,
+) -> JsonValue {
+    let mut object = JsonObject::new();
+    object.insert(
+        "id".to_string(),
+        JsonValue::String(tool_call.tool_call_id.clone()),
+    );
+    object.insert(
+        "type".to_string(),
+        JsonValue::String("function".to_string()),
+    );
+    object.insert(
+        "function".to_string(),
+        json!({
+            "name": tool_call.tool_name.clone(),
+            "arguments": tool_call.input.to_string()
+        }),
+    );
+    openai_compatible_insert_metadata(&mut object, tool_call.provider_options.as_ref());
+    if let Some(thought_signature) =
+        openai_compatible_google_thought_signature(tool_call.provider_options.as_ref())
+    {
+        object.insert(
+            "extra_content".to_string(),
+            json!({
+                "google": {
+                    "thought_signature": thought_signature
+                }
+            }),
+        );
+    }
+    JsonValue::Object(object)
+}
+
+fn openai_compatible_tool_message(
+    tool_result: &crate::language_model::LanguageModelToolResultPart,
+) -> JsonValue {
+    let mut object = JsonObject::new();
+    object.insert("role".to_string(), JsonValue::String("tool".to_string()));
+    object.insert(
+        "content".to_string(),
+        JsonValue::String(openai_compatible_tool_result_content(&tool_result.output)),
+    );
+    object.insert(
+        "tool_call_id".to_string(),
+        JsonValue::String(tool_result.tool_call_id.clone()),
+    );
+    openai_compatible_insert_metadata(&mut object, tool_result.provider_options.as_ref());
+    JsonValue::Object(object)
+}
+
+fn openai_compatible_tool_result_content(
+    output: &crate::language_model::LanguageModelToolResultOutput,
+) -> String {
+    match output {
+        crate::language_model::LanguageModelToolResultOutput::Text { value, .. }
+        | crate::language_model::LanguageModelToolResultOutput::ErrorText { value, .. } => {
+            value.clone()
+        }
+        crate::language_model::LanguageModelToolResultOutput::ExecutionDenied {
+            reason, ..
+        } => reason
+            .clone()
+            .unwrap_or_else(|| "Tool call execution denied.".to_string()),
+        crate::language_model::LanguageModelToolResultOutput::Json { value, .. }
+        | crate::language_model::LanguageModelToolResultOutput::ErrorJson { value, .. } => {
+            value.to_string()
+        }
+        crate::language_model::LanguageModelToolResultOutput::Content { value } => {
+            serde_json::to_string(value).unwrap_or_else(|_| "[]".to_string())
+        }
+    }
+}
+
+fn openai_compatible_top_level_media_type(media_type: &str) -> &str {
+    media_type
+        .split_once('/')
+        .map_or(media_type, |(top_level, _)| top_level)
+}
+
+fn openai_compatible_resolve_full_media_type(
+    part: &crate::language_model::LanguageModelFilePart,
+) -> String {
+    let top_level = openai_compatible_top_level_media_type(&part.media_type);
+    if !part.media_type.ends_with("/*") && part.media_type.contains('/') {
+        return part.media_type.clone();
+    }
+    if let FileData::Data { data } = &part.data
+        && let Some(detected_media_type) = detect_media_type(data, Some(top_level))
+    {
+        return detected_media_type.to_string();
+    }
+    part.media_type.clone()
+}
+
+fn openai_compatible_audio_format(media_type: &str) -> Option<&'static str> {
+    match media_type {
+        "audio/wav" => Some("wav"),
+        "audio/mp3" | "audio/mpeg" => Some("mp3"),
+        _ => None,
+    }
+}
+
+fn openai_compatible_insert_metadata(
+    object: &mut JsonObject,
+    provider_options: Option<&ProviderOptions>,
+) {
+    if let Some(metadata) =
+        provider_options.and_then(|provider_options| provider_options.get("openaiCompatible"))
+    {
+        object.extend(metadata.clone());
+    }
+}
+
+fn openai_compatible_google_thought_signature(
+    provider_options: Option<&ProviderOptions>,
+) -> Option<String> {
+    let value = provider_options
+        .and_then(|provider_options| provider_options.get("google"))
+        .and_then(|google| google.get("thoughtSignature"))?;
+    Some(match value {
+        JsonValue::String(value) => value.clone(),
+        other => other.to_string(),
+    })
+}
+
+fn openai_compatible_unsupported_functionality(functionality: impl AsRef<str>) -> String {
+    format!("'{}' functionality not supported", functionality.as_ref())
 }
 
 fn openai_compatible_tool_call_metadata(
@@ -3253,6 +3652,7 @@ mod tests {
     };
     use crate::embed::{EmbedManyOptions, embed_many};
     use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions};
+    use crate::file_data::{FileData, FileDataContent};
     use crate::generate_image::{
         GenerateImageOptions, GenerateImagePromptImage, GenerateImagePromptImages, generate_image,
     };
@@ -3261,11 +3661,14 @@ mod tests {
     use crate::image_model::{ImageModel, ImageModelCallOptions};
     use crate::json::{JsonObject, JsonValue};
     use crate::language_model::{
-        FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelFunctionTool,
-        LanguageModelMessage, LanguageModelProviderTool, LanguageModelReasoningEffort,
-        LanguageModelResponseFormat, LanguageModelStreamPart, LanguageModelSystemMessage,
-        LanguageModelTextPart, LanguageModelTool, LanguageModelToolChoice,
-        LanguageModelUserContentPart, LanguageModelUserMessage,
+        FinishReason, LanguageModel, LanguageModelAssistantContentPart,
+        LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelFilePart,
+        LanguageModelFunctionTool, LanguageModelMessage, LanguageModelProviderTool,
+        LanguageModelReasoningEffort, LanguageModelReasoningPart, LanguageModelResponseFormat,
+        LanguageModelStreamPart, LanguageModelSystemMessage, LanguageModelTextPart,
+        LanguageModelTool, LanguageModelToolCallPart, LanguageModelToolChoice,
+        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultOutput,
+        LanguageModelToolResultPart, LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::prompt::Prompt;
     use crate::provider::ProviderOptions;
@@ -3281,6 +3684,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
+    use url::Url;
 
     #[test]
     fn openai_compatible_provider_configures_headers_urls_and_model_aliases() {
@@ -4852,6 +5256,367 @@ mod tests {
                         "name": "weather"
                     }
                 }
+            }))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_converts_multimodal_user_messages() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "ok"
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
+            "test-provider",
+            "https://api.example.com",
+        ))
+        .with_transport(transport)
+        .chat_model("test-chat-model");
+        let message_metadata: ProviderOptions = serde_json::from_value(json!({
+            "openaiCompatible": {
+                "priority": "high"
+            },
+            "ignoredProvider": {
+                "ignored": true
+            }
+        }))
+        .expect("metadata deserializes");
+        let text_metadata: ProviderOptions = serde_json::from_value(json!({
+            "openaiCompatible": {
+                "sentiment": "positive"
+            }
+        }))
+        .expect("metadata deserializes");
+        let image_metadata: ProviderOptions = serde_json::from_value(json!({
+            "openaiCompatible": {
+                "alt_text": "A sample image"
+            }
+        }))
+        .expect("metadata deserializes");
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                    LanguageModelTextPart::new("Hello").with_provider_options(text_metadata),
+                )])
+                .with_provider_options(message_metadata.clone()),
+            ),
+            LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![
+                    LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Summarize these inputs")
+                            .with_provider_options(message_metadata.clone()),
+                    ),
+                    LanguageModelUserContentPart::File(
+                        LanguageModelFilePart::new(
+                            FileData::Data {
+                                data: FileDataContent::Bytes(vec![0, 1, 2, 3]),
+                            },
+                            "image/png",
+                        )
+                        .with_provider_options(image_metadata),
+                    ),
+                    LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                        FileData::Url {
+                            url: Url::parse("https://example.com/image.jpg")
+                                .expect("url parses"),
+                        },
+                        "image/*",
+                    )),
+                    LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("AAECAw==".to_string()),
+                        },
+                        "audio/wav",
+                    )),
+                    LanguageModelUserContentPart::File(
+                        LanguageModelFilePart::new(
+                            FileData::Data {
+                                data: FileDataContent::Bytes(vec![0, 1, 2, 3]),
+                            },
+                            "application/pdf",
+                        )
+                        .with_filename("report.pdf"),
+                    ),
+                    LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("SGVsbG8=".to_string()),
+                        },
+                        "text/markdown",
+                    )),
+                    LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                        FileData::Url {
+                            url: Url::parse("https://example.com/readme.md")
+                                .expect("url parses"),
+                        },
+                        "text/markdown",
+                    )),
+                ])
+                .with_provider_options(message_metadata),
+            ),
+        ])));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(
+            captured_request
+                .lock()
+                .expect("captured request mutex is not poisoned")
+                .clone()
+                .expect("request is captured")
+                .body
+                .and_then(|body| body.as_text().map(str::to_string))
+                .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok()),
+            Some(json!({
+                "model": "test-chat-model",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello",
+                        "sentiment": "positive"
+                    },
+                    {
+                        "role": "user",
+                        "priority": "high",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Summarize these inputs",
+                                "priority": "high"
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data:image/png;base64,AAECAw=="
+                                },
+                                "alt_text": "A sample image"
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "https://example.com/image.jpg"
+                                }
+                            },
+                            {
+                                "type": "input_audio",
+                                "input_audio": {
+                                    "data": "AAECAw==",
+                                    "format": "wav"
+                                }
+                            },
+                            {
+                                "type": "file",
+                                "file": {
+                                    "filename": "report.pdf",
+                                    "file_data": "data:application/pdf;base64,AAECAw=="
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": "Hello"
+                            },
+                            {
+                                "type": "text",
+                                "text": "https://example.com/readme.md"
+                            }
+                        ]
+                    }
+                ]
+            }))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_rejects_unsupported_file_messages_before_transport() {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(|_request| -> OpenAICompatibleTransportFuture {
+                panic!("transport should not be called for unsupported prompt conversion")
+            });
+        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
+            "test-provider",
+            "https://api.example.com",
+        ))
+        .with_transport(transport)
+        .chat_model("test-chat-model");
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Bytes(vec![0, 1, 2, 3]),
+                    },
+                    "video/mp4",
+                )),
+            ])),
+        ])));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Error);
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("test-provider"))
+                .and_then(|metadata| metadata.get("errorMessage"))
+                .and_then(JsonValue::as_str),
+            Some("'file part media type video/mp4' functionality not supported")
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_converts_assistant_tool_history() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "ok"
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
+            "test-provider",
+            "https://api.example.com",
+        ))
+        .with_transport(transport)
+        .chat_model("test-chat-model");
+        let assistant_metadata: ProviderOptions = serde_json::from_value(json!({
+            "openaiCompatible": {
+                "globalPriority": "high"
+            }
+        }))
+        .expect("metadata deserializes");
+        let tool_call_metadata: ProviderOptions = serde_json::from_value(json!({
+            "openaiCompatible": {
+                "function_call_reason": "user request"
+            },
+            "google": {
+                "thoughtSignature": "<Signature A>"
+            }
+        }))
+        .expect("metadata deserializes");
+        let tool_result_metadata: ProviderOptions = serde_json::from_value(json!({
+            "openaiCompatible": {
+                "partial": true
+            }
+        }))
+        .expect("metadata deserializes");
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "Checking that now...",
+                    )),
+                    LanguageModelAssistantContentPart::Reasoning(
+                        LanguageModelReasoningPart::new("Need weather data."),
+                    ),
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "call_1",
+                            "weather",
+                            json!({ "city": "Brisbane" }),
+                        )
+                        .with_provider_options(tool_call_metadata),
+                    ),
+                ])
+                .with_provider_options(assistant_metadata),
+            ),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolResult(
+                    LanguageModelToolResultPart::new(
+                        "call_1",
+                        "weather",
+                        LanguageModelToolResultOutput::json(json!({
+                            "temperature": 24
+                        })),
+                    )
+                    .with_provider_options(tool_result_metadata),
+                ),
+            ])),
+        ])));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(
+            captured_request
+                .lock()
+                .expect("captured request mutex is not poisoned")
+                .clone()
+                .expect("request is captured")
+                .body
+                .and_then(|body| body.as_text().map(str::to_string))
+                .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok()),
+            Some(json!({
+                "model": "test-chat-model",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "Checking that now...",
+                        "reasoning_content": "Need weather data.",
+                        "globalPriority": "high",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "weather",
+                                    "arguments": "{\"city\":\"Brisbane\"}"
+                                },
+                                "function_call_reason": "user request",
+                                "extra_content": {
+                                    "google": {
+                                        "thought_signature": "<Signature A>"
+                                    }
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "role": "tool",
+                        "content": "{\"temperature\":24}",
+                        "tool_call_id": "call_1",
+                        "partial": true
+                    }
+                ]
             }))
         );
     }
