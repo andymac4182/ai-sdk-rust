@@ -3741,6 +3741,48 @@ impl From<&str> for ToolExecutionError {
     }
 }
 
+/// Output yielded by [`execute_tool`].
+///
+/// Upstream provider-utils `executeTool` is an async generator that emits
+/// preliminary outputs for streaming executors and a final output when
+/// execution completes. Rust tools currently execute to a single JSON value,
+/// so the helper returns the final output shape while preserving the upstream
+/// tagged contract for future streaming support.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case", tag = "type")]
+pub enum ExecuteToolOutput {
+    /// Preliminary output from a streaming tool executor.
+    Preliminary {
+        /// JSON-serializable preliminary tool output.
+        output: JsonValue,
+    },
+
+    /// Final output from a tool executor.
+    Final {
+        /// JSON-serializable final tool output.
+        output: JsonValue,
+    },
+}
+
+impl ExecuteToolOutput {
+    /// Creates a preliminary tool output.
+    pub fn preliminary(output: JsonValue) -> Self {
+        Self::Preliminary { output }
+    }
+
+    /// Creates a final tool output.
+    pub fn final_output(output: JsonValue) -> Self {
+        Self::Final { output }
+    }
+
+    /// Returns the JSON output payload.
+    pub fn output(&self) -> &JsonValue {
+        match self {
+            Self::Preliminary { output } | Self::Final { output } => output,
+        }
+    }
+}
+
 /// Typed tool call returned by high-level text generation APIs.
 ///
 /// This mirrors upstream provider-utils `ToolCall` while using [`JsonValue`] for
@@ -4693,6 +4735,26 @@ pub fn dynamic_tool(name: impl Into<String>, input_schema: JsonSchema) -> Tool {
 /// also use [`Tool::is_executable`] directly when they already have a tool.
 pub fn is_executable_tool(tool: Option<&Tool>) -> bool {
     tool.is_some_and(Tool::is_executable)
+}
+
+/// Executes a Rust tool and returns its upstream-shaped output stream records.
+///
+/// Upstream `executeTool` yields preliminary records for async iterable tool
+/// outputs and a final record at completion. This dependency-free Rust helper
+/// keeps the public output contract but currently returns one final record
+/// because [`ToolExecuteFunction`] produces a single JSON value.
+pub async fn execute_tool(
+    tool: &Tool,
+    input: JsonValue,
+    options: ToolExecutionOptions,
+) -> Result<Vec<ExecuteToolOutput>, ToolExecutionError> {
+    let Some(execute) = tool.execute(input, options) else {
+        return Err(ToolExecutionError::new("Tool is not executable."));
+    };
+
+    execute
+        .await
+        .map(|output| vec![ExecuteToolOutput::final_output(output)])
 }
 
 /// Bidirectional mapping between caller-facing and provider-facing tool names.
@@ -7245,10 +7307,10 @@ mod tests {
     use super::{
         Arrayable, Base64DecodeError, BinaryResponseHandlerOptions, ConvertToFormDataOptions,
         DEFAULT_MAX_DOWNLOAD_SIZE, DelayedPromise, DownloadBlobOptions, DownloadBlobResponse,
-        DownloadError, DownloadedBlob, EventSourceResponseHandlerOptions, ExperimentalSandbox,
-        FetchErrorInfo, FlexibleSchema, FormData, FormDataEntry, FormDataInputValue, FormDataValue,
-        GetFromApiOptions, HandledFetchError, IdGeneratorOptions,
-        InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
+        DownloadError, DownloadedBlob, EventSourceResponseHandlerOptions, ExecuteToolOutput,
+        ExperimentalSandbox, FetchErrorInfo, FlexibleSchema, FormData, FormDataEntry,
+        FormDataInputValue, FormDataValue, GetFromApiOptions, HandledFetchError,
+        IdGeneratorOptions, InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
         JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, LazySchema, LoadApiKeyOptions,
         LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError, ParseJsonResult,
         PostFormDataToApiOptions, PostJsonToApiOptions, PostToApiOptions, ProviderApiRequest,
@@ -7271,8 +7333,8 @@ mod tests {
         create_provider_defined_tool_factory_with_output_schema,
         create_provider_executed_tool_factory, create_status_code_error_response_handler,
         create_tool_name_mapping, delay, detect_media_type, download_blob, dynamic_tool,
-        execute_provider_api_request, extract_response_headers, filter_nullable, generate_id,
-        get_error_message, get_from_api, get_runtime_environment_user_agent,
+        execute_provider_api_request, execute_tool, extract_response_headers, filter_nullable,
+        generate_id, get_error_message, get_from_api, get_runtime_environment_user_agent,
         get_top_level_media_type, handle_fetch_error, handle_provider_api_response,
         inject_json_instruction, inject_json_instruction_into_messages, is_abort_error,
         is_custom_reasoning, is_executable_tool, is_full_media_type, is_non_nullable,
@@ -13828,6 +13890,75 @@ mod tests {
         assert!(is_executable_tool(Some(&executable)));
         assert!(!is_executable_tool(Some(&non_executable)));
         assert!(!is_executable_tool(None));
+    }
+
+    #[test]
+    fn execute_tool_output_round_trips_upstream_shape() {
+        let final_output = ExecuteToolOutput::final_output(json!({
+            "forecast": "sunny"
+        }));
+
+        assert_eq!(
+            serde_json::to_value(&final_output).expect("final output serializes"),
+            json!({
+                "type": "final",
+                "output": {
+                    "forecast": "sunny"
+                }
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ExecuteToolOutput>(json!({
+                "type": "preliminary",
+                "output": "partial"
+            }))
+            .expect("preliminary output deserializes"),
+            ExecuteToolOutput::preliminary(json!("partial"))
+        );
+        assert_eq!(final_output.output(), &json!({ "forecast": "sunny" }));
+    }
+
+    #[test]
+    fn execute_tool_runs_executor_and_wraps_final_output() {
+        let tool = Tool::new("weather", object_schema()).with_execute(|input, options| {
+            ready(Ok(json!({
+                "input": input,
+                "toolCallId": options.tool_call_id
+            })))
+        });
+
+        let outputs = poll_ready(execute_tool(
+            &tool,
+            json!({
+                "city": "Brisbane"
+            }),
+            ToolExecutionOptions::new("call-1", Vec::new()),
+        ))
+        .expect("tool execution succeeds");
+
+        assert_eq!(
+            outputs,
+            vec![ExecuteToolOutput::final_output(json!({
+                "input": {
+                    "city": "Brisbane"
+                },
+                "toolCallId": "call-1"
+            }))]
+        );
+    }
+
+    #[test]
+    fn execute_tool_reports_non_executable_tools() {
+        let tool = Tool::new("weather", object_schema());
+
+        let error = poll_ready(execute_tool(
+            &tool,
+            json!({ "city": "Brisbane" }),
+            ToolExecutionOptions::new("call-1", Vec::new()),
+        ))
+        .expect_err("non-executable tools fail");
+
+        assert_eq!(error.message(), "Tool is not executable.");
     }
 
     #[test]
