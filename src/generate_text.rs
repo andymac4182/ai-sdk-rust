@@ -627,7 +627,7 @@ pub struct LanguageModelCallStartEvent {
 }
 
 impl LanguageModelCallStartEvent {
-    fn from_call_options(
+    pub(crate) fn from_call_options(
         call_id: &str,
         provider: &str,
         model_id: &str,
@@ -732,7 +732,7 @@ pub struct LanguageModelCallEndEvent {
 }
 
 impl LanguageModelCallEndEvent {
-    fn from_step(step: &GenerateTextStep, response_time_ms: u64) -> Self {
+    pub(crate) fn from_step(step: &GenerateTextStep, response_time_ms: u64) -> Self {
         Self {
             call_id: step.call_id.clone(),
             provider: step.model.provider.clone(),
@@ -4800,7 +4800,7 @@ pub struct GenerateTextFinishEvent {
 }
 
 impl GenerateTextFinishEvent {
-    fn from_steps(
+    pub(crate) fn from_steps(
         initial_response_messages: &[LanguageModelMessage],
         steps: &[GenerateTextStep],
     ) -> Self {
@@ -5422,7 +5422,7 @@ pub(crate) fn generate_text_call_id() -> String {
     generate_call_id()
 }
 
-fn apply_generate_text_response_metadata(step: &mut GenerateTextStep) {
+pub(crate) fn apply_generate_text_response_metadata(step: &mut GenerateTextStep) {
     ensure_generate_text_response_identity(step);
     let response = step
         .response
@@ -5432,7 +5432,7 @@ fn apply_generate_text_response_metadata(step: &mut GenerateTextStep) {
     response.messages = Some(step.response_messages.clone());
 }
 
-fn ensure_generate_text_response_identity(step: &mut GenerateTextStep) {
+pub(crate) fn ensure_generate_text_response_identity(step: &mut GenerateTextStep) {
     let response = step.response.get_or_insert_with(LanguageModelResponse::new);
 
     if response.id.is_none() {
@@ -5515,7 +5515,7 @@ pub(crate) fn refresh_tool_call_views(step: &mut GenerateTextStep) {
     step.dynamic_tool_calls = dynamic_tool_calls(&step.tool_calls);
 }
 
-fn refresh_generate_text_content(
+pub(crate) fn refresh_generate_text_content(
     step: &mut GenerateTextStep,
     provider_content: &[LanguageModelContent],
     tool_approvals: &StepToolApprovals,
