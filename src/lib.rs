@@ -33,6 +33,7 @@ pub mod skills;
 pub mod speech_model;
 pub mod stream_object;
 pub mod stream_text;
+pub mod text_stream_response;
 pub mod transcribe;
 pub mod transcription_model;
 pub mod upload_file;
@@ -295,6 +296,10 @@ pub use stream_text::{
     StreamTextStepPerformance, TextStreamFilePart, TextStreamFinishPart, TextStreamFinishStepPart,
     TextStreamPart, TextStreamReasoningDeltaPart, TextStreamReasoningFilePart, TextStreamStartPart,
     TextStreamStartStepPart, TextStreamTextDeltaPart, stream_text,
+};
+pub use text_stream_response::{
+    TEXT_STREAM_CONTENT_TYPE, TextStreamResponse, TextStreamResponseOptions,
+    TextStreamResponseWriter, create_text_stream_response, pipe_text_stream_to_response,
 };
 pub use transcribe::{
     ExperimentalTranscriptionResult, TranscribeAudio, TranscribeDownload,
