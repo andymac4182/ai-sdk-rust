@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::{Future, Ready, ready};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -24,11 +24,12 @@ use crate::language_model::{
     LanguageModelCallOptions, LanguageModelContent, LanguageModelErrorStreamPart,
     LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelMessage,
     LanguageModelRawStreamPart, LanguageModelReasoning, LanguageModelReasoningDelta,
-    LanguageModelReasoningEnd, LanguageModelReasoningStart, LanguageModelRequest,
-    LanguageModelResponse, LanguageModelResponseFormat, LanguageModelStreamFinish,
-    LanguageModelStreamPart, LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
-    LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
-    LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
+    LanguageModelReasoningEffort, LanguageModelReasoningEnd, LanguageModelReasoningStart,
+    LanguageModelRequest, LanguageModelResponse, LanguageModelResponseFormat,
+    LanguageModelStreamFinish, LanguageModelStreamPart, LanguageModelStreamResponseMetadata,
+    LanguageModelStreamResult, LanguageModelStreamResultResponse, LanguageModelStreamStart,
+    LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd,
+    LanguageModelTextStart, LanguageModelTool, LanguageModelToolCall, LanguageModelToolChoice,
     LanguageModelUsage, OutputTokenUsage,
 };
 use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
@@ -36,10 +37,11 @@ use crate::provider_utils::{
     ConvertToFormDataOptions, FetchErrorInfo, FormDataInputValue, FormDataValue, HandledFetchError,
     ParseJsonResult, PostFormDataToApiOptions, PostJsonToApiOptions, ProviderApiRequest,
     ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
-    ProviderApiResponseHandlerError, RuntimeEnvironment, combine_headers, convert_base64_to_bytes,
-    convert_to_form_data, create_event_source_response_handler, create_json_error_response_handler,
-    create_json_response_handler, post_form_data_to_api, post_json_to_api, with_user_agent_suffix,
-    without_trailing_slash,
+    ProviderApiResponseHandlerError, RuntimeEnvironment, StreamingToolCallDelta,
+    StreamingToolCallDeltaFunction, StreamingToolCallTracker, combine_headers,
+    convert_base64_to_bytes, convert_to_form_data, create_event_source_response_handler,
+    create_json_error_response_handler, create_json_response_handler, generate_id,
+    post_form_data_to_api, post_json_to_api, with_user_agent_suffix, without_trailing_slash,
 };
 use crate::warning::Warning;
 
@@ -415,7 +417,7 @@ impl OpenAICompatibleChatLanguageModel {
             .and_then(JsonValue::as_array)
             .and_then(|choices| choices.first());
         let message = choice.and_then(|choice| choice.get("message"));
-        let content = openai_compatible_response_content(message);
+        let content = openai_compatible_response_content(message, &self.config.settings.name);
         let finish_reason = openai_compatible_finish_reason(
             choice
                 .and_then(|choice| choice.get("finish_reason"))
@@ -1273,12 +1275,15 @@ fn openai_compatible_chat_request_body(
 ) -> (JsonValue, Vec<Warning>) {
     let mut body = JsonObject::new();
     let mut warnings = Vec::new();
+    let OpenAICompatibleChatProviderOptions {
+        user,
+        reasoning_effort,
+        text_verbosity,
+        strict_json_schema,
+        additional_body_options,
+    } = openai_compatible_chat_provider_options(&settings.name, options, &mut warnings);
 
     body.insert("model".to_string(), JsonValue::String(model_id.to_string()));
-    body.insert(
-        "messages".to_string(),
-        JsonValue::Array(openai_compatible_messages(&options.prompt)),
-    );
 
     if let Some(max_output_tokens) = options.max_output_tokens {
         body.insert("max_tokens".to_string(), json!(max_output_tokens));
@@ -1316,11 +1321,47 @@ fn openai_compatible_chat_request_body(
     }
 
     if let Some(response_format) = &options.response_format {
-        if let Some(value) =
-            openai_compatible_response_format(response_format, settings, &mut warnings)
-        {
+        if let Some(value) = openai_compatible_response_format(
+            response_format,
+            settings,
+            strict_json_schema.unwrap_or(true),
+            &mut warnings,
+        ) {
             body.insert("response_format".to_string(), value);
         }
+    }
+
+    body.extend(additional_body_options);
+
+    if let Some(user) = user {
+        body.insert("user".to_string(), JsonValue::String(user));
+    }
+
+    if let Some(reasoning_effort) =
+        reasoning_effort.or_else(|| openai_compatible_reasoning_effort(options.reasoning.as_ref()))
+    {
+        body.insert(
+            "reasoning_effort".to_string(),
+            JsonValue::String(reasoning_effort),
+        );
+    }
+
+    if let Some(text_verbosity) = text_verbosity {
+        body.insert("verbosity".to_string(), JsonValue::String(text_verbosity));
+    }
+
+    body.insert(
+        "messages".to_string(),
+        JsonValue::Array(openai_compatible_messages(&options.prompt)),
+    );
+
+    let (tools, tool_choice) =
+        openai_compatible_prepare_tools(&options.tools, &options.tool_choice, &mut warnings);
+    if let Some(tools) = tools {
+        body.insert("tools".to_string(), JsonValue::Array(tools));
+    }
+    if let Some(tool_choice) = tool_choice {
+        body.insert("tool_choice".to_string(), tool_choice);
     }
 
     (JsonValue::Object(body), warnings)
@@ -1843,9 +1884,183 @@ fn to_openai_compatible_camel_case(value: &str) -> String {
     output
 }
 
+#[derive(Clone, Debug, Default)]
+struct OpenAICompatibleChatProviderOptions {
+    user: Option<String>,
+    reasoning_effort: Option<String>,
+    text_verbosity: Option<String>,
+    strict_json_schema: Option<bool>,
+    additional_body_options: JsonObject,
+}
+
+fn openai_compatible_chat_provider_options(
+    provider_name: &str,
+    options: &LanguageModelCallOptions,
+    warnings: &mut Vec<Warning>,
+) -> OpenAICompatibleChatProviderOptions {
+    let Some(provider_options) = options.provider_options.as_ref() else {
+        return OpenAICompatibleChatProviderOptions::default();
+    };
+
+    let mut resolved = OpenAICompatibleChatProviderOptions::default();
+
+    if let Some(options) = provider_options.get("openai-compatible") {
+        warnings.push(Warning::Deprecated {
+            setting: "providerOptions key 'openai-compatible'".to_string(),
+            message: "Use 'openaiCompatible' instead.".to_string(),
+        });
+        merge_openai_compatible_chat_known_options(&mut resolved, options);
+    }
+
+    if let Some(options) = provider_options.get("openaiCompatible") {
+        merge_openai_compatible_chat_known_options(&mut resolved, options);
+    }
+
+    let provider_options_name = provider_name
+        .split('.')
+        .next()
+        .unwrap_or(provider_name)
+        .trim();
+    let camel_provider_options_name = to_openai_compatible_camel_case(provider_options_name);
+
+    if let Some(options) = provider_options.get(provider_options_name) {
+        if camel_provider_options_name != provider_options_name {
+            warnings.push(Warning::Deprecated {
+                setting: format!("providerOptions key '{provider_options_name}'"),
+                message: format!("Use '{camel_provider_options_name}' instead."),
+            });
+        }
+        merge_openai_compatible_chat_known_options(&mut resolved, options);
+        merge_openai_compatible_chat_additional_options(
+            &mut resolved.additional_body_options,
+            options,
+        );
+    }
+
+    if camel_provider_options_name != provider_options_name
+        && let Some(options) = provider_options.get(&camel_provider_options_name)
+    {
+        merge_openai_compatible_chat_known_options(&mut resolved, options);
+        merge_openai_compatible_chat_additional_options(
+            &mut resolved.additional_body_options,
+            options,
+        );
+    }
+
+    resolved
+}
+
+fn merge_openai_compatible_chat_known_options(
+    resolved: &mut OpenAICompatibleChatProviderOptions,
+    options: &JsonObject,
+) {
+    if let Some(user) = options.get("user").and_then(JsonValue::as_str) {
+        resolved.user = Some(user.to_string());
+    }
+
+    if let Some(reasoning_effort) = options.get("reasoningEffort").and_then(JsonValue::as_str) {
+        resolved.reasoning_effort = Some(reasoning_effort.to_string());
+    }
+
+    if let Some(text_verbosity) = options.get("textVerbosity").and_then(JsonValue::as_str) {
+        resolved.text_verbosity = Some(text_verbosity.to_string());
+    }
+
+    if let Some(strict_json_schema) = options.get("strictJsonSchema").and_then(JsonValue::as_bool) {
+        resolved.strict_json_schema = Some(strict_json_schema);
+    }
+}
+
+fn merge_openai_compatible_chat_additional_options(body: &mut JsonObject, options: &JsonObject) {
+    for (key, value) in options {
+        if !matches!(
+            key.as_str(),
+            "user" | "reasoningEffort" | "textVerbosity" | "strictJsonSchema"
+        ) {
+            body.insert(key.clone(), value.clone());
+        }
+    }
+}
+
+fn openai_compatible_reasoning_effort(
+    reasoning: Option<&LanguageModelReasoningEffort>,
+) -> Option<String> {
+    match reasoning? {
+        LanguageModelReasoningEffort::ProviderDefault | LanguageModelReasoningEffort::None => None,
+        LanguageModelReasoningEffort::Minimal => Some("minimal".to_string()),
+        LanguageModelReasoningEffort::Low => Some("low".to_string()),
+        LanguageModelReasoningEffort::Medium => Some("medium".to_string()),
+        LanguageModelReasoningEffort::High => Some("high".to_string()),
+        LanguageModelReasoningEffort::Xhigh => Some("xhigh".to_string()),
+    }
+}
+
+fn openai_compatible_prepare_tools(
+    tools: &Option<Vec<LanguageModelTool>>,
+    tool_choice: &Option<LanguageModelToolChoice>,
+    warnings: &mut Vec<Warning>,
+) -> (Option<Vec<JsonValue>>, Option<JsonValue>) {
+    let Some(tools) = tools.as_ref().filter(|tools| !tools.is_empty()) else {
+        return (None, None);
+    };
+
+    let prepared_tools = tools
+        .iter()
+        .filter_map(|tool| match tool {
+            LanguageModelTool::Function(tool) => {
+                let mut function = JsonObject::new();
+                function.insert("name".to_string(), JsonValue::String(tool.name.clone()));
+
+                if let Some(description) = &tool.description {
+                    function.insert(
+                        "description".to_string(),
+                        JsonValue::String(description.clone()),
+                    );
+                }
+
+                function.insert(
+                    "parameters".to_string(),
+                    JsonValue::Object(tool.input_schema.clone()),
+                );
+
+                if let Some(strict) = tool.strict {
+                    function.insert("strict".to_string(), JsonValue::Bool(strict));
+                }
+
+                Some(json!({
+                    "type": "function",
+                    "function": function
+                }))
+            }
+            LanguageModelTool::Provider(tool) => {
+                warnings.push(Warning::Unsupported {
+                    feature: format!("provider-defined tool {}", tool.id),
+                    details: None,
+                });
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let prepared_tool_choice = tool_choice.as_ref().map(|choice| match choice {
+        LanguageModelToolChoice::Auto => JsonValue::String("auto".to_string()),
+        LanguageModelToolChoice::None => JsonValue::String("none".to_string()),
+        LanguageModelToolChoice::Required => JsonValue::String("required".to_string()),
+        LanguageModelToolChoice::Tool { tool_name } => json!({
+            "type": "function",
+            "function": {
+                "name": tool_name
+            }
+        }),
+    });
+
+    (Some(prepared_tools), prepared_tool_choice)
+}
+
 fn openai_compatible_response_format(
     response_format: &LanguageModelResponseFormat,
     settings: &OpenAICompatibleProviderSettings,
+    strict_json_schema: bool,
     warnings: &mut Vec<Warning>,
 ) -> Option<JsonValue> {
     match response_format {
@@ -1860,7 +2075,7 @@ fn openai_compatible_response_format(
             {
                 let mut json_schema = JsonObject::new();
                 json_schema.insert("schema".to_string(), JsonValue::Object(schema.clone()));
-                json_schema.insert("strict".to_string(), JsonValue::Bool(true));
+                json_schema.insert("strict".to_string(), JsonValue::Bool(strict_json_schema));
                 json_schema.insert(
                     "name".to_string(),
                     JsonValue::String(name.clone().unwrap_or_else(|| "response".to_string())),
@@ -1935,7 +2150,32 @@ fn openai_compatible_messages(prompt: &[LanguageModelMessage]) -> Vec<JsonValue>
         .collect()
 }
 
-fn openai_compatible_response_content(message: Option<&JsonValue>) -> Vec<LanguageModelContent> {
+fn openai_compatible_tool_call_metadata(
+    provider_name: &str,
+    tool_call: &JsonValue,
+) -> Option<ProviderMetadata> {
+    let thought_signature = tool_call
+        .get("extra_content")
+        .and_then(|extra| extra.get("google"))
+        .and_then(|google| google.get("thought_signature"))
+        .and_then(JsonValue::as_str)?;
+    let mut metadata = ProviderMetadata::new();
+    metadata.insert(
+        provider_name.to_string(),
+        json!({
+            "thoughtSignature": thought_signature
+        })
+        .as_object()
+        .expect("metadata is an object")
+        .clone(),
+    );
+    Some(metadata)
+}
+
+fn openai_compatible_response_content(
+    message: Option<&JsonValue>,
+    provider_name: &str,
+) -> Vec<LanguageModelContent> {
     let mut content = Vec::new();
     let Some(message) = message else {
         return content;
@@ -1956,6 +2196,42 @@ fn openai_compatible_response_content(message: Option<&JsonValue>) -> Vec<Langua
         content.push(LanguageModelContent::Reasoning(
             LanguageModelReasoning::new(reasoning),
         ));
+    }
+
+    if let Some(tool_calls) = message.get("tool_calls").and_then(JsonValue::as_array) {
+        for (index, tool_call) in tool_calls.iter().enumerate() {
+            let Some(function) = tool_call.get("function") else {
+                continue;
+            };
+            let Some(tool_name) = function.get("name").and_then(JsonValue::as_str) else {
+                continue;
+            };
+            let input = function
+                .get("arguments")
+                .and_then(JsonValue::as_str)
+                .unwrap_or_default();
+            let tool_call_id = tool_call
+                .get("id")
+                .and_then(JsonValue::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    if index == 0 {
+                        generate_id()
+                    } else {
+                        format!("{}-{index}", generate_id())
+                    }
+                });
+            let mut content_part =
+                LanguageModelToolCall::new(tool_call_id, tool_name.to_string(), input.to_string());
+
+            if let Some(provider_metadata) =
+                openai_compatible_tool_call_metadata(provider_name, tool_call)
+            {
+                content_part = content_part.with_provider_metadata(provider_metadata);
+            }
+
+            content.push(LanguageModelContent::ToolCall(content_part));
+        }
     }
 
     content
@@ -2179,6 +2455,15 @@ fn openai_compatible_stream_result_from_response(
     let mut is_first_chunk = true;
     let mut is_active_reasoning = false;
     let mut is_active_text = false;
+    let tool_metadata_provider_name = provider_name.to_string();
+    let mut tool_call_tracker = StreamingToolCallTracker::new()
+        .with_generate_id(generate_id)
+        .with_extract_metadata(move |delta| {
+            openai_compatible_streaming_tool_call_metadata(&tool_metadata_provider_name, delta)
+        })
+        .with_tool_call_provider_metadata(|metadata| metadata.cloned());
+    let mut pending_tool_calls = BTreeMap::<usize, PendingOpenAICompatibleToolCall>::new();
+    let mut forwarded_tool_call_indices = BTreeSet::<usize>::new();
 
     for event in events {
         match event {
@@ -2270,7 +2555,7 @@ fn openai_compatible_stream_result_from_response(
                     ));
                 }
 
-                if delta.get("tool_calls").is_some() {
+                if let Some(tool_calls) = delta.get("tool_calls").and_then(JsonValue::as_array) {
                     if is_active_reasoning {
                         stream.push(LanguageModelStreamPart::ReasoningEnd(
                             LanguageModelReasoningEnd::new("reasoning-0"),
@@ -2278,14 +2563,31 @@ fn openai_compatible_stream_result_from_response(
                         is_active_reasoning = false;
                     }
 
-                    finish_reason = LanguageModelFinishReason {
-                        unified: FinishReason::Error,
-                        raw: Some("openai-compatible-unported-tool-calls".to_string()),
-                    };
-                    stream.push(openai_compatible_stream_error(
-                        "OpenAI-compatible streamed tool calls are not implemented yet",
-                        Some(&raw_value.to_string()),
-                    ));
+                    for tool_call in tool_calls {
+                        match serde_json::from_value::<StreamingToolCallDelta>(tool_call.clone())
+                            .map_err(|error| error.to_string())
+                            .and_then(|delta| {
+                                process_openai_compatible_streaming_tool_call_delta(
+                                    delta,
+                                    &mut pending_tool_calls,
+                                    &mut forwarded_tool_call_indices,
+                                    &mut tool_call_tracker,
+                                )
+                                .map_err(|error| error.to_string())
+                            }) {
+                            Ok(parts) => stream.extend(parts),
+                            Err(error) => {
+                                finish_reason = LanguageModelFinishReason {
+                                    unified: FinishReason::Error,
+                                    raw: Some("openai-compatible-tool-call-error".to_string()),
+                                };
+                                stream.push(openai_compatible_stream_error(
+                                    error,
+                                    Some(&raw_value.to_string()),
+                                ));
+                            }
+                        }
+                    }
                 }
             }
             ParseJsonResult::Failure { error, raw_value } => {
@@ -2313,6 +2615,32 @@ fn openai_compatible_stream_result_from_response(
         )));
     }
 
+    for (index, pending) in pending_tool_calls {
+        let mut delta = StreamingToolCallDelta::new()
+            .with_index(index)
+            .with_function(
+                StreamingToolCallDeltaFunction::new().with_arguments(pending.buffered_arguments),
+            );
+        if let Some(id) = pending.id {
+            delta = delta.with_id(id);
+        }
+        for (key, value) in pending.extra {
+            delta = delta.with_extra_value(key, value);
+        }
+        match tool_call_tracker.process_delta(delta) {
+            Ok(parts) => stream.extend(parts),
+            Err(error) => {
+                finish_reason = LanguageModelFinishReason {
+                    unified: FinishReason::Error,
+                    raw: Some("openai-compatible-tool-call-error".to_string()),
+                };
+                stream.push(openai_compatible_stream_error(error.to_string(), None));
+            }
+        }
+    }
+
+    stream.extend(tool_call_tracker.flush());
+
     stream.push(LanguageModelStreamPart::Finish(
         LanguageModelStreamFinish::new(openai_compatible_usage(usage.as_ref()), finish_reason)
             .with_provider_metadata(openai_compatible_stream_provider_metadata(
@@ -2332,6 +2660,99 @@ fn openai_compatible_stream_result_from_response(
     }
 
     result
+}
+
+#[derive(Clone, Debug, Default)]
+struct PendingOpenAICompatibleToolCall {
+    id: Option<String>,
+    buffered_arguments: String,
+    extra: JsonObject,
+}
+
+fn process_openai_compatible_streaming_tool_call_delta(
+    delta: StreamingToolCallDelta,
+    pending_tool_calls: &mut BTreeMap<usize, PendingOpenAICompatibleToolCall>,
+    forwarded_tool_call_indices: &mut BTreeSet<usize>,
+    tool_call_tracker: &mut StreamingToolCallTracker,
+) -> Result<Vec<LanguageModelStreamPart>, crate::provider::InvalidResponseDataError> {
+    let Some(index) = delta.index else {
+        return tool_call_tracker.process_delta(delta);
+    };
+
+    if forwarded_tool_call_indices.contains(&index) {
+        return tool_call_tracker.process_delta(delta);
+    }
+
+    let pending = pending_tool_calls.entry(index).or_default();
+
+    if pending.id.is_none() {
+        pending.id = delta.id.clone();
+    }
+
+    if pending.extra.is_empty() {
+        pending.extra = delta.extra.clone();
+    }
+
+    if let Some(arguments) = delta
+        .function
+        .as_ref()
+        .and_then(|function| function.arguments.as_ref())
+    {
+        pending.buffered_arguments.push_str(arguments);
+    }
+
+    let Some(name) = delta
+        .function
+        .as_ref()
+        .and_then(|function| function.name.clone())
+    else {
+        return Ok(Vec::new());
+    };
+
+    let pending = pending_tool_calls
+        .remove(&index)
+        .expect("pending tool call entry exists");
+    let mut forward_delta = StreamingToolCallDelta::new()
+        .with_index(index)
+        .with_function(
+            StreamingToolCallDeltaFunction::new()
+                .with_name(name)
+                .with_arguments(pending.buffered_arguments),
+        );
+
+    if let Some(id) = pending.id {
+        forward_delta = forward_delta.with_id(id);
+    }
+
+    for (key, value) in pending.extra {
+        forward_delta = forward_delta.with_extra_value(key, value);
+    }
+
+    forwarded_tool_call_indices.insert(index);
+    tool_call_tracker.process_delta(forward_delta)
+}
+
+fn openai_compatible_streaming_tool_call_metadata(
+    provider_name: &str,
+    delta: &StreamingToolCallDelta,
+) -> Option<ProviderMetadata> {
+    let thought_signature = delta
+        .extra
+        .get("extra_content")
+        .and_then(|extra| extra.get("google"))
+        .and_then(|google| google.get("thought_signature"))
+        .and_then(JsonValue::as_str)?;
+    let mut metadata = ProviderMetadata::new();
+    metadata.insert(
+        provider_name.to_string(),
+        json!({
+            "thoughtSignature": thought_signature
+        })
+        .as_object()
+        .expect("metadata is an object")
+        .clone(),
+    );
+    Some(metadata)
 }
 
 fn openai_compatible_stream_response_metadata(
@@ -2838,11 +3259,13 @@ mod tests {
     use crate::generate_text::{GenerateTextOptions, generate_text};
     use crate::headers::Headers;
     use crate::image_model::{ImageModel, ImageModelCallOptions};
-    use crate::json::JsonValue;
+    use crate::json::{JsonObject, JsonValue};
     use crate::language_model::{
-        FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelMessage,
+        FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelFunctionTool,
+        LanguageModelMessage, LanguageModelProviderTool, LanguageModelReasoningEffort,
         LanguageModelResponseFormat, LanguageModelStreamPart, LanguageModelSystemMessage,
-        LanguageModelTextPart, LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelTextPart, LanguageModelTool, LanguageModelToolChoice,
+        LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::prompt::Prompt;
     use crate::provider::ProviderOptions;
@@ -4257,6 +4680,377 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn openai_compatible_chat_passes_tools_tool_choice_and_provider_options() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "ok"
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com")
+                .with_supports_structured_outputs(true),
+        )
+        .with_transport(transport)
+        .chat_model("test-chat-model");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai-compatible": {
+                "user": "deprecated-user",
+                "reasoningEffort": "low"
+            },
+            "openaiCompatible": {
+                "textVerbosity": "low"
+            },
+            "test-provider": {
+                "reasoningEffort": "medium",
+                "someCustomOption": "raw-value",
+                "user": "raw-user"
+            },
+            "testProvider": {
+                "someCustomOption": "camel-value",
+                "strictJsonSchema": false,
+                "user": "camel-user"
+            }
+        }))
+        .expect("provider options deserialize");
+        let input_schema: JsonObject = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "city": {
+                    "type": "string"
+                }
+            },
+            "required": ["city"]
+        }))
+        .expect("schema deserializes");
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Use the weather tool"),
+                    )]),
+                )])
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new("weather", input_schema.clone())
+                        .with_description("Get weather")
+                        .with_strict(false),
+                ))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "gateway.unsupported",
+                    "unsupported",
+                    JsonObject::new(),
+                )))
+                .with_tool_choice(LanguageModelToolChoice::Tool {
+                    tool_name: "weather".to_string(),
+                })
+                .with_reasoning(LanguageModelReasoningEffort::High)
+                .with_response_format(
+                    LanguageModelResponseFormat::json().with_schema(input_schema.clone()),
+                )
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Deprecated { setting, .. }
+                    if setting == "providerOptions key 'openai-compatible'"
+            )
+        }));
+        assert!(result.warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Deprecated { setting, .. }
+                    if setting == "providerOptions key 'test-provider'"
+            )
+        }));
+        assert!(result.warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Unsupported { feature, .. }
+                    if feature == "provider-defined tool gateway.unsupported"
+            )
+        }));
+
+        assert_eq!(
+            captured_request
+                .lock()
+                .expect("captured request mutex is not poisoned")
+                .clone()
+                .expect("request is captured")
+                .body
+                .and_then(|body| body.as_text().map(str::to_string))
+                .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok()),
+            Some(json!({
+                "model": "test-chat-model",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Use the weather tool"
+                    }
+                ],
+                "user": "camel-user",
+                "reasoning_effort": "medium",
+                "verbosity": "low",
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "schema": input_schema,
+                        "strict": false,
+                        "name": "response"
+                    }
+                },
+                "someCustomOption": "camel-value",
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "weather",
+                            "description": "Get weather",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "city": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["city"]
+                            },
+                            "strict": false
+                        }
+                    }
+                ],
+                "tool_choice": {
+                    "type": "function",
+                    "function": {
+                        "name": "weather"
+                    }
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_maps_tool_calls_from_generate() {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(|_request| -> OpenAICompatibleTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "content": null,
+                                    "tool_calls": [
+                                        {
+                                            "id": "call_1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "weather",
+                                                "arguments": "{\"city\":\"Brisbane\"}"
+                                            },
+                                            "extra_content": {
+                                                "google": {
+                                                    "thought_signature": "signature-1"
+                                                }
+                                            }
+                                        }
+                                    ]
+                                },
+                                "finish_reason": "tool_calls"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 2,
+                            "completion_tokens": 1
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
+            "test-provider",
+            "https://api.example.com",
+        ))
+        .with_transport(transport)
+        .chat_model("test-chat-model");
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
+                    "What is the weather?",
+                )),
+            ])),
+        ])));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::ToolCalls);
+        assert!(matches!(
+            result.content.first(),
+            Some(crate::language_model::LanguageModelContent::ToolCall(tool_call))
+                if tool_call.tool_call_id == "call_1"
+                    && tool_call.tool_name == "weather"
+                    && tool_call.input == "{\"city\":\"Brisbane\"}"
+                    && tool_call
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("test-provider"))
+                        .and_then(|metadata| metadata.get("thoughtSignature"))
+                        .and_then(JsonValue::as_str)
+                        == Some("signature-1")
+        ));
+    }
+
+    #[test]
+    fn openai_compatible_chat_streams_tool_calls() {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(|_request| -> OpenAICompatibleTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    sse_body([
+                        json!({
+                            "id": "chatcmpl-tool-stream",
+                            "created": 1711115037,
+                            "model": "test-chat-model",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "tool_calls": [
+                                            {
+                                                "index": 0,
+                                                "id": "call_1",
+                                                "type": "function",
+                                                "function": {
+                                                    "name": "weather",
+                                                    "arguments": "{\"city\""
+                                                },
+                                                "extra_content": {
+                                                    "google": {
+                                                        "thought_signature": "signature-1"
+                                                    }
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    "finish_reason": null
+                                }
+                            ]
+                        }),
+                        json!({
+                            "id": "chatcmpl-tool-stream",
+                            "created": 1711115037,
+                            "model": "test-chat-model",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "tool_calls": [
+                                            {
+                                                "index": 0,
+                                                "function": {
+                                                    "arguments": ":\"Brisbane\"}"
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    "finish_reason": "tool_calls"
+                                }
+                            ],
+                            "usage": {
+                                "prompt_tokens": 2,
+                                "completion_tokens": 1
+                            }
+                        }),
+                    ]),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
+            "test-provider",
+            "https://api.example.com",
+        ))
+        .with_transport(transport)
+        .chat_model("test-chat-model");
+        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
+                    "What is the weather?",
+                )),
+            ])),
+        ])));
+
+        assert!(result.stream.iter().any(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::ToolInputStart(start)
+                    if start.id == "call_1" && start.tool_name == "weather"
+            )
+        }));
+        assert_eq!(
+            result
+                .stream
+                .iter()
+                .filter_map(|part| match part {
+                    LanguageModelStreamPart::ToolInputDelta(delta) => Some(delta.delta.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["{\"city\"", ":\"Brisbane\"}"]
+        );
+        assert!(result.stream.iter().any(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::ToolInputEnd(end) if end.id == "call_1"
+            )
+        }));
+        assert!(result.stream.iter().any(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::ToolCall(tool_call)
+                    if tool_call.tool_call_id == "call_1"
+                        && tool_call.tool_name == "weather"
+                        && tool_call.input == "{\"city\":\"Brisbane\"}"
+                        && tool_call
+                            .provider_metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.get("test-provider"))
+                            .and_then(|metadata| metadata.get("thoughtSignature"))
+                            .and_then(JsonValue::as_str)
+                            == Some("signature-1")
+            )
+        }));
+        assert!(matches!(
+            result.stream.last(),
+            Some(LanguageModelStreamPart::Finish(finish))
+                if finish.finish_reason.unified == FinishReason::ToolCalls
+        ));
     }
 
     fn openai_compatible_chat_stream_body() -> String {
