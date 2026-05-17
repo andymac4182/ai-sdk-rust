@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::VERSION;
 use crate::headers::Headers;
+use crate::json::JsonValue;
 use crate::language_model::{
     FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelCustomContent,
     LanguageModelErrorStreamPart, LanguageModelFile, LanguageModelPrompt,
@@ -609,6 +610,9 @@ pub struct StreamTextStep {
     /// Provider-specific custom parts emitted by the provider.
     pub custom_parts: Vec<LanguageModelCustomContent>,
 
+    /// Stream errors emitted by the provider.
+    pub errors: Vec<JsonValue>,
+
     /// Usage information for this step.
     pub usage: LanguageModelUsage,
 
@@ -661,6 +665,9 @@ pub struct StreamTextResult {
 
     /// Provider-specific custom parts emitted by all steps.
     pub custom_parts: Vec<LanguageModelCustomContent>,
+
+    /// Stream errors emitted by all steps.
+    pub errors: Vec<JsonValue>,
 
     /// Warnings reported by the provider.
     pub warnings: Vec<Warning>,
@@ -735,6 +742,7 @@ where
     let mut tool_calls = Vec::new();
     let mut tool_results = Vec::new();
     let mut custom_parts = Vec::new();
+    let mut errors = Vec::new();
     let mut usage = LanguageModelUsage::default();
     let mut finish_reason = FinishReason::Other;
     let mut raw_finish_reason = None;
@@ -843,6 +851,8 @@ where
                         }
                     }
                     LanguageModelStreamPart::Error(part) => {
+                        finish_reason = FinishReason::Error;
+                        errors.push(part.error.clone());
                         parts.push(TextStreamPart::Error(part));
                     }
                     LanguageModelStreamPart::StreamStart(_) => unreachable!(),
@@ -890,6 +900,7 @@ where
         tool_calls: tool_calls.clone(),
         tool_results: tool_results.clone(),
         custom_parts: custom_parts.clone(),
+        errors: errors.clone(),
         usage: usage.clone(),
         finish_reason: finish_reason.clone(),
         raw_finish_reason: raw_finish_reason.clone(),
@@ -908,6 +919,7 @@ where
         tool_calls,
         tool_results,
         custom_parts,
+        errors,
         warnings,
         usage: usage.clone(),
         total_usage: usage,
@@ -961,11 +973,12 @@ mod tests {
 
     use super::*;
     use crate::language_model::{
-        FinishReason, InputTokenUsage, LanguageModelFinishReason, LanguageModelMessage,
-        LanguageModelRawStreamPart, LanguageModelStreamFinish, LanguageModelStreamResponseMetadata,
-        LanguageModelStreamResult, LanguageModelStreamResultResponse, LanguageModelStreamStart,
-        LanguageModelSystemMessage, LanguageModelTextDelta, LanguageModelTextPart,
-        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
+        FinishReason, InputTokenUsage, LanguageModelErrorStreamPart, LanguageModelFinishReason,
+        LanguageModelMessage, LanguageModelRawStreamPart, LanguageModelStreamFinish,
+        LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
+        LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSystemMessage,
+        LanguageModelTextDelta, LanguageModelTextPart, LanguageModelUserContentPart,
+        LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::mock_models::MockLanguageModel;
     use crate::prompt::Prompt;
@@ -1194,6 +1207,33 @@ mod tests {
         assert_eq!(finish_value["type"], "finish");
         assert_eq!(finish_value["finishReason"], "stop");
         assert_eq!(finish_value["rawFinishReason"], "stop");
+    }
+
+    #[test]
+    fn stream_text_retains_error_parts_and_marks_error_finish_without_finish_part() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(
+                    json!({"message": "chunk failed"}),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Say hello")],
+        )));
+
+        assert_eq!(result.text, "Hello");
+        assert_eq!(result.finish_reason, FinishReason::Error);
+        assert_eq!(result.errors, vec![json!({"message": "chunk failed"})]);
+        assert!(
+            result
+                .parts
+                .iter()
+                .any(|part| matches!(part, TextStreamPart::Error(_)))
+        );
     }
 
     #[test]
