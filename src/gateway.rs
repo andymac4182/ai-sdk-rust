@@ -5504,6 +5504,148 @@ mod tests {
     }
 
     #[test]
+    fn gateway_provider_metadata_preserves_known_model_types_and_filters_unknown() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "models": [
+                        {
+                            "id": "model-embedding",
+                            "name": "Model embedding",
+                            "specification": {
+                                "specificationVersion": "v4",
+                                "provider": "gateway",
+                                "modelId": "model-embedding"
+                            },
+                            "modelType": "embedding"
+                        },
+                        {
+                            "id": "model-image",
+                            "name": "Model image",
+                            "specification": {
+                                "specificationVersion": "v4",
+                                "provider": "gateway",
+                                "modelId": "model-image"
+                            },
+                            "modelType": "image"
+                        },
+                        {
+                            "id": "model-language",
+                            "name": "Model language",
+                            "specification": {
+                                "specificationVersion": "v4",
+                                "provider": "gateway",
+                                "modelId": "model-language"
+                            },
+                            "modelType": "language"
+                        },
+                        {
+                            "id": "model-reranking",
+                            "name": "Model reranking",
+                            "specification": {
+                                "specificationVersion": "v4",
+                                "provider": "gateway",
+                                "modelId": "model-reranking"
+                            },
+                            "modelType": "reranking"
+                        },
+                        {
+                            "id": "model-video",
+                            "name": "Model video",
+                            "specification": {
+                                "specificationVersion": "v4",
+                                "provider": "gateway",
+                                "modelId": "model-video"
+                            },
+                            "modelType": "video"
+                        },
+                        {
+                            "id": "model-future",
+                            "name": "Model future",
+                            "specification": {
+                                "specificationVersion": "v4",
+                                "provider": "gateway",
+                                "modelId": "model-future"
+                            },
+                            "modelType": "future-model-family"
+                        }
+                    ]
+                })
+                .to_string(),
+            ))))
+        });
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com/v4/ai")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+        let result = poll_ready(provider.get_available_models()).expect("metadata fetch succeeds");
+
+        assert_eq!(result.models.len(), 5);
+        assert_eq!(
+            result
+                .models
+                .iter()
+                .map(|model| model.model_type)
+                .collect::<Vec<_>>(),
+            vec![
+                Some(GatewayModelType::Embedding),
+                Some(GatewayModelType::Image),
+                Some(GatewayModelType::Language),
+                Some(GatewayModelType::Reranking),
+                Some(GatewayModelType::Video),
+            ]
+        );
+    }
+
+    #[test]
+    fn gateway_provider_metadata_rejects_invalid_pricing_format() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "models": [
+                        {
+                            "id": "model-invalid-pricing",
+                            "name": "Invalid Pricing Model",
+                            "pricing": {
+                                "input": 123,
+                                "output": "0.000002"
+                            },
+                            "specification": {
+                                "specificationVersion": "v4",
+                                "provider": "gateway",
+                                "modelId": "model-invalid-pricing"
+                            },
+                            "modelType": "language"
+                        }
+                    ]
+                })
+                .to_string(),
+            ))))
+        });
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com/v4/ai")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        let error = poll_ready(provider.get_available_models()).expect_err("metadata is rejected");
+        let response_error = error
+            .as_response()
+            .expect("invalid metadata maps to a Gateway response error");
+
+        assert_eq!(response_error.error_type(), "response_error");
+        assert_eq!(response_error.status_code(), 200);
+        assert!(response_error.validation_error().is_some());
+    }
+
+    #[test]
     fn gateway_provider_caches_available_models_until_refresh() {
         let request_count = Arc::new(Mutex::new(0_u32));
         let request_count_for_transport = Arc::clone(&request_count);
@@ -5675,6 +5817,48 @@ mod tests {
     }
 
     #[test]
+    fn gateway_provider_fetches_empty_metadata_and_zero_credits() {
+        let request_count = Arc::new(Mutex::new(0_u32));
+        let request_count_for_transport = Arc::clone(&request_count);
+        let transport: GatewayTransport = Arc::new(move |_request| -> GatewayTransportFuture {
+            let mut count = request_count_for_transport
+                .lock()
+                .expect("request count mutex is not poisoned");
+            *count += 1;
+            let body = if *count == 1 {
+                json!({
+                    "models": []
+                })
+            } else {
+                json!({
+                    "balance": "0.00",
+                    "total_used": "0.00"
+                })
+            };
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                body.to_string(),
+            ))))
+        });
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com/v4/ai")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        let metadata =
+            poll_ready(provider.get_available_models()).expect("empty metadata fetch succeeds");
+        let credits = poll_ready(provider.get_credits()).expect("zero credits fetch succeeds");
+
+        assert!(metadata.models.is_empty());
+        assert_eq!(credits.balance, "0.00");
+        assert_eq!(credits.total_used, "0.00");
+    }
+
+    #[test]
     fn gateway_provider_fetches_spend_report_with_query_params() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -5807,6 +5991,77 @@ mod tests {
     }
 
     #[test]
+    fn gateway_provider_spend_report_omits_optional_query_params_and_metrics() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "results": [
+                        {
+                            "day": "2026-03-01",
+                            "total_cost": 1.5
+                        }
+                    ]
+                })
+                .to_string(),
+            ))))
+        });
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com/v4/ai")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+        let result = poll_ready(
+            provider.get_spend_report(
+                GatewaySpendReportParams::new("2026-03-01", "2026-03-25")
+                    .with_tags(Vec::<String>::new()),
+            ),
+        )
+        .expect("spend report fetch succeeds");
+
+        assert_eq!(result.results.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&result.results[0]).expect("row serializes"),
+            json!({
+                "day": "2026-03-01",
+                "totalCost": 1.5
+            })
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let url = url::Url::parse(&request.url).expect("request URL is valid");
+        let absent_params = [
+            "group_by",
+            "date_part",
+            "user_id",
+            "model",
+            "provider",
+            "credential_type",
+            "tags",
+        ];
+
+        assert_eq!(
+            url.as_str().split('?').next(),
+            Some("https://api.test.com/v1/report")
+        );
+        for name in absent_params {
+            assert!(!url.query_pairs().any(|(key, _)| key == name));
+        }
+    }
+
+    #[test]
     fn gateway_provider_fetches_generation_info_and_unwraps_data() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -5892,6 +6147,75 @@ mod tests {
                 .find(|(key, _)| key == "id")
                 .map(|(_, value)| value.into_owned()),
             Some("gen_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string())
+        );
+    }
+
+    #[test]
+    fn gateway_provider_generation_info_encodes_special_ids_and_byok_response() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "data": {
+                        "id": "gen id/with?chars&tag=1",
+                        "total_cost": 0.00123,
+                        "upstream_inference_cost": 0.0009,
+                        "usage": 0.00123,
+                        "created_at": "2024-01-01T00:00:00.000Z",
+                        "model": "claude-sonnet-4",
+                        "is_byok": true,
+                        "provider_name": "anthropic",
+                        "streamed": false,
+                        "finish_reason": "stop",
+                        "latency": 200,
+                        "generation_time": 1500,
+                        "native_tokens_prompt": 100,
+                        "native_tokens_completion": 50,
+                        "native_tokens_reasoning": 0,
+                        "native_tokens_cached": 0,
+                        "native_tokens_cache_creation": 0,
+                        "billable_web_search_calls": 0
+                    }
+                })
+                .to_string(),
+            ))))
+        });
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com/v4/ai")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+        let result = poll_ready(
+            provider
+                .get_generation_info(GatewayGenerationInfoParams::new("gen id/with?chars&tag=1")),
+        )
+        .expect("generation info fetch succeeds");
+
+        assert!(result.is_byok);
+        assert_eq!(result.provider_name, "anthropic");
+        assert_eq!(result.upstream_inference_cost, 0.0009);
+        assert_eq!(result.model, "claude-sonnet-4");
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let url = url::Url::parse(&request.url).expect("request URL is valid");
+
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "id")
+                .map(|(_, value)| value.into_owned()),
+            Some("gen id/with?chars&tag=1".to_string())
         );
     }
 
