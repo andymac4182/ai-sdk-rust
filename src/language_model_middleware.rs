@@ -8,7 +8,7 @@ use crate::json::{JsonObject, JsonValue};
 use crate::language_model::{
     LanguageModel, LanguageModelCallOptions, LanguageModelGenerateResult,
     LanguageModelResponseFormat, LanguageModelStreamResult, LanguageModelSupportedUrls,
-    LanguageModelTool, LanguageModelToolChoice,
+    LanguageModelTool, LanguageModelToolChoice, LanguageModelToolInputExample,
 };
 use crate::provider::{ProviderOptions, SpecificationVersion};
 
@@ -670,6 +670,128 @@ pub fn default_settings_middleware(
     DefaultSettingsMiddleware::new(settings)
 }
 
+/// Formats a tool input example for [`AddToolInputExamplesMiddleware`].
+pub type ToolInputExampleFormatFunction = fn(&LanguageModelToolInputExample, usize) -> String;
+
+/// Formats a tool input example using the upstream default JSON representation.
+pub fn default_format_tool_input_example(
+    example: &LanguageModelToolInputExample,
+    _index: usize,
+) -> String {
+    serde_json::to_string(&example.input).expect("JSON object examples serialize")
+}
+
+/// Language model middleware that appends tool input examples to descriptions.
+///
+/// Upstream `addToolInputExamplesMiddleware` is useful for providers that do
+/// not natively support `inputExamples`. This Rust port serializes function
+/// tool examples into the description and removes the structured examples by
+/// default, matching upstream behavior.
+#[derive(Clone, Debug)]
+pub struct AddToolInputExamplesMiddleware {
+    prefix: String,
+    remove: bool,
+    format: ToolInputExampleFormatFunction,
+}
+
+impl AddToolInputExamplesMiddleware {
+    /// Creates middleware with the upstream default options.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the prefix inserted before formatted examples.
+    pub fn with_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.prefix = prefix.into();
+        self
+    }
+
+    /// Sets whether structured `inputExamples` are removed after appending.
+    pub fn with_remove(mut self, remove: bool) -> Self {
+        self.remove = remove;
+        self
+    }
+
+    /// Sets a custom formatter for each example.
+    pub fn with_format(mut self, format: ToolInputExampleFormatFunction) -> Self {
+        self.format = format;
+        self
+    }
+
+    /// Returns the prefix inserted before formatted examples.
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    /// Returns whether structured input examples are removed after appending.
+    pub fn remove(&self) -> bool {
+        self.remove
+    }
+
+    fn apply_examples(&self, mut params: LanguageModelCallOptions) -> LanguageModelCallOptions {
+        let Some(tools) = params.tools.take() else {
+            return params;
+        };
+
+        params.tools = Some(
+            tools
+                .into_iter()
+                .map(|tool| self.transform_tool(tool))
+                .collect(),
+        );
+        params
+    }
+
+    fn transform_tool(&self, tool: LanguageModelTool) -> LanguageModelTool {
+        let mut function_tool = match tool {
+            LanguageModelTool::Function(function_tool) => function_tool,
+            other => return other,
+        };
+
+        let Some(input_examples) = function_tool.input_examples.as_ref() else {
+            return LanguageModelTool::Function(function_tool);
+        };
+
+        if input_examples.is_empty() {
+            return LanguageModelTool::Function(function_tool);
+        }
+
+        let formatted_examples = input_examples
+            .iter()
+            .enumerate()
+            .map(|(index, example)| (self.format)(example, index))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let examples_section = format!("{}\n{formatted_examples}", self.prefix);
+
+        function_tool.description = Some(match function_tool.description.take() {
+            Some(description) => format!("{description}\n\n{examples_section}"),
+            None => examples_section,
+        });
+
+        if self.remove {
+            function_tool.input_examples = None;
+        }
+
+        LanguageModelTool::Function(function_tool)
+    }
+}
+
+impl Default for AddToolInputExamplesMiddleware {
+    fn default() -> Self {
+        Self {
+            prefix: "Input Examples:".to_string(),
+            remove: true,
+            format: default_format_tool_input_example,
+        }
+    }
+}
+
+/// Creates language model middleware that appends input examples to tool descriptions.
+pub fn add_tool_input_examples_middleware() -> AddToolInputExamplesMiddleware {
+    AddToolInputExamplesMiddleware::new()
+}
+
 impl<M: LanguageModel> LanguageModelMiddleware<M> for DefaultSettingsMiddleware {
     type OverrideSupportedUrlsFuture<'a>
         = Ready<LanguageModelSupportedUrls>
@@ -703,6 +825,42 @@ impl<M: LanguageModel> LanguageModelMiddleware<M> for DefaultSettingsMiddleware 
         M: 'a,
     {
         Some(ready(self.apply_settings(options.params)))
+    }
+}
+
+impl<M: LanguageModel> LanguageModelMiddleware<M> for AddToolInputExamplesMiddleware {
+    type OverrideSupportedUrlsFuture<'a>
+        = Pending<LanguageModelSupportedUrls>
+    where
+        Self: 'a,
+        M: 'a;
+
+    type TransformParamsFuture<'a>
+        = Ready<LanguageModelCallOptions>
+    where
+        Self: 'a,
+        M: 'a;
+
+    type WrapGenerateFuture<'a>
+        = Pending<LanguageModelGenerateResult>
+    where
+        Self: 'a,
+        M: 'a;
+
+    type WrapStreamFuture<'a>
+        = Pending<LanguageModelStreamResult<M::Stream>>
+    where
+        Self: 'a,
+        M: 'a;
+
+    fn transform_params<'a>(
+        &'a self,
+        options: LanguageModelTransformParamsOptions<'a, M>,
+    ) -> Option<Self::TransformParamsFuture<'a>>
+    where
+        M: 'a,
+    {
+        Some(ready(self.apply_examples(options.params)))
     }
 }
 
@@ -773,16 +931,17 @@ fn merge_json_objects(default_object: &JsonObject, params_object: &JsonObject) -
 #[cfg(test)]
 mod tests {
     use super::{
-        LanguageModelDefaultSettings, LanguageModelMiddleware, LanguageModelMiddlewareCallType,
-        LanguageModelMiddlewareModelOptions, LanguageModelTransformParamsOptions,
-        LanguageModelWrapGenerateOptions, LanguageModelWrapStreamOptions,
+        AddToolInputExamplesMiddleware, LanguageModelDefaultSettings, LanguageModelMiddleware,
+        LanguageModelMiddlewareCallType, LanguageModelMiddlewareModelOptions,
+        LanguageModelTransformParamsOptions, LanguageModelWrapGenerateOptions,
+        LanguageModelWrapStreamOptions, add_tool_input_examples_middleware,
         default_settings_middleware, wrap_language_model,
     };
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
-        LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelStreamPart,
-        LanguageModelStreamResult, LanguageModelStreamStart, LanguageModelSupportedUrls,
-        LanguageModelText, LanguageModelUsage,
+        LanguageModelFinishReason, LanguageModelFunctionTool, LanguageModelGenerateResult,
+        LanguageModelStreamPart, LanguageModelStreamResult, LanguageModelStreamStart,
+        LanguageModelSupportedUrls, LanguageModelText, LanguageModelTool, LanguageModelUsage,
     };
     use crate::provider::SpecificationVersion;
     use crate::warning::Warning;
@@ -1123,6 +1282,20 @@ mod tests {
         )
     }
 
+    fn object_schema() -> crate::json::JsonSchema {
+        json_object(json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        }))
+    }
+
+    fn json_object(value: serde_json::Value) -> crate::json::JsonObject {
+        value.as_object().expect("value is a JSON object").clone()
+    }
+
     fn poll_ready<T>(mut future: Ready<T>) -> T {
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);
@@ -1289,6 +1462,87 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn add_tool_input_examples_middleware_appends_examples_and_removes_them_by_default() {
+        let model = StaticLanguageModel;
+        let middleware = add_tool_input_examples_middleware();
+        let params =
+            LanguageModelCallOptions::new(Vec::new()).with_tool(LanguageModelTool::Function(
+                LanguageModelFunctionTool::new("weather", object_schema())
+                    .with_description("Get the weather")
+                    .with_input_example(json_object(json!({ "city": "Brisbane" })))
+                    .with_input_example(json_object(json!({ "city": "Sydney" }))),
+            ));
+
+        let transformed = middleware
+            .transform_params(LanguageModelTransformParamsOptions::new(
+                LanguageModelMiddlewareCallType::Generate,
+                params,
+                &model,
+            ))
+            .expect("tool examples transform exists");
+        let transformed = poll_ready(transformed);
+
+        let tools = transformed.tools.expect("tools are retained");
+        let LanguageModelTool::Function(tool) = &tools[0] else {
+            panic!("function tool should remain a function tool");
+        };
+
+        assert_eq!(
+            tool.description.as_deref(),
+            Some(
+                "Get the weather\n\nInput Examples:\n{\"city\":\"Brisbane\"}\n{\"city\":\"Sydney\"}"
+            )
+        );
+        assert_eq!(tool.input_examples, None);
+    }
+
+    #[test]
+    fn add_tool_input_examples_middleware_supports_custom_options() {
+        fn format_city(
+            example: &crate::language_model::LanguageModelToolInputExample,
+            index: usize,
+        ) -> String {
+            let city = example
+                .input
+                .get("city")
+                .and_then(|value| value.as_str())
+                .expect("city example is a string");
+
+            format!("{}: {city}", index + 1)
+        }
+
+        let model = StaticLanguageModel;
+        let middleware = AddToolInputExamplesMiddleware::new()
+            .with_prefix("Examples:")
+            .with_remove(false)
+            .with_format(format_city);
+        let params =
+            LanguageModelCallOptions::new(Vec::new()).with_tool(LanguageModelTool::Function(
+                LanguageModelFunctionTool::new("weather", object_schema())
+                    .with_input_example(json_object(json!({ "city": "Brisbane" }))),
+            ));
+
+        let transformed = middleware
+            .transform_params(LanguageModelTransformParamsOptions::new(
+                LanguageModelMiddlewareCallType::Stream,
+                params,
+                &model,
+            ))
+            .expect("tool examples transform exists");
+        let transformed = poll_ready(transformed);
+
+        let tools = transformed.tools.expect("tools are retained");
+        let LanguageModelTool::Function(tool) = &tools[0] else {
+            panic!("function tool should remain a function tool");
+        };
+
+        assert_eq!(middleware.prefix(), "Examples:");
+        assert!(!middleware.remove());
+        assert_eq!(tool.description.as_deref(), Some("Examples:\n1: Brisbane"));
+        assert_eq!(tool.input_examples.as_ref().map(Vec::len), Some(1));
     }
 
     #[test]

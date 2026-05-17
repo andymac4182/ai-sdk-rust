@@ -179,10 +179,12 @@ pub use language_model::{
     LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
 };
 pub use language_model_middleware::{
-    DefaultSettingsMiddleware, LanguageModelDefaultSettings, LanguageModelDoGenerate,
-    LanguageModelDoStream, LanguageModelMiddleware, LanguageModelMiddlewareCallType,
-    LanguageModelMiddlewareModelOptions, LanguageModelTransformParamsOptions,
-    LanguageModelWrapGenerateOptions, LanguageModelWrapStreamOptions, WrappedLanguageModel,
+    AddToolInputExamplesMiddleware, DefaultSettingsMiddleware, LanguageModelDefaultSettings,
+    LanguageModelDoGenerate, LanguageModelDoStream, LanguageModelMiddleware,
+    LanguageModelMiddlewareCallType, LanguageModelMiddlewareModelOptions,
+    LanguageModelTransformParamsOptions, LanguageModelWrapGenerateOptions,
+    LanguageModelWrapStreamOptions, ToolInputExampleFormatFunction, WrappedLanguageModel,
+    add_tool_input_examples_middleware, default_format_tool_input_example,
     default_settings_middleware, wrap_language_model,
 };
 pub use mock_models::{
