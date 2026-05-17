@@ -339,11 +339,64 @@ impl ImageModelResponse {
     }
 }
 
+/// High-level image response metadata.
+///
+/// Upstream `ImageModelResponseMetadata` exposes timestamp, model id, and
+/// headers from the provider-v4 image response.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageModelResponseMetadata {
+    /// Timestamp for the start of the generated response.
+    #[serde(with = "time::serde::rfc3339")]
+    pub timestamp: OffsetDateTime,
+
+    /// Provider model identifier used for the response.
+    pub model_id: String,
+
+    /// Response headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Headers>,
+}
+
+impl ImageModelResponseMetadata {
+    /// Creates high-level image response metadata.
+    pub fn new(timestamp: OffsetDateTime, model_id: impl Into<String>) -> Self {
+        Self {
+            timestamp,
+            model_id: model_id.into(),
+            headers: None,
+        }
+    }
+
+    /// Creates high-level metadata from a provider-v4 image response.
+    pub fn from_response(response: ImageModelResponse) -> Self {
+        Self {
+            timestamp: response.timestamp,
+            model_id: response.model_id,
+            headers: response.headers,
+        }
+    }
+
+    /// Adds a response header.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers
+            .get_or_insert_with(Headers::new)
+            .insert(name.into(), value.into());
+        self
+    }
+}
+
+impl From<ImageModelResponse> for ImageModelResponseMetadata {
+    fn from(response: ImageModelResponse) -> Self {
+        Self::from_response(response)
+    }
+}
+
 /// Error returned when high-level image generation produces no images.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NoImageGeneratedError {
     message: String,
-    responses: Option<Vec<ImageModelResponse>>,
+    responses: Option<Vec<ImageModelResponseMetadata>>,
 }
 
 impl NoImageGeneratedError {
@@ -356,17 +409,21 @@ impl NoImageGeneratedError {
     }
 
     /// Creates a no-image error with response metadata from attempted provider calls.
-    pub fn with_responses(responses: impl IntoIterator<Item = ImageModelResponse>) -> Self {
+    pub fn with_responses<R, I>(responses: I) -> Self
+    where
+        R: Into<ImageModelResponseMetadata>,
+        I: IntoIterator<Item = R>,
+    {
         Self {
             message: "No image generated.".to_string(),
-            responses: Some(responses.into_iter().collect()),
+            responses: Some(responses.into_iter().map(Into::into).collect()),
         }
     }
 
     /// Creates a no-image error with a caller-supplied message and optional responses.
     pub fn with_message(
         message: impl Into<String>,
-        responses: Option<Vec<ImageModelResponse>>,
+        responses: Option<Vec<ImageModelResponseMetadata>>,
     ) -> Self {
         Self {
             message: message.into(),
@@ -380,12 +437,12 @@ impl NoImageGeneratedError {
     }
 
     /// Returns response metadata for attempted provider calls, when available.
-    pub fn responses(&self) -> Option<&[ImageModelResponse]> {
+    pub fn responses(&self) -> Option<&[ImageModelResponseMetadata]> {
         self.responses.as_deref()
     }
 
     /// Converts this error into its message and optional responses.
-    pub fn into_parts(self) -> (String, Option<Vec<ImageModelResponse>>) {
+    pub fn into_parts(self) -> (String, Option<Vec<ImageModelResponseMetadata>>) {
         (self.message, self.responses)
     }
 }
@@ -461,8 +518,8 @@ impl ImageModelResult {
 mod tests {
     use super::{
         ImageModel, ImageModelCallOptions, ImageModelFile, ImageModelProviderMetadata,
-        ImageModelProviderMetadataEntry, ImageModelResponse, ImageModelResult, ImageModelUsage,
-        NoImageGeneratedError,
+        ImageModelProviderMetadataEntry, ImageModelResponse, ImageModelResponseMetadata,
+        ImageModelResult, ImageModelUsage, NoImageGeneratedError,
     };
     use crate::file_data::FileDataContent;
     use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
@@ -736,6 +793,35 @@ mod tests {
     }
 
     #[test]
+    fn image_response_metadata_matches_upstream_shape() {
+        let response_timestamp = OffsetDateTime::parse(
+            "2026-05-16T10:00:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .expect("timestamp parses");
+        let response = ImageModelResponse::new(response_timestamp, "openai/gpt-image-1")
+            .with_header("x-request-id", "req_123");
+
+        let metadata = ImageModelResponseMetadata::from_response(response);
+
+        assert_eq!(
+            metadata,
+            ImageModelResponseMetadata::new(response_timestamp, "openai/gpt-image-1")
+                .with_header("x-request-id", "req_123")
+        );
+        assert_eq!(
+            serde_json::to_value(metadata).expect("metadata serializes"),
+            json!({
+                "timestamp": "2026-05-16T10:00:00Z",
+                "modelId": "openai/gpt-image-1",
+                "headers": {
+                    "x-request-id": "req_123"
+                }
+            })
+        );
+    }
+
+    #[test]
     fn no_image_generated_error_matches_upstream_default_message() {
         let error = NoImageGeneratedError::new();
 
@@ -761,25 +847,26 @@ mod tests {
         .expect("timestamp parses");
         let response = ImageModelResponse::new(response_timestamp, "openai/gpt-image-1")
             .with_header("x-request-id", "req_123");
+        let metadata = ImageModelResponseMetadata::from_response(response.clone());
 
         let error = NoImageGeneratedError::with_responses([response.clone()]);
 
         assert_eq!(error.message(), "No image generated.");
-        assert_eq!(error.responses(), Some([response.clone()].as_slice()));
+        assert_eq!(error.responses(), Some([metadata.clone()].as_slice()));
         assert_eq!(
             error.into_parts(),
             (
                 "No image generated.".to_string(),
-                Some(vec![response.clone()])
+                Some(vec![metadata.clone()])
             )
         );
 
         let custom = NoImageGeneratedError::with_message(
             "No image generated after retries.",
-            Some(vec![response.clone()]),
+            Some(vec![metadata.clone()]),
         );
         assert_eq!(custom.message(), "No image generated after retries.");
-        assert_eq!(custom.responses(), Some([response].as_slice()));
+        assert_eq!(custom.responses(), Some([metadata].as_slice()));
         assert_eq!(custom.to_string(), custom.message());
     }
 }

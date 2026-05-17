@@ -4,7 +4,7 @@ use crate::generate_text::GeneratedFile;
 use crate::headers::Headers;
 use crate::image_model::{
     ImageModel, ImageModelCallOptions, ImageModelFile, ImageModelProviderMetadata,
-    ImageModelProviderMetadataEntry, ImageModelResponse, ImageModelResult, ImageModelUsage,
+    ImageModelProviderMetadataEntry, ImageModelResponseMetadata, ImageModelResult, ImageModelUsage,
     NoImageGeneratedError,
 };
 use crate::provider::ProviderOptions;
@@ -296,7 +296,7 @@ pub struct GenerateImageResult {
     pub warnings: Vec<Warning>,
 
     /// Response metadata from provider calls.
-    pub responses: Vec<ImageModelResponse>,
+    pub responses: Vec<ImageModelResponseMetadata>,
 
     /// Provider-specific metadata aggregated across provider calls.
     pub provider_metadata: ImageModelProviderMetadata,
@@ -307,13 +307,18 @@ pub struct GenerateImageResult {
 
 impl GenerateImageResult {
     /// Creates a high-level image-generation result.
-    pub fn new(
+    pub fn new<R, I>(
         images: Vec<GeneratedFile>,
         warnings: Vec<Warning>,
-        responses: Vec<ImageModelResponse>,
+        responses: I,
         provider_metadata: ImageModelProviderMetadata,
         usage: ImageModelUsage,
-    ) -> Result<Self, NoImageGeneratedError> {
+    ) -> Result<Self, NoImageGeneratedError>
+    where
+        R: Into<ImageModelResponseMetadata>,
+        I: IntoIterator<Item = R>,
+    {
+        let responses = responses.into_iter().map(Into::into).collect::<Vec<_>>();
         let image = images
             .first()
             .cloned()
@@ -358,7 +363,7 @@ pub async fn generate_image<M: ImageModel + ?Sized>(
 
     let mut images = Vec::new();
     let mut warnings = Vec::new();
-    let mut responses = Vec::new();
+    let mut responses: Vec<ImageModelResponseMetadata> = Vec::new();
     let mut provider_metadata = ImageModelProviderMetadata::new();
     let mut usage = ImageModelUsage::new();
 
@@ -386,7 +391,7 @@ pub async fn generate_image<M: ImageModel + ?Sized>(
 
         images.extend(call_images.into_iter().map(generated_file_from_image));
         warnings.extend(call_warnings);
-        responses.push(response);
+        responses.push(response.into());
 
         if let Some(call_usage) = call_usage {
             usage = add_image_model_usage(usage, call_usage);
@@ -575,7 +580,7 @@ mod tests {
     use crate::headers::Headers;
     use crate::image_model::{
         ImageModel, ImageModelCallOptions, ImageModelProviderMetadata, ImageModelResponse,
-        ImageModelResult, ImageModelUsage,
+        ImageModelResponseMetadata, ImageModelResult, ImageModelUsage,
     };
     use crate::json::JsonValue;
     use crate::provider::{ProviderOptions, SpecificationVersion};
@@ -924,7 +929,13 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(result.responses, vec![first_response, second_response]);
+        assert_eq!(
+            result.responses,
+            vec![
+                ImageModelResponseMetadata::from_response(first_response),
+                ImageModelResponseMetadata::from_response(second_response)
+            ]
+        );
         assert_eq!(
             result
                 .provider_metadata
@@ -980,6 +991,7 @@ mod tests {
     #[test]
     fn generate_image_returns_no_image_error_with_responses() {
         let response = image_response("image-test").with_header("x-response-id", "res_1");
+        let expected_response = ImageModelResponseMetadata::from_response(response.clone());
         let model = RecordingImageModel::new(vec![ImageModelResult::new(Vec::new(), response)]);
 
         let error = poll_ready(super::generate_image(GenerateImageOptions::new(
@@ -991,7 +1003,7 @@ mod tests {
         assert_eq!(error.message(), "No image generated.");
         assert_eq!(
             error.responses().expect("responses are retained"),
-            &[image_response("image-test").with_header("x-response-id", "res_1")]
+            &[expected_response]
         );
     }
 
