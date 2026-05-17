@@ -36,6 +36,7 @@ pub mod stream_text;
 pub mod text_stream_response;
 pub mod transcribe;
 pub mod transcription_model;
+pub mod ui_message_stream;
 pub mod upload_file;
 pub mod upload_skill;
 pub mod util;
@@ -311,6 +312,12 @@ pub use transcription_model::{
     NoTranscriptGeneratedError, TranscriptionModel, TranscriptionModelCallOptions,
     TranscriptionModelRequest, TranscriptionModelResponse, TranscriptionModelResponseMetadata,
     TranscriptionModelResult, TranscriptionModelSegment,
+};
+pub use ui_message_stream::{
+    UI_MESSAGE_STREAM_CONTENT_TYPE, UI_MESSAGE_STREAM_VERSION, UI_MESSAGE_STREAM_VERSION_HEADER,
+    UiMessageChunk, UiMessageStreamResponse, UiMessageStreamResponseInit,
+    UiMessageStreamResponseOptions, UiMessageStreamResponseWriter,
+    create_ui_message_stream_response, pipe_ui_message_stream_to_response,
 };
 pub use upload_file::{UploadFileData, UploadFileOptions, UploadFileResult, upload_file};
 pub use upload_skill::{
