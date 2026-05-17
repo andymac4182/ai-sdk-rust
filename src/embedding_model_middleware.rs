@@ -245,6 +245,169 @@ pub fn default_embedding_settings_middleware(
     DefaultEmbeddingSettingsMiddleware::new(settings)
 }
 
+/// Embedding model wrapper that applies one middleware around a provider-v4 model.
+///
+/// Upstream `wrapEmbeddingModel` accepts one or more middlewares. This Rust
+/// wrapper models the same behavior for a single middleware without allocating a
+/// middleware collection; callers can wrap the returned model again to compose
+/// additional middleware.
+#[derive(Clone, Debug)]
+pub struct WrappedEmbeddingModel<M, W> {
+    model: M,
+    middleware: W,
+    provider_id: String,
+    model_id: String,
+}
+
+impl<M, W> WrappedEmbeddingModel<M, W>
+where
+    M: EmbeddingModel,
+    W: EmbeddingModelMiddleware<M>,
+{
+    /// Creates an embedding model wrapper using middleware-provided identity
+    /// overrides when present.
+    pub fn new(model: M, middleware: W) -> Self {
+        let provider_id = middleware
+            .override_provider(EmbeddingModelMiddlewareModelOptions::new(&model))
+            .unwrap_or_else(|| model.provider().to_string());
+        let model_id = middleware
+            .override_model_id(EmbeddingModelMiddlewareModelOptions::new(&model))
+            .unwrap_or_else(|| model.model_id().to_string());
+
+        Self {
+            model,
+            middleware,
+            provider_id,
+            model_id,
+        }
+    }
+
+    /// Sets an explicit provider id, taking precedence over middleware identity
+    /// overrides and the wrapped model's provider id.
+    pub fn with_provider_id(mut self, provider_id: impl Into<String>) -> Self {
+        self.provider_id = provider_id.into();
+        self
+    }
+
+    /// Sets an explicit model id, taking precedence over middleware identity
+    /// overrides and the wrapped model's model id.
+    pub fn with_model_id(mut self, model_id: impl Into<String>) -> Self {
+        self.model_id = model_id.into();
+        self
+    }
+
+    /// Returns the wrapped base embedding model.
+    pub fn model(&self) -> &M {
+        &self.model
+    }
+
+    /// Returns the middleware applied by this wrapper.
+    pub fn middleware(&self) -> &W {
+        &self.middleware
+    }
+
+    /// Consumes the wrapper into the base model and middleware.
+    pub fn into_parts(self) -> (M, W) {
+        (self.model, self.middleware)
+    }
+}
+
+/// Wraps an embedding model with middleware.
+pub fn wrap_embedding_model<M, W>(model: M, middleware: W) -> WrappedEmbeddingModel<M, W>
+where
+    M: EmbeddingModel,
+    W: EmbeddingModelMiddleware<M>,
+{
+    WrappedEmbeddingModel::new(model, middleware)
+}
+
+impl<M, W> EmbeddingModel for WrappedEmbeddingModel<M, W>
+where
+    M: EmbeddingModel + Sync,
+    W: EmbeddingModelMiddleware<M> + Sync,
+{
+    type MaxEmbeddingsPerCallFuture<'a>
+        = Pin<Box<dyn Future<Output = Option<usize>> + Send + 'a>>
+    where
+        Self: 'a;
+
+    type SupportsParallelCallsFuture<'a>
+        = Pin<Box<dyn Future<Output = bool> + Send + 'a>>
+    where
+        Self: 'a;
+
+    type EmbedFuture<'a>
+        = Pin<Box<dyn Future<Output = EmbeddingModelResult> + Send + 'a>>
+    where
+        Self: 'a;
+
+    fn provider(&self) -> &str {
+        &self.provider_id
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    fn max_embeddings_per_call(&self) -> Self::MaxEmbeddingsPerCallFuture<'_> {
+        Box::pin(async move {
+            if let Some(max_embeddings_per_call) = self.middleware.override_max_embeddings_per_call(
+                EmbeddingModelMiddlewareModelOptions::new(&self.model),
+            ) {
+                max_embeddings_per_call.await
+            } else {
+                self.model.max_embeddings_per_call().await
+            }
+        })
+    }
+
+    fn supports_parallel_calls(&self) -> Self::SupportsParallelCallsFuture<'_> {
+        Box::pin(async move {
+            if let Some(supports_parallel_calls) = self.middleware.override_supports_parallel_calls(
+                EmbeddingModelMiddlewareModelOptions::new(&self.model),
+            ) {
+                supports_parallel_calls.await
+            } else {
+                self.model.supports_parallel_calls().await
+            }
+        })
+    }
+
+    fn do_embed(&self, options: EmbeddingModelCallOptions) -> Self::EmbedFuture<'_> {
+        Box::pin(async move {
+            let params = if let Some(transform_params) =
+                self.middleware
+                    .transform_params(EmbeddingModelTransformParamsOptions::new(
+                        options.clone(),
+                        &self.model,
+                    )) {
+                transform_params.await
+            } else {
+                options
+            };
+
+            let do_embed_params = params.clone();
+            let fallback_params = params.clone();
+            let model = &self.model;
+            let do_embed: EmbeddingModelDoEmbed<'_> =
+                Box::new(move || Box::pin(model.do_embed(do_embed_params)));
+
+            if let Some(wrap_embed) =
+                self.middleware
+                    .wrap_embed(EmbeddingModelWrapEmbedOptions::new(
+                        do_embed,
+                        params,
+                        &self.model,
+                    ))
+            {
+                wrap_embed.await
+            } else {
+                self.model.do_embed(fallback_params).await
+            }
+        })
+    }
+}
+
 impl<M: EmbeddingModel> EmbeddingModelMiddleware<M> for DefaultEmbeddingSettingsMiddleware {
     type OverrideMaxEmbeddingsPerCallFuture<'a>
         = Pending<Option<usize>>
@@ -351,6 +514,7 @@ mod tests {
         EmbeddingModelDefaultSettings, EmbeddingModelMiddleware,
         EmbeddingModelMiddlewareModelOptions, EmbeddingModelTransformParamsOptions,
         EmbeddingModelWrapEmbedOptions, default_embedding_settings_middleware,
+        wrap_embedding_model,
     };
     use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelResult};
     use crate::provider::SpecificationVersion;
@@ -500,6 +664,110 @@ mod tests {
         }
     }
 
+    struct ParamEchoEmbeddingModel;
+
+    impl EmbeddingModel for ParamEchoEmbeddingModel {
+        type MaxEmbeddingsPerCallFuture<'a>
+            = Ready<Option<usize>>
+        where
+            Self: 'a;
+
+        type SupportsParallelCallsFuture<'a>
+            = Ready<bool>
+        where
+            Self: 'a;
+
+        type EmbedFuture<'a>
+            = Ready<EmbeddingModelResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "echo-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            "echo-embedding"
+        }
+
+        fn max_embeddings_per_call(&self) -> Self::MaxEmbeddingsPerCallFuture<'_> {
+            ready(Some(2))
+        }
+
+        fn supports_parallel_calls(&self) -> Self::SupportsParallelCallsFuture<'_> {
+            ready(true)
+        }
+
+        fn do_embed(&self, options: EmbeddingModelCallOptions) -> Self::EmbedFuture<'_> {
+            ready(
+                EmbeddingModelResult::new(vec![vec![options.values.len() as f64]]).with_warning(
+                    Warning::Other {
+                        message: options.values.join("|"),
+                    },
+                ),
+            )
+        }
+    }
+
+    struct TransformAndWrapEmbeddingMiddleware;
+
+    impl EmbeddingModelMiddleware<ParamEchoEmbeddingModel> for TransformAndWrapEmbeddingMiddleware {
+        type OverrideMaxEmbeddingsPerCallFuture<'a>
+            = Ready<Option<usize>>
+        where
+            Self: 'a,
+            ParamEchoEmbeddingModel: 'a;
+
+        type OverrideSupportsParallelCallsFuture<'a>
+            = Ready<bool>
+        where
+            Self: 'a,
+            ParamEchoEmbeddingModel: 'a;
+
+        type TransformParamsFuture<'a>
+            = Ready<EmbeddingModelCallOptions>
+        where
+            Self: 'a,
+            ParamEchoEmbeddingModel: 'a;
+
+        type WrapEmbedFuture<'a>
+            = Pin<Box<dyn Future<Output = EmbeddingModelResult> + Send + 'a>>
+        where
+            Self: 'a,
+            ParamEchoEmbeddingModel: 'a;
+
+        fn transform_params<'a>(
+            &'a self,
+            mut options: EmbeddingModelTransformParamsOptions<'a, ParamEchoEmbeddingModel>,
+        ) -> Option<Self::TransformParamsFuture<'a>>
+        where
+            Self: 'a,
+            ParamEchoEmbeddingModel: 'a,
+        {
+            options.params.values.push("transformed".to_string());
+            Some(ready(options.params))
+        }
+
+        fn wrap_embed<'a>(
+            &'a self,
+            options: EmbeddingModelWrapEmbedOptions<'a, ParamEchoEmbeddingModel>,
+        ) -> Option<Self::WrapEmbedFuture<'a>>
+        where
+            Self: 'a,
+            ParamEchoEmbeddingModel: 'a,
+        {
+            assert_eq!(options.params.values, ["input", "transformed"]);
+
+            Some(Box::pin(async move {
+                let mut result = (options.do_embed)().await;
+                result.warnings.push(Warning::Other {
+                    message: format!("wrapped {}", options.model.model_id()),
+                });
+                result
+            }))
+        }
+    }
+
     fn poll_ready<T>(mut future: Ready<T>) -> T {
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);
@@ -641,6 +909,46 @@ mod tests {
                     &model,
                 ))
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn wrap_embedding_model_applies_identity_and_capability_overrides() {
+        let wrapped = wrap_embedding_model(StaticEmbeddingModel, StaticEmbeddingMiddleware);
+
+        assert_eq!(wrapped.specification_version(), SpecificationVersion::V4);
+        assert_eq!(wrapped.provider(), "base-provider-middleware");
+        assert_eq!(wrapped.model_id(), "embed-base-wrapped");
+        assert_eq!(poll_boxed(wrapped.max_embeddings_per_call()), Some(8));
+        assert!(!poll_boxed(wrapped.supports_parallel_calls()));
+
+        let explicit = wrap_embedding_model(StaticEmbeddingModel, StaticEmbeddingMiddleware)
+            .with_provider_id("explicit-provider")
+            .with_model_id("explicit-model");
+
+        assert_eq!(explicit.provider(), "explicit-provider");
+        assert_eq!(explicit.model_id(), "explicit-model");
+    }
+
+    #[test]
+    fn wrap_embedding_model_transforms_params_before_wrapping_embed() {
+        let wrapped =
+            wrap_embedding_model(ParamEchoEmbeddingModel, TransformAndWrapEmbeddingMiddleware);
+
+        let result =
+            poll_boxed(wrapped.do_embed(EmbeddingModelCallOptions::new(vec!["input".to_string()])));
+
+        assert_eq!(result.embeddings, vec![vec![2.0]]);
+        assert_eq!(
+            result.warnings,
+            vec![
+                Warning::Other {
+                    message: "input|transformed".to_string(),
+                },
+                Warning::Other {
+                    message: "wrapped echo-embedding".to_string(),
+                }
+            ]
         );
     }
 
