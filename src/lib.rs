@@ -24,6 +24,7 @@ pub mod json;
 pub mod language_model;
 pub mod language_model_middleware;
 pub mod mock_models;
+pub mod open_responses;
 pub mod openai;
 pub mod openai_compatible;
 pub mod prompt;
@@ -233,7 +234,13 @@ pub use mock_models::{
     MockEmbeddingModel, MockImageModel, MockLanguageModel, MockProvider, MockRerankingModel,
     MockSpeechModel, MockTranscriptionModel, MockVideoModel,
 };
-pub use openai::{DEFAULT_OPENAI_BASE_URL, OpenAIProvider, OpenAIProviderSettings, create_openai};
+pub use open_responses::{
+    OpenResponsesLanguageModel, OpenResponsesProvider, OpenResponsesProviderSettings,
+    OpenResponsesTransport, OpenResponsesTransportFuture, create_open_responses,
+};
+pub use openai::{
+    DEFAULT_OPENAI_BASE_URL, OpenAIProvider, OpenAIProviderSettings, create_openai, openai,
+};
 pub use openai_compatible::{
     OpenAICompatibleChatLanguageModel, OpenAICompatibleCompletionLanguageModel,
     OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel, OpenAICompatibleProvider,
