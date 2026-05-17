@@ -123,8 +123,8 @@ inventory.
 | UI message streams | not-started | none | none | Upstream `ui-message-stream/*` remains unported. |
 | Chat/completion/object UI transport contracts | not-started | none | none | Portable request/response and transport contracts from `packages/ai/src/ui/*` remain unported; framework hooks are js-only rows. |
 | Agent and tool-loop agent APIs | not-started | none | none | Upstream `packages/ai/src/agent/*` remains unported. |
-| `generateObject` non-streaming structured output | verified | `src/generate_object.rs` | `generate_object_*` tests | Stream object and partial object streaming remain unported. |
-| `streamObject` | not-started | none | none | Upstream `packages/ai/src/generate-object/stream-object.ts` remains unported. |
+| `generateObject` non-streaming structured output | verified | `src/generate_object.rs` | `generate_object_*` tests | Non-streaming object output is covered; `streamObject` is tracked separately. |
+| `streamObject` | in-progress | `src/stream_object.rs` | `stream_object_calls_model_with_json_response_format_and_standardized_prompt`; `stream_object_collects_partial_objects_text_and_finish_metadata`; array/enum/error tests | Initial dependency-light collector over provider-v4 streams. It sends JSON response formats, accumulates text deltas, emits partial objects/text/full-stream parts, unwraps array/enum outputs, and parses final objects. Repair callbacks, telemetry, retries/abort, HTTP text response helpers, and full partial-output strategy parity remain unported. |
 | Embeddings: `embed`, `embedMany` | verified | `src/embed.rs` | `embed_calls_model_with_single_value_and_maps_result`; `embed_many_*` tests | Provider implementations remain unported. |
 | Image generation: `generateImage` and `experimental_generateImage` | verified | `src/generate_image.rs` | `generate_image_*` tests | Provider implementations remain unported. |
 | Speech generation: `generateSpeech` and experimental alias | verified | `src/generate_speech.rs` | Speech generation tests | Provider implementations remain unported. |
@@ -200,8 +200,9 @@ focused tests for each portable behavior before changing rows to `verified`.
 1. Continue `streamText` parity with multi-step streamed tool execution,
    callbacks, aborts/retries, tool-call deltas, text/UI response helpers, error
    propagation, and stop conditions.
-2. Port `streamObject` and structured partial-object streaming once `streamText`
-   event handling is available.
+2. Continue `streamObject` parity with repair callbacks, telemetry,
+   retries/abort, text response helpers, and fuller partial-output strategy
+   edge cases.
 3. Port provider wrapping middleware plus add-tool-input-examples,
    extract-json, extract-reasoning, and simulate-streaming middleware.
 4. Start the Gateway provider package with contract-first models and fake HTTP
