@@ -4,14 +4,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::VERSION;
 use crate::generate_object::{
-    GenerateObjectOutputKind, GenerateObjectRepairText, GenerateObjectRepairTextOptions,
-    generate_object_output_kind, generate_object_response_format, parse_generated_object,
+    GenerateObjectEndEvent, GenerateObjectOnFinish, GenerateObjectOnStart,
+    GenerateObjectOnStepFinish, GenerateObjectOnStepStart, GenerateObjectOutputKind,
+    GenerateObjectRepairText, GenerateObjectRepairTextOptions, GenerateObjectRequest,
+    GenerateObjectResponse, GenerateObjectStartEvent, GenerateObjectStepEndEvent,
+    GenerateObjectStepStartEvent, generate_object_call_id, generate_object_output_kind,
+    generate_object_response_format, parse_generated_object,
 };
 use crate::headers::Headers;
-use crate::json::JsonValue;
+use crate::json::{JsonSchema, JsonValue};
 use crate::language_model::{
     FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelPrompt,
-    LanguageModelRequest, LanguageModelStreamPart, LanguageModelUsage,
+    LanguageModelRequest, LanguageModelResponseFormat, LanguageModelStreamPart, LanguageModelUsage,
 };
 use crate::prompt::{Prompt, standardize_prompt};
 use crate::provider::{InvalidPromptError, ProviderMetadata, ProviderOptions};
@@ -19,6 +23,7 @@ use crate::provider_utils::{
     FlexibleSchema, ParseJsonResult, ValidateTypesResult, safe_validate_types,
     with_user_agent_suffix,
 };
+use crate::retry::DEFAULT_MAX_RETRIES;
 use crate::stream_text::StreamTextResponseMetadata;
 use crate::text_stream_response::{
     TextStreamResponse, TextStreamResponseInit, TextStreamResponseOptions,
@@ -120,6 +125,18 @@ pub struct StreamObjectOptions<'a, M: LanguageModel + ?Sized> {
 
     /// Optional callback that can repair invalid final object text.
     pub repair_text: Option<GenerateObjectRepairText<'a>>,
+
+    /// Optional callback invoked before stream-object model work begins.
+    pub on_start: Option<GenerateObjectOnStart<'a>>,
+
+    /// Optional callback invoked before the single streamed model step starts.
+    pub on_step_start: Option<GenerateObjectOnStepStart<'a>>,
+
+    /// Optional callback invoked after the streamed model step completes.
+    pub on_step_finish: Option<GenerateObjectOnStepFinish<'a>>,
+
+    /// Optional callback invoked after final object parsing and validation.
+    pub on_finish: Option<GenerateObjectOnFinish<'a>>,
 }
 
 impl<'a, M: LanguageModel + ?Sized> StreamObjectOptions<'a, M> {
@@ -147,6 +164,10 @@ impl<'a, M: LanguageModel + ?Sized> StreamObjectOptions<'a, M> {
             enum_values: None,
             array_output: false,
             repair_text: None,
+            on_start: None,
+            on_step_start: None,
+            on_step_finish: None,
+            on_finish: None,
         }
     }
 
@@ -240,6 +261,64 @@ impl<'a, M: LanguageModel + ?Sized> StreamObjectOptions<'a, M> {
     {
         self.with_repair_text(repair_text)
     }
+
+    /// Sets a callback that is invoked when stream-object work starts before model streaming.
+    pub fn with_on_start<F, Fut>(mut self, on_start: F) -> Self
+    where
+        F: Fn(GenerateObjectStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_start = Some(GenerateObjectOnStart::new(on_start));
+        self
+    }
+
+    /// Upstream experimental alias for [`StreamObjectOptions::with_on_start`].
+    pub fn with_experimental_on_start<F, Fut>(self, on_start: F) -> Self
+    where
+        F: Fn(GenerateObjectStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.with_on_start(on_start)
+    }
+
+    /// Sets a callback that is invoked before the single streamed model step starts.
+    pub fn with_on_step_start<F, Fut>(mut self, on_step_start: F) -> Self
+    where
+        F: Fn(GenerateObjectStepStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_step_start = Some(GenerateObjectOnStepStart::new(on_step_start));
+        self
+    }
+
+    /// Upstream experimental alias for [`StreamObjectOptions::with_on_step_start`].
+    pub fn with_experimental_on_step_start<F, Fut>(self, on_step_start: F) -> Self
+    where
+        F: Fn(GenerateObjectStepStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.with_on_step_start(on_step_start)
+    }
+
+    /// Sets a callback that is invoked after the streamed model step returns raw text.
+    pub fn with_on_step_finish<F, Fut>(mut self, on_step_finish: F) -> Self
+    where
+        F: Fn(GenerateObjectStepEndEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_step_finish = Some(GenerateObjectOnStepFinish::new(on_step_finish));
+        self
+    }
+
+    /// Sets a callback that is invoked after final object parsing and validation.
+    pub fn with_on_finish<F, Fut>(mut self, on_finish: F) -> Self
+    where
+        F: Fn(GenerateObjectEndEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_finish = Some(GenerateObjectOnFinish::new(on_finish));
+        self
+    }
 }
 
 /// Collected result of a high-level object streaming call.
@@ -330,18 +409,65 @@ where
         enum_values,
         array_output,
         repair_text,
+        on_start,
+        on_step_start,
+        on_step_finish,
+        on_finish,
     } = options;
 
     let output_kind = generate_object_output_kind(&schema, enum_values.as_deref(), array_output);
-    call_options.response_format = Some(generate_object_response_format(
+    let response_format = generate_object_response_format(
         &schema,
         &schema_name,
         &schema_description,
         enum_values.as_deref(),
         array_output,
-    ));
+    );
+    let event_schema = stream_object_response_format_schema(&response_format);
+    call_options.response_format = Some(response_format);
     call_options.include_raw_chunks = Some(false);
     append_stream_object_user_agent(&mut call_options);
+    let call_id = generate_object_call_id();
+
+    if let Some(on_start) = &on_start {
+        on_start
+            .start(GenerateObjectStartEvent {
+                call_id: call_id.clone(),
+                operation_id: "ai.streamObject".to_string(),
+                provider: model.provider().to_string(),
+                model_id: model.model_id().to_string(),
+                messages: call_options.prompt.clone(),
+                max_output_tokens: call_options.max_output_tokens,
+                temperature: call_options.temperature,
+                top_p: call_options.top_p,
+                top_k: call_options.top_k,
+                presence_penalty: call_options.presence_penalty,
+                frequency_penalty: call_options.frequency_penalty,
+                seed: call_options.seed,
+                max_retries: DEFAULT_MAX_RETRIES,
+                headers: call_options.headers.clone(),
+                provider_options: call_options.provider_options.clone(),
+                output: output_kind,
+                schema: event_schema.clone(),
+                schema_name: schema_name.clone(),
+                schema_description: schema_description.clone(),
+            })
+            .await;
+    }
+
+    if let Some(on_step_start) = &on_step_start {
+        on_step_start
+            .start(GenerateObjectStepStartEvent {
+                call_id: call_id.clone(),
+                step_number: 0,
+                provider: model.provider().to_string(),
+                model_id: model.model_id().to_string(),
+                provider_options: call_options.provider_options.clone(),
+                headers: call_options.headers.clone(),
+                prompt_messages: call_options.prompt.clone(),
+            })
+            .await;
+    }
 
     let stream_result = model.do_stream(call_options).await;
     let request = stream_result.request;
@@ -473,6 +599,45 @@ where
                 }
             }
         };
+
+    let callback_request = stream_object_callback_request(request.clone());
+    let callback_response = stream_object_callback_response(&response);
+    if let Some(on_step_finish) = &on_step_finish {
+        on_step_finish
+            .finish(GenerateObjectStepEndEvent {
+                call_id: call_id.clone(),
+                step_number: 0,
+                provider: model.provider().to_string(),
+                model_id: model.model_id().to_string(),
+                finish_reason: finish_reason.clone(),
+                usage: usage.clone(),
+                object_text: text.clone(),
+                reasoning: None,
+                warnings: warnings.clone(),
+                request: callback_request.clone(),
+                response: callback_response.clone(),
+                provider_metadata: provider_metadata.clone(),
+                ms_to_first_chunk: None,
+            })
+            .await;
+    }
+
+    if let Some(on_finish) = &on_finish {
+        on_finish
+            .finish(GenerateObjectEndEvent {
+                call_id,
+                object: object.clone(),
+                error: error.as_ref().map(stream_object_error_message),
+                reasoning: None,
+                finish_reason: finish_reason.clone(),
+                usage: usage.clone(),
+                warnings: warnings.clone(),
+                request: callback_request,
+                response: callback_response,
+                provider_metadata: provider_metadata.clone(),
+            })
+            .await;
+    }
 
     parts.push(ObjectStreamPart::Finish(Box::new(
         ObjectStreamFinishPart::new(
@@ -724,10 +889,45 @@ fn append_stream_object_user_agent(call_options: &mut LanguageModelCallOptions) 
     call_options.headers = Some(with_user_agent_suffix(headers, [format!("ai/{VERSION}")]));
 }
 
+fn stream_object_response_format_schema(
+    response_format: &LanguageModelResponseFormat,
+) -> Option<JsonSchema> {
+    match response_format {
+        LanguageModelResponseFormat::Json { schema, .. } => schema.clone(),
+        LanguageModelResponseFormat::Text => None,
+    }
+}
+
+fn stream_object_callback_request(request: Option<LanguageModelRequest>) -> GenerateObjectRequest {
+    GenerateObjectRequest {
+        body: request.and_then(|request| request.body),
+    }
+}
+
+fn stream_object_callback_response(
+    response: &StreamObjectResponseMetadata,
+) -> GenerateObjectResponse {
+    GenerateObjectResponse {
+        id: response.id.clone(),
+        timestamp: response.timestamp,
+        model_id: response.model_id.clone(),
+        headers: response.headers.clone(),
+        body: None,
+    }
+}
+
+fn stream_object_error_message(error: &JsonValue) -> String {
+    error
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Waker};
 
     use serde_json::json;
@@ -1266,5 +1466,151 @@ mod tests {
 
         assert_eq!(result.object, None);
         assert!(result.error.is_some());
+    }
+
+    #[test]
+    fn stream_object_invokes_lifecycle_callbacks_with_streamed_step() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ResponseMetadata(
+                    LanguageModelStreamResponseMetadata::new()
+                        .with_id("id-callback")
+                        .with_model_id("mock-model-id"),
+                ),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    r#"{ "content": "Hello, world!" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let callback_events = Arc::new(Mutex::new(Vec::new()));
+        let callback_call_ids = Arc::new(Mutex::new(Vec::new()));
+        let step_texts = Arc::new(Mutex::new(Vec::new()));
+        let finish_objects = Arc::new(Mutex::new(Vec::new()));
+
+        let start_events = Arc::clone(&callback_events);
+        let step_start_events = Arc::clone(&callback_events);
+        let step_finish_events = Arc::clone(&callback_events);
+        let finish_events = Arc::clone(&callback_events);
+
+        let start_call_ids = Arc::clone(&callback_call_ids);
+        let step_start_call_ids = Arc::clone(&callback_call_ids);
+        let step_finish_call_ids = Arc::clone(&callback_call_ids);
+        let finish_call_ids = Arc::clone(&callback_call_ids);
+
+        let step_texts_for_callback = Arc::clone(&step_texts);
+        let finish_objects_for_callback = Arc::clone(&finish_objects);
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_schema_name("answer")
+                .with_experimental_on_start(move |event| {
+                    let start_events = Arc::clone(&start_events);
+                    let start_call_ids = Arc::clone(&start_call_ids);
+                    async move {
+                        assert_eq!(event.operation_id, "ai.streamObject");
+                        assert_eq!(event.output, GenerateObjectOutputKind::Object);
+                        assert_eq!(event.schema_name.as_deref(), Some("answer"));
+                        start_events
+                            .lock()
+                            .expect("callback events lock")
+                            .push("start".to_string());
+                        start_call_ids
+                            .lock()
+                            .expect("callback call ids lock")
+                            .push(event.call_id);
+                    }
+                })
+                .with_experimental_on_step_start(move |event| {
+                    let step_start_events = Arc::clone(&step_start_events);
+                    let step_start_call_ids = Arc::clone(&step_start_call_ids);
+                    async move {
+                        assert_eq!(event.step_number, 0);
+                        assert_eq!(event.prompt_messages, prompt());
+                        step_start_events
+                            .lock()
+                            .expect("callback events lock")
+                            .push("step-start".to_string());
+                        step_start_call_ids
+                            .lock()
+                            .expect("callback call ids lock")
+                            .push(event.call_id);
+                    }
+                })
+                .with_on_step_finish(move |event| {
+                    let step_finish_events = Arc::clone(&step_finish_events);
+                    let step_finish_call_ids = Arc::clone(&step_finish_call_ids);
+                    let step_texts = Arc::clone(&step_texts_for_callback);
+                    async move {
+                        assert_eq!(event.step_number, 0);
+                        assert_eq!(event.finish_reason, FinishReason::Stop);
+                        assert_eq!(event.usage, usage());
+                        assert_eq!(event.response.id.as_deref(), Some("id-callback"));
+                        step_texts
+                            .lock()
+                            .expect("step texts lock")
+                            .push(event.object_text);
+                        step_finish_events
+                            .lock()
+                            .expect("callback events lock")
+                            .push("step-finish".to_string());
+                        step_finish_call_ids
+                            .lock()
+                            .expect("callback call ids lock")
+                            .push(event.call_id);
+                    }
+                })
+                .with_on_finish(move |event| {
+                    let finish_events = Arc::clone(&finish_events);
+                    let finish_call_ids = Arc::clone(&finish_call_ids);
+                    let finish_objects = Arc::clone(&finish_objects_for_callback);
+                    async move {
+                        assert_eq!(event.finish_reason, FinishReason::Stop);
+                        assert_eq!(event.error, None);
+                        finish_objects
+                            .lock()
+                            .expect("finish objects lock")
+                            .push(event.object);
+                        finish_events
+                            .lock()
+                            .expect("callback events lock")
+                            .push("finish".to_string());
+                        finish_call_ids
+                            .lock()
+                            .expect("callback call ids lock")
+                            .push(event.call_id);
+                    }
+                }),
+        ));
+
+        assert_eq!(result.object, Some(json!({ "content": "Hello, world!" })));
+        let callback_events = callback_events
+            .lock()
+            .expect("callback events lock")
+            .clone();
+        assert_eq!(
+            callback_events,
+            vec!["start", "step-start", "step-finish", "finish"]
+        );
+        let step_texts = step_texts.lock().expect("step texts lock").clone();
+        assert_eq!(
+            step_texts,
+            vec![r#"{ "content": "Hello, world!" }"#.to_string()]
+        );
+        let finish_objects = finish_objects.lock().expect("finish objects lock").clone();
+        assert_eq!(
+            finish_objects,
+            vec![Some(json!({ "content": "Hello, world!" }))]
+        );
+
+        let call_ids = callback_call_ids.lock().expect("callback call ids lock");
+        assert_eq!(call_ids.len(), 4);
+        assert!(call_ids[0].starts_with("aiobj-"));
+        assert!(call_ids.iter().all(|call_id| call_id == &call_ids[0]));
     }
 }
