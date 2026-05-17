@@ -62,7 +62,10 @@ pub use generate_image::{
     GenerateImagePromptImage, GenerateImagePromptImages, GenerateImageResult,
     experimental_generate_image, generate_image,
 };
-pub use generate_object::{GenerateObjectRequest, GenerateObjectResponse, GenerateObjectResult};
+pub use generate_object::{
+    GenerateObjectOptions, GenerateObjectRequest, GenerateObjectResponse, GenerateObjectResult,
+    generate_object,
+};
 pub use generate_speech::{
     DefaultGeneratedAudioFile, ExperimentalSpeechResult, GenerateSpeechOptions, GeneratedAudioFile,
     SpeechResult, experimental_generate_speech, generate_speech,
