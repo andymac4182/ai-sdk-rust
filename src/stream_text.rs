@@ -26,6 +26,7 @@ use crate::generate_text::{
     refresh_generate_text_content, refresh_tool_call_views, refresh_tool_result_views,
     repair_tool_calls, resolve_tool_approvals_for_step, response_messages_for_step,
     should_continue_after_tool_results, sync_tool_result_inputs,
+    update_pending_deferred_provider_tool_calls,
 };
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
@@ -1225,6 +1226,7 @@ where
     let max_steps = max_steps.max(1);
     let mut stream_steps = Vec::new();
     let mut generate_steps = Vec::new();
+    let mut pending_deferred_provider_tool_call_ids = BTreeSet::new();
 
     if let Some(on_start) = &on_start {
         let mut start_tools = base_language_model_tools.clone().unwrap_or_default();
@@ -1419,13 +1421,6 @@ where
             ),
         )
         .await;
-        let should_continue = should_continue_after_tool_results(
-            &generate_step,
-            &local_tool_results,
-            tool_approvals.denied_client_tool_call_count,
-            false,
-        );
-
         for tool_result in &local_tool_results {
             push_text_stream_part(
                 &mut parts,
@@ -1435,7 +1430,9 @@ where
             .await;
         }
 
-        collected_step.tool_results.extend(local_tool_results);
+        collected_step
+            .tool_results
+            .extend(local_tool_results.iter().cloned());
         mark_tool_result_metadata(
             &mut collected_step.tool_results,
             &collected_step.tool_calls,
@@ -1444,6 +1441,17 @@ where
         generate_step.tool_results = collected_step.tool_results.clone();
         refresh_tool_result_views(&mut generate_step);
         generate_step.performance.tool_execution_ms = tool_execution_ms;
+        update_pending_deferred_provider_tool_calls(
+            &mut pending_deferred_provider_tool_call_ids,
+            &generate_step,
+            &step_tools,
+        );
+        let should_continue = should_continue_after_tool_results(
+            &generate_step,
+            &local_tool_results,
+            tool_approvals.denied_client_tool_call_count,
+            !pending_deferred_provider_tool_call_ids.is_empty(),
+        );
 
         let response_messages = response_messages_for_step(
             &generate_step,
@@ -2720,6 +2728,181 @@ mod tests {
             callback_events.lock().expect("events lock").as_slice(),
             ["start:call-1:Brisbane:1", "end:call-1:sunny:1"]
         );
+    }
+
+    #[test]
+    fn stream_text_continues_for_deferred_provider_executed_tool_results() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(
+                    LanguageModelToolCall::new(
+                        "provider-call-1",
+                        "providerTool",
+                        r#"{"city":"Brisbane"}"#,
+                    )
+                    .with_provider_executed(true),
+                ),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolResult(LanguageModelToolResult::new(
+                    "provider-call-1",
+                    "providerTool",
+                    NonNullJsonValue::new(json!({ "forecast": "sunny" }))
+                        .expect("provider result is non-null"),
+                )),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "Deferred result ready.",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            }
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let output_schema = input_schema.clone();
+        let provider_args = json!({ "mode": "deferred" })
+            .as_object()
+            .expect("provider args are an object")
+            .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(
+                    Tool::provider_executed(
+                        "providerTool",
+                        "test.providerTool",
+                        provider_args,
+                        input_schema,
+                        output_schema,
+                    )
+                    .with_supports_deferred_results(true),
+                )
+                .with_max_steps(3),
+        ));
+
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 2);
+        assert!(matches!(
+            &calls[1].prompt[1],
+            LanguageModelMessage::Assistant(message)
+                if message.content.len() == 1
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelAssistantContentPart::ToolCall(part)
+                            if part.tool_call_id == "provider-call-1"
+                                && part.tool_name == "providerTool"
+                                && part.input == json!({ "city": "Brisbane" })
+                                && part.provider_executed == Some(true)
+                    )
+        ));
+
+        assert_eq!(result.steps.len(), 2);
+        assert_eq!(result.text, "Deferred result ready.");
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].provider_executed, Some(true));
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_call_id, "provider-call-1");
+        assert_eq!(result.tool_results[0].tool_name, "providerTool");
+        assert_eq!(result.tool_results[0].input, json!(null));
+        assert_eq!(
+            result.tool_results[0].output,
+            json!({ "forecast": "sunny" })
+        );
+        assert_eq!(result.tool_results[0].provider_executed, Some(true));
+    }
+
+    #[test]
+    fn stream_text_resolves_deferred_provider_tool_errors() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(
+                    LanguageModelToolCall::new(
+                        "provider-call-1",
+                        "providerTool",
+                        r#"{"city":"Brisbane"}"#,
+                    )
+                    .with_provider_executed(true),
+                ),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolResult(
+                    LanguageModelToolResult::new(
+                        "provider-call-1",
+                        "providerTool",
+                        NonNullJsonValue::new(json!("ERROR")).expect("provider error is non-null"),
+                    )
+                    .with_is_error(true),
+                ),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "Handled provider error.",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            }
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let provider_args = json!({ "mode": "deferred" })
+            .as_object()
+            .expect("provider args are an object")
+            .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(
+                    Tool::provider_executed(
+                        "providerTool",
+                        "test.providerTool",
+                        provider_args,
+                        schema.clone(),
+                        schema,
+                    )
+                    .with_supports_deferred_results(true),
+                )
+                .with_max_steps(3),
+        ));
+
+        assert_eq!(model.stream_calls().len(), 2);
+        assert_eq!(result.steps.len(), 2);
+        assert_eq!(result.text, "Handled provider error.");
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_call_id, "provider-call-1");
+        assert_eq!(result.tool_results[0].input, json!(null));
+        assert_eq!(result.tool_results[0].output, json!("ERROR"));
+        assert_eq!(result.tool_results[0].is_error, Some(true));
+        assert_eq!(result.tool_results[0].provider_executed, Some(true));
     }
 
     #[test]

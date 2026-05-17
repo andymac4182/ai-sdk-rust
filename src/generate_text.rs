@@ -5830,7 +5830,7 @@ pub(crate) fn refresh_tool_result_views(step: &mut GenerateTextStep) {
     step.dynamic_tool_results = dynamic_tool_results(&step.tool_results);
 }
 
-fn update_pending_deferred_provider_tool_calls(
+pub(crate) fn update_pending_deferred_provider_tool_calls(
     pending_tool_call_ids: &mut BTreeSet<String>,
     step: &GenerateTextStep,
     tools: &[Tool],
