@@ -41,6 +41,7 @@ pub mod speech_model;
 pub mod stream_object;
 pub mod stream_text;
 pub mod text_stream_response;
+pub mod togetherai;
 pub mod transcribe;
 pub mod transcription_model;
 pub mod ui_message_stream;
@@ -359,6 +360,10 @@ pub use text_stream_response::{
     TEXT_STREAM_CONTENT_TYPE, TextStreamResponse, TextStreamResponseInit,
     TextStreamResponseOptions, TextStreamResponseWriter, create_text_stream_response,
     pipe_text_stream_to_response,
+};
+pub use togetherai::{
+    DEFAULT_TOGETHERAI_BASE_URL, TogetherAIProvider, TogetherAIProviderSettings, create_togetherai,
+    togetherai,
 };
 pub use transcribe::{
     ExperimentalTranscriptionResult, TranscribeAudio, TranscribeDownload,
