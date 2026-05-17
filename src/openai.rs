@@ -4,6 +4,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::headers::Headers;
+use crate::open_responses::{
+    OpenResponsesLanguageModel, OpenResponsesProvider, OpenResponsesProviderSettings,
+};
 use crate::openai_compatible::{
     OpenAICompatibleChatLanguageModel, OpenAICompatibleCompletionLanguageModel,
     OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel, OpenAICompatibleProvider,
@@ -155,13 +158,14 @@ impl OpenAIProvider {
         self
     }
 
-    /// Creates an OpenAI chat language model.
-    ///
-    /// Upstream `@ai-sdk/openai` defaults `languageModel` to the Responses API.
-    /// This foundation slice maps Rust `language_model` to chat until the
-    /// Responses model is ported.
-    pub fn language_model(&self, model_id: impl Into<String>) -> OpenAICompatibleChatLanguageModel {
-        self.chat(model_id)
+    /// Creates an OpenAI Responses API language model.
+    pub fn language_model(&self, model_id: impl Into<String>) -> OpenResponsesLanguageModel {
+        self.responses(model_id)
+    }
+
+    /// Creates an OpenAI Responses API language model.
+    pub fn responses(&self, model_id: impl Into<String>) -> OpenResponsesLanguageModel {
+        self.open_responses_provider().language_model(model_id)
     }
 
     /// Creates an OpenAI chat language model.
@@ -211,8 +215,7 @@ impl OpenAIProvider {
     }
 
     fn openai_compatible_provider(&self) -> OpenAICompatibleProvider {
-        let provider_name = non_empty_optional_setting(self.settings.name.clone())
-            .unwrap_or_else(|| "openai".to_string());
+        let provider_name = openai_provider_name(&self.settings);
         let mut settings =
             OpenAICompatibleProviderSettings::new(provider_name, openai_base_url(&self.settings))
                 .with_user_agent_suffix(format!("ai-sdk/openai/{}", crate::VERSION));
@@ -241,6 +244,39 @@ impl OpenAIProvider {
             provider
         }
     }
+
+    fn open_responses_provider(&self) -> OpenResponsesProvider {
+        let provider_name = openai_provider_name(&self.settings);
+        let mut settings = OpenResponsesProviderSettings::new(
+            provider_name,
+            format!("{}/responses", openai_base_url(&self.settings)),
+        )
+        .with_user_agent_suffix(format!("ai-sdk/openai/{}", crate::VERSION));
+
+        if let Some(api_key) = openai_api_key(self.settings.api_key.as_ref()) {
+            settings = settings.with_api_key(api_key);
+        }
+
+        if let Some(organization) = non_empty_optional_setting(self.settings.organization.clone()) {
+            settings = settings.with_header("OpenAI-Organization", organization);
+        }
+
+        if let Some(project) = non_empty_optional_setting(self.settings.project.clone()) {
+            settings = settings.with_header("OpenAI-Project", project);
+        }
+
+        for (name, value) in &self.settings.headers {
+            settings = settings.with_header(name.clone(), value.clone());
+        }
+
+        let provider = OpenResponsesProvider::from_settings(settings);
+
+        if let Some(transport) = &self.transport {
+            provider.with_transport(Arc::clone(transport))
+        } else {
+            provider
+        }
+    }
 }
 
 impl Default for OpenAIProvider {
@@ -250,7 +286,7 @@ impl Default for OpenAIProvider {
 }
 
 impl Provider for OpenAIProvider {
-    type LanguageModel = OpenAICompatibleChatLanguageModel;
+    type LanguageModel = OpenResponsesLanguageModel;
     type EmbeddingModel = OpenAICompatibleEmbeddingModel;
     type ImageModel = OpenAICompatibleImageModel;
 
@@ -272,6 +308,11 @@ pub fn create_openai(settings: OpenAIProviderSettings) -> OpenAIProvider {
     OpenAIProvider::from_settings(settings)
 }
 
+/// Creates an OpenAI Responses API language model using the default provider settings.
+pub fn openai(model_id: impl Into<String>) -> OpenResponsesLanguageModel {
+    OpenAIProvider::new().language_model(model_id)
+}
+
 fn openai_base_url(settings: &OpenAIProviderSettings) -> String {
     let base_url = non_empty_optional_setting(settings.base_url.clone())
         .or_else(|| non_empty_optional_setting(env::var("OPENAI_BASE_URL").ok()))
@@ -280,6 +321,10 @@ fn openai_base_url(settings: &OpenAIProviderSettings) -> String {
     without_trailing_slash(Some(&base_url))
         .unwrap_or(&base_url)
         .to_string()
+}
+
+fn openai_provider_name(settings: &OpenAIProviderSettings) -> String {
+    non_empty_optional_setting(settings.name.clone()).unwrap_or_else(|| "openai".to_string())
 }
 
 fn openai_api_key(explicit_api_key: Option<&String>) -> Option<String> {
@@ -437,6 +482,114 @@ mod tests {
                 ],
                 "max_tokens": 16,
                 "temperature": 0.0
+            }))
+        );
+    }
+
+    #[test]
+    fn openai_provider_language_model_uses_responses_endpoint() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_openai",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Hello from OpenAI Responses"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 4,
+                            "output_tokens": 5
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = OpenAIProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://api.openai.test/v1/")
+            .with_organization("org_test")
+            .with_project("proj_test")
+            .with_header("custom-header", "value")
+            .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(&model, Prompt::from_prompt("Say hello"))
+                .expect("prompt is valid"),
+        ));
+
+        assert_eq!(model.provider(), "openai.responses");
+        assert_eq!(result.text, "Hello from OpenAI Responses");
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.url, "https://api.openai.test/v1/responses");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("openai-organization")
+                .map(String::as_str),
+            Some("org_test")
+        );
+        assert_eq!(
+            request.headers.get("openai-project").map(String::as_str),
+            Some("proj_test")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+        assert!(
+            request
+                .headers
+                .get("user-agent")
+                .is_some_and(|value| value.contains("ai-sdk/openai/0.1.0"))
+        );
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "gpt-4.1-mini",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Say hello"
+                            }
+                        ]
+                    }
+                ]
             }))
         );
     }
@@ -617,14 +770,15 @@ mod tests {
     fn openai_provider_uses_default_base_url_name_override_and_provider_trait() {
         let provider = OpenAIProvider::new().with_name("custom-openai");
 
-        let chat = provider.language_model("gpt-4.1-mini");
-        assert_eq!(chat.provider(), "custom-openai.chat");
-        assert_eq!(chat.model_id(), "gpt-4.1-mini");
+        let responses = provider.language_model("gpt-4.1-mini");
+        assert_eq!(responses.provider(), "custom-openai.responses");
+        assert_eq!(responses.model_id(), "gpt-4.1-mini");
+        assert_eq!(super::openai("gpt-4.1-mini").provider(), "openai.responses");
         assert_eq!(DEFAULT_OPENAI_BASE_URL, "https://api.openai.com/v1");
 
-        let trait_chat =
+        let trait_responses =
             Provider::language_model(&provider, "gpt-4.1-mini").expect("language model exists");
-        assert_eq!(trait_chat.provider(), "custom-openai.chat");
+        assert_eq!(trait_responses.provider(), "custom-openai.responses");
         let trait_embedding = Provider::embedding_model(&provider, "text-embedding-3-small")
             .expect("embedding model exists");
         assert_eq!(trait_embedding.provider(), "custom-openai.embedding");
