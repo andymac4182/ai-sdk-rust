@@ -1,3 +1,8 @@
+use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
+use std::rc::Rc;
+
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -11,8 +16,8 @@ use crate::language_model::{
 };
 use crate::provider::ProviderMetadata;
 use crate::provider_utils::{
-    FlexibleSchema, ParseJsonResult, generate_id, safe_parse_json, safe_parse_json_with_schema,
-    with_user_agent_suffix,
+    FlexibleSchema, ParseJsonError, ParseJsonResult, generate_id, safe_parse_json,
+    safe_parse_json_with_schema, with_user_agent_suffix,
 };
 use crate::warning::Warning;
 
@@ -196,6 +201,85 @@ impl<T> GenerateObjectResult<T> {
     }
 }
 
+/// Options passed to a generate-object repair-text callback.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GenerateObjectRepairTextOptions {
+    /// Raw model text that failed parsing or schema validation.
+    pub text: String,
+
+    /// Parse or validation error that triggered repair.
+    pub error: ParseJsonError,
+}
+
+impl GenerateObjectRepairTextOptions {
+    /// Creates repair-text callback options.
+    pub fn new(text: impl Into<String>, error: ParseJsonError) -> Self {
+        Self {
+            text: text.into(),
+            error,
+        }
+    }
+
+    /// Returns the raw model text that failed parsing or validation.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Returns the parse or validation error that triggered repair.
+    pub fn error(&self) -> &ParseJsonError {
+        &self.error
+    }
+
+    /// Converts these options into their raw parts.
+    pub fn into_parts(self) -> (String, ParseJsonError) {
+        (self.text, self.error)
+    }
+}
+
+/// Future returned by a generate-object repair-text callback.
+pub type GenerateObjectRepairTextFuture<'a> = Pin<Box<dyn Future<Output = Option<String>> + 'a>>;
+
+/// Callback that can repair raw model text after parse or validation failure.
+pub type GenerateObjectRepairTextFunction<'a> =
+    dyn Fn(GenerateObjectRepairTextOptions) -> GenerateObjectRepairTextFuture<'a> + 'a;
+
+/// Upstream callback alias for `experimental_repairText`.
+pub type RepairTextFunction<'a> = GenerateObjectRepairTextFunction<'a>;
+
+/// Callback wrapper for upstream generate-object `experimental_repairText`.
+pub struct GenerateObjectRepairText<'a> {
+    repair_text: Rc<GenerateObjectRepairTextFunction<'a>>,
+}
+
+impl<'a> GenerateObjectRepairText<'a> {
+    /// Creates a repair-text callback.
+    pub fn new<F, Fut>(repair_text: F) -> Self
+    where
+        F: Fn(GenerateObjectRepairTextOptions) -> Fut + 'a,
+        Fut: Future<Output = Option<String>> + 'a,
+    {
+        Self {
+            repair_text: Rc::new(move |options| Box::pin(repair_text(options))),
+        }
+    }
+
+    /// Runs the repair-text callback.
+    pub fn repair(
+        &self,
+        options: GenerateObjectRepairTextOptions,
+    ) -> GenerateObjectRepairTextFuture<'a> {
+        (self.repair_text)(options)
+    }
+}
+
+impl fmt::Debug for GenerateObjectRepairText<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GenerateObjectRepairText")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Options for a high-level non-streaming object generation call.
 #[derive(Debug)]
 pub struct GenerateObjectOptions<'a, M: LanguageModel + ?Sized> {
@@ -213,6 +297,9 @@ pub struct GenerateObjectOptions<'a, M: LanguageModel + ?Sized> {
 
     /// Optional schema description sent to providers that support JSON output descriptions.
     pub schema_description: Option<String>,
+
+    /// Optional callback that can repair invalid model text before the final error is returned.
+    pub repair_text: Option<GenerateObjectRepairText<'a>>,
 }
 
 impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
@@ -230,6 +317,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
             schema: None,
             schema_name: None,
             schema_description: None,
+            repair_text: None,
         }
     }
 
@@ -278,6 +366,25 @@ impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
         self
     }
 
+    /// Sets a callback that can repair generated text after parse or validation failure.
+    pub fn with_repair_text<F, Fut>(mut self, repair_text: F) -> Self
+    where
+        F: Fn(GenerateObjectRepairTextOptions) -> Fut + 'a,
+        Fut: Future<Output = Option<String>> + 'a,
+    {
+        self.repair_text = Some(GenerateObjectRepairText::new(repair_text));
+        self
+    }
+
+    /// Sets the upstream experimental repair-text callback alias.
+    pub fn with_experimental_repair_text<F, Fut>(self, repair_text: F) -> Self
+    where
+        F: Fn(GenerateObjectRepairTextOptions) -> Fut + 'a,
+        Fut: Future<Output = Option<String>> + 'a,
+    {
+        self.with_repair_text(repair_text)
+    }
+
     /// Adds an HTTP header.
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.call_options
@@ -306,6 +413,7 @@ where
         schema,
         schema_name,
         schema_description,
+        repair_text,
     } = options;
 
     call_options.response_format = Some(generate_object_response_format(
@@ -331,25 +439,15 @@ where
         ));
     };
 
-    let object = match parse_generated_object(&text, schema) {
-        ParseJsonResult::Success { value, .. } => value,
-        ParseJsonResult::Failure { error, .. } => {
-            let message = if error.as_type_validation_error().is_some() {
-                "No object generated: response did not match schema."
-            } else {
-                "No object generated: could not parse the response."
-            };
-
-            return Err(NoObjectGeneratedError::with_message(
-                message,
-                response,
-                usage,
-                finish_reason,
-            )
-            .with_text(text)
-            .with_cause(error));
-        }
-    };
+    let object = parse_generated_object_with_repair(
+        text,
+        schema,
+        repair_text.as_ref(),
+        &response,
+        &usage,
+        &finish_reason,
+    )
+    .await?;
 
     let mut result =
         GenerateObjectResult::new(object, finish_reason, usage, request, result_response)
@@ -407,6 +505,78 @@ fn parse_generated_object(
         || safe_parse_json(text),
         |schema| safe_parse_json_with_schema(text, schema),
     )
+}
+
+async fn parse_generated_object_with_repair(
+    text: String,
+    schema: Option<FlexibleSchema>,
+    repair_text: Option<&GenerateObjectRepairText<'_>>,
+    response: &LanguageModelResponse,
+    usage: &LanguageModelUsage,
+    finish_reason: &FinishReason,
+) -> Result<JsonValue, NoObjectGeneratedError> {
+    match parse_generated_object(&text, schema.clone()) {
+        ParseJsonResult::Success { value, .. } => Ok(value),
+        ParseJsonResult::Failure { error, .. } => {
+            let Some(repair_text) = repair_text else {
+                return Err(parse_failure_error(
+                    text,
+                    error,
+                    response,
+                    usage,
+                    finish_reason,
+                ));
+            };
+
+            let original_error = error.clone();
+            let Some(repaired_text) = repair_text
+                .repair(GenerateObjectRepairTextOptions::new(text.clone(), error))
+                .await
+            else {
+                return Err(parse_failure_error(
+                    text,
+                    original_error,
+                    response,
+                    usage,
+                    finish_reason,
+                ));
+            };
+
+            match parse_generated_object(&repaired_text, schema) {
+                ParseJsonResult::Success { value, .. } => Ok(value),
+                ParseJsonResult::Failure { error, .. } => Err(parse_failure_error(
+                    repaired_text,
+                    error,
+                    response,
+                    usage,
+                    finish_reason,
+                )),
+            }
+        }
+    }
+}
+
+fn parse_failure_error(
+    text: String,
+    error: ParseJsonError,
+    response: &LanguageModelResponse,
+    usage: &LanguageModelUsage,
+    finish_reason: &FinishReason,
+) -> NoObjectGeneratedError {
+    let message = if error.as_type_validation_error().is_some() {
+        "No object generated: response did not match schema."
+    } else {
+        "No object generated: could not parse the response."
+    };
+
+    NoObjectGeneratedError::with_message(
+        message,
+        response.clone(),
+        usage.clone(),
+        finish_reason.clone(),
+    )
+    .with_text(text)
+    .with_cause(error)
 }
 
 fn generate_object_request(request: Option<LanguageModelRequest>) -> GenerateObjectRequest {
@@ -960,6 +1130,135 @@ mod tests {
         assert_eq!(error.usage(), &object_usage());
         assert_eq!(error.finish_reason(), &FinishReason::Stop);
         assert_eq!(error.response().model_id.as_deref(), Some("object-test"));
+    }
+
+    #[test]
+    fn generate_object_repairs_parse_failures() {
+        let result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"answer\":42",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        );
+        let model = StaticObjectModel::new(result);
+
+        let output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_experimental_repair_text(|options| async move {
+                    assert_eq!(options.text(), "{\"answer\":42");
+                    assert!(options.error().as_json_parse_error().is_some());
+
+                    Some(format!("{}}}", options.text()))
+                }),
+        ))
+        .expect("repaired object is generated");
+
+        assert_eq!(output.object, json!({ "answer": 42 }));
+    }
+
+    #[test]
+    fn generate_object_repairs_schema_validation_failures() {
+        let result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"answer\":\"wrong\"}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        );
+        let model = StaticObjectModel::new(result);
+
+        let output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_repair_text(|options| async move {
+                    let (text, error) = options.into_parts();
+                    assert_eq!(text, "{\"answer\":\"wrong\"}");
+                    assert!(error.as_type_validation_error().is_some());
+
+                    Some("{\"answer\":42}".to_string())
+                }),
+        ))
+        .expect("schema-invalid object is repaired");
+
+        assert_eq!(output.object, json!({ "answer": 42 }));
+    }
+
+    #[test]
+    fn generate_object_keeps_original_error_when_repair_returns_none() {
+        let result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"answer\":\"wrong\"}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        );
+        let model = StaticObjectModel::new(result);
+
+        let error = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_repair_text(|options| async move {
+                    assert_eq!(options.text(), "{\"answer\":\"wrong\"}");
+                    assert!(options.error().as_type_validation_error().is_some());
+
+                    None
+                }),
+        ))
+        .expect_err("unrepaired validation error should fail");
+
+        assert_eq!(
+            error.message(),
+            "No object generated: response did not match schema."
+        );
+        assert_eq!(error.text(), Some("{\"answer\":\"wrong\"}"));
+        assert!(
+            error
+                .cause_message()
+                .is_some_and(|cause| cause.contains("answer must be a number"))
+        );
+    }
+
+    #[test]
+    fn generate_object_reports_repaired_text_error_when_repair_fails() {
+        let result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new("{ bad"))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Other,
+                raw: None,
+            },
+            object_usage(),
+        );
+        let model = StaticObjectModel::new(result);
+
+        let error = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_repair_text(|options| async move {
+                    assert_eq!(options.text(), "{ bad");
+                    assert!(options.error().as_json_parse_error().is_some());
+
+                    Some(format!("{}{{", options.text()))
+                }),
+        ))
+        .expect_err("invalid repair should fail");
+
+        assert_eq!(
+            error.message(),
+            "No object generated: could not parse the response."
+        );
+        assert_eq!(error.text(), Some("{ bad{"));
+        assert!(error.cause_message().is_some());
     }
 
     #[test]

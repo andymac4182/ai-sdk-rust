@@ -63,8 +63,9 @@ pub use generate_image::{
     experimental_generate_image, generate_image,
 };
 pub use generate_object::{
-    GenerateObjectOptions, GenerateObjectRequest, GenerateObjectResponse, GenerateObjectResult,
-    generate_object,
+    GenerateObjectOptions, GenerateObjectRepairText, GenerateObjectRepairTextFunction,
+    GenerateObjectRepairTextFuture, GenerateObjectRepairTextOptions, GenerateObjectRequest,
+    GenerateObjectResponse, GenerateObjectResult, RepairTextFunction, generate_object,
 };
 pub use generate_speech::{
     DefaultGeneratedAudioFile, ExperimentalSpeechResult, GenerateSpeechOptions, GeneratedAudioFile,
