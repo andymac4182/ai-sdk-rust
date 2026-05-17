@@ -34,7 +34,7 @@ use crate::language_model::{
     LanguageModelStreamPart, LanguageModelStreamResult, LanguageModelStreamResultResponse,
     LanguageModelSupportedUrls, LanguageModelText, LanguageModelUsage, OutputTokenUsage,
 };
-use crate::provider::{ApiCallError, ProviderMetadata, SpecificationVersion};
+use crate::provider::{ApiCallError, ProviderMetadata, ProviderOptions, SpecificationVersion};
 use crate::provider_utils::{
     FetchErrorInfo, GetFromApiOptions, HandledFetchError, ParseJsonResult, PostJsonToApiOptions,
     ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
@@ -632,6 +632,216 @@ impl GatewayProviderSettings {
         self.vercel_request_id = Some(vercel_request_id.into());
         self
     }
+}
+
+/// Gateway provider routing sort strategy.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GatewayProviderOptionsSort {
+    /// Route to the lowest-cost provider first.
+    Cost,
+
+    /// Route to the lowest time-to-first-token provider first.
+    Ttft,
+
+    /// Route to the highest tokens-per-second provider first.
+    Tps,
+}
+
+/// Per-provider timeout configuration for Gateway BYOK credentials.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayProviderTimeouts {
+    /// BYOK provider timeouts in milliseconds, keyed by provider slug.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub byok: BTreeMap<String, u64>,
+}
+
+impl GatewayProviderTimeouts {
+    /// Creates empty Gateway provider timeouts.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets a BYOK provider timeout in milliseconds.
+    pub fn with_byok_timeout(mut self, provider: impl Into<String>, timeout_millis: u64) -> Self {
+        self.byok.insert(provider.into(), timeout_millis);
+        self
+    }
+}
+
+/// Request-scoped Gateway provider options.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayProviderOptions {
+    /// Provider slugs that are the only ones allowed to be used.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub only: Vec<String>,
+
+    /// Provider slugs in the sequence Gateway should attempt them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<String>,
+
+    /// Sort providers by a routing metric before dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<GatewayProviderOptionsSort>,
+
+    /// End-user identifier for spend attribution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+
+    /// User-specified tags for reporting and filtering usage.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+
+    /// Fallback model ids to use in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
+
+    /// Request-scoped BYOK credentials keyed by provider slug.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub byok: BTreeMap<String, Vec<JsonObject>>,
+
+    /// Filter to providers with zero-data-retention agreements.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zero_data_retention: Option<bool>,
+
+    /// Filter to providers that do not train on prompt data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disallow_prompt_training: Option<bool>,
+
+    /// Filter to HIPAA-compliant providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hipaa_compliant: Option<bool>,
+
+    /// Entity id used for quota tracking and enforcement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_entity_id: Option<String>,
+
+    /// Per-provider BYOK timeout settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_timeouts: Option<GatewayProviderTimeouts>,
+}
+
+impl GatewayProviderOptions {
+    /// Creates empty Gateway provider options.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the only allowed provider slugs.
+    pub fn with_only<I, S>(mut self, only: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.only = only.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Sets the provider routing order.
+    pub fn with_order<I, S>(mut self, order: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.order = order.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Sets the provider routing sort strategy.
+    pub fn with_sort(mut self, sort: GatewayProviderOptionsSort) -> Self {
+        self.sort = Some(sort);
+        self
+    }
+
+    /// Sets the end-user identifier for spend attribution.
+    pub fn with_user(mut self, user: impl Into<String>) -> Self {
+        self.user = Some(user.into());
+        self
+    }
+
+    /// Sets reporting tags.
+    pub fn with_tags<I, S>(mut self, tags: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.tags = tags.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Sets fallback model ids.
+    pub fn with_models<I, S>(mut self, models: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.models = models.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Adds BYOK credentials for a provider slug.
+    pub fn with_byok_credentials<I>(mut self, provider: impl Into<String>, credentials: I) -> Self
+    where
+        I: IntoIterator<Item = JsonObject>,
+    {
+        self.byok
+            .insert(provider.into(), credentials.into_iter().collect());
+        self
+    }
+
+    /// Sets whether Gateway should require zero-data-retention providers.
+    pub fn with_zero_data_retention(mut self, zero_data_retention: bool) -> Self {
+        self.zero_data_retention = Some(zero_data_retention);
+        self
+    }
+
+    /// Sets whether Gateway should reject providers that train on prompt data.
+    pub fn with_disallow_prompt_training(mut self, disallow_prompt_training: bool) -> Self {
+        self.disallow_prompt_training = Some(disallow_prompt_training);
+        self
+    }
+
+    /// Sets whether Gateway should require HIPAA-compliant providers.
+    pub fn with_hipaa_compliant(mut self, hipaa_compliant: bool) -> Self {
+        self.hipaa_compliant = Some(hipaa_compliant);
+        self
+    }
+
+    /// Sets the quota entity id.
+    pub fn with_quota_entity_id(mut self, quota_entity_id: impl Into<String>) -> Self {
+        self.quota_entity_id = Some(quota_entity_id.into());
+        self
+    }
+
+    /// Sets BYOK provider timeout configuration.
+    pub fn with_provider_timeouts(mut self, provider_timeouts: GatewayProviderTimeouts) -> Self {
+        self.provider_timeouts = Some(provider_timeouts);
+        self
+    }
+
+    /// Converts these options into the provider-options map expected by
+    /// language and model call options.
+    pub fn into_provider_options(self) -> ProviderOptions {
+        gateway_provider_options(self)
+    }
+}
+
+impl From<GatewayProviderOptions> for ProviderOptions {
+    fn from(options: GatewayProviderOptions) -> Self {
+        options.into_provider_options()
+    }
+}
+
+/// Wraps request-scoped Gateway options in a provider-options map.
+pub fn gateway_provider_options(options: GatewayProviderOptions) -> ProviderOptions {
+    let gateway_options = serde_json::to_value(options)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+
+    ProviderOptions::from([(GATEWAY_PROVIDER_ID.to_string(), gateway_options)])
 }
 
 /// Authentication token selected for an AI Gateway request.
@@ -3194,10 +3404,12 @@ fn provider_api_response(
 mod tests {
     use super::{
         GatewayAuthMethod, GatewayCredentialType, GatewayGenerationInfoParams, GatewayModelType,
-        GatewayProvider, GatewayProviderSettings, GatewaySpendReportDatePart,
+        GatewayProvider, GatewayProviderOptions, GatewayProviderOptionsSort,
+        GatewayProviderSettings, GatewayProviderTimeouts, GatewaySpendReportDatePart,
         GatewaySpendReportGroupBy, GatewaySpendReportParams, GatewayTransport,
         GatewayTransportFuture, gateway, gateway_observability_headers_with_env,
-        gateway_provider_headers_with_env, get_gateway_auth_token_with_env,
+        gateway_provider_headers_with_env, gateway_provider_options,
+        get_gateway_auth_token_with_env,
     };
     use crate::embed::{EmbedOptions, embed};
     use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions};
@@ -3207,7 +3419,7 @@ mod tests {
     use crate::generate_video::{GenerateVideoOptions, generate_video};
     use crate::headers::Headers;
     use crate::image_model::{ImageModel, ImageModelCallOptions, ImageModelFile};
-    use crate::json::JsonValue;
+    use crate::json::{JsonObject, JsonValue};
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
         LanguageModelFilePart, LanguageModelMessage, LanguageModelStreamPart,
@@ -3243,6 +3455,10 @@ mod tests {
                 .find_map(|(key, value)| (*key == name).then(|| (*value).to_string()))
                 .ok_or(env::VarError::NotPresent)
         }
+    }
+
+    fn json_object(value: JsonValue) -> JsonObject {
+        value.as_object().cloned().expect("JSON value is an object")
     }
 
     #[test]
@@ -3387,6 +3603,241 @@ mod tests {
         assert_eq!(
             headers.get("ai-o11y-request-id").map(String::as_str),
             Some("iad1::req_env")
+        );
+    }
+
+    #[test]
+    fn gateway_provider_options_serialize_upstream_shape() {
+        let options = GatewayProviderOptions::new()
+            .with_only(["azure", "openai"])
+            .with_order(["bedrock", "anthropic"])
+            .with_sort(GatewayProviderOptionsSort::Ttft)
+            .with_user("user-123")
+            .with_tags(["chat", "v2"])
+            .with_models(["openai/gpt-5-nano", "zai/glm-4.6"])
+            .with_byok_credentials(
+                "anthropic",
+                [json_object(json!({
+                    "apiKey": "test-anthropic-key"
+                }))],
+            )
+            .with_byok_credentials(
+                "vertex",
+                [
+                    json_object(json!({
+                        "projectId": "project-1",
+                        "privateKey": "private-key-1"
+                    })),
+                    json_object(json!({
+                        "projectId": "project-2",
+                        "privateKey": "private-key-2"
+                    })),
+                ],
+            )
+            .with_zero_data_retention(true)
+            .with_disallow_prompt_training(true)
+            .with_hipaa_compliant(true)
+            .with_quota_entity_id("entity-123")
+            .with_provider_timeouts(
+                GatewayProviderTimeouts::new()
+                    .with_byok_timeout("openai", 5000)
+                    .with_byok_timeout("anthropic", 2000),
+            );
+        let expected = json!({
+            "only": ["azure", "openai"],
+            "order": ["bedrock", "anthropic"],
+            "sort": "ttft",
+            "user": "user-123",
+            "tags": ["chat", "v2"],
+            "models": ["openai/gpt-5-nano", "zai/glm-4.6"],
+            "byok": {
+                "anthropic": [
+                    {
+                        "apiKey": "test-anthropic-key"
+                    }
+                ],
+                "vertex": [
+                    {
+                        "projectId": "project-1",
+                        "privateKey": "private-key-1"
+                    },
+                    {
+                        "projectId": "project-2",
+                        "privateKey": "private-key-2"
+                    }
+                ]
+            },
+            "zeroDataRetention": true,
+            "disallowPromptTraining": true,
+            "hipaaCompliant": true,
+            "quotaEntityId": "entity-123",
+            "providerTimeouts": {
+                "byok": {
+                    "anthropic": 2000,
+                    "openai": 5000
+                }
+            }
+        });
+
+        assert_eq!(
+            serde_json::to_value(&options).expect("options serialize"),
+            expected
+        );
+        assert_eq!(
+            gateway_provider_options(options).get("gateway"),
+            expected.as_object()
+        );
+    }
+
+    #[test]
+    fn gateway_model_passes_typed_gateway_provider_options_for_generate() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "id": "test-id",
+                    "created": 1711115037,
+                    "model": "openai/gpt-4.1-mini",
+                    "content": {
+                        "type": "text",
+                        "text": "ok"
+                    },
+                    "finish_reason": "stop",
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1
+                    }
+                })
+                .to_string(),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .language_model("openai/gpt-4.1-mini");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(Vec::new()).with_provider_options(
+                    GatewayProviderOptions::new()
+                        .with_order(["bedrock", "anthropic"])
+                        .with_zero_data_retention(true)
+                        .with_provider_timeouts(
+                            GatewayProviderTimeouts::new().with_byok_timeout("openai", 5000),
+                        )
+                        .into_provider_options(),
+                ),
+            ),
+        );
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .and_then(|body| body.as_text().map(str::to_string))
+            .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok())
+            .expect("request body is JSON");
+        assert_eq!(
+            request_body.get("providerOptions"),
+            Some(&json!({
+                "gateway": {
+                    "order": ["bedrock", "anthropic"],
+                    "zeroDataRetention": true,
+                    "providerTimeouts": {
+                        "byok": {
+                            "openai": 5000
+                        }
+                    }
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_model_passes_typed_gateway_provider_options_for_stream() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                format!(
+                    "data: {}\n\n",
+                    json!({
+                        "type": "finish",
+                        "finishReason": {
+                            "unified": "stop",
+                            "raw": "stop"
+                        },
+                        "usage": {
+                            "inputTokens": {
+                                "total": 1
+                            },
+                            "outputTokens": {
+                                "total": 1
+                            }
+                        }
+                    })
+                ),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .language_model("openai/gpt-4.1-mini");
+
+        let result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(Vec::new()).with_provider_options(
+                    GatewayProviderOptions::new()
+                        .with_order(["groq", "openai"])
+                        .with_quota_entity_id("entity-123")
+                        .into_provider_options(),
+                ),
+            ),
+        );
+        assert!(matches!(
+            result.stream.last(),
+            Some(LanguageModelStreamPart::Finish(_))
+        ));
+
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .and_then(|body| body.as_text().map(str::to_string))
+            .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok())
+            .expect("request body is JSON");
+        assert_eq!(
+            request_body.get("providerOptions"),
+            Some(&json!({
+                "gateway": {
+                    "order": ["groq", "openai"],
+                    "quotaEntityId": "entity-123"
+                }
+            }))
         );
     }
 
