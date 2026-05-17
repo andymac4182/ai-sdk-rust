@@ -80,6 +80,10 @@ pub struct OpenAICompatibleProviderSettings {
     /// Whether chat models support structured JSON schema outputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_structured_outputs: Option<bool>,
+
+    /// User-agent suffix for wrappers built on the OpenAI-compatible transport.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_agent_suffix: Option<String>,
 }
 
 impl OpenAICompatibleProviderSettings {
@@ -93,6 +97,7 @@ impl OpenAICompatibleProviderSettings {
             query_params: BTreeMap::new(),
             include_usage: None,
             supports_structured_outputs: None,
+            user_agent_suffix: None,
         }
     }
 
@@ -123,6 +128,12 @@ impl OpenAICompatibleProviderSettings {
     /// Sets whether chat models support structured JSON schema outputs.
     pub fn with_supports_structured_outputs(mut self, supports_structured_outputs: bool) -> Self {
         self.supports_structured_outputs = Some(supports_structured_outputs);
+        self
+    }
+
+    /// Sets the request user-agent suffix for wrappers built on this provider.
+    pub fn with_user_agent_suffix(mut self, user_agent_suffix: impl Into<String>) -> Self {
+        self.user_agent_suffix = Some(user_agent_suffix.into());
         self
     }
 }
@@ -1238,10 +1249,12 @@ fn openai_compatible_provider_headers(settings: &OpenAICompatibleProviderSetting
             .map(|(name, value)| (name.clone(), Some(value.clone()))),
     );
 
-    with_user_agent_suffix(
-        Some(headers),
-        [format!("ai-sdk/openai-compatible/{}", crate::VERSION)],
-    )
+    let user_agent_suffix = settings
+        .user_agent_suffix
+        .clone()
+        .unwrap_or_else(|| format!("ai-sdk/openai-compatible/{}", crate::VERSION));
+
+    with_user_agent_suffix(Some(headers), [user_agent_suffix])
 }
 
 fn optional_headers(headers: Option<&Headers>) -> Option<Vec<(String, Option<String>)>> {
