@@ -1,22 +1,20 @@
 # Upstream Parity Ledger
 
-This ledger is maintained by long-running Codex `/goal` sessions.
-
-Codex must update this file while porting the upstream
-[`vercel/ai`](https://github.com/vercel/ai) repository to Rust. The goal is full
-portable feature parity, not a single progress slice.
+This ledger is maintained by long-running Codex `/goal` sessions. It is the
+source of truth for deciding what remains before this repository can claim full
+portable parity with upstream [`vercel/ai`](https://github.com/vercel/ai).
 
 ## Inventory Rules
 
 - Record the upstream commit SHA/date used for each inventory pass.
-- List every upstream package, provider package, utility library, framework
-  adapter, example, testable behavior, public API, and feature.
+- List every upstream package, provider package, framework adapter, example,
+  testable behavior, public API, and feature.
 - Use one of these statuses for each row: `not-started`, `in-progress`,
   `ported`, `verified`, `js-only-documented`.
 - A row may be `verified` only when there is a Rust equivalent plus tests,
   examples, or documented validation evidence.
 - A row may be `js-only-documented` only when the behavior is truly not
-  portable to Rust and the Rust-facing alternative is documented.
+  portable to Rust and the Rust-facing alternative is documented in the row.
 - Do not remove upstream items just because they are hard or large.
 
 ## Latest Upstream Inventory
@@ -25,30 +23,195 @@ portable feature parity, not a single progress slice.
 | --- | --- |
 | Upstream repo | `vercel/ai` |
 | Inventory command | `npx opensrc@latest path github:vercel/ai` |
-| Upstream commit | `TODO` |
-| Inventory date | `TODO` |
+| Local source path | `/Users/andrewmcclenaghan/.opensrc/repos/github.com/vercel/ai/main` |
+| Upstream commit | `aa5a1e539643c2a7162a141502eee63c665a9544` |
+| Upstream commit date | `2026-05-16T06:55:10Z` |
+| Inventory date | `2026-05-17` |
+| Upstream package count | 56 packages under `packages/*/package.json` |
+| Upstream package test files | 521 `*.test.ts`, `*.test.tsx`, `*.test-d.ts`, `*.test-d.tsx`, `*.spec.ts`, and `*.spec.tsx` files under `packages/*` |
+| Upstream examples | 22 top-level example apps/directories under `examples/*` |
 
 ## Package And Provider Inventory
 
-Codex must replace this placeholder with an exhaustive upstream package list.
+Every upstream package is listed here. Provider implementation packages are
+`not-started` until this crate has a Rust provider module or crate with typed
+settings, model contracts, provider-specific serialization tests, and model-call
+behavior tests. Framework adapters are marked `js-only-documented` only for
+browser or JavaScript framework bindings; portable model, transport, message,
+and stream behavior used by those adapters is tracked separately in the API
+inventory.
 
 | Upstream item | Kind | Status | Rust path | Evidence | Notes |
 | --- | --- | --- | --- | --- | --- |
-| `TODO` | package/provider/api/example/test | not-started | `TODO` | `TODO` | Inventory upstream first. |
+| `packages/ai` (`ai`) | core package | in-progress | `src/lib.rs`, `src/generate_text.rs`, `src/generate_object.rs`, `src/embed.rs`, `src/generate_image.rs`, `src/generate_speech.rs`, `src/generate_video.rs`, `src/transcribe.rs`, `src/rerank.rs`, `src/upload_file.rs`, `src/upload_skill.rs`, `src/registry.rs` | Unit tests in matching modules; `examples/kitchen_sink.rs` | Non-streaming generation, object, image, speech, video, transcription, embeddings, reranking, upload, registry, tool loops, and many provider-v4 shapes exist. Agent, stream APIs, UI-message APIs, telemetry, logger, text-stream response helpers, and public mock models remain unported. |
+| `packages/provider` (`@ai-sdk/provider`) | provider contracts | in-progress | `src/provider.rs`, `src/language_model.rs`, `src/embedding_model.rs`, `src/image_model.rs`, `src/speech_model.rs`, `src/transcription_model.rs`, `src/reranking_model.rs`, `src/video_model.rs`, `src/files.rs`, `src/skills.rs`, `src/json.rs`, `src/warning.rs`, `src/file_data.rs` | Contract and serialization tests in each module | Provider-v4 shapes are partially verified. Upstream v2/v3 compatibility surfaces and exact stream abstractions remain unported. |
+| `packages/provider-utils` (`@ai-sdk/provider-utils`) | provider support library | in-progress | `src/provider_utils.rs`, `src/retry.rs`, `src/headers.rs` | Large upstream-shape unit-test coverage in `src/provider_utils.rs` and `src/retry.rs` | Many schema, header, retry, media, response-handler, tool, API-request, and user-agent helpers exist. Browser stream adapters and exact fetch/runtime integration remain incomplete. |
+| `packages/gateway` (`@ai-sdk/gateway`) | provider package | not-started | none | none | Needs Vercel AI Gateway provider, metadata, credits, spend report, language/embedding/image/reranking/video model contracts, gateway error types, and optional integration tests using ignored `.env.local` keys. |
+| `packages/openai` (`@ai-sdk/openai`) | provider package | not-started | none | none | Needs OpenAI chat, responses, completion, embedding, image, speech, transcription, files, provider tools, and error mapping. |
+| `packages/openai-compatible` (`@ai-sdk/openai-compatible`) | provider base package | not-started | none | none | Needs OpenAI-compatible provider foundation used by multiple providers. |
+| `packages/open-responses` (`@ai-sdk/open-responses`) | provider package | not-started | none | none | Needs OpenAI responses-compatible language model and conversion tests. |
+| `packages/anthropic` (`@ai-sdk/anthropic`) | provider package | not-started | none | none | Needs language model, files, cache control, prompt conversion, tool preparation, usage conversion, and error mapping. |
+| `packages/amazon-bedrock` (`@ai-sdk/amazon-bedrock`) | provider package | not-started | none | none | Needs chat, embeddings, image, event-stream response handling, SigV4 fetch, tool prep, usage conversion, and model settings. |
+| `packages/google` (`@ai-sdk/google`) | provider package | not-started | none | none | Needs Gemini language, embedding, image, video, files, interactions, schema conversion, URL support, tools, and JSON accumulator behavior. |
+| `packages/google-vertex` (`@ai-sdk/google-vertex`) | provider package | not-started | none | none | Needs Vertex language, embedding, image, video, Anthropic-on-Vertex, auth variants, and provider tests. |
+| `packages/xai` (`@ai-sdk/xai`) | provider package | not-started | none | none | Needs chat/responses, image, video, files, usage conversion, tools, and error mapping. |
+| `packages/alibaba` (`@ai-sdk/alibaba`) | provider package | not-started | none | none | Needs chat/video provider, usage conversion, cache control, and message conversion. |
+| `packages/assemblyai` (`@ai-sdk/assemblyai`) | provider package | not-started | none | none | Needs transcription model and provider error mapping. |
+| `packages/azure` (`@ai-sdk/azure`) | provider package | not-started | none | none | Needs Azure OpenAI provider configuration and model dispatch. |
+| `packages/baseten` (`@ai-sdk/baseten`) | provider package | not-started | none | none | Needs chat and embedding provider contracts. |
+| `packages/black-forest-labs` (`@ai-sdk/black-forest-labs`) | provider package | not-started | none | none | Needs image model and provider settings. |
+| `packages/bytedance` (`@ai-sdk/bytedance`) | provider package | not-started | none | none | Needs video provider and model settings. |
+| `packages/cerebras` (`@ai-sdk/cerebras`) | provider package | not-started | none | none | Needs language provider and error mapping. |
+| `packages/cohere` (`@ai-sdk/cohere`) | provider package | not-started | none | none | Needs chat, embeddings, reranking, prompt conversion, and tool preparation. |
+| `packages/deepgram` (`@ai-sdk/deepgram`) | provider package | not-started | none | none | Needs speech, transcription, and error mapping. |
+| `packages/deepinfra` (`@ai-sdk/deepinfra`) | provider package | not-started | none | none | Needs OpenAI-compatible chat/image provider wrapper and errors. |
+| `packages/deepseek` (`@ai-sdk/deepseek`) | provider package | not-started | none | none | Needs chat language model, messages, tools, and error data. |
+| `packages/elevenlabs` (`@ai-sdk/elevenlabs`) | provider package | not-started | none | none | Needs speech, transcription, and error mapping. |
+| `packages/fal` (`@ai-sdk/fal`) | provider package | not-started | none | none | Needs image, speech, transcription, video, provider settings, and error mapping. |
+| `packages/fireworks` (`@ai-sdk/fireworks`) | provider package | not-started | none | none | Needs image provider and settings. |
+| `packages/gladia` (`@ai-sdk/gladia`) | provider package | not-started | none | none | Needs transcription provider and error mapping. |
+| `packages/groq` (`@ai-sdk/groq`) | provider package | not-started | none | none | Needs chat, transcription, browser-search tool, usage conversion, message conversion, and tool preparation. |
+| `packages/huggingface` (`@ai-sdk/huggingface`) | provider package | not-started | none | none | Needs OpenAI-compatible provider and responses language model. |
+| `packages/hume` (`@ai-sdk/hume`) | provider package | not-started | none | none | Needs speech provider and error mapping. |
+| `packages/klingai` (`@ai-sdk/klingai`) | provider package | not-started | none | none | Needs auth, provider, and video model. |
+| `packages/lmnt` (`@ai-sdk/lmnt`) | provider package | not-started | none | none | Needs speech provider and error mapping. |
+| `packages/luma` (`@ai-sdk/luma`) | provider package | not-started | none | none | Needs image provider and error mapping. |
+| `packages/mistral` (`@ai-sdk/mistral`) | provider package | not-started | none | none | Needs chat, embeddings, message conversion, usage conversion, and tool preparation. |
+| `packages/moonshotai` (`@ai-sdk/moonshotai`) | provider package | not-started | none | none | Needs provider contract and chat usage conversion. |
+| `packages/perplexity` (`@ai-sdk/perplexity`) | provider package | not-started | none | none | Needs language model and message conversion. |
+| `packages/prodia` (`@ai-sdk/prodia`) | provider package | not-started | none | none | Needs image, language, video, and provider settings. |
+| `packages/replicate` (`@ai-sdk/replicate`) | provider package | not-started | none | none | Needs image, video, and provider settings. |
+| `packages/revai` (`@ai-sdk/revai`) | provider package | not-started | none | none | Needs transcription provider and error mapping. |
+| `packages/togetherai` (`@ai-sdk/togetherai`) | provider package | not-started | none | none | Needs image, reranking, provider settings, and OpenAI-compatible errors. |
+| `packages/vercel` (`@ai-sdk/vercel`) | provider package | not-started | none | none | Needs Vercel OpenAI-compatible provider wrapper and settings. |
+| `packages/voyage` (`@ai-sdk/voyage`) | provider package | not-started | none | none | Needs embedding and reranking provider. |
+| `packages/mcp` (`@ai-sdk/mcp`) | protocol/client package | not-started | none | none | Needs MCP client, transports, OAuth, elicitation schemas, app bridge behavior, and tool conversion. |
+| `packages/otel` (`@ai-sdk/otel`) | telemetry package | not-started | none | none | Needs OpenTelemetry spans, GenAI message formatting, attribute selection, and legacy telemetry compatibility. |
+| `packages/workflow` (`@ai-sdk/workflow`) | agent/workflow package | not-started | none | none | Needs workflow agent, serializable schemas, stream iterators, chat transport, and integration-style behavior. |
+| `packages/test-server` (`@ai-sdk/test-server`) | testing support package | not-started | none | none | Needs Rust test server equivalent for provider/API behavior validation. |
+| `packages/devtools` (`@ai-sdk/devtools`) | JavaScript devtools package | js-only-documented | none | This row | Upstream exposes JavaScript middleware/telemetry integration for AI SDK DevTools. Portable Rust tracing/telemetry behavior is tracked under telemetry rows; browser devtools integration is intentionally not ported. |
+| `packages/codemod` (`@ai-sdk/codemod`) | JavaScript migration tooling | js-only-documented | none | This row | Upstream codemods transform JavaScript/TypeScript source between AI SDK versions. No Rust SDK runtime equivalent is required. |
+| `packages/angular` (`@ai-sdk/angular`) | JavaScript framework adapter | js-only-documented | none | This row | Angular components/services are JavaScript framework bindings. Portable chat/object/transport semantics are tracked in API rows. |
+| `packages/react` (`@ai-sdk/react`) | JavaScript framework adapter | js-only-documented | none | This row | React hooks/components are JavaScript framework bindings. Portable chat/object/transport semantics are tracked in API rows. |
+| `packages/rsc` (`@ai-sdk/rsc`) | JavaScript framework adapter | js-only-documented | none | This row | React Server Components and streamable UI surfaces depend on React/Next.js runtime semantics. Portable streaming contracts are tracked separately. |
+| `packages/svelte` (`@ai-sdk/svelte`) | JavaScript framework adapter | js-only-documented | none | This row | Svelte stores/components are JavaScript framework bindings. Portable chat/object/transport semantics are tracked in API rows. |
+| `packages/vue` (`@ai-sdk/vue`) | JavaScript framework adapter | js-only-documented | none | This row | Vue composition functions/components are JavaScript framework bindings. Portable chat/object/transport semantics are tracked in API rows. |
+| `packages/langchain` (`@ai-sdk/langchain`) | JavaScript library adapter | js-only-documented | none | This row | Upstream adapts LangChain JS callbacks, streams, and transports. A Rust-native LangChain adapter would target a different ecosystem and is intentionally outside the portable SDK runtime. |
+| `packages/llamaindex` (`@ai-sdk/llamaindex`) | JavaScript library adapter | js-only-documented | none | This row | Upstream adapts LlamaIndex TS message/tool shapes. A Rust-native adapter would target different crates and is intentionally outside this port. |
+| `packages/valibot` (`@ai-sdk/valibot`) | JavaScript schema adapter | js-only-documented | none | This row | Valibot is a JavaScript validation library. Rust schema validation is tracked through `Schema`, `JsonSchema`, and serde-style boundaries. |
 
 ## High-Level API Inventory
 
-Track all portable public APIs here, including generate text/object/image,
-streaming, tools, structured output, embeddings, transcription, speech, video,
-reranking, files, registry/gateway support, middleware, provider utilities,
-warnings/errors, and prompt/message parts.
-
-| Upstream API | Status | Rust path | Evidence | Notes |
+| Upstream API or feature | Status | Rust path | Evidence | Notes |
 | --- | --- | --- | --- | --- |
-| `TODO` | not-started | `TODO` | `TODO` | Inventory upstream first. |
+| Provider-v4 language model contract | verified | `src/language_model.rs` | `language_model_trait_exposes_upstream_v4_identity_capabilities_and_generate_boundary`; stream part serialization tests | Exact JavaScript stream primitive is replaced with Rust associated `Stream`; high-level stream consumers remain unported. |
+| Provider-v4 embedding model contract | verified | `src/embedding_model.rs` | `embedding_model_trait_exposes_upstream_v4_identity_capabilities_and_embed_boundary` | Includes max-per-call and parallel-call capability futures. |
+| Provider-v4 image model contract | verified | `src/image_model.rs` | Image model call/result serialization tests | Includes image generation result and metadata contracts. |
+| Provider-v4 speech model contract | verified | `src/speech_model.rs` | `speech_model_trait_exposes_upstream_v4_identity_and_generate_boundary` | Non-streaming speech generation boundary only. |
+| Provider-v4 transcription model contract | verified | `src/transcription_model.rs` | `transcription_model_trait_exposes_upstream_v4_identity_and_generate_boundary` | Non-streaming transcription boundary only. |
+| Provider-v4 reranking model contract | verified | `src/reranking_model.rs` | `reranking_model_trait_exposes_upstream_v4_identity_and_rerank_boundary` | Covers text/object document inputs. |
+| Provider-v4 video model contract | verified | `src/video_model.rs` | `video_model_trait_exposes_upstream_v4_identity_capability_and_generate_boundary` | Includes max-videos-per-call capability. |
+| Provider-v4 files contract | verified | `src/files.rs`, `src/upload_file.rs` | `files_trait_exposes_upstream_v4_identity_and_upload_boundary`; upload tests | Provider implementations remain unported. |
+| Provider-v4 skills contract | verified | `src/skills.rs`, `src/upload_skill.rs` | `skills_trait_exposes_upstream_v4_identity_and_upload_boundary`; upload tests | Provider implementations remain unported. |
+| Provider metadata, options, headers, warnings, provider references | verified | `src/provider.rs`, `src/headers.rs`, `src/warning.rs`, `src/file_data.rs` | Serialization and error tests in each module | Includes Rust `ProviderReference` wrapper for upstream provider references. |
+| JSON values and schemas | verified | `src/json.rs`, `src/provider_utils.rs` | JSON/schema helper tests | Exact JavaScript validator library adapters remain js-only or unported. |
+| Error types and messages | in-progress | `src/provider.rs`, `src/generate_text.rs`, `src/provider_utils.rs`, model modules | Existing error serialization/message tests | Many upstream errors exist; provider-specific error types and gateway errors are not ported. |
+| `generateText` non-streaming | verified | `src/generate_text.rs` | `generate_text_*` tests in `src/generate_text.rs`; `examples/kitchen_sink.rs` | Covers deterministic model calls, tool loops, result shaping, usage, warnings, metadata, and response messages. |
+| Tool calling, tool execution, tool approval, repair, refinement, active tools, pruning | verified | `src/generate_text.rs`, `src/provider_utils.rs` | Tool loop, approval, repair, execution, pruning, and mapping tests | Provider-executed deferred results are represented in Rust, but provider implementations are not ported. |
+| `streamText` and language model streaming orchestration | not-started | none | none | Upstream `packages/ai/src/generate-text/stream-text.ts` and related stream tests remain unported. |
+| Text stream response helpers | not-started | none | none | Upstream `text-stream/create-text-stream-response.ts` and pipe helpers remain unported. |
+| UI message streams | not-started | none | none | Upstream `ui-message-stream/*` remains unported. |
+| Chat/completion/object UI transport contracts | not-started | none | none | Portable request/response and transport contracts from `packages/ai/src/ui/*` remain unported; framework hooks are js-only rows. |
+| Agent and tool-loop agent APIs | not-started | none | none | Upstream `packages/ai/src/agent/*` remains unported. |
+| `generateObject` non-streaming structured output | verified | `src/generate_object.rs` | `generate_object_*` tests | Stream object and partial object streaming remain unported. |
+| `streamObject` | not-started | none | none | Upstream `packages/ai/src/generate-object/stream-object.ts` remains unported. |
+| Embeddings: `embed`, `embedMany` | verified | `src/embed.rs` | `embed_calls_model_with_single_value_and_maps_result`; `embed_many_*` tests | Provider implementations remain unported. |
+| Image generation: `generateImage` and `experimental_generateImage` | verified | `src/generate_image.rs` | `generate_image_*` tests | Provider implementations remain unported. |
+| Speech generation: `generateSpeech` and experimental alias | verified | `src/generate_speech.rs` | Speech generation tests | Provider implementations remain unported. |
+| Video generation: `generateVideo` and experimental alias | verified | `src/generate_video.rs` | Video generation tests | Provider implementations remain unported. |
+| Transcription: `transcribe` and experimental alias | verified | `src/transcribe.rs` | `transcribe_*` tests | Provider implementations remain unported. |
+| Reranking: `rerank` | verified | `src/rerank.rs` | `rerank_*` tests | Provider implementations remain unported. |
+| File upload: `uploadFile` | verified | `src/upload_file.rs` | `upload_file_*` tests | Provider implementations remain unported. |
+| Skill upload: `uploadSkill` | verified | `src/upload_skill.rs` | `upload_skill_*` tests | Provider implementations remain unported. |
+| Provider registry | verified | `src/registry.rs` | `create_provider_registry_*` tests | Gateway-specific registry helpers remain unported. |
+| Language model middleware: wrap/default settings | verified | `src/language_model_middleware.rs` | `wrap_language_model_*`; `default_settings_middleware_*` tests | Provider wrapping middleware remains unported. |
+| Embedding model middleware: wrap/default settings | verified | `src/embedding_model_middleware.rs` | `wrap_embedding_model_*`; `default_embedding_settings_middleware_*` tests | Mirrors upstream v4 hooks. |
+| Image model middleware: wrap | verified | `src/image_model_middleware.rs` | `image_model_middleware_exposes_upstream_v4_hooks`; wrap tests | Additional upstream AI middleware remains unported. |
+| Provider wrapping middleware | not-started | none | none | Upstream `middleware/wrap-provider.ts` remains unported. |
+| Add tool input examples middleware | not-started | none | none | Upstream `middleware/add-tool-input-examples-middleware.ts` remains unported. |
+| Extract JSON/reasoning middleware | not-started | none | none | Upstream `middleware/extract-json-middleware.ts` and `extract-reasoning-middleware.ts` remain unported. |
+| Simulate streaming middleware | not-started | none | none | Upstream `middleware/simulate-streaming-middleware.ts` remains unported. |
+| Prompt standardization, model-message conversion, request options | in-progress | `src/prompt.rs`, `src/language_model.rs` | Prompt conversion and call-option tests | Many prompt parts are covered; UI/model-message conversion helpers and v2/v3 adapters remain unported. |
+| Provider-v2/v3 compatibility adapters | not-started | none | none | Upstream `packages/ai/src/model/as-*-v3.ts` and `as-*-v4.ts` compatibility helpers remain unported. |
+| Public mock models and test fixtures | not-started | none | none | Tests use private fakes; upstream `packages/ai/src/test/mock-*.ts` public test helpers remain unported. |
+| Telemetry and logger | not-started | none | none | Upstream `packages/ai/src/telemetry/*`, `packages/otel`, and `logger/log-warnings.ts` remain unported. |
+| MCP client and tool bridge | not-started | none | none | Upstream `packages/mcp` remains unported. |
+| Workflow agent package | not-started | none | none | Upstream `packages/workflow` remains unported. |
+| Gateway provider and metadata APIs | not-started | none | none | Upstream `packages/gateway` remains unported. |
+| Concrete provider packages | not-started | none | none | All provider implementation package rows above remain unported. |
+
+## Examples Inventory
+
+| Upstream example | Status | Rust path | Evidence | Notes |
+| --- | --- | --- | --- | --- |
+| Rust kitchen sink equivalent | verified | `examples/kitchen_sink.rs` | `cargo run --example kitchen_sink` is part of validation target when run manually | Rust-only example currently demonstrates deterministic `generate_text` with a tool loop. |
+| `examples/ai-e2e-next` | not-started | none | none | Needs portable API coverage before Rust equivalent can be planned. |
+| `examples/ai-functions` | not-started | none | none | Needs Rust equivalent for AI functions patterns. |
+| `examples/angular` | js-only-documented | none | This row | Angular adapter example is JavaScript framework-specific. |
+| `examples/express` | not-started | none | none | Portable server example should map to a Rust HTTP framework once stream/chat APIs exist. |
+| `examples/fastify` | not-started | none | none | Portable server example should map to a Rust HTTP framework once stream/chat APIs exist. |
+| `examples/hono` | not-started | none | none | Portable server example should map to a Rust HTTP framework once stream/chat APIs exist. |
+| `examples/mcp` | not-started | none | none | Blocked on MCP package parity. |
+| `examples/nest` | js-only-documented | none | This row | NestJS framework wiring is JavaScript-specific; portable server behavior is tracked separately. |
+| `examples/next` | js-only-documented | none | This row | Next.js framework wiring is JavaScript-specific; portable server behavior is tracked separately. |
+| `examples/next-agent` | js-only-documented | none | This row | Depends on Next.js and unported agent APIs. |
+| `examples/next-fastapi` | not-started | none | none | Mixed Next/FastAPI example; portable API behavior should be covered by Rust server examples. |
+| `examples/next-google-vertex` | js-only-documented | none | This row | Next.js wiring is JavaScript-specific; Google Vertex provider remains unported. |
+| `examples/next-langchain` | js-only-documented | none | This row | Depends on JavaScript LangChain adapter and Next.js wiring. |
+| `examples/next-openai-kasada-bot-protection` | js-only-documented | none | This row | Depends on Next.js and JavaScript bot-protection integration. |
+| `examples/next-openai-pages` | js-only-documented | none | This row | Depends on Next.js Pages Router. |
+| `examples/next-openai-telemetry` | js-only-documented | none | This row | Depends on Next.js; portable telemetry remains unported. |
+| `examples/next-openai-telemetry-sentry` | js-only-documented | none | This row | Depends on Next.js and JavaScript Sentry integration. |
+| `examples/next-openai-upstash-rate-limits` | js-only-documented | none | This row | Depends on Next.js and JavaScript Upstash integration. |
+| `examples/next-workflow` | js-only-documented | none | This row | Depends on Next.js and unported workflow package. |
+| `examples/node-http-server` | not-started | none | none | Portable HTTP server equivalent should be added after stream/chat APIs. |
+| `examples/nuxt-openai` | js-only-documented | none | This row | Nuxt adapter example is JavaScript framework-specific. |
+| `examples/sveltekit-openai` | js-only-documented | none | This row | SvelteKit adapter example is JavaScript framework-specific. |
+
+## Upstream Test Corpus And Tooling Inventory
+
+The upstream scan found 521 package test files. Rust parity must continue adding
+focused tests for each portable behavior before changing rows to `verified`.
+
+| Upstream area | Test files scanned | Status | Notes |
+| --- | ---: | --- | --- |
+| `packages/ai` | 128 | in-progress | Many non-streaming high-level API tests are represented in Rust; stream, UI, agent, telemetry, compatibility, and public mock model tests remain. |
+| Provider package tests | 195 | not-started | Concrete provider package test files remain unported across Gateway, OpenAI, Anthropic, Google, Bedrock, xAI, and the remaining provider packages. |
+| `packages/provider` | 1 | in-progress | Upstream provider contract test is partially covered by Rust provider/model module tests. |
+| `packages/provider-utils` | 77 | in-progress | Many provider support behaviors are represented, but stream/browser/fetch parity is incomplete. |
+| Framework adapter tests | 21 | js-only-documented | Angular, React, RSC, Svelte, and Vue bindings are JavaScript framework-specific; portable transport/message semantics are tracked separately. |
+| MCP, Gateway, OTel, Workflow, test server | 39 | not-started | Portable runtime packages remain unported. |
+| Codemod tests | 54 | js-only-documented | JavaScript migration tooling is intentionally not part of the Rust runtime. |
+| JavaScript library adapter/devtools tests | 6 | js-only-documented | DevTools, LangChain, LlamaIndex, and Valibot rows are documented as JavaScript-specific above. |
+| Repo docs, content, architecture, tools, skills, Changesets, package publishing | not counted | in-progress | Public behavior docs/examples still need Rust equivalents; JS-only repository operations are documented as non-portable where applicable. |
 
 ## Next Unported Work Queue
 
-1. Inventory upstream `vercel/ai` packages/providers/APIs/examples/tests.
-2. Replace the placeholder rows above with the real exhaustive ledger.
-3. Pick the highest-value `not-started` item and port it with validation.
+1. Port a public deterministic mock model/test fixture module equivalent to
+   upstream `packages/ai/src/test/mock-*.ts` so future slices can verify stream,
+   provider, and high-level API behavior without duplicating private fakes.
+2. Port `streamText` over a dependency-light Rust stream abstraction, including
+   deterministic tests for text deltas, reasoning, sources, tool-call deltas,
+   tool execution from streams, final usage, errors, and stop conditions.
+3. Port `streamObject` and structured partial-object streaming once `streamText`
+   event handling is available.
+4. Port provider wrapping middleware plus add-tool-input-examples,
+   extract-json, extract-reasoning, and simulate-streaming middleware.
+5. Start the Gateway provider package with contract-first models and fake HTTP
+   tests, then add optional `.env.local` integration tests that skip when keys
+   are absent.
+6. Start the OpenAI-compatible provider foundation, then layer concrete
+   OpenAI, Vercel, DeepInfra, Hugging Face, and Together AI provider wrappers.
+7. Continue provider package slices until every provider row above is `verified`.
+8. Port MCP, OTel, Workflow, UI-message, chat/completion transport, telemetry,
+   logger, and HTTP server example surfaces.
