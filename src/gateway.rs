@@ -16,6 +16,9 @@ use crate::embedding_model::{
     EmbeddingModelUsage,
 };
 use crate::file_data::FileDataContent;
+use crate::gateway_error::{
+    GatewayError, GatewayInvalidRequestError, as_gateway_error, parse_gateway_auth_method,
+};
 use crate::headers::Headers;
 use crate::image_model::{
     ImageModel, ImageModelCallOptions, ImageModelFile, ImageModelProviderMetadata,
@@ -752,66 +755,91 @@ impl GatewayProvider {
     }
 
     /// Returns available Gateway models for the authenticated account.
-    pub async fn get_available_models(
-        &self,
-    ) -> Result<GatewayFetchMetadataResponse, HandledFetchError> {
+    pub async fn get_available_models(&self) -> Result<GatewayFetchMetadataResponse, GatewayError> {
         if let Some(cached) = self.cached_available_models() {
             return Ok(cached);
         }
 
         let request_headers = gateway_provider_headers(&self.settings);
+        let auth_method = parse_gateway_auth_method(&request_headers);
         let get_options = GetFromApiOptions::new(format!("{}/config", self.base_url()))
             .with_headers(request_headers)
             .with_environment(RuntimeEnvironment::unknown());
         let transport = Arc::clone(&self.transport);
 
-        let response =
-            get_gateway_json(get_options, transport, gateway_fetch_metadata_response).await?;
+        let response = get_gateway_json(
+            get_options,
+            transport,
+            gateway_fetch_metadata_response,
+            auth_method,
+        )
+        .await?;
         self.store_available_models(response.clone());
 
         Ok(response)
     }
 
     /// Returns credit balance information for the authenticated Gateway account.
-    pub async fn get_credits(&self) -> Result<GatewayCreditsResponse, HandledFetchError> {
+    pub async fn get_credits(&self) -> Result<GatewayCreditsResponse, GatewayError> {
         let request_headers = gateway_provider_headers(&self.settings);
+        let auth_method = parse_gateway_auth_method(&request_headers);
         let get_options =
             GetFromApiOptions::new(gateway_origin_url(&self.base_url(), "/v1/credits")?)
                 .with_headers(request_headers)
                 .with_environment(RuntimeEnvironment::unknown());
         let transport = Arc::clone(&self.transport);
 
-        get_gateway_json(get_options, transport, gateway_credits_response).await
+        get_gateway_json(
+            get_options,
+            transport,
+            gateway_credits_response,
+            auth_method,
+        )
+        .await
     }
 
     /// Returns a Gateway spend report for the supplied date range and filters.
     pub async fn get_spend_report(
         &self,
         params: GatewaySpendReportParams,
-    ) -> Result<GatewaySpendReportResponse, HandledFetchError> {
+    ) -> Result<GatewaySpendReportResponse, GatewayError> {
         let request_headers = gateway_provider_headers(&self.settings);
+        let auth_method = parse_gateway_auth_method(&request_headers);
         let url = gateway_spend_report_url(&self.base_url(), &params)?;
         let get_options = GetFromApiOptions::new(url)
             .with_headers(request_headers)
             .with_environment(RuntimeEnvironment::unknown());
         let transport = Arc::clone(&self.transport);
 
-        get_gateway_json(get_options, transport, gateway_spend_report_response).await
+        get_gateway_json(
+            get_options,
+            transport,
+            gateway_spend_report_response,
+            auth_method,
+        )
+        .await
     }
 
     /// Returns detailed information for a specific Gateway generation id.
     pub async fn get_generation_info(
         &self,
         params: GatewayGenerationInfoParams,
-    ) -> Result<GatewayGenerationInfo, HandledFetchError> {
+    ) -> Result<GatewayGenerationInfo, GatewayError> {
         let request_headers = gateway_provider_headers(&self.settings);
+        let auth_method = parse_gateway_auth_method(&request_headers);
         let url = gateway_generation_info_url(&self.base_url(), &params)?;
         let get_options = GetFromApiOptions::new(url)
             .with_headers(request_headers)
             .with_environment(RuntimeEnvironment::unknown());
         let transport = Arc::clone(&self.transport);
 
-        get_gateway_json(get_options, transport, gateway_generation_info_response).await
+        get_gateway_json(
+            get_options,
+            transport,
+            gateway_generation_info_response,
+            auth_method,
+        )
+        .await
     }
 
     fn base_url(&self) -> String {
@@ -1716,10 +1744,9 @@ fn gateway_provider_headers(
     .collect()
 }
 
-fn gateway_origin_url(base_url: &str, path: &str) -> Result<String, HandledFetchError> {
-    let url = Url::parse(base_url).map_err(|error| HandledFetchError::Original {
-        error: FetchErrorInfo::new(format!("invalid Gateway base URL: {error}"))
-            .with_name("TypeError"),
+fn gateway_origin_url(base_url: &str, path: &str) -> Result<String, GatewayError> {
+    let url = Url::parse(base_url).map_err(|error| {
+        GatewayInvalidRequestError::with_message(format!("invalid Gateway base URL: {error}"))
     })?;
     let mut origin = url.origin().ascii_serialization();
     origin.push_str(path);
@@ -1730,7 +1757,7 @@ fn gateway_origin_url(base_url: &str, path: &str) -> Result<String, HandledFetch
 fn gateway_spend_report_url(
     base_url: &str,
     params: &GatewaySpendReportParams,
-) -> Result<String, HandledFetchError> {
+) -> Result<String, GatewayError> {
     let mut query = FormUrlEncodedSerializer::new(String::new());
     query.append_pair("start_date", &params.start_date);
     query.append_pair("end_date", &params.end_date);
@@ -1773,7 +1800,7 @@ fn gateway_spend_report_url(
 fn gateway_generation_info_url(
     base_url: &str,
     params: &GatewayGenerationInfoParams,
-) -> Result<String, HandledFetchError> {
+) -> Result<String, GatewayError> {
     let mut query = FormUrlEncodedSerializer::new(String::new());
     query.append_pair("id", &params.id);
 
@@ -1788,7 +1815,8 @@ async fn get_gateway_json<T, V, E>(
     options: GetFromApiOptions,
     transport: GatewayTransport,
     validate: V,
-) -> Result<T, HandledFetchError>
+    auth_method: Option<crate::gateway_error::GatewayAuthMethod>,
+) -> Result<T, GatewayError>
 where
     V: FnOnce(&JsonValue) -> Result<T, E>,
     E: std::fmt::Display,
@@ -1811,6 +1839,7 @@ where
     )
     .await
     .map(|response| response.value)
+    .map_err(|error| as_gateway_error(error, auth_method))
 }
 
 #[derive(Deserialize)]
@@ -4567,13 +4596,13 @@ mod tests {
         )
         .with_transport(transport);
         let error = poll_ready(provider.get_available_models()).expect_err("request fails");
-        let api_error = error
-            .api_call_error()
-            .expect("gateway metadata errors are API call errors");
+        let rate_limit_error = error
+            .as_rate_limit()
+            .expect("gateway metadata errors map to Gateway rate-limit errors");
 
-        assert_eq!(api_error.status_code(), Some(429));
-        assert_eq!(api_error.message(), "Rate limit exceeded");
-        assert!(api_error.is_retryable());
+        assert_eq!(rate_limit_error.status_code(), 429);
+        assert_eq!(rate_limit_error.message(), "Rate limit exceeded");
+        assert!(rate_limit_error.is_retryable());
     }
 
     #[test]

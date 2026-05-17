@@ -10,6 +10,7 @@ pub mod embedding_model_middleware;
 pub mod file_data;
 pub mod files;
 pub mod gateway;
+pub mod gateway_error;
 pub mod generate_image;
 pub mod generate_object;
 pub mod generate_speech;
@@ -75,6 +76,14 @@ pub use gateway::{
     GatewaySpendReportGroupBy, GatewaySpendReportParams, GatewaySpendReportResponse,
     GatewaySpendReportRow, GatewayTransport, GatewayTransportFuture, GatewayVideoModel,
     create_gateway, gateway,
+};
+pub use gateway_error::{
+    GATEWAY_AUTH_METHOD_HEADER, GatewayAuthMethod, GatewayAuthenticationError, GatewayError,
+    GatewayErrorResponse, GatewayErrorResponseError, GatewayInternalServerError,
+    GatewayInvalidRequestError, GatewayModelNotFoundError, GatewayRateLimitError,
+    GatewayResponseError, GatewayTimeoutError, as_gateway_error,
+    create_gateway_error_from_api_call, create_gateway_error_from_response,
+    extract_gateway_api_call_response, gateway_headers_from_auth_method, parse_gateway_auth_method,
 };
 pub use generate_image::{
     ExperimentalGenerateImageResult, GenerateImageOptions, GenerateImagePrompt,
