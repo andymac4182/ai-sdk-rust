@@ -53,7 +53,7 @@ pub mod video_model;
 pub mod warning;
 
 pub use deepinfra::{
-    DEFAULT_DEEPINFRA_BASE_URL, DeepInfraChatLanguageModel, DeepInfraProvider,
+    DEFAULT_DEEPINFRA_BASE_URL, DeepInfraChatLanguageModel, DeepInfraImageModel, DeepInfraProvider,
     DeepInfraProviderSettings, create_deepinfra, deepinfra,
 };
 pub use embed::{

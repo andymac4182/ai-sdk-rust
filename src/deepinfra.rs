@@ -1,11 +1,18 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::future::{Future, Ready};
 use std::pin::Pin;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
+use crate::file_data::FileDataContent;
 use crate::headers::Headers;
+use crate::image_model::{
+    ImageModel, ImageModelCallOptions, ImageModelProviderMetadata, ImageModelProviderMetadataEntry,
+    ImageModelResponse, ImageModelResult,
+};
 use crate::json::{JsonObject, JsonValue};
 use crate::language_model::{
     InputTokenUsage, LanguageModel, LanguageModelCallOptions, LanguageModelGenerateResult,
@@ -14,11 +21,17 @@ use crate::language_model::{
 };
 use crate::openai_compatible::{
     OpenAICompatibleChatLanguageModel, OpenAICompatibleCompletionLanguageModel,
-    OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel, OpenAICompatibleProvider,
-    OpenAICompatibleProviderSettings, OpenAICompatibleTransport,
+    OpenAICompatibleEmbeddingModel, OpenAICompatibleProvider, OpenAICompatibleProviderSettings,
+    OpenAICompatibleTransport,
 };
-use crate::provider::{ModelType, NoSuchModelError, Provider, SpecificationVersion};
-use crate::provider_utils::without_trailing_slash;
+use crate::provider::{NoSuchModelError, Provider, SpecificationVersion};
+use crate::provider_utils::{
+    FetchErrorInfo, HandledFetchError, PostJsonToApiOptions, ProviderApiRequest,
+    ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+    ProviderApiResponseHandlerError, RuntimeEnvironment, combine_headers,
+    create_json_error_response_handler, create_json_response_handler, post_json_to_api,
+    with_user_agent_suffix, without_trailing_slash,
+};
 
 /// Default base URL for upstream `@ai-sdk/deepinfra` API calls.
 pub const DEFAULT_DEEPINFRA_BASE_URL: &str = "https://api.deepinfra.com/v1";
@@ -81,6 +94,15 @@ pub struct DeepInfraProvider {
 #[derive(Clone)]
 pub struct DeepInfraChatLanguageModel {
     inner: OpenAICompatibleChatLanguageModel,
+}
+
+/// DeepInfra image model for `/inference/{modelId}` image generation calls.
+#[derive(Clone)]
+pub struct DeepInfraImageModel {
+    model_id: String,
+    base_url: String,
+    settings: DeepInfraProviderSettings,
+    transport: OpenAICompatibleTransport,
 }
 
 impl DeepInfraChatLanguageModel {
@@ -156,6 +178,120 @@ impl LanguageModel for DeepInfraChatLanguageModel {
             }
             result
         })
+    }
+}
+
+impl DeepInfraImageModel {
+    fn new(
+        model_id: impl Into<String>,
+        base_url: impl Into<String>,
+        settings: DeepInfraProviderSettings,
+        transport: OpenAICompatibleTransport,
+    ) -> Self {
+        Self {
+            model_id: model_id.into(),
+            base_url: base_url.into(),
+            settings,
+            transport,
+        }
+    }
+
+    /// Returns the provider-specific model id.
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    /// Returns the provider id for this model.
+    pub fn provider(&self) -> &str {
+        "deepinfra.image"
+    }
+
+    async fn do_generate_result(&self, options: ImageModelCallOptions) -> ImageModelResult {
+        let request_body = deepinfra_image_generation_request_body(&options);
+        let request_headers = self.request_headers(options.headers.as_ref());
+        let post_options =
+            PostJsonToApiOptions::new(format!("{}/{}", self.base_url, self.model_id), request_body)
+                .with_headers(request_headers)
+                .with_environment(RuntimeEnvironment::unknown());
+        let transport = Arc::clone(&self.transport);
+
+        match post_json_to_api(
+            post_options,
+            move |request| (transport)(request),
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    deepinfra_image_response,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_json_error_response_handler(
+                    response.json_error_response_handler_options(request),
+                    deepinfra_image_error_response,
+                    deepinfra_image_error_message,
+                    |_, _| None,
+                ))
+            },
+        )
+        .await
+        {
+            Ok(response) => deepinfra_image_result_from_response(
+                &self.model_id,
+                response.value,
+                response.response_headers,
+            ),
+            Err(error) => deepinfra_image_result_from_error(&self.model_id, error),
+        }
+    }
+
+    fn request_headers(&self, call_headers: Option<&Headers>) -> BTreeMap<String, Option<String>> {
+        combine_headers([
+            Some(
+                deepinfra_provider_headers(&self.settings)
+                    .into_iter()
+                    .map(|(name, value)| (name, Some(value)))
+                    .collect::<Vec<_>>(),
+            ),
+            call_headers.map(|headers| {
+                headers
+                    .iter()
+                    .map(|(name, value)| (name.clone(), Some(value.clone())))
+                    .collect::<Vec<_>>()
+            }),
+        ])
+    }
+}
+
+impl ImageModel for DeepInfraImageModel {
+    type MaxImagesPerCallFuture<'a>
+        = Ready<Option<usize>>
+    where
+        Self: 'a;
+
+    type GenerateFuture<'a>
+        = Pin<Box<dyn Future<Output = ImageModelResult> + Send + 'a>>
+    where
+        Self: 'a;
+
+    fn specification_version(&self) -> SpecificationVersion {
+        SpecificationVersion::V4
+    }
+
+    fn provider(&self) -> &str {
+        "deepinfra.image"
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    fn max_images_per_call(&self) -> Self::MaxImagesPerCallFuture<'_> {
+        std::future::ready(Some(1))
+    }
+
+    fn do_generate(&self, options: ImageModelCallOptions) -> Self::GenerateFuture<'_> {
+        Box::pin(self.do_generate_result(options))
     }
 }
 
@@ -238,19 +374,23 @@ impl DeepInfraProvider {
         self.embedding_model(model_id)
     }
 
-    /// Reports that DeepInfra's custom image model is not ported in this foundation slice.
-    pub fn image_model(
-        &self,
-        model_id: impl Into<String>,
-    ) -> Result<OpenAICompatibleImageModel, NoSuchModelError> {
-        Err(NoSuchModelError::new(model_id, ModelType::ImageModel))
+    /// Creates a DeepInfra image model.
+    pub fn image_model(&self, model_id: impl Into<String>) -> DeepInfraImageModel {
+        let transport = self
+            .transport
+            .as_ref()
+            .map(Arc::clone)
+            .unwrap_or_else(default_deepinfra_transport);
+        DeepInfraImageModel::new(
+            model_id,
+            format!("{}/inference", deepinfra_base_url(&self.settings)),
+            self.settings.clone(),
+            transport,
+        )
     }
 
     /// Alias for [`DeepInfraProvider::image_model`].
-    pub fn image(
-        &self,
-        model_id: impl Into<String>,
-    ) -> Result<OpenAICompatibleImageModel, NoSuchModelError> {
+    pub fn image(&self, model_id: impl Into<String>) -> DeepInfraImageModel {
         self.image_model(model_id)
     }
 
@@ -288,7 +428,7 @@ impl Default for DeepInfraProvider {
 impl Provider for DeepInfraProvider {
     type LanguageModel = DeepInfraChatLanguageModel;
     type EmbeddingModel = OpenAICompatibleEmbeddingModel;
-    type ImageModel = OpenAICompatibleImageModel;
+    type ImageModel = DeepInfraImageModel;
 
     fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
         Ok(DeepInfraProvider::language_model(self, model_id))
@@ -299,7 +439,7 @@ impl Provider for DeepInfraProvider {
     }
 
     fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
-        DeepInfraProvider::image_model(self, model_id)
+        Ok(DeepInfraProvider::image_model(self, model_id))
     }
 }
 
@@ -412,6 +552,239 @@ fn json_u64(value: Option<&JsonValue>) -> Option<u64> {
     value.and_then(JsonValue::as_u64)
 }
 
+fn deepinfra_provider_headers(settings: &DeepInfraProviderSettings) -> Headers {
+    let mut headers = Headers::new();
+
+    if let Some(api_key) = deepinfra_api_key(settings.api_key.as_ref()) {
+        headers.insert("authorization".to_string(), format!("Bearer {api_key}"));
+    }
+
+    for (name, value) in &settings.headers {
+        headers.insert(name.clone(), value.clone());
+    }
+
+    with_user_agent_suffix(
+        Some(
+            headers
+                .into_iter()
+                .map(|(name, value)| (name, Some(value)))
+                .collect::<Vec<_>>(),
+        ),
+        [format!("ai-sdk/deepinfra/{}", crate::VERSION)],
+    )
+}
+
+fn deepinfra_image_generation_request_body(options: &ImageModelCallOptions) -> JsonValue {
+    let mut body = JsonObject::new();
+
+    if let Some(prompt) = &options.prompt {
+        body.insert("prompt".to_string(), JsonValue::String(prompt.clone()));
+    }
+
+    body.insert("num_images".to_string(), JsonValue::from(options.n));
+
+    if let Some(aspect_ratio) = &options.aspect_ratio {
+        body.insert(
+            "aspect_ratio".to_string(),
+            JsonValue::String(aspect_ratio.clone()),
+        );
+    }
+
+    if let Some(size) = &options.size
+        && let Some((width, height)) = size.split_once('x')
+    {
+        body.insert("width".to_string(), JsonValue::String(width.to_string()));
+        body.insert("height".to_string(), JsonValue::String(height.to_string()));
+    }
+
+    if let Some(seed) = options.seed {
+        body.insert("seed".to_string(), JsonValue::from(seed));
+    }
+
+    if let Some(provider_options) = options.provider_options.get("deepinfra") {
+        for (name, value) in provider_options {
+            body.insert(name.clone(), value.clone());
+        }
+    }
+
+    JsonValue::Object(body)
+}
+
+fn deepinfra_image_response(
+    value: &JsonValue,
+) -> Result<DeepInfraImageResponse, serde_json::Error> {
+    serde_json::from_value(value.clone())
+}
+
+fn deepinfra_image_error_response(value: &JsonValue) -> Result<JsonValue, serde_json::Error> {
+    Ok(value.clone())
+}
+
+fn deepinfra_image_error_message(value: &JsonValue) -> String {
+    value
+        .get("detail")
+        .and_then(|detail| detail.get("error"))
+        .and_then(JsonValue::as_str)
+        .or_else(|| {
+            value
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(JsonValue::as_str)
+        })
+        .unwrap_or("Unknown error")
+        .to_string()
+}
+
+fn deepinfra_image_result_from_response(
+    model_id: &str,
+    response: DeepInfraImageResponse,
+    response_headers: Option<Headers>,
+) -> ImageModelResult {
+    ImageModelResult::new(
+        response
+            .images
+            .into_iter()
+            .map(strip_deepinfra_image_data_prefix)
+            .map(FileDataContent::Base64)
+            .collect(),
+        deepinfra_image_response_metadata(model_id, response_headers),
+    )
+}
+
+fn deepinfra_image_result_from_error(model_id: &str, error: HandledFetchError) -> ImageModelResult {
+    let (message, headers) = match error {
+        HandledFetchError::Original { error } => (error.message().to_string(), None),
+        HandledFetchError::ApiCall { error } => (
+            error.message().to_string(),
+            error.response_headers().cloned(),
+        ),
+    };
+    let mut extra = JsonObject::new();
+    extra.insert("errorMessage".to_string(), JsonValue::String(message));
+
+    ImageModelResult::new(
+        Vec::new(),
+        deepinfra_image_response_metadata(model_id, headers),
+    )
+    .with_provider_metadata(ImageModelProviderMetadata::from([(
+        "deepinfra".to_string(),
+        ImageModelProviderMetadataEntry {
+            images: Vec::new(),
+            extra,
+        },
+    )]))
+}
+
+fn deepinfra_image_response_metadata(
+    model_id: &str,
+    headers: Option<Headers>,
+) -> ImageModelResponse {
+    let mut response = ImageModelResponse::new(OffsetDateTime::now_utc(), model_id);
+
+    if let Some(headers) = headers {
+        for (name, value) in headers {
+            response = response.with_header(name, value);
+        }
+    }
+
+    response
+}
+
+fn strip_deepinfra_image_data_prefix(image: String) -> String {
+    if image.starts_with("data:image/")
+        && let Some((_, base64)) = image.split_once(";base64,")
+    {
+        return base64.to_string();
+    }
+
+    image
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct DeepInfraImageResponse {
+    images: Vec<String>,
+}
+
+fn default_deepinfra_transport() -> OpenAICompatibleTransport {
+    Arc::new(|request| Box::pin(std::future::ready(execute_deepinfra_request(request))))
+}
+
+fn execute_deepinfra_request(
+    request: ProviderApiRequest,
+) -> Result<ProviderApiResponse, FetchErrorInfo> {
+    match request.method {
+        ProviderApiRequestMethod::Get => execute_deepinfra_get_request(request),
+        ProviderApiRequestMethod::Post => execute_deepinfra_post_request(request),
+    }
+}
+
+fn execute_deepinfra_get_request(
+    request: ProviderApiRequest,
+) -> Result<ProviderApiResponse, FetchErrorInfo> {
+    let mut builder = ureq::get(&request.url);
+
+    for (name, value) in &request.headers {
+        builder = builder.header(name.as_str(), value.as_str());
+    }
+
+    let response = builder.config().http_status_as_error(false).build().call();
+
+    deepinfra_provider_api_response(response)
+}
+
+fn execute_deepinfra_post_request(
+    request: ProviderApiRequest,
+) -> Result<ProviderApiResponse, FetchErrorInfo> {
+    let mut builder = ureq::post(&request.url);
+
+    for (name, value) in &request.headers {
+        builder = builder.header(name.as_str(), value.as_str());
+    }
+
+    let builder = builder.config().http_status_as_error(false).build();
+    let response = match request.body {
+        Some(ProviderApiRequestBody::Text { content }) => builder.send(content),
+        Some(ProviderApiRequestBody::Bytes { content }) => builder.send(content),
+        Some(ProviderApiRequestBody::FormData { .. }) => {
+            return Err(FetchErrorInfo::new(
+                "multipart form data is not supported by the DeepInfra transport",
+            ));
+        }
+        None => builder.send_empty(),
+    };
+
+    deepinfra_provider_api_response(response)
+}
+
+fn deepinfra_provider_api_response(
+    response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+) -> Result<ProviderApiResponse, FetchErrorInfo> {
+    let mut response = response.map_err(|error| {
+        FetchErrorInfo::new("fetch failed")
+            .with_name("Error")
+            .with_cause_message(error.to_string())
+    })?;
+    let status = response.status();
+    let status_text = status.canonical_reason().unwrap_or("").to_string();
+    let headers = response
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_string(), value.to_string()))
+        })
+        .collect::<Headers>();
+    let body = response.body_mut().read_to_string().map_err(|error| {
+        FetchErrorInfo::new("failed to read response body")
+            .with_name("Error")
+            .with_cause_message(error.to_string())
+    })?;
+
+    Ok(ProviderApiResponse::text(status.as_u16(), status_text, body).with_headers(headers))
+}
+
 fn non_empty_optional_setting(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.is_empty())
 }
@@ -422,8 +795,10 @@ mod tests {
         DEFAULT_DEEPINFRA_BASE_URL, DeepInfraProvider, DeepInfraProviderSettings, create_deepinfra,
     };
     use crate::embed::{EmbedManyOptions, embed_many};
+    use crate::file_data::FileDataContent;
     use crate::generate_text::{GenerateTextOptions, generate_text};
     use crate::headers::Headers;
+    use crate::image_model::{ImageModel, ImageModelCallOptions};
     use crate::json::JsonValue;
     use crate::language_model::{
         LanguageModel, LanguageModelCallOptions, LanguageModelMessage, LanguageModelStreamPart,
@@ -431,7 +806,7 @@ mod tests {
     };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
-    use crate::provider::{ModelType, Provider, ProviderMetadata};
+    use crate::provider::{Provider, ProviderMetadata, ProviderOptions};
     use crate::provider_utils::{
         ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     };
@@ -851,21 +1226,175 @@ mod tests {
     }
 
     #[test]
-    fn deepinfra_provider_reports_unported_image_model() {
-        let provider = DeepInfraProvider::new();
+    fn deepinfra_provider_creates_image_model_and_generates_images() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
 
-        let image = match provider.image_model("black-forest-labs/FLUX-1-schnell") {
-            Ok(_) => panic!("image models are not implemented in this slice"),
-            Err(error) => error,
-        };
-        assert_eq!(image.model_type(), ModelType::ImageModel);
-        assert_eq!(image.model_id(), "black-forest-labs/FLUX-1-schnell");
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "images": [
+                            "data:image/png;base64,test-image-data",
+                            "raw-image-data"
+                        ]
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from([(
+                    "x-request-id".to_string(),
+                    "req_deepinfra_image".to_string(),
+                )])))))
+            });
+        let provider = create_deepinfra(
+            DeepInfraProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.deepinfra.test/v1/")
+                .with_header("custom-header", "value"),
+        )
+        .with_transport(transport);
+        let model = provider.image_model("black-forest-labs/FLUX-1-schnell");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "deepinfra": {
+                "additional_param": "value"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(2)
+                    .with_prompt("A cute baby sea otter")
+                    .with_size("1024x768")
+                    .with_aspect_ratio("16:9")
+                    .with_seed(42)
+                    .with_provider_options(provider_options)
+                    .with_header("x-call", "image"),
+            ),
+        );
 
-        let image_alias = match provider.image("black-forest-labs/FLUX-1-schnell") {
-            Ok(_) => panic!("image models are not implemented in this slice"),
-            Err(error) => error,
-        };
-        assert_eq!(image_alias.model_type(), ModelType::ImageModel);
+        assert_eq!(model.provider(), "deepinfra.image");
+        assert_eq!(model.model_id(), "black-forest-labs/FLUX-1-schnell");
+        assert_eq!(poll_ready(model.max_images_per_call()), Some(1));
+        assert_eq!(
+            result.images,
+            vec![
+                FileDataContent::Base64("test-image-data".to_string()),
+                FileDataContent::Base64("raw-image-data".to_string())
+            ]
+        );
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("req_deepinfra_image")
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(
+            request.url,
+            "https://api.deepinfra.test/v1/inference/black-forest-labs/FLUX-1-schnell"
+        );
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+        assert_eq!(
+            request.headers.get("x-call").map(String::as_str),
+            Some("image")
+        );
+        assert!(
+            request
+                .headers
+                .get("user-agent")
+                .is_some_and(|value| value.contains("ai-sdk/deepinfra/0.1.0")),
+            "DeepInfra user-agent suffix is included"
+        );
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "prompt": "A cute baby sea otter",
+                "num_images": 2,
+                "aspect_ratio": "16:9",
+                "width": "1024",
+                "height": "768",
+                "seed": 42,
+                "additional_param": "value"
+            }))
+        );
+
+        assert_eq!(
+            provider
+                .image("black-forest-labs/FLUX-1-schnell")
+                .provider(),
+            "deepinfra.image"
+        );
+    }
+
+    #[test]
+    fn deepinfra_image_model_maps_api_error_to_metadata() {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(|_request| -> OpenAICompatibleTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    400,
+                    "Bad Request",
+                    json!({
+                        "detail": {
+                            "error": "bad prompt"
+                        }
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from([(
+                    "x-request-id".to_string(),
+                    "req_deepinfra_image_error".to_string(),
+                )])))))
+            });
+        let model = DeepInfraProvider::new()
+            .with_transport(transport)
+            .image_model("black-forest-labs/FLUX-1-schnell");
+        let result =
+            poll_ready(model.do_generate(ImageModelCallOptions::new(1).with_prompt("bad prompt")));
+
+        assert!(result.images.is_empty());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("deepinfra"))
+                .and_then(|metadata| metadata.extra.get("errorMessage"))
+                .and_then(JsonValue::as_str),
+            Some("bad prompt")
+        );
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("req_deepinfra_image_error")
+        );
     }
 
     #[test]
@@ -879,11 +1408,10 @@ mod tests {
         let embedding = Provider::embedding_model(&provider, "BAAI/bge-large-en-v1.5")
             .expect("embedding model is supported");
         assert_eq!(embedding.provider(), "deepinfra.embedding");
-        let image = match Provider::image_model(&provider, "image") {
-            Ok(_) => panic!("image is unsupported in this slice"),
-            Err(error) => error,
-        };
-        assert_eq!(image.model_type(), ModelType::ImageModel);
+        let image = Provider::image_model(&provider, "black-forest-labs/FLUX-1-schnell")
+            .expect("image model is supported");
+        assert_eq!(image.provider(), "deepinfra.image");
+        assert_eq!(image.model_id(), "black-forest-labs/FLUX-1-schnell");
     }
 
     #[test]
