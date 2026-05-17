@@ -4721,6 +4721,16 @@ pub fn create_provider_executed_tool_factory(
     ProviderExecutedToolFactory::new(id, input_schema, output_schema)
 }
 
+/// Defines a function-style tool.
+///
+/// This is the Rust-native counterpart to upstream provider-utils `tool`.
+/// Upstream infers the tool name from the surrounding tool set; the Rust
+/// contract stores it directly so provider-v4 tool preparation can remain
+/// dependency-free and explicit.
+pub fn tool(name: impl Into<String>, input_schema: JsonSchema) -> Tool {
+    Tool::new(name, input_schema)
+}
+
 /// Defines a dynamic runtime tool.
 ///
 /// Dynamic tools prepare as provider-v4 function tools, matching upstream
@@ -7348,9 +7358,9 @@ mod tests {
         prepare_post_to_api_request, prepare_tools, prepare_tools_with_context,
         read_response_with_size_limit, remove_undefined_entries, resolve, resolve_full_media_type,
         resolve_provider_reference, safe_parse_json, safe_parse_json_with_schema,
-        safe_validate_types, serialize_model_options, strip_file_extension, validate_download_url,
-        validate_types, with_provider_utils_user_agent, with_user_agent_suffix,
-        without_trailing_slash,
+        safe_validate_types, serialize_model_options, strip_file_extension, tool,
+        validate_download_url, validate_types, with_provider_utils_user_agent,
+        with_user_agent_suffix, without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -13134,6 +13144,29 @@ mod tests {
                     }
                 ],
                 "strict": true
+            })
+        );
+    }
+
+    #[test]
+    fn tool_helper_prepares_upstream_function_tool_shape() {
+        let tool = tool("weather", object_schema()).with_description("Look up weather.");
+
+        assert!(!tool.is_dynamic());
+        assert!(!tool.is_provider_tool());
+        assert_eq!(
+            serde_json::to_value(tool.to_language_model_tool()).expect("tool serializes"),
+            json!({
+                "type": "function",
+                "name": "weather",
+                "description": "Look up weather.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    },
+                    "required": ["city"]
+                }
             })
         );
     }

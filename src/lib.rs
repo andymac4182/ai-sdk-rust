@@ -236,8 +236,8 @@ pub use provider_utils::{
     prepare_tools_with_context, read_response_with_size_limit, remove_undefined_entries, resolve,
     resolve_full_media_type, resolve_provider_reference, safe_parse_json,
     safe_parse_json_with_schema, safe_validate_types, serialize_model_options,
-    strip_file_extension, validate_download_url, validate_types, with_provider_utils_user_agent,
-    with_user_agent_suffix, without_trailing_slash,
+    strip_file_extension, tool, validate_download_url, validate_types,
+    with_provider_utils_user_agent, with_user_agent_suffix, without_trailing_slash,
 };
 pub use registry::{
     NoSuchProviderError, ProviderRegistry, ProviderRegistryError, ProviderRegistryOptions,
