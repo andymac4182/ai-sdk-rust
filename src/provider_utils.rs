@@ -4086,6 +4086,45 @@ pub type ToolModelOutputFuture =
 pub type ToolModelOutputFunction =
     dyn Fn(ToolModelOutputOptions) -> ToolModelOutputFuture + Send + Sync;
 
+/// Future returned by a tool-defined approval callback.
+pub type ToolNeedsApprovalFuture = Pin<Box<dyn Future<Output = bool> + Send>>;
+
+/// Options passed to a tool-defined approval callback.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolNeedsApprovalOptions {
+    /// Identifier of the model tool call whose execution might need approval.
+    pub tool_call_id: String,
+
+    /// Prompt messages sent to the model for the step that produced the tool call.
+    pub messages: LanguageModelPrompt,
+
+    /// Tool-specific context configured for the called tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<JsonValue>,
+}
+
+impl ToolNeedsApprovalOptions {
+    /// Creates tool-defined approval callback options.
+    pub fn new(tool_call_id: impl Into<String>, messages: LanguageModelPrompt) -> Self {
+        Self {
+            tool_call_id: tool_call_id.into(),
+            messages,
+            context: None,
+        }
+    }
+
+    /// Sets tool-specific context for the approval callback.
+    pub fn with_context(mut self, context: impl Into<JsonValue>) -> Self {
+        self.context = Some(context.into());
+        self
+    }
+}
+
+/// Function that determines whether a tool call needs approval.
+pub type ToolNeedsApprovalFunction =
+    dyn Fn(JsonValue, ToolNeedsApprovalOptions) -> ToolNeedsApprovalFuture + Send + Sync;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ToolKind {
     Function,
@@ -4261,6 +4300,8 @@ pub struct Tool {
     /// Generate-text-level approval configuration can still override it.
     pub needs_approval: Option<bool>,
 
+    needs_approval_resolver: Option<Arc<ToolNeedsApprovalFunction>>,
+
     execute: Option<Arc<ToolExecuteFunction>>,
     to_model_output: Option<Arc<ToolModelOutputFunction>>,
 }
@@ -4281,6 +4322,7 @@ impl Tool {
             provider_options: None,
             metadata: None,
             needs_approval: None,
+            needs_approval_resolver: None,
             execute: None,
             to_model_output: None,
         }
@@ -4305,6 +4347,7 @@ impl Tool {
             provider_options: None,
             metadata: None,
             needs_approval: None,
+            needs_approval_resolver: None,
             execute: None,
             to_model_output: None,
         }
@@ -4340,6 +4383,7 @@ impl Tool {
             provider_options: None,
             metadata: None,
             needs_approval: None,
+            needs_approval_resolver: None,
             execute: None,
             to_model_output: None,
         }
@@ -4375,6 +4419,7 @@ impl Tool {
             provider_options: None,
             metadata: None,
             needs_approval: None,
+            needs_approval_resolver: None,
             execute: None,
             to_model_output: None,
         }
@@ -4475,6 +4520,23 @@ impl Tool {
     /// when it is configured as a boolean rather than a callback.
     pub fn with_needs_approval(mut self, needs_approval: bool) -> Self {
         self.needs_approval = Some(needs_approval);
+        self.needs_approval_resolver = None;
+        self
+    }
+
+    /// Sets a runtime callback that determines whether this tool requires approval.
+    ///
+    /// This mirrors upstream's deprecated function-form `needsApproval`
+    /// setting while keeping approval resolution dependency-free and async.
+    pub fn with_needs_approval_function<F, Fut>(mut self, needs_approval: F) -> Self
+    where
+        F: Fn(JsonValue, ToolNeedsApprovalOptions) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = bool> + Send + 'static,
+    {
+        self.needs_approval = None;
+        self.needs_approval_resolver = Some(Arc::new(move |input, options| {
+            Box::pin(needs_approval(input, options))
+        }));
         self
     }
 
@@ -4580,9 +4642,29 @@ impl Tool {
         self.title.as_deref()
     }
 
-    /// Returns whether this tool requires approval before execution when configured.
+    /// Returns whether this tool has a static approval requirement.
     pub fn needs_approval(&self) -> Option<bool> {
         self.needs_approval
+    }
+
+    /// Returns whether this tool has a tool-defined approval callback.
+    pub fn has_needs_approval_function(&self) -> bool {
+        self.needs_approval_resolver.is_some()
+    }
+
+    /// Resolves this tool's approval requirement when one is configured.
+    pub fn resolve_needs_approval(
+        &self,
+        input: JsonValue,
+        options: ToolNeedsApprovalOptions,
+    ) -> Option<ToolNeedsApprovalFuture> {
+        if let Some(needs_approval) = self.needs_approval {
+            return Some(Box::pin(std::future::ready(needs_approval)));
+        }
+
+        self.needs_approval_resolver
+            .as_ref()
+            .map(|needs_approval| needs_approval(input, options))
     }
 
     /// Returns whether this tool has a runtime-dependent description callback.
@@ -4690,6 +4772,10 @@ impl fmt::Debug for Tool {
             .field("provider_options", &self.provider_options)
             .field("metadata", &self.metadata)
             .field("needs_approval", &self.needs_approval)
+            .field(
+                "has_needs_approval_function",
+                &self.needs_approval_resolver.is_some(),
+            )
             .field("is_executable", &self.is_executable())
             .finish()
     }
@@ -7293,7 +7379,7 @@ mod tests {
     use std::future::{Future, ready};
     use std::pin::Pin;
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
     use std::task::{Context, Poll, Waker};
@@ -7332,13 +7418,13 @@ mod tests {
         StreamingToolCallDelta, StreamingToolCallDeltaFunction, StreamingToolCallTracker,
         StreamingToolCallTrackerOptions, StreamingToolCallTypeValidation, Tool,
         ToolApprovalRequest, ToolApprovalResponse, ToolCall, ToolDescriptionOptions,
-        ToolExecutionError, ToolExecutionOptions, ToolModelOutputOptions, ToolResult,
-        ValidateTypesResult, ValidationResult, add_additional_properties_to_json_schema, as_array,
-        as_flexible_schema, as_schema, combine_headers, convert_base64_to_bytes,
-        convert_bytes_to_base64, convert_image_model_file_to_data_uri,
-        convert_inline_file_data_to_bytes, convert_to_base64, convert_to_form_data,
-        create_binary_response_handler, create_event_source_response_handler, create_id_generator,
-        create_json_error_response_handler, create_json_response_handler,
+        ToolExecutionError, ToolExecutionOptions, ToolModelOutputOptions, ToolNeedsApprovalOptions,
+        ToolResult, ValidateTypesResult, ValidationResult,
+        add_additional_properties_to_json_schema, as_array, as_flexible_schema, as_schema,
+        combine_headers, convert_base64_to_bytes, convert_bytes_to_base64,
+        convert_image_model_file_to_data_uri, convert_inline_file_data_to_bytes, convert_to_base64,
+        convert_to_form_data, create_binary_response_handler, create_event_source_response_handler,
+        create_id_generator, create_json_error_response_handler, create_json_response_handler,
         create_provider_defined_tool_factory,
         create_provider_defined_tool_factory_with_output_schema,
         create_provider_executed_tool_factory, create_status_code_error_response_handler,
@@ -13169,6 +13255,93 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn tool_needs_approval_options_use_upstream_shape() {
+        let options = ToolNeedsApprovalOptions::new(
+            "call-1",
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::Text(
+                    LanguageModelTextPart::new("Weather?"),
+                )],
+            ))],
+        )
+        .with_context(json!({ "risk": "high" }));
+
+        assert_eq!(
+            serde_json::to_value(&options).expect("options serialize"),
+            json!({
+                "toolCallId": "call-1",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Weather?"
+                            }
+                        ]
+                    }
+                ],
+                "context": {
+                    "risk": "high"
+                }
+            })
+        );
+
+        let round_tripped: ToolNeedsApprovalOptions = serde_json::from_value(json!({
+            "toolCallId": "call-2",
+            "messages": [],
+            "context": {
+                "risk": "low"
+            }
+        }))
+        .expect("options deserialize");
+
+        assert_eq!(round_tripped.tool_call_id, "call-2");
+        assert_eq!(round_tripped.context, Some(json!({ "risk": "low" })));
+    }
+
+    #[test]
+    fn tool_defined_needs_approval_function_resolves_with_input_and_options() {
+        let seen = Arc::new(Mutex::new(None::<(JsonValue, ToolNeedsApprovalOptions)>));
+        let seen_for_callback = Arc::clone(&seen);
+        let tool = Tool::new("weather", object_schema()).with_needs_approval_function(
+            move |input, options| {
+                let seen = Arc::clone(&seen_for_callback);
+                async move {
+                    let needs_approval = input["risk"] == json!("high");
+                    seen.lock().expect("seen lock").replace((input, options));
+                    needs_approval
+                }
+            },
+        );
+
+        assert_eq!(tool.needs_approval(), None);
+        assert!(tool.has_needs_approval_function());
+
+        let prompt = vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![LanguageModelUserContentPart::Text(
+                LanguageModelTextPart::new("Weather?"),
+            )],
+        ))];
+        let needs_approval = poll_ready(
+            tool.resolve_needs_approval(
+                json!({ "risk": "high" }),
+                ToolNeedsApprovalOptions::new("call-1", prompt.clone())
+                    .with_context(json!({ "tenant": "acme" })),
+            )
+            .expect("approval function is configured"),
+        );
+
+        assert!(needs_approval);
+        let seen = seen.lock().expect("seen lock");
+        let (input, options) = seen.as_ref().expect("callback captured options");
+        assert_eq!(input["risk"], json!("high"));
+        assert_eq!(options.tool_call_id, "call-1");
+        assert_eq!(options.messages, prompt);
+        assert_eq!(options.context, Some(json!({ "tenant": "acme" })));
     }
 
     #[test]

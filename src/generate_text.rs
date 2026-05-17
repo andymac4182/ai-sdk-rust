@@ -36,8 +36,8 @@ use crate::provider::{
 use crate::provider::{ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{
     Base64DecodeError, ExperimentalSandbox, IdGeneratorOptions, Tool, ToolExecutionOptions,
-    ToolModelOutputOptions, convert_base64_to_bytes, convert_bytes_to_base64, create_id_generator,
-    generate_id, prepare_tools_with_context,
+    ToolModelOutputOptions, ToolNeedsApprovalOptions, convert_base64_to_bytes,
+    convert_bytes_to_base64, create_id_generator, generate_id, prepare_tools_with_context,
 };
 use crate::warning::Warning;
 
@@ -2237,17 +2237,35 @@ pub async fn resolve_tool_approval(
         }
     }
 
-    let needs_approval = options.tools.and_then(|tools| {
+    if let Some(tool) = options.tools.and_then(|tools| {
         tools
             .iter()
             .find(|tool| tool.name == options.tool_call.tool_name)
-            .and_then(Tool::needs_approval)
-    });
+    }) {
+        let context = options
+            .tools_context
+            .and_then(|tools_context| tools_context.get(&options.tool_call.tool_name))
+            .cloned();
+        let mut needs_approval_options = ToolNeedsApprovalOptions::new(
+            options.tool_call.tool_call_id.clone(),
+            options.messages.cloned().unwrap_or_default(),
+        );
+        if let Some(context) = context {
+            needs_approval_options = needs_approval_options.with_context(context);
+        }
 
-    match needs_approval {
-        Some(true) => NormalizedToolApprovalStatus::UserApproval,
-        Some(false) | None => NormalizedToolApprovalStatus::NotApplicable,
+        if let Some(needs_approval) =
+            tool.resolve_needs_approval(options.tool_call.input.clone(), needs_approval_options)
+        {
+            return if needs_approval.await {
+                NormalizedToolApprovalStatus::UserApproval
+            } else {
+                NormalizedToolApprovalStatus::NotApplicable
+            };
+        }
     }
+
+    NormalizedToolApprovalStatus::NotApplicable
 }
 
 /// Error returned when a model tries to call a tool that is not available.
@@ -7364,17 +7382,17 @@ mod tests {
         LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
         LanguageModelFile, LanguageModelFileData, LanguageModelFinishReason,
         LanguageModelFunctionTool, LanguageModelGenerateResult, LanguageModelMessage,
-        LanguageModelProviderTool, LanguageModelReasoning, LanguageModelReasoningFile,
-        LanguageModelReasoningPart, LanguageModelRequest, LanguageModelResponse,
-        LanguageModelResponseFormat, LanguageModelSource, LanguageModelStreamPart,
-        LanguageModelStreamResult, LanguageModelSupportedUrls, LanguageModelSystemMessage,
-        LanguageModelText, LanguageModelTextDelta, LanguageModelTextPart, LanguageModelTool,
-        LanguageModelToolApprovalRequest, LanguageModelToolApprovalRequestPart,
-        LanguageModelToolApprovalResponsePart, LanguageModelToolCall, LanguageModelToolCallPart,
-        LanguageModelToolChoice, LanguageModelToolContentPart, LanguageModelToolMessage,
-        LanguageModelToolResult, LanguageModelToolResultOutput, LanguageModelToolResultPart,
-        LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage,
-        OutputTokenUsage,
+        LanguageModelPrompt, LanguageModelProviderTool, LanguageModelReasoning,
+        LanguageModelReasoningFile, LanguageModelReasoningPart, LanguageModelRequest,
+        LanguageModelResponse, LanguageModelResponseFormat, LanguageModelSource,
+        LanguageModelStreamPart, LanguageModelStreamResult, LanguageModelSupportedUrls,
+        LanguageModelSystemMessage, LanguageModelText, LanguageModelTextDelta,
+        LanguageModelTextPart, LanguageModelTool, LanguageModelToolApprovalRequest,
+        LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
+        LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolChoice,
+        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResult,
+        LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
+        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::prompt::Prompt;
     use crate::provider::{
@@ -7987,6 +8005,50 @@ mod tests {
             )),
             NormalizedToolApprovalStatus::NotApplicable
         );
+    }
+
+    #[test]
+    fn resolve_tool_approval_uses_tool_defined_callback_with_context() {
+        let tool_call = approval_tool_call("weather");
+        let prompt = vec![user_message("Weather?")];
+        let tools_context =
+            JsonObject::from_iter([("weather".to_string(), json!({ "risk": "high" }))]);
+        let seen = Arc::new(Mutex::new(
+            None::<(JsonValue, String, LanguageModelPrompt, JsonValue)>,
+        ));
+        let seen_for_callback = Arc::clone(&seen);
+        let tools = vec![
+            Tool::new("weather", approval_tool_schema()).with_needs_approval_function(
+                move |input, options| {
+                    let seen = Arc::clone(&seen_for_callback);
+                    async move {
+                        seen.lock().expect("seen lock").replace((
+                            input,
+                            options.tool_call_id,
+                            options.messages,
+                            options.context.expect("context passed"),
+                        ));
+                        true
+                    }
+                },
+            ),
+        ];
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_messages(&prompt)
+                .with_tools_context(&tools_context),
+        ));
+
+        assert_eq!(status, NormalizedToolApprovalStatus::UserApproval);
+        let seen = seen.lock().expect("seen lock");
+        let (input, tool_call_id, messages, context) =
+            seen.as_ref().expect("callback captured options");
+        assert_eq!(input["city"], json!("Berlin"));
+        assert_eq!(tool_call_id, "call-1");
+        assert_eq!(messages, &prompt);
+        assert_eq!(context, &json!({ "risk": "high" }));
     }
 
     #[test]
