@@ -63,9 +63,17 @@ pub use generate_image::{
     experimental_generate_image, generate_image,
 };
 pub use generate_object::{
-    GenerateObjectOptions, GenerateObjectRepairText, GenerateObjectRepairTextFunction,
+    GenerateObjectEndEvent, GenerateObjectOnFinish, GenerateObjectOnFinishCallback,
+    GenerateObjectOnFinishFunction, GenerateObjectOnFinishFuture, GenerateObjectOnStart,
+    GenerateObjectOnStartCallback, GenerateObjectOnStartFunction, GenerateObjectOnStartFuture,
+    GenerateObjectOnStepFinish, GenerateObjectOnStepFinishCallback,
+    GenerateObjectOnStepFinishFunction, GenerateObjectOnStepFinishFuture,
+    GenerateObjectOnStepStart, GenerateObjectOnStepStartCallback,
+    GenerateObjectOnStepStartFunction, GenerateObjectOnStepStartFuture, GenerateObjectOptions,
+    GenerateObjectOutputKind, GenerateObjectRepairText, GenerateObjectRepairTextFunction,
     GenerateObjectRepairTextFuture, GenerateObjectRepairTextOptions, GenerateObjectRequest,
-    GenerateObjectResponse, GenerateObjectResult, RepairTextFunction, generate_object,
+    GenerateObjectResponse, GenerateObjectResult, GenerateObjectStartEvent,
+    GenerateObjectStepEndEvent, GenerateObjectStepStartEvent, RepairTextFunction, generate_object,
 };
 pub use generate_speech::{
     DefaultGeneratedAudioFile, ExperimentalSpeechResult, GenerateSpeechOptions, GeneratedAudioFile,

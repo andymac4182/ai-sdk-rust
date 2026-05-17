@@ -14,11 +14,13 @@ use crate::language_model::{
     LanguageModelPrompt, LanguageModelReasoning, LanguageModelRequest, LanguageModelResponse,
     LanguageModelResponseFormat, LanguageModelText, LanguageModelUsage,
 };
-use crate::provider::{ProviderMetadata, TypeValidationError};
+use crate::provider::{ProviderMetadata, ProviderOptions, TypeValidationError};
 use crate::provider_utils::{
-    FlexibleSchema, ParseJsonError, ParseJsonResult, ValidateTypesResult, generate_id,
-    safe_parse_json, safe_parse_json_with_schema, safe_validate_types, with_user_agent_suffix,
+    FlexibleSchema, IdGeneratorOptions, ParseJsonError, ParseJsonResult, ValidateTypesResult,
+    create_id_generator, generate_id, safe_parse_json, safe_parse_json_with_schema,
+    safe_validate_types, with_user_agent_suffix,
 };
+use crate::retry::DEFAULT_MAX_RETRIES;
 use crate::warning::Warning;
 
 pub use crate::generate_text::NoObjectGeneratedError;
@@ -201,6 +203,211 @@ impl<T> GenerateObjectResult<T> {
     }
 }
 
+/// Output strategy selected for a high-level `generate_object` call.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GenerateObjectOutputKind {
+    /// Object output with optional schema validation.
+    Object,
+
+    /// Array output wrapped in upstream's `{ elements: [...] }` provider response shape.
+    Array,
+
+    /// Enum output wrapped in upstream's `{ result: <enum> }` provider response shape.
+    Enum,
+
+    /// JSON output without a schema.
+    NoSchema,
+}
+
+/// Event passed to the start callback for `generate_object`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateObjectStartEvent {
+    /// Unique identifier for this object generation call.
+    pub call_id: String,
+
+    /// Upstream operation identifier.
+    pub operation_id: String,
+
+    /// Provider identifier.
+    pub provider: String,
+
+    /// Provider-specific model identifier.
+    pub model_id: String,
+
+    /// Prompt messages being sent to the language model.
+    pub messages: LanguageModelPrompt,
+
+    /// Maximum number of tokens configured for generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
+
+    /// Sampling temperature configured for generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+
+    /// Nucleus sampling value configured for generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+
+    /// Top-k sampling value configured for generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u64>,
+
+    /// Presence penalty configured for generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f64>,
+
+    /// Frequency penalty configured for generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f64>,
+
+    /// Deterministic sampling seed configured for generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+
+    /// Maximum number of retries configured for failed requests.
+    pub max_retries: usize,
+
+    /// Additional HTTP headers sent to the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Headers>,
+
+    /// Additional provider-specific options.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+
+    /// Output strategy used for the call.
+    pub output: GenerateObjectOutputKind,
+
+    /// JSON schema sent to the model provider, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<JsonSchema>,
+
+    /// Optional provider-facing schema name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_name: Option<String>,
+
+    /// Optional provider-facing schema description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_description: Option<String>,
+}
+
+/// Event passed to the step-start callback for `generate_object`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateObjectStepStartEvent {
+    /// Unique identifier for this object generation call.
+    pub call_id: String,
+
+    /// Zero-based step index. Non-streaming object generation always has one step.
+    pub step_number: usize,
+
+    /// Provider identifier.
+    pub provider: String,
+
+    /// Provider-specific model identifier.
+    pub model_id: String,
+
+    /// Additional provider-specific options.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+
+    /// Additional HTTP headers sent to the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Headers>,
+
+    /// Prompt messages sent to the provider.
+    pub prompt_messages: LanguageModelPrompt,
+}
+
+/// Event passed to the step-finish callback for `generate_object`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateObjectStepEndEvent {
+    /// Unique identifier for this object generation call.
+    pub call_id: String,
+
+    /// Zero-based step index. Non-streaming object generation always has one step.
+    pub step_number: usize,
+
+    /// Provider identifier.
+    pub provider: String,
+
+    /// Provider-specific model identifier.
+    pub model_id: String,
+
+    /// Unified reason why generation finished.
+    pub finish_reason: FinishReason,
+
+    /// Token usage reported by the model.
+    pub usage: LanguageModelUsage,
+
+    /// Raw object text before JSON parsing and validation.
+    pub object_text: String,
+
+    /// Reasoning text concatenated from reasoning parts, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+
+    /// Warnings returned by the model provider.
+    pub warnings: Vec<Warning>,
+
+    /// Additional request information.
+    pub request: GenerateObjectRequest,
+
+    /// Additional response information.
+    pub response: GenerateObjectResponse,
+
+    /// Additional provider-specific metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+
+    /// Milliseconds to the first stream chunk. Always absent for non-streaming generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ms_to_first_chunk: Option<u64>,
+}
+
+/// Event passed to the finish callback for `generate_object`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateObjectEndEvent<T = JsonValue> {
+    /// Unique identifier for this object generation call.
+    pub call_id: String,
+
+    /// Parsed and validated object. Always present for non-streaming `generate_object`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<T>,
+
+    /// Parse or validation error. Always absent for successful non-streaming `generate_object`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+
+    /// Reasoning text concatenated from reasoning parts, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+
+    /// Unified reason why generation finished.
+    pub finish_reason: FinishReason,
+
+    /// Token usage reported by the model.
+    pub usage: LanguageModelUsage,
+
+    /// Warnings returned by the model provider.
+    pub warnings: Vec<Warning>,
+
+    /// Additional request information.
+    pub request: GenerateObjectRequest,
+
+    /// Additional response information.
+    pub response: GenerateObjectResponse,
+
+    /// Additional provider-specific metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+}
+
 /// Options passed to a generate-object repair-text callback.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GenerateObjectRepairTextOptions {
@@ -280,6 +487,176 @@ impl fmt::Debug for GenerateObjectRepairText<'_> {
     }
 }
 
+/// Future returned by a high-level generate-object start callback.
+pub type GenerateObjectOnStartFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+/// Callback invoked before a high-level generate-object operation calls the model.
+pub type GenerateObjectOnStartFunction<'a> =
+    dyn Fn(GenerateObjectStartEvent) -> GenerateObjectOnStartFuture<'a> + 'a;
+
+/// Upstream callback alias for [`GenerateObjectOnStartFunction`].
+pub type GenerateObjectOnStartCallback<'a> = GenerateObjectOnStartFunction<'a>;
+
+/// Callback wrapper for upstream generate-object `experimental_onStart`.
+pub struct GenerateObjectOnStart<'a> {
+    on_start: Rc<GenerateObjectOnStartFunction<'a>>,
+}
+
+impl<'a> GenerateObjectOnStart<'a> {
+    /// Creates a generate-object start callback.
+    pub fn new<F, Fut>(on_start: F) -> Self
+    where
+        F: Fn(GenerateObjectStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        Self {
+            on_start: Rc::new(move |event| Box::pin(on_start(event))),
+        }
+    }
+
+    /// Runs the generate-object start callback.
+    pub fn start(&self, event: GenerateObjectStartEvent) -> GenerateObjectOnStartFuture<'a> {
+        (self.on_start)(event)
+    }
+}
+
+impl fmt::Debug for GenerateObjectOnStart<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GenerateObjectOnStart")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Future returned by a high-level generate-object step-start callback.
+pub type GenerateObjectOnStepStartFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+/// Callback invoked before the single generate-object model step.
+pub type GenerateObjectOnStepStartFunction<'a> =
+    dyn Fn(GenerateObjectStepStartEvent) -> GenerateObjectOnStepStartFuture<'a> + 'a;
+
+/// Upstream callback alias for [`GenerateObjectOnStepStartFunction`].
+pub type GenerateObjectOnStepStartCallback<'a> = GenerateObjectOnStepStartFunction<'a>;
+
+/// Callback wrapper for upstream generate-object `experimental_onStepStart`.
+pub struct GenerateObjectOnStepStart<'a> {
+    on_step_start: Rc<GenerateObjectOnStepStartFunction<'a>>,
+}
+
+impl<'a> GenerateObjectOnStepStart<'a> {
+    /// Creates a generate-object step-start callback.
+    pub fn new<F, Fut>(on_step_start: F) -> Self
+    where
+        F: Fn(GenerateObjectStepStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        Self {
+            on_step_start: Rc::new(move |event| Box::pin(on_step_start(event))),
+        }
+    }
+
+    /// Runs the generate-object step-start callback.
+    pub fn start(
+        &self,
+        event: GenerateObjectStepStartEvent,
+    ) -> GenerateObjectOnStepStartFuture<'a> {
+        (self.on_step_start)(event)
+    }
+}
+
+impl fmt::Debug for GenerateObjectOnStepStart<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GenerateObjectOnStepStart")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Future returned by a high-level generate-object step-finish callback.
+pub type GenerateObjectOnStepFinishFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+/// Callback invoked after the generate-object model step returns raw text.
+pub type GenerateObjectOnStepFinishFunction<'a> =
+    dyn Fn(GenerateObjectStepEndEvent) -> GenerateObjectOnStepFinishFuture<'a> + 'a;
+
+/// Upstream callback alias for [`GenerateObjectOnStepFinishFunction`].
+pub type GenerateObjectOnStepFinishCallback<'a> = GenerateObjectOnStepFinishFunction<'a>;
+
+/// Callback wrapper for upstream generate-object `onStepFinish`.
+pub struct GenerateObjectOnStepFinish<'a> {
+    on_step_finish: Rc<GenerateObjectOnStepFinishFunction<'a>>,
+}
+
+impl<'a> GenerateObjectOnStepFinish<'a> {
+    /// Creates a generate-object step-finish callback.
+    pub fn new<F, Fut>(on_step_finish: F) -> Self
+    where
+        F: Fn(GenerateObjectStepEndEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        Self {
+            on_step_finish: Rc::new(move |event| Box::pin(on_step_finish(event))),
+        }
+    }
+
+    /// Runs the generate-object step-finish callback.
+    pub fn finish(
+        &self,
+        event: GenerateObjectStepEndEvent,
+    ) -> GenerateObjectOnStepFinishFuture<'a> {
+        (self.on_step_finish)(event)
+    }
+}
+
+impl fmt::Debug for GenerateObjectOnStepFinish<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GenerateObjectOnStepFinish")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Future returned by a high-level generate-object finish callback.
+pub type GenerateObjectOnFinishFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+/// Callback invoked after `generate_object` parses and validates the final object.
+pub type GenerateObjectOnFinishFunction<'a> =
+    dyn Fn(GenerateObjectEndEvent) -> GenerateObjectOnFinishFuture<'a> + 'a;
+
+/// Upstream callback alias for [`GenerateObjectOnFinishFunction`].
+pub type GenerateObjectOnFinishCallback<'a> = GenerateObjectOnFinishFunction<'a>;
+
+/// Callback wrapper for upstream generate-object `onFinish`.
+pub struct GenerateObjectOnFinish<'a> {
+    on_finish: Rc<GenerateObjectOnFinishFunction<'a>>,
+}
+
+impl<'a> GenerateObjectOnFinish<'a> {
+    /// Creates a generate-object finish callback.
+    pub fn new<F, Fut>(on_finish: F) -> Self
+    where
+        F: Fn(GenerateObjectEndEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        Self {
+            on_finish: Rc::new(move |event| Box::pin(on_finish(event))),
+        }
+    }
+
+    /// Runs the generate-object finish callback.
+    pub fn finish(&self, event: GenerateObjectEndEvent) -> GenerateObjectOnFinishFuture<'a> {
+        (self.on_finish)(event)
+    }
+}
+
+impl fmt::Debug for GenerateObjectOnFinish<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GenerateObjectOnFinish")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Options for a high-level non-streaming object generation call.
 #[derive(Debug)]
 pub struct GenerateObjectOptions<'a, M: LanguageModel + ?Sized> {
@@ -306,6 +683,18 @@ pub struct GenerateObjectOptions<'a, M: LanguageModel + ?Sized> {
 
     /// Whether schema validation should use upstream array output mode.
     pub array_output: bool,
+
+    /// Optional callback invoked before generation starts.
+    pub on_start: Option<GenerateObjectOnStart<'a>>,
+
+    /// Optional callback invoked before the single model step starts.
+    pub on_step_start: Option<GenerateObjectOnStepStart<'a>>,
+
+    /// Optional callback invoked after the model step returns raw text.
+    pub on_step_finish: Option<GenerateObjectOnStepFinish<'a>>,
+
+    /// Optional callback invoked after the final object is parsed and validated.
+    pub on_finish: Option<GenerateObjectOnFinish<'a>>,
 }
 
 impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
@@ -326,6 +715,10 @@ impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
             repair_text: None,
             enum_values: None,
             array_output: false,
+            on_start: None,
+            on_step_start: None,
+            on_step_finish: None,
+            on_finish: None,
         }
     }
 
@@ -425,6 +818,64 @@ impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
         self.with_repair_text(repair_text)
     }
 
+    /// Sets a callback that is invoked before object generation starts.
+    pub fn with_on_start<F, Fut>(mut self, on_start: F) -> Self
+    where
+        F: Fn(GenerateObjectStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_start = Some(GenerateObjectOnStart::new(on_start));
+        self
+    }
+
+    /// Upstream experimental alias for [`GenerateObjectOptions::with_on_start`].
+    pub fn with_experimental_on_start<F, Fut>(self, on_start: F) -> Self
+    where
+        F: Fn(GenerateObjectStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.with_on_start(on_start)
+    }
+
+    /// Sets a callback that is invoked before the single model step starts.
+    pub fn with_on_step_start<F, Fut>(mut self, on_step_start: F) -> Self
+    where
+        F: Fn(GenerateObjectStepStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_step_start = Some(GenerateObjectOnStepStart::new(on_step_start));
+        self
+    }
+
+    /// Upstream experimental alias for [`GenerateObjectOptions::with_on_step_start`].
+    pub fn with_experimental_on_step_start<F, Fut>(self, on_step_start: F) -> Self
+    where
+        F: Fn(GenerateObjectStepStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.with_on_step_start(on_step_start)
+    }
+
+    /// Sets a callback that is invoked after the model step returns raw text.
+    pub fn with_on_step_finish<F, Fut>(mut self, on_step_finish: F) -> Self
+    where
+        F: Fn(GenerateObjectStepEndEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_step_finish = Some(GenerateObjectOnStepFinish::new(on_step_finish));
+        self
+    }
+
+    /// Sets a callback that is invoked after the final object is parsed and validated.
+    pub fn with_on_finish<F, Fut>(mut self, on_finish: F) -> Self
+    where
+        F: Fn(GenerateObjectEndEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_finish = Some(GenerateObjectOnFinish::new(on_finish));
+        self
+    }
+
     /// Adds an HTTP header.
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.call_options
@@ -455,16 +906,64 @@ where
         repair_text,
         enum_values,
         array_output,
+        on_start,
+        on_step_start,
+        on_step_finish,
+        on_finish,
     } = options;
 
-    call_options.response_format = Some(generate_object_response_format(
+    let output_kind = generate_object_output_kind(&schema, enum_values.as_deref(), array_output);
+    let response_format = generate_object_response_format(
         &schema,
         &schema_name,
         &schema_description,
         enum_values.as_deref(),
         array_output,
-    ));
+    );
+    let event_schema = response_format_schema(&response_format);
+    call_options.response_format = Some(response_format);
     append_generate_object_user_agent(&mut call_options);
+    let call_id = generate_object_call_id();
+
+    if let Some(on_start) = &on_start {
+        on_start
+            .start(GenerateObjectStartEvent {
+                call_id: call_id.clone(),
+                operation_id: "ai.generateObject".to_string(),
+                provider: model.provider().to_string(),
+                model_id: model.model_id().to_string(),
+                messages: call_options.prompt.clone(),
+                max_output_tokens: call_options.max_output_tokens,
+                temperature: call_options.temperature,
+                top_p: call_options.top_p,
+                top_k: call_options.top_k,
+                presence_penalty: call_options.presence_penalty,
+                frequency_penalty: call_options.frequency_penalty,
+                seed: call_options.seed,
+                max_retries: DEFAULT_MAX_RETRIES,
+                headers: call_options.headers.clone(),
+                provider_options: call_options.provider_options.clone(),
+                output: output_kind,
+                schema: event_schema.clone(),
+                schema_name: schema_name.clone(),
+                schema_description: schema_description.clone(),
+            })
+            .await;
+    }
+
+    if let Some(on_step_start) = &on_step_start {
+        on_step_start
+            .start(GenerateObjectStepStartEvent {
+                call_id: call_id.clone(),
+                step_number: 0,
+                provider: model.provider().to_string(),
+                model_id: model.model_id().to_string(),
+                provider_options: call_options.provider_options.clone(),
+                headers: call_options.headers.clone(),
+                prompt_messages: call_options.prompt.clone(),
+            })
+            .await;
+    }
 
     let generate_result = model.do_generate(call_options).await;
     let finish_reason = generate_result.finish_reason.unified;
@@ -481,6 +980,27 @@ where
             finish_reason,
         ));
     };
+    let reasoning = extract_object_reasoning(&generate_result.content);
+
+    if let Some(on_step_finish) = &on_step_finish {
+        on_step_finish
+            .finish(GenerateObjectStepEndEvent {
+                call_id: call_id.clone(),
+                step_number: 0,
+                provider: model.provider().to_string(),
+                model_id: model.model_id().to_string(),
+                finish_reason: finish_reason.clone(),
+                usage: usage.clone(),
+                object_text: text.clone(),
+                reasoning: reasoning.clone(),
+                warnings: generate_result.warnings.clone(),
+                request: request.clone(),
+                response: result_response.clone(),
+                provider_metadata: generate_result.provider_metadata.clone(),
+                ms_to_first_chunk: None,
+            })
+            .await;
+    }
 
     let object = parse_generated_object_with_repair(
         text,
@@ -500,7 +1020,7 @@ where
         GenerateObjectResult::new(object, finish_reason, usage, request, result_response)
             .with_warnings(generate_result.warnings);
 
-    if let Some(reasoning) = extract_object_reasoning(&generate_result.content) {
+    if let Some(reasoning) = reasoning {
         result = result.with_reasoning(reasoning);
     }
 
@@ -508,7 +1028,47 @@ where
         result = result.with_provider_metadata(provider_metadata);
     }
 
+    if let Some(on_finish) = &on_finish {
+        on_finish
+            .finish(GenerateObjectEndEvent {
+                call_id,
+                object: Some(result.object.clone()),
+                error: None,
+                reasoning: result.reasoning.clone(),
+                finish_reason: result.finish_reason.clone(),
+                usage: result.usage.clone(),
+                warnings: result.warnings.clone().unwrap_or_default(),
+                request: result.request.clone(),
+                response: result.response.clone(),
+                provider_metadata: result.provider_metadata.clone(),
+            })
+            .await;
+    }
+
     Ok(result)
+}
+
+fn generate_object_output_kind(
+    schema: &Option<FlexibleSchema>,
+    enum_values: Option<&[String]>,
+    array_output: bool,
+) -> GenerateObjectOutputKind {
+    if enum_values.is_some() {
+        GenerateObjectOutputKind::Enum
+    } else if array_output {
+        GenerateObjectOutputKind::Array
+    } else if schema.is_some() {
+        GenerateObjectOutputKind::Object
+    } else {
+        GenerateObjectOutputKind::NoSchema
+    }
+}
+
+fn response_format_schema(response_format: &LanguageModelResponseFormat) -> Option<JsonSchema> {
+    match response_format {
+        LanguageModelResponseFormat::Json { schema, .. } => schema.clone(),
+        LanguageModelResponseFormat::Text => None,
+    }
 }
 
 fn generate_object_response_format(
@@ -814,6 +1374,14 @@ fn generate_object_response(response: &LanguageModelResponse) -> GenerateObjectR
     }
 }
 
+fn generate_object_call_id() -> String {
+    let generate_call_id =
+        create_id_generator(IdGeneratorOptions::new().with_prefix("aiobj").with_size(24))
+            .expect("default generate_object call id configuration is valid");
+
+    generate_call_id()
+}
+
 fn extract_object_text(content: &[LanguageModelContent]) -> Option<String> {
     let mut text = String::new();
     let mut has_text = false;
@@ -850,7 +1418,7 @@ fn extract_object_reasoning(content: &[LanguageModelContent]) -> Option<String> 
 mod tests {
     use std::future::{Future, Ready, ready};
     use std::pin::Pin;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Waker};
 
     use serde::{Deserialize, Serialize};
@@ -858,10 +1426,13 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::{
-        GenerateObjectOptions, GenerateObjectRequest, GenerateObjectResponse, GenerateObjectResult,
+        GenerateObjectEndEvent, GenerateObjectOptions, GenerateObjectOutputKind,
+        GenerateObjectRequest, GenerateObjectResponse, GenerateObjectResult,
+        GenerateObjectStartEvent, GenerateObjectStepEndEvent, GenerateObjectStepStartEvent,
         array_json_schema, enum_json_schema, generate_object,
     };
     use crate::VERSION;
+    use crate::headers::Headers;
     use crate::language_model::{
         FinishReason, InputTokenUsage, LanguageModel, LanguageModelCallOptions,
         LanguageModelContent, LanguageModelFinishReason, LanguageModelGenerateResult,
@@ -871,6 +1442,7 @@ mod tests {
     };
     use crate::provider::ProviderMetadata;
     use crate::provider_utils::{Schema, ValidationResult, json_schema};
+    use crate::retry::DEFAULT_MAX_RETRIES;
     use crate::warning::Warning;
 
     #[derive(Debug)]
@@ -1294,6 +1866,295 @@ mod tests {
                     .with_description("A numeric answer object.")
             )
         );
+    }
+
+    #[test]
+    fn generate_object_lifecycle_events_use_upstream_json_shapes() {
+        let start = GenerateObjectStartEvent {
+            call_id: "aiobj_call".to_string(),
+            operation_id: "ai.generateObject".to_string(),
+            provider: "test-provider".to_string(),
+            model_id: "object-test".to_string(),
+            messages: prompt(),
+            max_output_tokens: Some(128),
+            temperature: Some(0.2),
+            top_p: Some(0.9),
+            top_k: Some(40),
+            presence_penalty: Some(0.1),
+            frequency_penalty: Some(0.3),
+            seed: Some(7),
+            max_retries: DEFAULT_MAX_RETRIES,
+            headers: Some(Headers::from([(
+                "user-agent".to_string(),
+                "ai/test".to_string(),
+            )])),
+            provider_options: None,
+            output: GenerateObjectOutputKind::Object,
+            schema: Some(answer_json_schema()),
+            schema_name: Some("answer".to_string()),
+            schema_description: Some("A numeric answer object.".to_string()),
+        };
+
+        let serialized_start =
+            serde_json::to_value(&start).expect("start event serializes to JSON");
+        assert_eq!(serialized_start["callId"], "aiobj_call");
+        assert_eq!(serialized_start["operationId"], "ai.generateObject");
+        assert_eq!(serialized_start["maxOutputTokens"], 128);
+        assert_eq!(serialized_start["maxRetries"], DEFAULT_MAX_RETRIES);
+        assert_eq!(serialized_start["output"], "object");
+        assert_eq!(serialized_start["schemaName"], "answer");
+        assert_eq!(
+            serde_json::from_value::<GenerateObjectStartEvent>(serialized_start)
+                .expect("start event deserializes"),
+            start
+        );
+
+        let step_start = GenerateObjectStepStartEvent {
+            call_id: "aiobj_call".to_string(),
+            step_number: 0,
+            provider: "test-provider".to_string(),
+            model_id: "object-test".to_string(),
+            provider_options: None,
+            headers: Some(Headers::from([(
+                "user-agent".to_string(),
+                "ai/test".to_string(),
+            )])),
+            prompt_messages: prompt(),
+        };
+
+        let serialized_step_start =
+            serde_json::to_value(&step_start).expect("step-start event serializes");
+        assert_eq!(serialized_step_start["stepNumber"], 0);
+        assert!(serialized_step_start.get("promptMessages").is_some());
+        assert_eq!(
+            serde_json::from_value::<GenerateObjectStepStartEvent>(serialized_step_start)
+                .expect("step-start event deserializes"),
+            step_start
+        );
+
+        let response_timestamp =
+            OffsetDateTime::from_unix_timestamp(1).expect("timestamp is valid");
+        let step_end = GenerateObjectStepEndEvent {
+            call_id: "aiobj_call".to_string(),
+            step_number: 0,
+            provider: "test-provider".to_string(),
+            model_id: "object-test".to_string(),
+            finish_reason: FinishReason::Stop,
+            usage: object_usage(),
+            object_text: "{\"answer\":42}".to_string(),
+            reasoning: Some("because".to_string()),
+            warnings: vec![Warning::Other {
+                message: "provider warning".to_string(),
+            }],
+            request: GenerateObjectRequest::new().with_body(json!({ "prompt": "Return JSON." })),
+            response: GenerateObjectResponse::new()
+                .with_id("resp_123")
+                .with_timestamp(response_timestamp)
+                .with_model_id("object-test"),
+            provider_metadata: None,
+            ms_to_first_chunk: None,
+        };
+
+        let serialized_step_end =
+            serde_json::to_value(&step_end).expect("step-end event serializes");
+        assert_eq!(serialized_step_end["objectText"], "{\"answer\":42}");
+        assert_eq!(serialized_step_end["reasoning"], "because");
+        assert_eq!(
+            serde_json::from_value::<GenerateObjectStepEndEvent>(serialized_step_end)
+                .expect("step-end event deserializes"),
+            step_end
+        );
+
+        let end = GenerateObjectEndEvent {
+            call_id: "aiobj_call".to_string(),
+            object: Some(json!({ "answer": 42 })),
+            error: None,
+            reasoning: Some("because".to_string()),
+            finish_reason: FinishReason::Stop,
+            usage: object_usage(),
+            warnings: Vec::new(),
+            request: GenerateObjectRequest::new(),
+            response: GenerateObjectResponse::new(),
+            provider_metadata: None,
+        };
+
+        let serialized_end = serde_json::to_value(&end).expect("end event serializes");
+        assert_eq!(serialized_end["object"], json!({ "answer": 42 }));
+        assert!(serialized_end.get("error").is_none());
+        assert_eq!(
+            serde_json::from_value::<GenerateObjectEndEvent>(serialized_end)
+                .expect("end event deserializes"),
+            end
+        );
+    }
+
+    #[test]
+    fn generate_object_invokes_lifecycle_callbacks_with_single_step_events() {
+        let response_timestamp =
+            OffsetDateTime::from_unix_timestamp(2).expect("timestamp is valid");
+        let provider_metadata: ProviderMetadata = serde_json::from_value(json!({
+            "test-provider": {
+                "traceId": "trace_callback"
+            }
+        }))
+        .expect("provider metadata deserializes");
+        let result = LanguageModelGenerateResult::new(
+            vec![
+                LanguageModelContent::Reasoning(LanguageModelReasoning::new("because")),
+                LanguageModelContent::Text(LanguageModelText::new("{\"answer\":42}")),
+            ],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        )
+        .with_request(
+            crate::language_model::LanguageModelRequest::new().with_body(json!({
+                "prompt": "Return JSON."
+            })),
+        )
+        .with_response(
+            LanguageModelResponse::new()
+                .with_id("resp_callback")
+                .with_timestamp(response_timestamp)
+                .with_model_id("object-test")
+                .with_header("x-request-id", "req_callback"),
+        )
+        .with_warning(Warning::Other {
+            message: "provider warning".to_string(),
+        })
+        .with_provider_metadata(provider_metadata.clone());
+        let model = StaticObjectModel::new(result);
+
+        let start_events = Arc::new(Mutex::new(Vec::<GenerateObjectStartEvent>::new()));
+        let step_start_events = Arc::new(Mutex::new(Vec::<GenerateObjectStepStartEvent>::new()));
+        let step_end_events = Arc::new(Mutex::new(Vec::<GenerateObjectStepEndEvent>::new()));
+        let end_events = Arc::new(Mutex::new(Vec::<GenerateObjectEndEvent>::new()));
+
+        let start_events_for_callback = Arc::clone(&start_events);
+        let step_start_events_for_callback = Arc::clone(&step_start_events);
+        let step_end_events_for_callback = Arc::clone(&step_end_events);
+        let end_events_for_callback = Arc::clone(&end_events);
+
+        let output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_schema_name("answer")
+                .with_header("X-Custom", "yes")
+                .with_experimental_on_start(move |event| {
+                    let start_events = Arc::clone(&start_events_for_callback);
+                    async move {
+                        start_events
+                            .lock()
+                            .expect("start events lock is not poisoned")
+                            .push(event);
+                    }
+                })
+                .with_experimental_on_step_start(move |event| {
+                    let step_start_events = Arc::clone(&step_start_events_for_callback);
+                    async move {
+                        step_start_events
+                            .lock()
+                            .expect("step-start events lock is not poisoned")
+                            .push(event);
+                    }
+                })
+                .with_on_step_finish(move |event| {
+                    let step_end_events = Arc::clone(&step_end_events_for_callback);
+                    async move {
+                        step_end_events
+                            .lock()
+                            .expect("step-end events lock is not poisoned")
+                            .push(event);
+                    }
+                })
+                .with_on_finish(move |event| {
+                    let end_events = Arc::clone(&end_events_for_callback);
+                    async move {
+                        end_events
+                            .lock()
+                            .expect("end events lock is not poisoned")
+                            .push(event);
+                    }
+                }),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(output.object, json!({ "answer": 42 }));
+
+        let start_events = start_events
+            .lock()
+            .expect("start events lock is not poisoned");
+        let step_start_events = step_start_events
+            .lock()
+            .expect("step-start events lock is not poisoned");
+        let step_end_events = step_end_events
+            .lock()
+            .expect("step-end events lock is not poisoned");
+        let end_events = end_events.lock().expect("end events lock is not poisoned");
+
+        assert_eq!(start_events.len(), 1);
+        assert_eq!(step_start_events.len(), 1);
+        assert_eq!(step_end_events.len(), 1);
+        assert_eq!(end_events.len(), 1);
+
+        let call_id = &start_events[0].call_id;
+        assert!(call_id.starts_with("aiobj-"));
+        assert_eq!(step_start_events[0].call_id, *call_id);
+        assert_eq!(step_end_events[0].call_id, *call_id);
+        assert_eq!(end_events[0].call_id, *call_id);
+
+        assert_eq!(start_events[0].operation_id, "ai.generateObject");
+        assert_eq!(start_events[0].provider, "test-provider");
+        assert_eq!(start_events[0].model_id, "object-test");
+        assert_eq!(start_events[0].output, GenerateObjectOutputKind::Object);
+        assert_eq!(start_events[0].schema, Some(answer_json_schema()));
+        assert_eq!(start_events[0].schema_name.as_deref(), Some("answer"));
+        assert_eq!(
+            start_events[0]
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-custom"))
+                .map(String::as_str),
+            Some("yes")
+        );
+        assert_eq!(
+            start_events[0]
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("user-agent"))
+                .map(String::as_str),
+            Some(format!("ai/{VERSION}").as_str())
+        );
+
+        assert_eq!(step_start_events[0].step_number, 0);
+        assert_eq!(step_start_events[0].prompt_messages, prompt());
+        assert_eq!(step_end_events[0].object_text, "{\"answer\":42}");
+        assert_eq!(step_end_events[0].reasoning.as_deref(), Some("because"));
+        assert_eq!(step_end_events[0].warnings.len(), 1);
+        assert_eq!(
+            step_end_events[0].request.body,
+            Some(json!({ "prompt": "Return JSON." }))
+        );
+        assert_eq!(
+            step_end_events[0].response,
+            GenerateObjectResponse::new()
+                .with_id("resp_callback")
+                .with_timestamp(response_timestamp)
+                .with_model_id("object-test")
+                .with_header("x-request-id", "req_callback")
+        );
+        assert_eq!(
+            step_end_events[0].provider_metadata,
+            Some(provider_metadata.clone())
+        );
+
+        assert_eq!(end_events[0].object, Some(json!({ "answer": 42 })));
+        assert_eq!(end_events[0].error, None);
+        assert_eq!(end_events[0].reasoning.as_deref(), Some("because"));
+        assert_eq!(end_events[0].warnings.len(), 1);
+        assert_eq!(end_events[0].provider_metadata, Some(provider_metadata));
     }
 
     #[test]
