@@ -14,7 +14,8 @@ use crate::language_model::{
     LanguageModelPrompt, LanguageModelReasoning, LanguageModelRequest, LanguageModelResponse,
     LanguageModelResponseFormat, LanguageModelText, LanguageModelUsage,
 };
-use crate::provider::{ProviderMetadata, ProviderOptions, TypeValidationError};
+use crate::prompt::{Prompt, standardize_prompt};
+use crate::provider::{InvalidPromptError, ProviderMetadata, ProviderOptions, TypeValidationError};
 use crate::provider_utils::{
     FlexibleSchema, IdGeneratorOptions, ParseJsonError, ParseJsonResult, ValidateTypesResult,
     create_id_generator, generate_id, safe_parse_json, safe_parse_json_with_schema,
@@ -701,6 +702,15 @@ impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
     /// Creates object generation options for a model and standardized prompt.
     pub fn new(model: &'a M, prompt: LanguageModelPrompt) -> Self {
         Self::from_call_options(model, LanguageModelCallOptions::new(prompt))
+    }
+
+    /// Creates object generation options from the high-level upstream prompt shape.
+    ///
+    /// This standardizes text prompts and instructions before delegating to
+    /// the provider-v4 language model prompt boundary.
+    pub fn from_prompt(model: &'a M, prompt: Prompt) -> Result<Self, InvalidPromptError> {
+        let prompt = standardize_prompt(prompt)?.into_language_model_prompt();
+        Ok(Self::new(model, prompt))
     }
 
     /// Creates object generation options from already prepared provider call options.
@@ -1438,8 +1448,10 @@ mod tests {
         LanguageModelContent, LanguageModelFinishReason, LanguageModelGenerateResult,
         LanguageModelMessage, LanguageModelPrompt, LanguageModelReasoning, LanguageModelResponse,
         LanguageModelResponseFormat, LanguageModelStreamResult, LanguageModelSupportedUrls,
-        LanguageModelSystemMessage, LanguageModelText, LanguageModelUsage, OutputTokenUsage,
+        LanguageModelSystemMessage, LanguageModelText, LanguageModelTextPart, LanguageModelUsage,
+        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
     };
+    use crate::prompt::Prompt;
     use crate::provider::ProviderMetadata;
     use crate::provider_utils::{Schema, ValidationResult, json_schema};
     use crate::retry::DEFAULT_MAX_RETRIES;
@@ -1829,6 +1841,69 @@ mod tests {
             headers.get("user-agent").map(String::as_str),
             Some(format!("ai/{VERSION}").as_str())
         );
+    }
+
+    #[test]
+    fn generate_object_options_from_prompt_standardizes_high_level_prompt() {
+        let result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"answer\":42}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        );
+        let model = StaticObjectModel::new(result);
+
+        let options = GenerateObjectOptions::from_prompt(
+            &model,
+            Prompt::from_prompt("Return the answer.").with_instructions("Use JSON."),
+        )
+        .expect("high-level prompt standardizes");
+        let output = poll_ready(generate_object(options)).expect("object is generated");
+
+        assert_eq!(output.object, json!({ "answer": 42 }));
+
+        let seen_options = model.seen_options();
+        assert_eq!(
+            seen_options[0].prompt,
+            vec![
+                LanguageModelMessage::System(LanguageModelSystemMessage::new("Use JSON.")),
+                LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                    LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
+                        "Return the answer."
+                    ))
+                ])),
+            ]
+        );
+    }
+
+    #[test]
+    fn generate_object_options_from_prompt_rejects_invalid_high_level_prompt() {
+        let model = StaticObjectModel::new(LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new("{}"))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        ));
+
+        let error = GenerateObjectOptions::from_prompt(
+            &model,
+            Prompt::from_messages(vec![LanguageModelMessage::System(
+                LanguageModelSystemMessage::new("Use JSON."),
+            )]),
+        )
+        .expect_err("system messages are rejected by high-level prompt standardization");
+
+        assert_eq!(
+            error.message(),
+            "Invalid prompt: System messages are not allowed in the prompt or messages fields. Use the instructions option instead."
+        );
+        assert!(model.seen_options().is_empty());
     }
 
     #[test]

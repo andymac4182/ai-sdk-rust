@@ -337,6 +337,33 @@ impl StandardizedPrompt {
     pub fn into_messages(self) -> LanguageModelPrompt {
         self.messages
     }
+
+    /// Converts this standardized prompt into a language model prompt.
+    ///
+    /// Upstream `convertToLanguageModelPrompt` prepends `instructions` as
+    /// system messages before the standardized message history. This Rust
+    /// boundary already stores messages in provider-v4 shape, so instruction
+    /// insertion is the remaining conversion step here.
+    pub fn into_language_model_prompt(self) -> LanguageModelPrompt {
+        let mut messages = match self.instructions {
+            Some(instructions) => instructions_to_system_messages(instructions)
+                .into_iter()
+                .map(LanguageModelMessage::System)
+                .collect::<LanguageModelPrompt>(),
+            None => Vec::new(),
+        };
+
+        messages.extend(self.messages);
+        messages
+    }
+}
+
+fn instructions_to_system_messages(instructions: Instructions) -> Vec<LanguageModelSystemMessage> {
+    match instructions {
+        Instructions::Text(text) => vec![LanguageModelSystemMessage::new(text)],
+        Instructions::Message(message) => vec![message],
+        Instructions::Messages(messages) => messages,
+    }
 }
 
 /// Granular request timeout settings.
@@ -998,6 +1025,26 @@ mod tests {
             Some(Instructions::message(system_message("SYSTEM")))
         );
         assert_eq!(standardized.messages, vec![user_text_message("Hello")]);
+    }
+
+    #[test]
+    fn standardized_prompt_prepends_instructions_as_system_messages() {
+        let prompt = StandardizedPrompt::new(
+            Some(Instructions::messages(vec![
+                system_message("First instruction."),
+                system_message("Second instruction."),
+            ])),
+            vec![user_text_message("Hello")],
+        );
+
+        assert_eq!(
+            prompt.into_language_model_prompt(),
+            vec![
+                LanguageModelMessage::System(system_message("First instruction.")),
+                LanguageModelMessage::System(system_message("Second instruction.")),
+                user_text_message("Hello"),
+            ]
+        );
     }
 
     #[test]
