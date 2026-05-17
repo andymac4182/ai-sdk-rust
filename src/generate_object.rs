@@ -8,13 +8,13 @@ use time::OffsetDateTime;
 
 use crate::VERSION;
 use crate::headers::Headers;
-use crate::json::JsonValue;
+use crate::json::{JsonSchema, JsonValue};
 use crate::language_model::{
     FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
     LanguageModelPrompt, LanguageModelReasoning, LanguageModelRequest, LanguageModelResponse,
     LanguageModelResponseFormat, LanguageModelText, LanguageModelUsage,
 };
-use crate::provider::ProviderMetadata;
+use crate::provider::{ProviderMetadata, TypeValidationError};
 use crate::provider_utils::{
     FlexibleSchema, ParseJsonError, ParseJsonResult, generate_id, safe_parse_json,
     safe_parse_json_with_schema, with_user_agent_suffix,
@@ -300,6 +300,9 @@ pub struct GenerateObjectOptions<'a, M: LanguageModel + ?Sized> {
 
     /// Optional callback that can repair invalid model text before the final error is returned.
     pub repair_text: Option<GenerateObjectRepairText<'a>>,
+
+    /// Optional enum values for upstream enum output mode.
+    pub enum_values: Option<Vec<String>>,
 }
 
 impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
@@ -318,6 +321,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
             schema_name: None,
             schema_description: None,
             repair_text: None,
+            enum_values: None,
         }
     }
 
@@ -351,6 +355,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
     /// Sets the schema used to validate the generated object and guide the provider.
     pub fn with_schema(mut self, schema: impl Into<FlexibleSchema>) -> Self {
         self.schema = Some(schema.into());
+        self.enum_values = None;
         self
     }
 
@@ -363,6 +368,23 @@ impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
     /// Sets the provider-facing schema description.
     pub fn with_schema_description(mut self, schema_description: impl Into<String>) -> Self {
         self.schema_description = Some(schema_description.into());
+        self
+    }
+
+    /// Uses upstream enum output mode with the allowed string values.
+    ///
+    /// Upstream asks the provider for an object shaped as `{ "result": <enum> }`
+    /// and returns the selected enum string as the final object value. Setting
+    /// enum values clears any schema metadata previously configured.
+    pub fn with_enum_values<T, I>(mut self, enum_values: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<String>,
+    {
+        self.schema = None;
+        self.schema_name = None;
+        self.schema_description = None;
+        self.enum_values = Some(enum_values.into_iter().map(Into::into).collect());
         self
     }
 
@@ -397,10 +419,9 @@ impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
 
 /// Generates a JSON value with a language model and parses the text response.
 ///
-/// This is the first Rust-native runtime slice for upstream `generateObject`.
-/// It uses the no-schema output strategy: the model is called with a JSON
-/// response format, generated text is parsed as JSON, and schema-specific
-/// validation/repair remain future extensions.
+/// This Rust-native runtime slice for upstream `generateObject` calls the
+/// model with a JSON response format, parses generated text as JSON, and
+/// applies optional schema, enum-output, and repair-text handling.
 pub async fn generate_object<M>(
     options: GenerateObjectOptions<'_, M>,
 ) -> Result<GenerateObjectResult, NoObjectGeneratedError>
@@ -414,12 +435,14 @@ where
         schema_name,
         schema_description,
         repair_text,
+        enum_values,
     } = options;
 
     call_options.response_format = Some(generate_object_response_format(
         &schema,
         &schema_name,
         &schema_description,
+        enum_values.as_deref(),
     ));
     append_generate_object_user_agent(&mut call_options);
 
@@ -442,6 +465,7 @@ where
     let object = parse_generated_object_with_repair(
         text,
         schema,
+        enum_values.as_deref(),
         repair_text.as_ref(),
         &response,
         &usage,
@@ -468,22 +492,41 @@ fn generate_object_response_format(
     schema: &Option<FlexibleSchema>,
     schema_name: &Option<String>,
     schema_description: &Option<String>,
+    enum_values: Option<&[String]>,
 ) -> LanguageModelResponseFormat {
     let mut response_format = LanguageModelResponseFormat::json();
 
-    if let Some(schema) = schema {
+    if let Some(enum_values) = enum_values {
+        response_format = response_format.with_schema(enum_json_schema(enum_values));
+    } else if let Some(schema) = schema {
         response_format = response_format.with_schema(schema.as_schema().json_schema().clone());
-    }
 
-    if let Some(schema_name) = schema_name {
-        response_format = response_format.with_name(schema_name.clone());
-    }
+        if let Some(schema_name) = schema_name {
+            response_format = response_format.with_name(schema_name.clone());
+        }
 
-    if let Some(schema_description) = schema_description {
-        response_format = response_format.with_description(schema_description.clone());
+        if let Some(schema_description) = schema_description {
+            response_format = response_format.with_description(schema_description.clone());
+        }
     }
 
     response_format
+}
+
+fn enum_json_schema(enum_values: &[String]) -> JsonSchema {
+    serde_json::from_value(serde_json::json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+            "result": {
+                "type": "string",
+                "enum": enum_values
+            }
+        },
+        "required": ["result"],
+        "additionalProperties": false
+    }))
+    .expect("enum output schema is a JSON object")
 }
 
 fn append_generate_object_user_agent(call_options: &mut LanguageModelCallOptions) {
@@ -500,22 +543,71 @@ fn append_generate_object_user_agent(call_options: &mut LanguageModelCallOptions
 fn parse_generated_object(
     text: &str,
     schema: Option<FlexibleSchema>,
+    enum_values: Option<&[String]>,
 ) -> ParseJsonResult<JsonValue> {
-    schema.map_or_else(
+    let parse_result = schema.map_or_else(
         || safe_parse_json(text),
         |schema| safe_parse_json_with_schema(text, schema),
+    );
+
+    match (parse_result, enum_values) {
+        (
+            ParseJsonResult::Success {
+                value, raw_value, ..
+            },
+            Some(enum_values),
+        ) => validate_enum_generated_object(value, raw_value, enum_values),
+        (parse_result, _) => parse_result,
+    }
+}
+
+fn validate_enum_generated_object(
+    value: JsonValue,
+    raw_value: JsonValue,
+    enum_values: &[String],
+) -> ParseJsonResult<JsonValue> {
+    let result = value
+        .as_object()
+        .and_then(|object| object.get("result"))
+        .and_then(JsonValue::as_str)
+        .map(ToOwned::to_owned);
+
+    let Some(result) = result else {
+        return enum_validation_failure(
+            value,
+            raw_value,
+            "value must be an object that contains a string in the \"result\" property.",
+        );
+    };
+
+    if enum_values.iter().any(|value| value == &result) {
+        ParseJsonResult::success(JsonValue::String(result), raw_value)
+    } else {
+        enum_validation_failure(value, raw_value, "value must be a string in the enum")
+    }
+}
+
+fn enum_validation_failure(
+    value: JsonValue,
+    raw_value: JsonValue,
+    cause_message: &'static str,
+) -> ParseJsonResult<JsonValue> {
+    ParseJsonResult::failure(
+        TypeValidationError::with_cause_message(value, cause_message, None),
+        Some(raw_value),
     )
 }
 
 async fn parse_generated_object_with_repair(
     text: String,
     schema: Option<FlexibleSchema>,
+    enum_values: Option<&[String]>,
     repair_text: Option<&GenerateObjectRepairText<'_>>,
     response: &LanguageModelResponse,
     usage: &LanguageModelUsage,
     finish_reason: &FinishReason,
 ) -> Result<JsonValue, NoObjectGeneratedError> {
-    match parse_generated_object(&text, schema.clone()) {
+    match parse_generated_object(&text, schema.clone(), enum_values) {
         ParseJsonResult::Success { value, .. } => Ok(value),
         ParseJsonResult::Failure { error, .. } => {
             let Some(repair_text) = repair_text else {
@@ -542,7 +634,7 @@ async fn parse_generated_object_with_repair(
                 ));
             };
 
-            match parse_generated_object(&repaired_text, schema) {
+            match parse_generated_object(&repaired_text, schema, enum_values) {
                 ParseJsonResult::Success { value, .. } => Ok(value),
                 ParseJsonResult::Failure { error, .. } => Err(parse_failure_error(
                     repaired_text,
@@ -661,7 +753,7 @@ mod tests {
 
     use super::{
         GenerateObjectOptions, GenerateObjectRequest, GenerateObjectResponse, GenerateObjectResult,
-        generate_object,
+        enum_json_schema, generate_object,
     };
     use crate::VERSION;
     use crate::language_model::{
@@ -1096,6 +1188,96 @@ mod tests {
                     .with_description("A numeric answer object.")
             )
         );
+    }
+
+    #[test]
+    fn generate_object_forwards_enum_schema_and_returns_selected_value() {
+        let result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"result\":\"green\"}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        );
+        let model = StaticObjectModel::new(result);
+
+        let enum_values = vec!["red".to_string(), "green".to_string()];
+        let output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt()).with_enum_values(enum_values.clone()),
+        ))
+        .expect("enum value is generated");
+
+        assert_eq!(output.object, json!("green"));
+
+        let seen_options = model.seen_options();
+        assert_eq!(seen_options.len(), 1);
+        assert_eq!(
+            seen_options[0].response_format,
+            Some(LanguageModelResponseFormat::json().with_schema(enum_json_schema(&enum_values)))
+        );
+    }
+
+    #[test]
+    fn generate_object_reports_enum_validation_failures_as_no_object_errors() {
+        let result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"result\":\"blue\"}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        );
+        let model = StaticObjectModel::new(result);
+
+        let error = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt()).with_enum_values(["red", "green"]),
+        ))
+        .expect_err("enum value outside the allowed set should fail");
+
+        assert_eq!(
+            error.message(),
+            "No object generated: response did not match schema."
+        );
+        assert_eq!(error.text(), Some("{\"result\":\"blue\"}"));
+        assert!(
+            error
+                .cause_message()
+                .is_some_and(|cause| cause.contains("value must be a string in the enum"))
+        );
+    }
+
+    #[test]
+    fn generate_object_repairs_enum_validation_failures() {
+        let result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"result\":\"blue\"}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        );
+        let model = StaticObjectModel::new(result);
+
+        let output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_enum_values(["red", "green"])
+                .with_repair_text(|options| async move {
+                    assert_eq!(options.text(), "{\"result\":\"blue\"}");
+                    assert!(options.error().as_type_validation_error().is_some());
+
+                    Some("{\"result\":\"green\"}".to_string())
+                }),
+        ))
+        .expect("enum output is repaired");
+
+        assert_eq!(output.object, json!("green"));
     }
 
     #[test]
