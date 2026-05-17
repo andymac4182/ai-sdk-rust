@@ -12,8 +12,13 @@ use crate::embedding_model::{
     EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelResponse, EmbeddingModelResult,
     EmbeddingModelUsage,
 };
+use crate::file_data::FileDataContent;
 use crate::headers::Headers;
-use crate::json::{JsonObject, JsonValue};
+use crate::image_model::{
+    ImageModel, ImageModelCallOptions, ImageModelFile, ImageModelProviderMetadata,
+    ImageModelProviderMetadataEntry, ImageModelResponse, ImageModelResult,
+};
+use crate::json::{JsonArray, JsonObject, JsonValue};
 use crate::language_model::{
     FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
     LanguageModelCallOptions, LanguageModelContent, LanguageModelErrorStreamPart,
@@ -28,11 +33,13 @@ use crate::language_model::{
 };
 use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
 use crate::provider_utils::{
-    FetchErrorInfo, HandledFetchError, ParseJsonResult, PostJsonToApiOptions, ProviderApiRequest,
+    ConvertToFormDataOptions, FetchErrorInfo, FormDataInputValue, FormDataValue, HandledFetchError,
+    ParseJsonResult, PostFormDataToApiOptions, PostJsonToApiOptions, ProviderApiRequest,
     ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
-    ProviderApiResponseHandlerError, RuntimeEnvironment, combine_headers,
-    create_event_source_response_handler, create_json_error_response_handler,
-    create_json_response_handler, post_json_to_api, with_user_agent_suffix, without_trailing_slash,
+    ProviderApiResponseHandlerError, RuntimeEnvironment, combine_headers, convert_base64_to_bytes,
+    convert_to_form_data, create_event_source_response_handler, create_json_error_response_handler,
+    create_json_response_handler, post_form_data_to_api, post_json_to_api, with_user_agent_suffix,
+    without_trailing_slash,
 };
 use crate::warning::Warning;
 
@@ -993,14 +1000,201 @@ impl OpenAICompatibleImageModel {
         &self.config.provider
     }
 
-    #[cfg(test)]
+    async fn do_generate_result(&self, options: ImageModelCallOptions) -> ImageModelResult {
+        let mut warnings = openai_compatible_image_warnings(&options);
+        let provider_options = openai_compatible_image_provider_options(
+            &self.config.provider,
+            &options.provider_options,
+            &mut warnings,
+        );
+        let request_headers = self.request_headers(options.headers.as_ref());
+        let response = if options
+            .files
+            .as_ref()
+            .is_some_and(|files| !files.is_empty())
+        {
+            self.do_generate_edit_result(options, provider_options, request_headers, warnings)
+                .await
+        } else {
+            self.do_generate_image_result(options, provider_options, request_headers, warnings)
+                .await
+        };
+
+        match response {
+            Ok((response, response_headers, warnings)) => {
+                openai_compatible_image_result_from_response(
+                    &self.model_id,
+                    response,
+                    response_headers,
+                    warnings,
+                )
+            }
+            Err((error, warnings)) => openai_compatible_image_result_from_error(
+                &self.model_id,
+                &self.config.settings.name,
+                error,
+                warnings,
+            ),
+        }
+    }
+
+    async fn do_generate_image_result(
+        &self,
+        options: ImageModelCallOptions,
+        provider_options: JsonObject,
+        request_headers: BTreeMap<String, Option<String>>,
+        warnings: Vec<Warning>,
+    ) -> Result<
+        (OpenAICompatibleImageResponse, Option<Headers>, Vec<Warning>),
+        (HandledFetchError, Vec<Warning>),
+    > {
+        let request_body = openai_compatible_image_generation_request_body(
+            &self.model_id,
+            &options,
+            provider_options,
+        );
+        let url = match self.model_url("/images/generations") {
+            Ok(url) => url,
+            Err(message) => {
+                return Err((
+                    HandledFetchError::Original {
+                        error: FetchErrorInfo::new(message),
+                    },
+                    warnings,
+                ));
+            }
+        };
+        let post_options = PostJsonToApiOptions::new(url, request_body)
+            .with_headers(request_headers)
+            .with_environment(RuntimeEnvironment::unknown());
+        let transport = Arc::clone(&self.config.transport);
+
+        match post_json_to_api(
+            post_options,
+            move |request| (transport)(request),
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    openai_compatible_image_response,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_json_error_response_handler(
+                    response.json_error_response_handler_options(request),
+                    clone_json_value,
+                    openai_compatible_error_message,
+                    |_, _| None,
+                ))
+            },
+        )
+        .await
+        {
+            Ok(response) => Ok((response.value, response.response_headers, warnings)),
+            Err(error) => Err((error, warnings)),
+        }
+    }
+
+    async fn do_generate_edit_result(
+        &self,
+        options: ImageModelCallOptions,
+        provider_options: JsonObject,
+        request_headers: BTreeMap<String, Option<String>>,
+        warnings: Vec<Warning>,
+    ) -> Result<
+        (OpenAICompatibleImageResponse, Option<Headers>, Vec<Warning>),
+        (HandledFetchError, Vec<Warning>),
+    > {
+        let form_data =
+            openai_compatible_image_edit_form_data(&self.model_id, &options, provider_options);
+        let url = match self.model_url("/images/edits") {
+            Ok(url) => url,
+            Err(message) => {
+                return Err((
+                    HandledFetchError::Original {
+                        error: FetchErrorInfo::new(message),
+                    },
+                    warnings,
+                ));
+            }
+        };
+        let post_options = PostFormDataToApiOptions::new(url, form_data)
+            .with_headers(request_headers)
+            .with_environment(RuntimeEnvironment::unknown());
+        let transport = Arc::clone(&self.config.transport);
+
+        match post_form_data_to_api(
+            post_options,
+            move |request| (transport)(request),
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    openai_compatible_image_response,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_json_error_response_handler(
+                    response.json_error_response_handler_options(request),
+                    clone_json_value,
+                    openai_compatible_error_message,
+                    |_, _| None,
+                ))
+            },
+        )
+        .await
+        {
+            Ok(response) => Ok((response.value, response.response_headers, warnings)),
+            Err(error) => Err((error, warnings)),
+        }
+    }
+
     fn model_url(&self, path: &str) -> Result<String, String> {
         openai_compatible_url(&self.config.settings, path)
     }
 
-    #[cfg(test)]
-    fn request_headers(&self) -> Headers {
-        openai_compatible_provider_headers(&self.config.settings)
+    fn request_headers(&self, call_headers: Option<&Headers>) -> BTreeMap<String, Option<String>> {
+        combine_headers([
+            Some(
+                openai_compatible_provider_headers(&self.config.settings)
+                    .into_iter()
+                    .map(|(name, value)| (name, Some(value)))
+                    .collect::<Vec<_>>(),
+            ),
+            optional_headers(call_headers),
+        ])
+    }
+}
+
+impl ImageModel for OpenAICompatibleImageModel {
+    type MaxImagesPerCallFuture<'a>
+        = Ready<Option<usize>>
+    where
+        Self: 'a;
+
+    type GenerateFuture<'a>
+        = Pin<Box<dyn Future<Output = ImageModelResult> + Send + 'a>>
+    where
+        Self: 'a;
+
+    fn specification_version(&self) -> SpecificationVersion {
+        SpecificationVersion::V4
+    }
+
+    fn provider(&self) -> &str {
+        &self.config.provider
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    fn max_images_per_call(&self) -> Self::MaxImagesPerCallFuture<'_> {
+        ready(Some(10))
+    }
+
+    fn do_generate(&self, options: ImageModelCallOptions) -> Self::GenerateFuture<'_> {
+        Box::pin(self.do_generate_result(options))
     }
 }
 
@@ -1374,6 +1568,168 @@ fn add_openai_compatible_completion_body_options(body: &mut JsonObject, options:
 
     for (key, value) in options {
         body.insert(key.clone(), value.clone());
+    }
+}
+
+fn openai_compatible_image_warnings(options: &ImageModelCallOptions) -> Vec<Warning> {
+    let mut warnings = Vec::new();
+
+    if options.aspect_ratio.is_some() {
+        warnings.push(Warning::Unsupported {
+            feature: "aspectRatio".to_string(),
+            details: Some(
+                "This model does not support aspect ratio. Use `size` instead.".to_string(),
+            ),
+        });
+    }
+
+    if options.seed.is_some() {
+        warnings.push(Warning::Unsupported {
+            feature: "seed".to_string(),
+            details: None,
+        });
+    }
+
+    warnings
+}
+
+fn openai_compatible_image_provider_options(
+    provider: &str,
+    provider_options: &ProviderOptions,
+    warnings: &mut Vec<Warning>,
+) -> JsonObject {
+    let provider_options_name = provider.split('.').next().unwrap_or(provider).trim();
+    let camel_provider_options_name = to_openai_compatible_camel_case(provider_options_name);
+    let mut body_options = JsonObject::new();
+
+    if let Some(options) = provider_options.get(provider_options_name) {
+        if camel_provider_options_name != provider_options_name {
+            warnings.push(Warning::Deprecated {
+                setting: format!("providerOptions key '{provider_options_name}'"),
+                message: format!("Use '{camel_provider_options_name}' instead."),
+            });
+        }
+        body_options.extend(options.clone());
+    }
+
+    if camel_provider_options_name != provider_options_name
+        && let Some(options) = provider_options.get(&camel_provider_options_name)
+    {
+        body_options.extend(options.clone());
+    }
+
+    body_options
+}
+
+fn openai_compatible_image_generation_request_body(
+    model_id: &str,
+    options: &ImageModelCallOptions,
+    provider_options: JsonObject,
+) -> JsonValue {
+    let mut body = JsonObject::new();
+    body.insert("model".to_string(), JsonValue::String(model_id.to_string()));
+
+    if let Some(prompt) = &options.prompt {
+        body.insert("prompt".to_string(), JsonValue::String(prompt.clone()));
+    }
+
+    body.insert("n".to_string(), json!(options.n));
+
+    if let Some(size) = &options.size {
+        body.insert("size".to_string(), JsonValue::String(size.clone()));
+    }
+
+    body.extend(provider_options);
+    body.insert(
+        "response_format".to_string(),
+        JsonValue::String("b64_json".to_string()),
+    );
+
+    JsonValue::Object(body)
+}
+
+fn openai_compatible_image_edit_form_data(
+    model_id: &str,
+    options: &ImageModelCallOptions,
+    provider_options: JsonObject,
+) -> crate::provider_utils::FormData {
+    let mut input = vec![
+        (
+            "model".to_string(),
+            Some(FormDataInputValue::text(model_id.to_string())),
+        ),
+        (
+            "prompt".to_string(),
+            options.prompt.clone().map(FormDataInputValue::text),
+        ),
+        (
+            "image".to_string(),
+            options.files.as_ref().map(|files| {
+                FormDataInputValue::array(
+                    files
+                        .iter()
+                        .map(|file| FormDataValue::bytes(openai_compatible_image_file_bytes(file)))
+                        .collect(),
+                )
+            }),
+        ),
+        (
+            "mask".to_string(),
+            options
+                .mask
+                .as_ref()
+                .map(|mask| FormDataInputValue::bytes(openai_compatible_image_file_bytes(mask))),
+        ),
+        (
+            "n".to_string(),
+            Some(FormDataInputValue::text(options.n.to_string())),
+        ),
+        (
+            "size".to_string(),
+            options.size.clone().map(FormDataInputValue::text),
+        ),
+    ];
+
+    for (key, value) in provider_options {
+        input.push((key, openai_compatible_image_form_value(value)));
+    }
+
+    convert_to_form_data(input, ConvertToFormDataOptions::new())
+}
+
+fn openai_compatible_image_file_bytes(file: &ImageModelFile) -> Vec<u8> {
+    match file {
+        ImageModelFile::File { data, .. } => match data {
+            FileDataContent::Bytes(bytes) => bytes.clone(),
+            FileDataContent::Base64(base64) => {
+                convert_base64_to_bytes(base64).unwrap_or_else(|_| base64.as_bytes().to_vec())
+            }
+        },
+        ImageModelFile::Url { url, .. } => url.as_str().as_bytes().to_vec(),
+    }
+}
+
+fn openai_compatible_image_form_value(value: JsonValue) -> Option<FormDataInputValue> {
+    match value {
+        JsonValue::Null => None,
+        JsonValue::String(value) => Some(FormDataInputValue::text(value)),
+        JsonValue::Bool(value) => Some(FormDataInputValue::text(value.to_string())),
+        JsonValue::Number(value) => Some(FormDataInputValue::text(value.to_string())),
+        JsonValue::Array(values) => Some(FormDataInputValue::array(
+            values
+                .into_iter()
+                .filter_map(|value| {
+                    openai_compatible_image_form_value(value).and_then(|value| match value {
+                        FormDataInputValue::Text { value } => Some(FormDataValue::text(value)),
+                        FormDataInputValue::Bytes { value } => Some(FormDataValue::bytes(value)),
+                        FormDataInputValue::Array { .. } => None,
+                    })
+                })
+                .collect(),
+        )),
+        JsonValue::Object(value) => Some(FormDataInputValue::text(
+            JsonValue::Object(value).to_string(),
+        )),
     }
 }
 
@@ -2028,6 +2384,103 @@ fn add_openai_compatible_prediction_metadata(
 }
 
 #[derive(Clone, Debug, Deserialize)]
+struct OpenAICompatibleImageResponse {
+    data: Vec<OpenAICompatibleImageData>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct OpenAICompatibleImageData {
+    b64_json: String,
+}
+
+fn openai_compatible_image_response(
+    value: &JsonValue,
+) -> Result<OpenAICompatibleImageResponse, serde_json::Error> {
+    serde_json::from_value(value.clone())
+}
+
+fn openai_compatible_image_result_from_response(
+    model_id: &str,
+    response: OpenAICompatibleImageResponse,
+    response_headers: Option<Headers>,
+    warnings: Vec<Warning>,
+) -> ImageModelResult {
+    let mut result = ImageModelResult::new(
+        response
+            .data
+            .into_iter()
+            .map(|image| FileDataContent::Base64(image.b64_json))
+            .collect(),
+        openai_compatible_image_response_metadata(model_id, response_headers),
+    );
+
+    for warning in warnings {
+        result = result.with_warning(warning);
+    }
+
+    result
+}
+
+fn openai_compatible_image_result_from_error(
+    model_id: &str,
+    provider_name: &str,
+    error: HandledFetchError,
+    warnings: Vec<Warning>,
+) -> ImageModelResult {
+    let (message, headers) = match error {
+        HandledFetchError::Original { error } => (error.message().to_string(), None),
+        HandledFetchError::ApiCall { error } => (
+            error.message().to_string(),
+            error.response_headers().cloned(),
+        ),
+    };
+    let mut result = ImageModelResult::new(
+        Vec::new(),
+        openai_compatible_image_response_metadata(model_id, headers),
+    )
+    .with_provider_metadata(openai_compatible_image_error_metadata(
+        provider_name,
+        message,
+    ));
+
+    for warning in warnings {
+        result = result.with_warning(warning);
+    }
+
+    result
+}
+
+fn openai_compatible_image_response_metadata(
+    model_id: &str,
+    headers: Option<Headers>,
+) -> ImageModelResponse {
+    let mut response = ImageModelResponse::new(OffsetDateTime::now_utc(), model_id);
+
+    if let Some(headers) = headers {
+        response = with_image_response_headers(response, headers);
+    }
+
+    response
+}
+
+fn openai_compatible_image_error_metadata(
+    provider_name: &str,
+    message: String,
+) -> ImageModelProviderMetadata {
+    let mut metadata = ImageModelProviderMetadata::new();
+    let mut extra = JsonObject::new();
+    extra.insert("errorMessage".to_string(), JsonValue::String(message));
+    metadata.insert(
+        provider_name.to_string(),
+        ImageModelProviderMetadataEntry {
+            images: JsonArray::new(),
+            extra,
+        },
+    );
+    metadata
+}
+
+#[derive(Clone, Debug, Deserialize)]
 struct OpenAICompatibleEmbeddingResponse {
     data: Vec<OpenAICompatibleEmbeddingData>,
     #[serde(default)]
@@ -2267,6 +2720,17 @@ fn with_embedding_response_headers(
     response
 }
 
+fn with_image_response_headers(
+    mut response: ImageModelResponse,
+    headers: Headers,
+) -> ImageModelResponse {
+    for (name, value) in headers {
+        response = response.with_header(name, value);
+    }
+
+    response
+}
+
 fn default_openai_compatible_transport() -> OpenAICompatibleTransport {
     Arc::new(|request| Box::pin(ready(execute_openai_compatible_request(request))))
 }
@@ -2355,8 +2819,12 @@ mod tests {
     };
     use crate::embed::{EmbedManyOptions, embed_many};
     use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions};
+    use crate::generate_image::{
+        GenerateImageOptions, GenerateImagePromptImage, GenerateImagePromptImages, generate_image,
+    };
     use crate::generate_text::{GenerateTextOptions, generate_text};
     use crate::headers::Headers;
+    use crate::image_model::{ImageModel, ImageModelCallOptions};
     use crate::json::JsonValue;
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelMessage,
@@ -2366,7 +2834,8 @@ mod tests {
     use crate::prompt::Prompt;
     use crate::provider::ProviderOptions;
     use crate::provider_utils::{
-        ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+        FormDataValue, ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod,
+        ProviderApiResponse,
     };
     use crate::stream_text::{StreamTextOptions, stream_text};
     use crate::warning::Warning;
@@ -2401,6 +2870,7 @@ mod tests {
         assert_eq!(embedding.provider(), "test-provider.embedding");
         assert_eq!(text_embedding.model_id(), "embedding-model");
         assert_eq!(image.provider(), "test-provider.image");
+        assert_eq!(poll_ready(image.max_images_per_call()), Some(10));
         assert!(chat.supports_structured_outputs());
         assert_eq!(
             chat.model_url("/v1/chat").expect("url is valid"),
@@ -2450,9 +2920,9 @@ mod tests {
         );
         assert_eq!(
             image
-                .request_headers()
+                .request_headers(None)
                 .get("user-agent")
-                .map(String::as_str),
+                .and_then(Option::as_deref),
             Some("ai-sdk/openai-compatible/0.1.0")
         );
     }
@@ -2691,6 +3161,286 @@ mod tests {
                 .and_then(|metadata| metadata.get("errorMessage"))
                 .and_then(JsonValue::as_str),
             Some("Invalid API key")
+        );
+    }
+
+    #[test]
+    fn openai_compatible_image_model_generates_through_generate_image() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "data": [
+                            {
+                                "b64_json": "aW1hZ2UtMQ=="
+                            },
+                            {
+                                "b64_json": "aW1hZ2UtMg=="
+                            }
+                        ]
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from([(
+                    "x-request-id".to_string(),
+                    "req_image".to_string(),
+                )])))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com/")
+                .with_api_key("test-api-key")
+                .with_query_param("api-version", "2026-01-01"),
+        )
+        .with_transport(transport)
+        .image_model("dall-e-3");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "testProvider": {
+                "quality": "hd",
+                "user": "user-123"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = poll_ready(generate_image(
+            GenerateImageOptions::new(&model, "A photorealistic astronaut riding a horse")
+                .with_n(2)
+                .with_size("1024x1024")
+                .with_provider_options(provider_options),
+        ))
+        .expect("image generation succeeds");
+
+        assert_eq!(result.images.len(), 2);
+        assert_eq!(
+            result
+                .responses
+                .first()
+                .and_then(|response| response.headers.as_ref())
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("req_image")
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(
+            request.url,
+            "https://api.example.com/images/generations?api-version=2026-01-01"
+        );
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "dall-e-3",
+                "prompt": "A photorealistic astronaut riding a horse",
+                "n": 2,
+                "size": "1024x1024",
+                "quality": "hd",
+                "user": "user-123",
+                "response_format": "b64_json"
+            }))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_image_model_edits_with_files_and_mask() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "data": [
+                            {
+                                "b64_json": "ZWRpdGVkLWltYWdl"
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
+            "test-provider",
+            "https://api.example.com",
+        ))
+        .with_transport(transport)
+        .image_model("dall-e-3");
+        let result = poll_ready(generate_image(GenerateImageOptions::new(
+            &model,
+            GenerateImagePromptImages::new([GenerateImagePromptImage::bytes(vec![
+                137, 80, 78, 71,
+            ])])
+            .with_text("Add a flamingo to the pool")
+            .with_mask(GenerateImagePromptImage::bytes(vec![1, 2, 3])),
+        )))
+        .expect("image edit succeeds");
+
+        assert_eq!(result.images.len(), 1);
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.url, "https://api.example.com/images/edits");
+        let form_data = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_form_data)
+            .expect("request body is form data");
+        assert_eq!(
+            form_data.get("model"),
+            Some(&FormDataValue::text("dall-e-3"))
+        );
+        assert_eq!(
+            form_data.get("prompt"),
+            Some(&FormDataValue::text("Add a flamingo to the pool"))
+        );
+        assert_eq!(
+            form_data.get("image"),
+            Some(&FormDataValue::bytes(vec![137, 80, 78, 71]))
+        );
+        assert_eq!(
+            form_data.get("mask"),
+            Some(&FormDataValue::bytes(vec![1, 2, 3]))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_image_model_passes_options_warnings_and_errors() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "data": [
+                            {
+                                "b64_json": "aW1hZ2U="
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
+            "black-forest-labs",
+            "https://api.example.com",
+        ))
+        .with_transport(transport)
+        .image_model("flux-pro");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "black-forest-labs": {
+                "quality": "standard"
+            },
+            "blackForestLabs": {
+                "quality": "hd"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A forest")
+                    .with_aspect_ratio("16:9")
+                    .with_seed(123)
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Deprecated { setting, .. }
+                    if setting == "providerOptions key 'black-forest-labs'"
+            )
+        }));
+        assert_eq!(
+            result
+                .warnings
+                .iter()
+                .filter(|warning| matches!(warning, Warning::Unsupported { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(
+            captured_request
+                .lock()
+                .expect("captured request mutex is not poisoned")
+                .clone()
+                .expect("request is captured")
+                .body
+                .and_then(|body| body.as_text().map(str::to_string))
+                .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok()),
+            Some(json!({
+                "model": "flux-pro",
+                "prompt": "A forest",
+                "n": 1,
+                "quality": "hd",
+                "response_format": "b64_json"
+            }))
+        );
+
+        let error_transport: OpenAICompatibleTransport =
+            Arc::new(|_request| -> OpenAICompatibleTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    400,
+                    "Bad Request",
+                    json!({
+                        "error": {
+                            "message": "Invalid image prompt"
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let error_model = OpenAICompatibleProvider::from_settings(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com"),
+        )
+        .with_transport(error_transport)
+        .image_model("dall-e-3");
+        let error_result = poll_ready(
+            error_model.do_generate(ImageModelCallOptions::new(1).with_prompt("bad prompt")),
+        );
+
+        assert!(error_result.images.is_empty());
+        assert_eq!(
+            error_result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("test-provider"))
+                .map(|metadata| &metadata.extra)
+                .and_then(|extra| extra.get("errorMessage"))
+                .and_then(JsonValue::as_str),
+            Some("Invalid image prompt")
         );
     }
 
