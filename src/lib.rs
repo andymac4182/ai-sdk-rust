@@ -373,7 +373,7 @@ pub use util::{
 pub use vercel_ai_gateway::{
     VERCEL_AI_GATEWAY_OPENAI_COMPATIBLE_BASE_URL, VercelAiGatewayOpenAICompatibleProvider,
     VercelAiGatewayOpenAICompatibleSettings, create_vercel_ai_gateway_openai_compatible,
-    vercel_ai_gateway_openai_compatible,
+    vercel_ai_gateway_openai_compatible, vercel_ai_gateway_openai_compatible_embedding,
 };
 pub use video_model::{
     ExperimentalVideoModel, ExperimentalVideoModelCallOptions, ExperimentalVideoModelFile,

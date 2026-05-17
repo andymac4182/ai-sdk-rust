@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::headers::Headers;
 use crate::openai_compatible::{
-    OpenAICompatibleChatLanguageModel, OpenAICompatibleProvider, OpenAICompatibleProviderSettings,
-    OpenAICompatibleTransport,
+    OpenAICompatibleChatLanguageModel, OpenAICompatibleEmbeddingModel, OpenAICompatibleProvider,
+    OpenAICompatibleProviderSettings, OpenAICompatibleTransport,
 };
 
 /// OpenAI-compatible Vercel AI Gateway base URL.
@@ -112,6 +112,24 @@ impl VercelAiGatewayOpenAICompatibleProvider {
         self.language_model(model_id)
     }
 
+    /// Creates a Gateway OpenAI-compatible embedding model.
+    pub fn embedding_model(&self, model_id: impl Into<String>) -> OpenAICompatibleEmbeddingModel {
+        self.openai_compatible_provider().embedding_model(model_id)
+    }
+
+    /// Alias for [`VercelAiGatewayOpenAICompatibleProvider::embedding_model`].
+    pub fn embedding(&self, model_id: impl Into<String>) -> OpenAICompatibleEmbeddingModel {
+        self.embedding_model(model_id)
+    }
+
+    /// Deprecated upstream alias for [`VercelAiGatewayOpenAICompatibleProvider::embedding_model`].
+    pub fn text_embedding_model(
+        &self,
+        model_id: impl Into<String>,
+    ) -> OpenAICompatibleEmbeddingModel {
+        self.embedding_model(model_id)
+    }
+
     fn openai_compatible_provider(&self) -> OpenAICompatibleProvider {
         let mut settings = OpenAICompatibleProviderSettings::new(
             VERCEL_AI_GATEWAY_OPENAI_COMPATIBLE_PROVIDER_NAME,
@@ -159,6 +177,13 @@ pub fn vercel_ai_gateway_openai_compatible(
     VercelAiGatewayOpenAICompatibleProvider::new().language_model(model_id)
 }
 
+/// Creates a Vercel AI Gateway OpenAI-compatible embedding model.
+pub fn vercel_ai_gateway_openai_compatible_embedding(
+    model_id: impl Into<String>,
+) -> OpenAICompatibleEmbeddingModel {
+    VercelAiGatewayOpenAICompatibleProvider::new().embedding_model(model_id)
+}
+
 fn vercel_ai_gateway_api_key(explicit_api_key: Option<&String>) -> Option<String> {
     non_empty_optional_setting(explicit_api_key.cloned())
         .or_else(|| non_empty_env_setting("AI_GATEWAY_API_KEY"))
@@ -178,16 +203,20 @@ mod tests {
     use super::{
         VERCEL_AI_GATEWAY_OPENAI_COMPATIBLE_BASE_URL, VercelAiGatewayOpenAICompatibleProvider,
         VercelAiGatewayOpenAICompatibleSettings, create_vercel_ai_gateway_openai_compatible,
-        vercel_ai_gateway_openai_compatible,
+        vercel_ai_gateway_openai_compatible, vercel_ai_gateway_openai_compatible_embedding,
     };
+    use crate::embed::{EmbedManyOptions, EmbedOptions, embed, embed_many};
+    use crate::embedding_model::EmbeddingModel;
     use crate::generate_text::{GenerateTextOptions, generate_text};
     use crate::headers::Headers;
     use crate::json::JsonValue;
+    use crate::language_model::FinishReason;
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
     use crate::provider_utils::{
         ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     };
+    use crate::stream_text::{StreamTextOptions, stream_text};
     use serde_json::json;
     use std::env;
     use std::fs;
@@ -312,12 +341,212 @@ mod tests {
     #[test]
     fn vercel_ai_gateway_openai_compatible_factory_uses_default_base_url() {
         let model = vercel_ai_gateway_openai_compatible("openai/gpt-4.1-mini");
+        let embedding =
+            vercel_ai_gateway_openai_compatible_embedding("openai/text-embedding-3-small");
 
         assert_eq!(model.provider(), "vercel-ai-gateway.chat");
         assert_eq!(model.model_id(), "openai/gpt-4.1-mini");
+        assert_eq!(embedding.provider(), "vercel-ai-gateway.embedding");
+        assert_eq!(embedding.model_id(), "openai/text-embedding-3-small");
         assert_eq!(
             VERCEL_AI_GATEWAY_OPENAI_COMPATIBLE_BASE_URL,
             "https://ai-gateway.vercel.sh/v1"
+        );
+    }
+
+    #[test]
+    fn vercel_ai_gateway_openai_compatible_streams_text_through_openai_chat() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    openai_compatible_chat_stream_body(),
+                )
+                .with_headers(Headers::from([
+                    ("content-type".to_string(), "text/event-stream".to_string()),
+                    (
+                        "x-request-id".to_string(),
+                        "req_vercel_ai_gateway_stream".to_string(),
+                    ),
+                ])))))
+            });
+        let provider = create_vercel_ai_gateway_openai_compatible(
+            VercelAiGatewayOpenAICompatibleSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://ai-gateway.test/v1")
+                .with_header("custom-header", "value"),
+        )
+        .with_transport(transport);
+        let model = provider.chat("openai/gpt-4.1-mini");
+        let result = poll_ready(stream_text(
+            StreamTextOptions::from_prompt(&model, Prompt::from_prompt("Say hello"))
+                .expect("prompt is valid")
+                .with_max_output_tokens(12)
+                .with_temperature(0.0),
+        ));
+
+        assert_eq!(result.text, "Hello stream");
+        assert_eq!(result.text_stream, vec!["Hello ", "stream"]);
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(4));
+        assert_eq!(result.usage.output_tokens.total, Some(5));
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("req_vercel_ai_gateway_stream")
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://ai-gateway.test/v1/chat/completions");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "openai/gpt-4.1-mini",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Say hello"
+                    }
+                ],
+                "max_tokens": 12,
+                "temperature": 0.0,
+                "stream": true
+            }))
+        );
+    }
+
+    #[test]
+    fn vercel_ai_gateway_openai_compatible_embeds_through_openai_embeddings() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "object": "list",
+                        "data": [
+                            {
+                                "object": "embedding",
+                                "index": 0,
+                                "embedding": [0.1, 0.2, 0.3]
+                            },
+                            {
+                                "object": "embedding",
+                                "index": 1,
+                                "embedding": [0.4, 0.5, 0.6]
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 8,
+                            "total_tokens": 8
+                        },
+                        "providerMetadata": {
+                            "vercel-ai-gateway": {
+                                "traceId": "trace-vercel-ai-gateway-embedding"
+                            }
+                        }
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from([(
+                    "x-request-id".to_string(),
+                    "req_vercel_ai_gateway_embedding".to_string(),
+                )])))))
+            });
+        let provider = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://ai-gateway.test/v1/")
+            .with_header("custom-header", "value")
+            .with_transport(transport);
+        let model = provider.embedding_model("openai/text-embedding-3-small");
+
+        assert_eq!(model.provider(), "vercel-ai-gateway.embedding");
+        assert_eq!(poll_ready(model.max_embeddings_per_call()), Some(2048));
+
+        let result = poll_ready(embed_many(
+            EmbedManyOptions::new(&model, ["sunny day", "rainy city"])
+                .with_header("x-call", "embed-many"),
+        ));
+
+        assert_eq!(
+            result.embeddings,
+            vec![vec![0.1, 0.2, 0.3], vec![0.4, 0.5, 0.6]]
+        );
+        assert_eq!(result.usage.tokens, 8);
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("vercel-ai-gateway"))
+                .and_then(|metadata| metadata.get("traceId"))
+                .and_then(JsonValue::as_str),
+            Some("trace-vercel-ai-gateway-embedding")
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://ai-gateway.test/v1/embeddings");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+        assert_eq!(
+            request.headers.get("x-call").map(String::as_str),
+            Some("embed-many")
+        );
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "openai/text-embedding-3-small",
+                "input": ["sunny day", "rainy city"],
+                "encoding_format": "float"
+            }))
         );
     }
 
@@ -355,6 +584,142 @@ mod tests {
                 .contains("rust-vercel-ai-gateway-openai-ok"),
             "Gateway OpenAI-compatible response did not contain expected marker"
         );
+    }
+
+    #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI-compatible stream call"]
+    fn live_vercel_ai_gateway_openai_compatible_stream_text() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!(
+                "skipping live Gateway OpenAI-compatible stream test because no API key is configured"
+            );
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_AI_GATEWAY_OPENAI_COMPATIBLE_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_OPENAI_COMPATIBLE_MODEL"))
+            .or_else(|_| env::var("AI_SDK_RUST_GATEWAY_MODEL"))
+            .or_else(|_| env::var("AI_GATEWAY_MODEL"))
+            .unwrap_or_else(|_| "openai/gpt-4.1-mini".to_string());
+        let model = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key(api_key)
+            .language_model(model_id);
+        let result = poll_ready(stream_text(
+            StreamTextOptions::from_prompt(
+                &model,
+                Prompt::from_prompt("Reply with exactly: rust-vercel-ai-gateway-stream-ok"),
+            )
+            .expect("prompt is valid")
+            .with_max_output_tokens(24)
+            .with_temperature(0.0),
+        ));
+
+        assert!(
+            result
+                .text
+                .to_lowercase()
+                .contains("rust-vercel-ai-gateway-stream-ok"),
+            "Gateway OpenAI-compatible stream response did not contain expected marker"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI-compatible embedding call"]
+    fn live_vercel_ai_gateway_openai_compatible_embed() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!(
+                "skipping live Gateway OpenAI-compatible embedding test because no API key is configured"
+            );
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_AI_GATEWAY_OPENAI_COMPATIBLE_EMBEDDING_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_OPENAI_COMPATIBLE_EMBEDDING_MODEL"))
+            .or_else(|_| env::var("AI_SDK_RUST_GATEWAY_EMBEDDING_MODEL"))
+            .or_else(|_| env::var("AI_GATEWAY_EMBEDDING_MODEL"))
+            .unwrap_or_else(|_| "openai/text-embedding-3-small".to_string());
+        let model = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key(api_key)
+            .embedding_model(model_id);
+        let result = poll_ready(embed(EmbedOptions::new(
+            &model,
+            "rust vercel ai gateway embedding ok",
+        )));
+
+        assert!(
+            !result.embedding.is_empty(),
+            "Gateway OpenAI-compatible embedding response was empty"
+        );
+    }
+
+    fn openai_compatible_chat_stream_body() -> String {
+        sse_body([
+            json!({
+                "id": "chatcmpl-stream-test",
+                "created": 1711115037,
+                "model": "openai/gpt-4.1-mini",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": ""
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-stream-test",
+                "created": 1711115037,
+                "model": "openai/gpt-4.1-mini",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "content": "Hello "
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-stream-test",
+                "created": 1711115037,
+                "model": "openai/gpt-4.1-mini",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "content": "stream"
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-stream-test",
+                "created": 1711115037,
+                "model": "openai/gpt-4.1-mini",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 4,
+                    "completion_tokens": 5
+                }
+            }),
+        ])
+    }
+
+    fn sse_body(events: impl IntoIterator<Item = JsonValue>) -> String {
+        events
+            .into_iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .chain(["data: [DONE]\n\n".to_string()])
+            .collect()
     }
 
     fn live_gateway_api_key() -> Option<String> {
