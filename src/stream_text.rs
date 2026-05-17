@@ -9,15 +9,15 @@ use serde::{Deserialize, Serialize};
 use crate::VERSION;
 use crate::generate_text::{
     ActiveTools, GenerateTextModelInfo, GenerateTextStep, GenerateTextTool, GenerateTextToolCall,
-    GenerateTextToolResult, StopCondition, ToolCallRepair, ToolCallRepairOptions,
-    ToolInputRefinement, ToolInputRefinementError, execute_tool_calls,
+    GenerateTextToolResult, StopCondition, ToolApprovalConfiguration, ToolCallRepair,
+    ToolCallRepairOptions, ToolInputRefinement, ToolInputRefinementError, execute_tool_calls,
     filter_active_language_model_tools, generate_text_call_id,
     generate_text_tool_result_from_language_model_tool_result, is_stop_condition_met,
     mark_runtime_dynamic_tool_calls, mark_tool_call_metadata, mark_tool_call_titles,
     mark_tool_result_metadata, mark_unavailable_tool_calls, refine_tool_inputs,
     refresh_tool_call_views, refresh_tool_result_views, repair_tool_calls,
-    response_messages_for_step_without_approvals, should_continue_after_tool_results,
-    sync_tool_result_inputs,
+    resolve_tool_approvals_for_step, response_messages_for_step,
+    should_continue_after_tool_results, sync_tool_result_inputs,
 };
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
@@ -494,6 +494,9 @@ pub struct StreamTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Optional active tool names used to restrict the available tool set.
     pub active_tools: ActiveTools,
 
+    /// Static approval configuration for streamed tool calls.
+    pub tool_approval: Option<ToolApprovalConfiguration>,
+
     /// Per-tool input refinements applied after parsing valid tool calls.
     pub tool_input_refinements: BTreeMap<String, ToolInputRefinement>,
 
@@ -518,6 +521,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             tools_context: JsonObject::new(),
             experimental_sandbox: None,
             active_tools: None,
+            tool_approval: None,
             tool_input_refinements: BTreeMap::new(),
             tool_call_repair: None,
             max_steps: 1,
@@ -541,6 +545,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             tools_context: JsonObject::new(),
             experimental_sandbox: None,
             active_tools: None,
+            tool_approval: None,
             tool_input_refinements: BTreeMap::new(),
             tool_call_repair: None,
             max_steps: 1,
@@ -656,6 +661,12 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
         active_tools: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         self.active_tools = Some(active_tools.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Sets static approval configuration for streamed tool calls.
+    pub fn with_tool_approval(mut self, tool_approval: ToolApprovalConfiguration) -> Self {
+        self.tool_approval = Some(tool_approval);
         self
     }
 
@@ -906,6 +917,7 @@ where
         tools_context,
         experimental_sandbox,
         active_tools,
+        tool_approval,
         tool_input_refinements,
         tool_call_repair,
         max_steps,
@@ -983,6 +995,24 @@ where
             runtime_context.clone(),
             tools_context.clone(),
         );
+        let tool_approvals = resolve_tool_approvals_for_step(
+            &generate_step.tool_calls,
+            &step_tools,
+            tool_approval.as_ref(),
+            &step_prompt,
+            &tools_context,
+            &runtime_context,
+        )
+        .await;
+
+        for request in &tool_approvals.requests {
+            parts.push(TextStreamPart::ToolApprovalRequest(
+                LanguageModelToolApprovalRequest::new(
+                    request.approval_id.clone(),
+                    request.tool_call_id.clone(),
+                ),
+            ));
+        }
 
         let provider_result_tool_call_ids = collected_step
             .tool_results
@@ -1002,12 +1032,16 @@ where
             &executable_tool_calls,
             &step_prompt,
             &tools_context,
-            &BTreeSet::new(),
+            &tool_approvals.blocked_tool_call_ids,
             (experimental_sandbox.as_ref(), None, None),
         )
         .await;
-        let should_continue =
-            should_continue_after_tool_results(&generate_step, &local_tool_results, 0, false);
+        let should_continue = should_continue_after_tool_results(
+            &generate_step,
+            &local_tool_results,
+            tool_approvals.denied_client_tool_call_count,
+            false,
+        );
 
         for tool_result in &local_tool_results {
             parts.push(TextStreamPart::ToolResult(tool_result.clone()));
@@ -1023,9 +1057,10 @@ where
         refresh_tool_result_views(&mut generate_step);
         generate_step.performance.tool_execution_ms = tool_execution_ms;
 
-        let response_messages = response_messages_for_step_without_approvals(
+        let response_messages = response_messages_for_step(
             &generate_step,
             &collected_step.provider_content,
+            &tool_approvals,
             &step_tools,
         )
         .await
@@ -1579,12 +1614,14 @@ fn append_stream_text_user_agent(call_options: &mut LanguageModelCallOptions) {
 mod tests {
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Waker};
 
     use serde_json::{Map, json};
 
     use super::*;
-    use crate::generate_text::has_tool_call;
+    use crate::generate_text::{ToolApprovalStatusKind, has_tool_call};
     use crate::json::NonNullJsonValue;
     use crate::language_model::{
         FinishReason, InputTokenUsage, LanguageModelAssistantContentPart,
@@ -2222,5 +2259,141 @@ mod tests {
         assert_eq!(result.steps.len(), 1);
         assert_eq!(result.finish_reason, FinishReason::ToolCalls);
         assert_eq!(result.tool_calls[0].tool_name, "weather");
+    }
+
+    #[test]
+    fn stream_text_applies_denied_tool_approval_to_continuation_messages() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "weather",
+                    r#"{"city":"Brisbane"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "Request denied.",
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+        let execute_count = Arc::new(AtomicUsize::new(0));
+        let execute_count_for_tool = Arc::clone(&execute_count);
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    move |_input, _options| {
+                        let execute_count = Arc::clone(&execute_count_for_tool);
+                        async move {
+                            execute_count.fetch_add(1, Ordering::SeqCst);
+                            Ok(json!({ "forecast": "sunny" }))
+                        }
+                    },
+                ))
+                .with_tool_approval(
+                    ToolApprovalConfiguration::new()
+                        .with_tool_status("weather", ToolApprovalStatusKind::Denied),
+                )
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(execute_count.load(Ordering::SeqCst), 0);
+        assert_eq!(model.stream_calls().len(), 2);
+        assert_eq!(result.text, "Request denied.");
+        assert!(result.parts.iter().any(|part| {
+            matches!(
+                part,
+                TextStreamPart::ToolApprovalRequest(request)
+                    if request.tool_call_id == "call-1"
+            )
+        }));
+
+        assert!(matches!(
+            &model.stream_calls()[1].prompt[2],
+            LanguageModelMessage::Tool(message)
+                if message.content.len() == 2
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelToolContentPart::ToolApprovalResponse(response)
+                            if !response.approved
+                    )
+                    && matches!(
+                        &message.content[1],
+                        LanguageModelToolContentPart::ToolResult(part)
+                            if part.tool_name == "weather"
+                                && matches!(
+                                    &part.output,
+                                    LanguageModelToolResultOutput::ExecutionDenied { .. }
+                                )
+            )
+        ));
+    }
+
+    #[test]
+    fn stream_text_repairs_and_refines_streamed_tool_call_before_execution() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1", "weather", "{bad",
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |input, _options| async move {
+                        Ok(json!({
+                            "city": input["city"],
+                            "forecast": "sunny"
+                        }))
+                    },
+                ))
+                .with_tool_call_repair(|_options| async move {
+                    Ok::<Option<LanguageModelToolCall>, String>(Some(LanguageModelToolCall::new(
+                        "call-1",
+                        "weather",
+                        r#"{"city":"brisbane"}"#,
+                    )))
+                })
+                .with_tool_input_refinement("weather", |mut input| async move {
+                    input["city"] = json!("BRISBANE");
+                    Ok(input)
+                }),
+        ));
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].input, json!({ "city": "BRISBANE" }));
+        assert_eq!(result.tool_calls[0].invalid, None);
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].output["city"], "BRISBANE");
+        assert_eq!(result.tool_results[0].is_error, None);
     }
 }
