@@ -274,8 +274,8 @@ pub use transcribe::{
 };
 pub use transcription_model::{
     NoTranscriptGeneratedError, TranscriptionModel, TranscriptionModelCallOptions,
-    TranscriptionModelRequest, TranscriptionModelResponse, TranscriptionModelResult,
-    TranscriptionModelSegment,
+    TranscriptionModelRequest, TranscriptionModelResponse, TranscriptionModelResponseMetadata,
+    TranscriptionModelResult, TranscriptionModelSegment,
 };
 pub use upload_file::{UploadFileData, UploadFileOptions, UploadFileResult, upload_file};
 pub use upload_skill::{

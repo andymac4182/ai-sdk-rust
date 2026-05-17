@@ -17,7 +17,7 @@ use crate::provider_utils::{
 };
 use crate::transcription_model::{
     NoTranscriptGeneratedError, TranscriptionModel, TranscriptionModelCallOptions,
-    TranscriptionModelResponse, TranscriptionModelResult, TranscriptionModelSegment,
+    TranscriptionModelResponseMetadata, TranscriptionModelResult, TranscriptionModelSegment,
 };
 use crate::warning::Warning;
 
@@ -43,7 +43,7 @@ pub struct TranscriptionResult {
     pub warnings: Vec<Warning>,
 
     /// Response metadata from provider calls.
-    pub responses: Vec<TranscriptionModelResponse>,
+    pub responses: Vec<TranscriptionModelResponseMetadata>,
 
     /// Provider-specific metadata returned by the provider.
     pub provider_metadata: ProviderMetadata,
@@ -51,14 +51,19 @@ pub struct TranscriptionResult {
 
 impl TranscriptionResult {
     /// Creates a high-level transcription result.
-    pub fn new(
+    pub fn new<R, I>(
         text: impl Into<String>,
         segments: Vec<TranscriptionModelSegment>,
         warnings: Vec<Warning>,
-        responses: Vec<TranscriptionModelResponse>,
+        responses: I,
         provider_metadata: ProviderMetadata,
-    ) -> Result<Self, NoTranscriptGeneratedError> {
+    ) -> Result<Self, NoTranscriptGeneratedError>
+    where
+        R: Into<TranscriptionModelResponseMetadata>,
+        I: IntoIterator<Item = R>,
+    {
         let text = text.into();
+        let responses = responses.into_iter().map(Into::into).collect::<Vec<_>>();
 
         if text.is_empty() {
             return Err(NoTranscriptGeneratedError::new(responses));
@@ -335,7 +340,7 @@ pub async fn transcribe<M: TranscriptionModel + ?Sized>(
         language,
         duration_in_seconds,
         warnings,
-        responses: vec![response],
+        responses: vec![response.into()],
         provider_metadata: provider_metadata.unwrap_or_default(),
     })
 }
@@ -400,7 +405,7 @@ mod tests {
     use crate::provider_utils::{DownloadError, DownloadedBlob};
     use crate::transcription_model::{
         TranscriptionModel, TranscriptionModelCallOptions, TranscriptionModelResponse,
-        TranscriptionModelResult, TranscriptionModelSegment,
+        TranscriptionModelResponseMetadata, TranscriptionModelResult, TranscriptionModelSegment,
     };
     use crate::warning::Warning;
     use serde_json::json;
@@ -487,6 +492,10 @@ mod tests {
         )
     }
 
+    fn transcription_response_metadata(model_id: &str) -> TranscriptionModelResponseMetadata {
+        TranscriptionModelResponseMetadata::from_response(transcription_response(model_id))
+    }
+
     #[test]
     fn transcription_result_serializes_upstream_shape() {
         let provider_metadata: ProviderMetadata = serde_json::from_value(json!({
@@ -569,10 +578,47 @@ mod tests {
                 "Hello.",
                 Vec::new(),
                 Vec::new(),
-                vec![transcription_response("transcribe-test")],
+                vec![transcription_response_metadata("transcribe-test")],
                 ProviderMetadata::new(),
             )
             .expect("transcript is present")
+        );
+    }
+
+    #[test]
+    fn transcription_result_drops_provider_response_body_from_metadata() {
+        let result = TranscriptionResult::new(
+            "Hello.",
+            Vec::new(),
+            Vec::new(),
+            vec![
+                transcription_response("transcribe-test")
+                    .with_header("x-request-id", "req_123")
+                    .with_body(json!({
+                        "text": "Hello."
+                    })),
+            ],
+            ProviderMetadata::new(),
+        )
+        .expect("transcript is present");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("result serializes"),
+            json!({
+                "text": "Hello.",
+                "segments": [],
+                "warnings": [],
+                "responses": [
+                    {
+                        "timestamp": "2024-01-02T03:04:05Z",
+                        "modelId": "transcribe-test",
+                        "headers": {
+                            "x-request-id": "req_123"
+                        }
+                    }
+                ],
+                "providerMetadata": {}
+            })
         );
     }
 
@@ -589,9 +635,10 @@ mod tests {
             ProviderMetadata::new(),
         )
         .expect_err("empty transcript errors");
+        let expected_metadata = TranscriptionModelResponseMetadata::from_response(response);
 
         assert_eq!(error.message(), "No transcript generated.");
-        assert_eq!(error.responses(), &[response]);
+        assert_eq!(error.responses(), &[expected_metadata]);
     }
 
     #[test]
@@ -600,7 +647,7 @@ mod tests {
             "Hello.",
             Vec::new(),
             Vec::new(),
-            vec![transcription_response("transcribe-test")],
+            vec![transcription_response_metadata("transcribe-test")],
             ProviderMetadata::new(),
         )
         .expect("transcript is present");
@@ -825,7 +872,10 @@ mod tests {
         );
         assert_eq!(
             result.responses,
-            vec![transcription_response("transcribe-test").with_header("x-request-id", "req_123")]
+            vec![
+                transcription_response_metadata("transcribe-test")
+                    .with_header("x-request-id", "req_123")
+            ]
         );
         assert_eq!(result.provider_metadata, ProviderMetadata::new());
     }
@@ -875,8 +925,9 @@ mod tests {
         let no_transcript = error
             .as_no_transcript_generated()
             .expect("error is no-transcript");
+        let expected_metadata = TranscriptionModelResponseMetadata::from_response(response);
         assert_eq!(no_transcript.message(), "No transcript generated.");
-        assert_eq!(no_transcript.responses(), &[response]);
+        assert_eq!(no_transcript.responses(), &[expected_metadata]);
     }
 
     #[test]

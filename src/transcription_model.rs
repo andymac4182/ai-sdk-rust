@@ -173,17 +173,74 @@ impl TranscriptionModelResponse {
     }
 }
 
+/// High-level transcription response metadata.
+///
+/// Upstream `TranscriptionModelResponseMetadata` intentionally exposes
+/// timestamp, model id, and headers, but not the provider response body.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptionModelResponseMetadata {
+    /// Timestamp for the start of the generated response.
+    #[serde(with = "time::serde::rfc3339")]
+    pub timestamp: OffsetDateTime,
+
+    /// Provider model identifier used for the response.
+    pub model_id: String,
+
+    /// Response headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Headers>,
+}
+
+impl TranscriptionModelResponseMetadata {
+    /// Creates high-level transcription response metadata.
+    pub fn new(timestamp: OffsetDateTime, model_id: impl Into<String>) -> Self {
+        Self {
+            timestamp,
+            model_id: model_id.into(),
+            headers: None,
+        }
+    }
+
+    /// Creates high-level metadata from a provider-v4 transcription response.
+    pub fn from_response(response: TranscriptionModelResponse) -> Self {
+        Self {
+            timestamp: response.timestamp,
+            model_id: response.model_id,
+            headers: response.headers,
+        }
+    }
+
+    /// Adds a response header.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers
+            .get_or_insert_with(Headers::new)
+            .insert(name.into(), value.into());
+        self
+    }
+}
+
+impl From<TranscriptionModelResponse> for TranscriptionModelResponseMetadata {
+    fn from(response: TranscriptionModelResponse) -> Self {
+        Self::from_response(response)
+    }
+}
+
 /// Error returned when high-level transcription produces no transcript.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NoTranscriptGeneratedError {
-    responses: Vec<TranscriptionModelResponse>,
+    responses: Vec<TranscriptionModelResponseMetadata>,
 }
 
 impl NoTranscriptGeneratedError {
     /// Creates a no-transcript error with response metadata from attempted provider calls.
-    pub fn new(responses: impl IntoIterator<Item = TranscriptionModelResponse>) -> Self {
+    pub fn new<R, I>(responses: I) -> Self
+    where
+        R: Into<TranscriptionModelResponseMetadata>,
+        I: IntoIterator<Item = R>,
+    {
         Self {
-            responses: responses.into_iter().collect(),
+            responses: responses.into_iter().map(Into::into).collect(),
         }
     }
 
@@ -193,12 +250,12 @@ impl NoTranscriptGeneratedError {
     }
 
     /// Returns response metadata for attempted provider calls.
-    pub fn responses(&self) -> &[TranscriptionModelResponse] {
+    pub fn responses(&self) -> &[TranscriptionModelResponseMetadata] {
         &self.responses
     }
 
     /// Converts this error into its response metadata.
-    pub fn into_responses(self) -> Vec<TranscriptionModelResponse> {
+    pub fn into_responses(self) -> Vec<TranscriptionModelResponseMetadata> {
         self.responses
     }
 }
@@ -298,8 +355,8 @@ impl TranscriptionModelResult {
 mod tests {
     use super::{
         NoTranscriptGeneratedError, TranscriptionModel, TranscriptionModelCallOptions,
-        TranscriptionModelRequest, TranscriptionModelResponse, TranscriptionModelResult,
-        TranscriptionModelSegment,
+        TranscriptionModelRequest, TranscriptionModelResponse, TranscriptionModelResponseMetadata,
+        TranscriptionModelResult, TranscriptionModelSegment,
     };
     use crate::file_data::FileDataContent;
     use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
@@ -431,13 +488,40 @@ mod tests {
             .with_body(json!({
                 "text": ""
             }));
+        let expected_metadata =
+            TranscriptionModelResponseMetadata::new(response_timestamp, "openai/whisper-1")
+                .with_header("x-request-id", "req_123");
 
         let error = NoTranscriptGeneratedError::new([response.clone()]);
 
         assert_eq!(error.message(), "No transcript generated.");
         assert_eq!(error.to_string(), "No transcript generated.");
-        assert_eq!(error.responses(), std::slice::from_ref(&response));
-        assert_eq!(error.into_responses(), vec![response]);
+        assert_eq!(error.responses(), std::slice::from_ref(&expected_metadata));
+        assert_eq!(error.into_responses(), vec![expected_metadata]);
+    }
+
+    #[test]
+    fn response_metadata_drops_provider_response_body() {
+        let response_timestamp =
+            OffsetDateTime::parse("2026-05-16T09:30:00Z", &Rfc3339).expect("timestamp parses");
+        let response = TranscriptionModelResponse::new(response_timestamp, "openai/whisper-1")
+            .with_header("x-request-id", "req_123")
+            .with_body(json!({
+                "text": "Hello world."
+            }));
+
+        let metadata = TranscriptionModelResponseMetadata::from_response(response);
+
+        assert_eq!(
+            serde_json::to_value(metadata).expect("response metadata serializes"),
+            json!({
+                "timestamp": "2026-05-16T09:30:00Z",
+                "modelId": "openai/whisper-1",
+                "headers": {
+                    "x-request-id": "req_123"
+                }
+            })
+        );
     }
 
     #[test]
