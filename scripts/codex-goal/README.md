@@ -16,8 +16,8 @@ The launcher uses:
 - `-C <worktree>` so Codex's root is the explicit worktree.
 - `-m gpt-5.5`.
 - `-c 'model_reasoning_effort="xhigh"'`.
-- `--dangerously-bypass-approvals-and-sandbox -a never` so it does not stop for
-  tool approvals.
+- `--dangerously-bypass-approvals-and-sandbox` so it does not stop for tool
+  approvals.
 - `tmux` and `caffeinate` when available so it can keep running.
 
 Worktrees are created under:
