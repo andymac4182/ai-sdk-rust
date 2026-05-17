@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 use std::env;
 use std::future::{Future, Ready, ready};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -35,6 +36,7 @@ pub const DEFAULT_GATEWAY_BASE_URL: &str = "https://ai-gateway.vercel.sh/v4/ai";
 const AI_GATEWAY_PROTOCOL_VERSION: &str = "0.0.1";
 const GATEWAY_AUTH_METHOD_HEADER: &str = "ai-gateway-auth-method";
 const GATEWAY_PROVIDER_ID: &str = "gateway";
+const DEFAULT_METADATA_CACHE_REFRESH_MILLIS: u64 = 1000 * 60 * 5;
 
 /// Future returned by an injected Gateway HTTP transport.
 pub type GatewayTransportFuture =
@@ -551,6 +553,11 @@ pub struct GatewayProviderSettings {
     /// Custom provider-level headers included with each request.
     #[serde(default, skip_serializing_if = "Headers::is_empty")]
     pub headers: Headers,
+
+    /// How frequently available-model metadata should be refreshed, in
+    /// milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_cache_refresh_millis: Option<u64>,
 }
 
 impl GatewayProviderSettings {
@@ -576,6 +583,16 @@ impl GatewayProviderSettings {
         self.headers.insert(name.into(), value.into());
         self
     }
+
+    /// Sets how frequently available-model metadata is refreshed, in
+    /// milliseconds.
+    pub fn with_metadata_cache_refresh_millis(
+        mut self,
+        metadata_cache_refresh_millis: u64,
+    ) -> Self {
+        self.metadata_cache_refresh_millis = Some(metadata_cache_refresh_millis);
+        self
+    }
 }
 
 /// Vercel AI Gateway provider.
@@ -583,6 +600,13 @@ impl GatewayProviderSettings {
 pub struct GatewayProvider {
     settings: GatewayProviderSettings,
     transport: GatewayTransport,
+    metadata_cache: Arc<Mutex<GatewayMetadataCache>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct GatewayMetadataCache {
+    fetched_at: Option<Instant>,
+    value: Option<GatewayFetchMetadataResponse>,
 }
 
 impl GatewayProvider {
@@ -596,6 +620,7 @@ impl GatewayProvider {
         Self {
             settings,
             transport: default_gateway_transport(),
+            metadata_cache: Arc::new(Mutex::new(GatewayMetadataCache::default())),
         }
     }
 
@@ -614,6 +639,16 @@ impl GatewayProvider {
     /// Adds a provider-level request header.
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.settings.headers.insert(name.into(), value.into());
+        self
+    }
+
+    /// Sets how frequently available-model metadata is refreshed, in
+    /// milliseconds.
+    pub fn with_metadata_cache_refresh_millis(
+        mut self,
+        metadata_cache_refresh_millis: u64,
+    ) -> Self {
+        self.settings.metadata_cache_refresh_millis = Some(metadata_cache_refresh_millis);
         self
     }
 
@@ -641,13 +676,21 @@ impl GatewayProvider {
     pub async fn get_available_models(
         &self,
     ) -> Result<GatewayFetchMetadataResponse, HandledFetchError> {
+        if let Some(cached) = self.cached_available_models() {
+            return Ok(cached);
+        }
+
         let request_headers = gateway_provider_headers(&self.settings);
         let get_options = GetFromApiOptions::new(format!("{}/config", self.base_url()))
             .with_headers(request_headers)
             .with_environment(RuntimeEnvironment::unknown());
         let transport = Arc::clone(&self.transport);
 
-        get_gateway_json(get_options, transport, gateway_fetch_metadata_response).await
+        let response =
+            get_gateway_json(get_options, transport, gateway_fetch_metadata_response).await?;
+        self.store_available_models(response.clone());
+
+        Ok(response)
     }
 
     /// Returns credit balance information for the authenticated Gateway account.
@@ -694,6 +737,35 @@ impl GatewayProvider {
 
     fn base_url(&self) -> String {
         gateway_base_url(&self.settings)
+    }
+
+    fn cached_available_models(&self) -> Option<GatewayFetchMetadataResponse> {
+        let refresh_duration = metadata_cache_refresh_duration(&self.settings);
+        if refresh_duration.is_zero() {
+            return None;
+        }
+
+        let cache = self
+            .metadata_cache
+            .lock()
+            .expect("gateway metadata cache mutex is not poisoned");
+        let fetched_at = cache.fetched_at?;
+
+        if fetched_at.elapsed() < refresh_duration {
+            cache.value.clone()
+        } else {
+            None
+        }
+    }
+
+    fn store_available_models(&self, response: GatewayFetchMetadataResponse) {
+        let mut cache = self
+            .metadata_cache
+            .lock()
+            .expect("gateway metadata cache mutex is not poisoned");
+
+        cache.fetched_at = Some(Instant::now());
+        cache.value = Some(response);
     }
 }
 
@@ -1057,6 +1129,14 @@ fn gateway_base_url(settings: &GatewayProviderSettings) -> String {
     without_trailing_slash(settings.base_url.as_deref())
         .unwrap_or(DEFAULT_GATEWAY_BASE_URL)
         .to_string()
+}
+
+fn metadata_cache_refresh_duration(settings: &GatewayProviderSettings) -> Duration {
+    Duration::from_millis(
+        settings
+            .metadata_cache_refresh_millis
+            .unwrap_or(DEFAULT_METADATA_CACHE_REFRESH_MILLIS),
+    )
 }
 
 fn resolve_gateway_api_key(settings: &GatewayProviderSettings) -> Option<String> {
@@ -1983,6 +2063,106 @@ mod tests {
             request.headers.get("x-provider").map(String::as_str),
             Some("provider-value")
         );
+    }
+
+    #[test]
+    fn gateway_provider_caches_available_models_until_refresh() {
+        let request_count = Arc::new(Mutex::new(0_u32));
+        let request_count_for_transport = Arc::clone(&request_count);
+        let transport: GatewayTransport = Arc::new(move |_request| -> GatewayTransportFuture {
+            let mut count = request_count_for_transport
+                .lock()
+                .expect("request count mutex is not poisoned");
+            *count += 1;
+            let model_id = format!("model-{}", *count);
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "models": [{
+                        "id": model_id,
+                        "name": "Cached Model",
+                        "specification": {
+                            "specificationVersion": "v4",
+                            "provider": "gateway",
+                            "modelId": model_id
+                        },
+                        "modelType": "language"
+                    }]
+                })
+                .to_string(),
+            ))))
+        });
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com/v4/ai")
+                .with_api_key("test-token")
+                .with_metadata_cache_refresh_millis(60_000),
+        )
+        .with_transport(transport);
+
+        let first = poll_ready(provider.get_available_models()).expect("first fetch succeeds");
+        let second = poll_ready(provider.get_available_models()).expect("second fetch succeeds");
+
+        assert_eq!(
+            *request_count
+                .lock()
+                .expect("request count mutex is not poisoned"),
+            1
+        );
+        assert_eq!(first.models[0].id, "model-1");
+        assert_eq!(second.models[0].id, "model-1");
+    }
+
+    #[test]
+    fn gateway_provider_refreshes_available_models_when_cache_disabled() {
+        let request_count = Arc::new(Mutex::new(0_u32));
+        let request_count_for_transport = Arc::clone(&request_count);
+        let transport: GatewayTransport = Arc::new(move |_request| -> GatewayTransportFuture {
+            let mut count = request_count_for_transport
+                .lock()
+                .expect("request count mutex is not poisoned");
+            *count += 1;
+            let model_id = format!("model-{}", *count);
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "models": [{
+                        "id": model_id,
+                        "name": "Refreshed Model",
+                        "specification": {
+                            "specificationVersion": "v4",
+                            "provider": "gateway",
+                            "modelId": model_id
+                        },
+                        "modelType": "language"
+                    }]
+                })
+                .to_string(),
+            ))))
+        });
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com/v4/ai")
+                .with_api_key("test-token")
+                .with_metadata_cache_refresh_millis(0),
+        )
+        .with_transport(transport);
+
+        let first = poll_ready(provider.get_available_models()).expect("first fetch succeeds");
+        let second = poll_ready(provider.get_available_models()).expect("second fetch succeeds");
+
+        assert_eq!(
+            *request_count
+                .lock()
+                .expect("request count mutex is not poisoned"),
+            2
+        );
+        assert_eq!(first.models[0].id, "model-1");
+        assert_eq!(second.models[0].id, "model-2");
     }
 
     #[test]
