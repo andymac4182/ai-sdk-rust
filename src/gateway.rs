@@ -1211,6 +1211,7 @@ impl GatewayLanguageModel {
         let request_body_for_error = request_body.clone();
         let request_body_for_response = request_body.clone();
         let request_headers = self.request_headers(options.headers.as_ref(), false);
+        let auth_method = parse_gateway_auth_method(&request_headers);
         let post_options = PostJsonToApiOptions::new(self.language_model_url(), request_body)
             .with_headers(request_headers)
             .with_environment(RuntimeEnvironment::unknown());
@@ -1243,7 +1244,9 @@ impl GatewayLanguageModel {
                 response.response_headers,
                 request_body_for_response,
             ),
-            Err(error) => self.generate_result_from_error(error, request_body_for_error),
+            Err(error) => {
+                self.generate_result_from_error(error, request_body_for_error, auth_method)
+            }
         }
     }
 
@@ -1256,6 +1259,7 @@ impl GatewayLanguageModel {
         let request_body_for_error = request_body.clone();
         let request_body_for_response = request_body.clone();
         let request_headers = self.request_headers(options.headers.as_ref(), true);
+        let auth_method = parse_gateway_auth_method(&request_headers);
         let post_options = PostJsonToApiOptions::new(self.language_model_url(), request_body)
             .with_headers(request_headers)
             .with_environment(RuntimeEnvironment::unknown());
@@ -1288,7 +1292,7 @@ impl GatewayLanguageModel {
                 request_body_for_response,
                 include_raw_chunks,
             ),
-            Err(error) => self.stream_result_from_error(error, request_body_for_error),
+            Err(error) => self.stream_result_from_error(error, request_body_for_error, auth_method),
         }
     }
 
@@ -1390,19 +1394,14 @@ impl GatewayLanguageModel {
         &self,
         error: HandledFetchError,
         request_body: JsonValue,
+        auth_method: Option<GatewayAuthMethod>,
     ) -> LanguageModelGenerateResult {
-        let (message, headers, body) = match error {
-            HandledFetchError::Original { error } => (error.message().to_string(), None, None),
-            HandledFetchError::ApiCall { error } => (
-                error.message().to_string(),
-                error.response_headers().cloned(),
-                error.response_body().map(String::from),
-            ),
-        };
+        let (headers, body) = gateway_error_response_context(&error);
         let response_body = body
             .as_deref()
             .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
             .or_else(|| body.map(JsonValue::String));
+        let gateway_error = as_gateway_error(error, auth_method);
         let mut response = LanguageModelResponse::new();
 
         if let Some(headers) = headers {
@@ -1424,7 +1423,7 @@ impl GatewayLanguageModel {
         .with_request(LanguageModelRequest::new().with_body(request_body))
         .with_response(response);
 
-        result = result.with_provider_metadata(gateway_error_metadata(message));
+        result = result.with_provider_metadata(gateway_error_metadata_from_error(&gateway_error));
         result
     }
 
@@ -1456,18 +1455,16 @@ impl GatewayLanguageModel {
         &self,
         error: HandledFetchError,
         request_body: JsonValue,
+        auth_method: Option<GatewayAuthMethod>,
     ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
-        let (message, headers, body) = match error {
-            HandledFetchError::Original { error } => (error.message().to_string(), None, None),
-            HandledFetchError::ApiCall { error } => (
-                error.message().to_string(),
-                error.response_headers().cloned(),
-                error.response_body().map(String::from),
-            ),
-        };
+        let (headers, body) = gateway_error_response_context(&error);
+        let gateway_error = as_gateway_error(error, auth_method);
         let mut result =
-            LanguageModelStreamResult::new(vec![gateway_stream_error(message, body.as_deref())])
-                .with_request(LanguageModelRequest::new().with_body(request_body));
+            LanguageModelStreamResult::new(vec![gateway_stream_error_from_gateway_error(
+                &gateway_error,
+                body.as_deref(),
+            )])
+            .with_request(LanguageModelRequest::new().with_body(request_body));
 
         if let Some(headers) = headers {
             result = result.with_response(with_stream_response_headers(
@@ -1492,6 +1489,7 @@ impl GatewayEmbeddingModel {
         let request_body_for_error = request_body.clone();
         let request_body_for_response = request_body.clone();
         let request_headers = self.request_headers(options.headers.as_ref());
+        let auth_method = parse_gateway_auth_method(&request_headers);
         let post_options = PostJsonToApiOptions::new(self.embedding_model_url(), request_body)
             .with_headers(request_headers)
             .with_environment(RuntimeEnvironment::unknown());
@@ -1524,7 +1522,7 @@ impl GatewayEmbeddingModel {
                 response.response_headers,
                 request_body_for_response,
             ),
-            Err(error) => embedding_result_from_error(error, request_body_for_error),
+            Err(error) => embedding_result_from_error(error, request_body_for_error, auth_method),
         }
     }
 
@@ -1571,6 +1569,7 @@ impl GatewayImageModel {
     async fn do_generate_result(&self, options: ImageModelCallOptions) -> ImageModelResult {
         let request_body = gateway_image_request_body(&options);
         let request_headers = self.request_headers(options.headers.as_ref());
+        let auth_method = parse_gateway_auth_method(&request_headers);
         let post_options = PostJsonToApiOptions::new(self.image_model_url(), request_body)
             .with_headers(request_headers)
             .with_environment(RuntimeEnvironment::unknown());
@@ -1602,7 +1601,7 @@ impl GatewayImageModel {
                 response.value,
                 response.response_headers,
             ),
-            Err(error) => image_result_from_error(&self.model_id, error),
+            Err(error) => image_result_from_error(&self.model_id, error, auth_method),
         }
     }
 
@@ -1650,6 +1649,7 @@ impl GatewayRerankingModel {
         let request_body = gateway_reranking_request_body(&options);
         let request_body_for_error = request_body.clone();
         let request_headers = self.request_headers(options.headers.as_ref());
+        let auth_method = parse_gateway_auth_method(&request_headers);
         let post_options = PostJsonToApiOptions::new(self.reranking_model_url(), request_body)
             .with_headers(request_headers)
             .with_environment(RuntimeEnvironment::unknown());
@@ -1681,7 +1681,7 @@ impl GatewayRerankingModel {
                 response.raw_value,
                 response.response_headers,
             ),
-            Err(error) => reranking_result_from_error(error, request_body_for_error),
+            Err(error) => reranking_result_from_error(error, request_body_for_error, auth_method),
         }
     }
 
@@ -1728,6 +1728,7 @@ impl GatewayVideoModel {
     async fn do_generate_result(&self, options: VideoModelCallOptions) -> VideoModelResult {
         let request_body = gateway_video_request_body(&options);
         let request_headers = self.request_headers(options.headers.as_ref());
+        let auth_method = parse_gateway_auth_method(&request_headers);
         let post_options = PostJsonToApiOptions::new(self.video_model_url(), request_body)
             .with_headers(request_headers)
             .with_environment(RuntimeEnvironment::unknown());
@@ -1753,7 +1754,7 @@ impl GatewayVideoModel {
                 response.value,
                 response.response_headers,
             ),
-            Err(error) => video_result_from_error(&self.model_id, error),
+            Err(error) => video_result_from_error(&self.model_id, error, auth_method),
         }
     }
 
@@ -2424,20 +2425,15 @@ fn embedding_result_from_response(
 fn embedding_result_from_error(
     error: HandledFetchError,
     request_body: JsonValue,
+    auth_method: Option<GatewayAuthMethod>,
 ) -> EmbeddingModelResult {
-    let (message, headers, body) = match error {
-        HandledFetchError::Original { error } => (error.message().to_string(), None, None),
-        HandledFetchError::ApiCall { error } => (
-            error.message().to_string(),
-            error.response_headers().cloned(),
-            error.response_body().map(String::from),
-        ),
-    };
+    let (headers, body) = gateway_error_response_context(&error);
     let response_body = body
         .as_deref()
         .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
         .or_else(|| body.map(JsonValue::String))
         .unwrap_or(request_body);
+    let gateway_error = as_gateway_error(error, auth_method);
     let mut response = EmbeddingModelResponse::new().with_body(response_body);
 
     if let Some(headers) = headers {
@@ -2445,7 +2441,7 @@ fn embedding_result_from_error(
     }
 
     EmbeddingModelResult::new(Vec::new())
-        .with_provider_metadata(gateway_error_metadata(message))
+        .with_provider_metadata(gateway_error_metadata_from_error(&gateway_error))
         .with_response(response)
 }
 
@@ -2587,17 +2583,16 @@ fn image_result_from_response(
     result
 }
 
-fn image_result_from_error(model_id: &str, error: HandledFetchError) -> ImageModelResult {
-    let (message, headers) = match error {
-        HandledFetchError::Original { error } => (error.message().to_string(), None),
-        HandledFetchError::ApiCall { error } => (
-            error.message().to_string(),
-            error.response_headers().cloned(),
-        ),
-    };
+fn image_result_from_error(
+    model_id: &str,
+    error: HandledFetchError,
+    auth_method: Option<GatewayAuthMethod>,
+) -> ImageModelResult {
+    let (headers, _) = gateway_error_response_context(&error);
+    let gateway_error = as_gateway_error(error, auth_method);
 
     ImageModelResult::new(Vec::new(), image_response(model_id, headers))
-        .with_provider_metadata(gateway_image_error_metadata(message))
+        .with_provider_metadata(gateway_image_error_metadata(&gateway_error))
 }
 
 fn image_response(model_id: &str, headers: Option<Headers>) -> ImageModelResponse {
@@ -2640,15 +2635,13 @@ fn gateway_image_provider_metadata(value: JsonValue) -> Option<ImageModelProvide
     Some(metadata)
 }
 
-fn gateway_image_error_metadata(message: String) -> ImageModelProviderMetadata {
+fn gateway_image_error_metadata(error: &GatewayError) -> ImageModelProviderMetadata {
     let mut metadata = ImageModelProviderMetadata::new();
-    let mut extra = JsonObject::new();
-    extra.insert("errorMessage".to_string(), JsonValue::String(message));
     metadata.insert(
         GATEWAY_PROVIDER_ID.to_string(),
         ImageModelProviderMetadataEntry {
             images: JsonArray::new(),
-            extra,
+            extra: gateway_error_metadata_entry(error),
         },
     );
     metadata
@@ -2719,20 +2712,15 @@ fn reranking_result_from_response(
 fn reranking_result_from_error(
     error: HandledFetchError,
     request_body: JsonValue,
+    auth_method: Option<GatewayAuthMethod>,
 ) -> RerankingModelResult {
-    let (message, headers, body) = match error {
-        HandledFetchError::Original { error } => (error.message().to_string(), None, None),
-        HandledFetchError::ApiCall { error } => (
-            error.message().to_string(),
-            error.response_headers().cloned(),
-            error.response_body().map(String::from),
-        ),
-    };
+    let (headers, body) = gateway_error_response_context(&error);
     let response_body = body
         .as_deref()
         .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
         .or_else(|| body.map(JsonValue::String))
         .unwrap_or(request_body);
+    let gateway_error = as_gateway_error(error, auth_method);
     let mut response = RerankingModelResponse::new().with_body(response_body);
 
     if let Some(headers) = headers {
@@ -2740,7 +2728,7 @@ fn reranking_result_from_error(
     }
 
     RerankingModelResult::new(Vec::new())
-        .with_provider_metadata(gateway_error_metadata(message))
+        .with_provider_metadata(gateway_error_metadata_from_error(&gateway_error))
         .with_response(response)
 }
 
@@ -3013,17 +3001,16 @@ fn video_result_from_response(
     result
 }
 
-fn video_result_from_error(model_id: &str, error: HandledFetchError) -> VideoModelResult {
-    let (message, headers) = match error {
-        HandledFetchError::Original { error } => (error.message().to_string(), None),
-        HandledFetchError::ApiCall { error } => (
-            error.message().to_string(),
-            error.response_headers().cloned(),
-        ),
-    };
+fn video_result_from_error(
+    model_id: &str,
+    error: HandledFetchError,
+    auth_method: Option<GatewayAuthMethod>,
+) -> VideoModelResult {
+    let (headers, _) = gateway_error_response_context(&error);
+    let gateway_error = as_gateway_error(error, auth_method);
 
     VideoModelResult::new(Vec::new(), video_response(model_id, headers))
-        .with_provider_metadata(gateway_error_metadata(message))
+        .with_provider_metadata(gateway_error_metadata_from_error(&gateway_error))
 }
 
 fn video_response(model_id: &str, headers: Option<Headers>) -> VideoModelResponse {
@@ -3202,12 +3189,46 @@ fn response_timestamp(value: Option<&JsonValue>) -> Option<OffsetDateTime> {
     }
 }
 
-fn gateway_error_metadata(message: String) -> ProviderMetadata {
+fn gateway_error_response_context(error: &HandledFetchError) -> (Option<Headers>, Option<String>) {
+    match error {
+        HandledFetchError::Original { .. } => (None, None),
+        HandledFetchError::ApiCall { error } => (
+            error.response_headers().cloned(),
+            error.response_body().map(String::from),
+        ),
+    }
+}
+
+fn gateway_error_metadata_from_error(error: &GatewayError) -> ProviderMetadata {
     let mut metadata = ProviderMetadata::new();
-    let mut gateway = JsonObject::new();
-    gateway.insert("errorMessage".to_string(), JsonValue::String(message));
-    metadata.insert(GATEWAY_PROVIDER_ID.to_string(), gateway);
+    metadata.insert(
+        GATEWAY_PROVIDER_ID.to_string(),
+        gateway_error_metadata_entry(error),
+    );
     metadata
+}
+
+fn gateway_error_metadata_entry(error: &GatewayError) -> JsonObject {
+    let mut gateway = JsonObject::new();
+    gateway.insert(
+        "errorMessage".to_string(),
+        JsonValue::String(error.message().to_string()),
+    );
+    gateway.insert(
+        "errorType".to_string(),
+        JsonValue::String(error.error_type().to_string()),
+    );
+    gateway.insert("statusCode".to_string(), json!(error.status_code()));
+    gateway.insert("isRetryable".to_string(), json!(error.is_retryable()));
+
+    if let Some(generation_id) = error.generation_id() {
+        gateway.insert(
+            "generationId".to_string(),
+            JsonValue::String(generation_id.to_string()),
+        );
+    }
+
+    gateway
 }
 
 fn stream_part_from_gateway_event(
@@ -3245,6 +3266,39 @@ fn is_raw_stream_part(value: &JsonValue) -> bool {
 fn gateway_stream_error(message: String, raw_body: Option<&str>) -> LanguageModelStreamPart {
     let mut error = JsonObject::new();
     error.insert("message".to_string(), JsonValue::String(message));
+
+    if let Some(raw_body) = raw_body {
+        error.insert("body".to_string(), JsonValue::String(raw_body.to_string()));
+    }
+
+    LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(JsonValue::Object(error)))
+}
+
+fn gateway_stream_error_from_gateway_error(
+    gateway_error: &GatewayError,
+    raw_body: Option<&str>,
+) -> LanguageModelStreamPart {
+    let mut error = JsonObject::new();
+    error.insert(
+        "message".to_string(),
+        JsonValue::String(gateway_error.message().to_string()),
+    );
+    error.insert(
+        "type".to_string(),
+        JsonValue::String(gateway_error.error_type().to_string()),
+    );
+    error.insert("statusCode".to_string(), json!(gateway_error.status_code()));
+    error.insert(
+        "isRetryable".to_string(),
+        json!(gateway_error.is_retryable()),
+    );
+
+    if let Some(generation_id) = gateway_error.generation_id() {
+        error.insert(
+            "generationId".to_string(),
+            JsonValue::String(generation_id.to_string()),
+        );
+    }
 
     if let Some(raw_body) = raw_body {
         error.insert("body".to_string(), JsonValue::String(raw_body.to_string()));
@@ -3428,8 +3482,8 @@ mod tests {
     use crate::prompt::Prompt;
     use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
     use crate::provider_utils::{
-        ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
-        Tool,
+        FetchErrorInfo, ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod,
+        ProviderApiResponse, Tool,
     };
     use crate::rerank::{RerankDocuments, RerankOptions, rerank};
     use crate::reranking_model::{
@@ -5139,8 +5193,187 @@ mod tests {
                 .as_ref()
                 .and_then(|metadata| metadata.get("gateway"))
                 .and_then(|metadata| metadata.get("errorMessage"))
+                .and_then(JsonValue::as_str)
+                .map(|message| message.contains("Invalid API key")),
+            Some(true)
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("errorType"))
                 .and_then(JsonValue::as_str),
-            Some("Invalid API key")
+            Some("authentication_error")
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("statusCode"))
+                .and_then(JsonValue::as_u64),
+            Some(401)
+        );
+    }
+
+    #[test]
+    fn gateway_model_preserves_structured_gateway_error_metadata() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                400,
+                "Bad Request",
+                json!({
+                    "error": {
+                        "message": "Invalid prompt",
+                        "type": "invalid_request_error"
+                    },
+                    "generationId": "gen_error_123"
+                })
+                .to_string(),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .language_model("openai/gpt-4.1-mini");
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(Vec::new())));
+        let gateway_metadata = result
+            .provider_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("gateway"))
+            .expect("Gateway error metadata is present");
+
+        assert_eq!(
+            gateway_metadata
+                .get("errorMessage")
+                .and_then(JsonValue::as_str),
+            Some("Invalid prompt [gen_error_123]")
+        );
+        assert_eq!(
+            gateway_metadata
+                .get("errorType")
+                .and_then(JsonValue::as_str),
+            Some("invalid_request_error")
+        );
+        assert_eq!(
+            gateway_metadata
+                .get("statusCode")
+                .and_then(JsonValue::as_u64),
+            Some(400)
+        );
+        assert_eq!(
+            gateway_metadata
+                .get("isRetryable")
+                .and_then(JsonValue::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            gateway_metadata
+                .get("generationId")
+                .and_then(JsonValue::as_str),
+            Some("gen_error_123")
+        );
+    }
+
+    #[test]
+    fn gateway_model_classifies_transport_timeout_errors() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Err(
+                FetchErrorInfo::new("headers timed out").with_code("UND_ERR_HEADERS_TIMEOUT")
+            )))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .language_model("openai/gpt-4.1-mini");
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(Vec::new())));
+        let gateway_metadata = result
+            .provider_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("gateway"))
+            .expect("Gateway error metadata is present");
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Error);
+        assert!(
+            gateway_metadata
+                .get("errorMessage")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|message| message.contains("headers timed out"))
+        );
+        assert_eq!(
+            gateway_metadata
+                .get("errorType")
+                .and_then(JsonValue::as_str),
+            Some("timeout_error")
+        );
+        assert_eq!(
+            gateway_metadata
+                .get("statusCode")
+                .and_then(JsonValue::as_u64),
+            Some(408)
+        );
+        assert_eq!(
+            gateway_metadata
+                .get("isRetryable")
+                .and_then(JsonValue::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn gateway_model_stream_classifies_transport_timeout_errors() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Err(
+                FetchErrorInfo::new("body timed out").with_code("UND_ERR_BODY_TIMEOUT")
+            )))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .language_model("openai/gpt-4.1-mini");
+        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(Vec::new())));
+        let LanguageModelStreamPart::Error(error_part) = result
+            .stream
+            .first()
+            .expect("stream contains an error part")
+        else {
+            panic!("first stream part should be an error");
+        };
+
+        assert!(
+            error_part
+                .error
+                .get("message")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|message| message.contains("body timed out"))
+        );
+        assert_eq!(
+            error_part.error.get("type").and_then(JsonValue::as_str),
+            Some("timeout_error")
+        );
+        assert_eq!(
+            error_part
+                .error
+                .get("statusCode")
+                .and_then(JsonValue::as_u64),
+            Some(408)
+        );
+        assert_eq!(
+            error_part
+                .error
+                .get("isRetryable")
+                .and_then(JsonValue::as_bool),
+            Some(true)
         );
     }
 
