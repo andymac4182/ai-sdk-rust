@@ -68,14 +68,15 @@ pub use file_data::{
 };
 pub use files::{Files, FilesUploadFileCallOptions, FilesUploadFileData, FilesUploadFileResult};
 pub use gateway::{
-    DEFAULT_GATEWAY_BASE_URL, GatewayCredentialType, GatewayCreditsResponse, GatewayEmbeddingModel,
-    GatewayFetchMetadataResponse, GatewayGenerationInfo, GatewayGenerationInfoParams,
-    GatewayImageModel, GatewayLanguageModel, GatewayLanguageModelEntry,
-    GatewayLanguageModelPricing, GatewayLanguageModelSpecification, GatewayModelType,
-    GatewayProvider, GatewayProviderSettings, GatewayRerankingModel, GatewaySpendReportDatePart,
-    GatewaySpendReportGroupBy, GatewaySpendReportParams, GatewaySpendReportResponse,
-    GatewaySpendReportRow, GatewayTransport, GatewayTransportFuture, GatewayVideoModel,
-    create_gateway, gateway,
+    DEFAULT_GATEWAY_BASE_URL, GatewayAuthToken, GatewayCredentialType, GatewayCreditsResponse,
+    GatewayEmbeddingModel, GatewayFetchMetadataResponse, GatewayGenerationInfo,
+    GatewayGenerationInfoParams, GatewayImageModel, GatewayLanguageModel,
+    GatewayLanguageModelEntry, GatewayLanguageModelPricing, GatewayLanguageModelSpecification,
+    GatewayModelType, GatewayProvider, GatewayProviderSettings, GatewayRerankingModel,
+    GatewaySpendReportDatePart, GatewaySpendReportGroupBy, GatewaySpendReportParams,
+    GatewaySpendReportResponse, GatewaySpendReportRow, GatewayTransport, GatewayTransportFuture,
+    GatewayVideoModel, create_gateway, create_gateway_provider, gateway,
+    gateway_observability_headers, get_gateway_auth_token,
 };
 pub use gateway_error::{
     GATEWAY_AUTH_METHOD_HEADER, GatewayAuthMethod, GatewayAuthenticationError, GatewayError,

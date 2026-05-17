@@ -17,7 +17,8 @@ use crate::embedding_model::{
 };
 use crate::file_data::FileDataContent;
 use crate::gateway_error::{
-    GatewayError, GatewayInvalidRequestError, as_gateway_error, parse_gateway_auth_method,
+    GATEWAY_AUTH_METHOD_HEADER, GatewayAuthMethod, GatewayAuthenticationError, GatewayError,
+    GatewayInvalidRequestError, as_gateway_error, parse_gateway_auth_method,
 };
 use crate::headers::Headers;
 use crate::image_model::{
@@ -55,9 +56,11 @@ use crate::warning::Warning;
 pub const DEFAULT_GATEWAY_BASE_URL: &str = "https://ai-gateway.vercel.sh/v4/ai";
 
 const AI_GATEWAY_PROTOCOL_VERSION: &str = "0.0.1";
-const GATEWAY_AUTH_METHOD_HEADER: &str = "ai-gateway-auth-method";
 const GATEWAY_PROVIDER_ID: &str = "gateway";
 const DEFAULT_METADATA_CACHE_REFRESH_MILLIS: u64 = 1000 * 60 * 5;
+const VERCEL_OIDC_TOKEN_ENV: &str = "VERCEL_OIDC_TOKEN";
+const VERCEL_REQUEST_ID_ENV: &str = "VERCEL_REQUEST_ID";
+const X_VERCEL_ID_ENV: &str = "X_VERCEL_ID";
 
 /// Future returned by an injected Gateway HTTP transport.
 pub type GatewayTransportFuture =
@@ -579,6 +582,14 @@ pub struct GatewayProviderSettings {
     /// milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata_cache_refresh_millis: Option<u64>,
+
+    /// Vercel request id to send as an AI Gateway observability header.
+    ///
+    /// Upstream reads this from Vercel's JavaScript request context. Rust
+    /// callers can provide the current request id explicitly when they have
+    /// one available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vercel_request_id: Option<String>,
 }
 
 impl GatewayProviderSettings {
@@ -613,6 +624,32 @@ impl GatewayProviderSettings {
     ) -> Self {
         self.metadata_cache_refresh_millis = Some(metadata_cache_refresh_millis);
         self
+    }
+
+    /// Sets the Vercel request id used for Gateway observability headers.
+    pub fn with_vercel_request_id(mut self, vercel_request_id: impl Into<String>) -> Self {
+        self.vercel_request_id = Some(vercel_request_id.into());
+        self
+    }
+}
+
+/// Authentication token selected for an AI Gateway request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayAuthToken {
+    /// Bearer token value sent in the Authorization header.
+    pub token: String,
+
+    /// Authentication source advertised to Gateway.
+    pub auth_method: GatewayAuthMethod,
+}
+
+impl GatewayAuthToken {
+    fn new(token: impl Into<String>, auth_method: GatewayAuthMethod) -> Self {
+        Self {
+            token: token.into(),
+            auth_method,
+        }
     }
 }
 
@@ -670,6 +707,12 @@ impl GatewayProvider {
         metadata_cache_refresh_millis: u64,
     ) -> Self {
         self.settings.metadata_cache_refresh_millis = Some(metadata_cache_refresh_millis);
+        self
+    }
+
+    /// Sets the Vercel request id used for Gateway observability headers.
+    pub fn with_vercel_request_id(mut self, vercel_request_id: impl Into<String>) -> Self {
+        self.settings.vercel_request_id = Some(vercel_request_id.into());
         self
     }
 
@@ -760,7 +803,7 @@ impl GatewayProvider {
             return Ok(cached);
         }
 
-        let request_headers = gateway_provider_headers(&self.settings);
+        let request_headers = try_gateway_provider_headers(&self.settings)?;
         let auth_method = parse_gateway_auth_method(&request_headers);
         let get_options = GetFromApiOptions::new(format!("{}/config", self.base_url()))
             .with_headers(request_headers)
@@ -781,7 +824,7 @@ impl GatewayProvider {
 
     /// Returns credit balance information for the authenticated Gateway account.
     pub async fn get_credits(&self) -> Result<GatewayCreditsResponse, GatewayError> {
-        let request_headers = gateway_provider_headers(&self.settings);
+        let request_headers = try_gateway_provider_headers(&self.settings)?;
         let auth_method = parse_gateway_auth_method(&request_headers);
         let get_options =
             GetFromApiOptions::new(gateway_origin_url(&self.base_url(), "/v1/credits")?)
@@ -803,7 +846,7 @@ impl GatewayProvider {
         &self,
         params: GatewaySpendReportParams,
     ) -> Result<GatewaySpendReportResponse, GatewayError> {
-        let request_headers = gateway_provider_headers(&self.settings);
+        let request_headers = try_gateway_provider_headers(&self.settings)?;
         let auth_method = parse_gateway_auth_method(&request_headers);
         let url = gateway_spend_report_url(&self.base_url(), &params)?;
         let get_options = GetFromApiOptions::new(url)
@@ -825,7 +868,7 @@ impl GatewayProvider {
         &self,
         params: GatewayGenerationInfoParams,
     ) -> Result<GatewayGenerationInfo, GatewayError> {
-        let request_headers = gateway_provider_headers(&self.settings);
+        let request_headers = try_gateway_provider_headers(&self.settings)?;
         let auth_method = parse_gateway_auth_method(&request_headers);
         let url = gateway_generation_info_url(&self.base_url(), &params)?;
         let get_options = GetFromApiOptions::new(url)
@@ -885,6 +928,11 @@ impl Default for GatewayProvider {
 /// Creates a Gateway provider with explicit settings.
 pub fn create_gateway(settings: GatewayProviderSettings) -> GatewayProvider {
     GatewayProvider::from_settings(settings)
+}
+
+/// Deprecated upstream alias for [`create_gateway`].
+pub fn create_gateway_provider(settings: GatewayProviderSettings) -> GatewayProvider {
+    create_gateway(settings)
 }
 
 /// Creates a Gateway language model using the default provider settings.
@@ -1051,6 +1099,7 @@ impl GatewayLanguageModel {
     ) -> BTreeMap<String, Option<String>> {
         let provider_headers = self.provider_headers();
         let call_headers = optional_headers(call_headers);
+        let observability_headers = gateway_observability_header_entries(&self.settings);
         let model_headers = Some(vec![
             (
                 "ai-language-model-specification-version".to_string(),
@@ -1066,7 +1115,12 @@ impl GatewayLanguageModel {
             ),
         ]);
 
-        combine_headers([provider_headers, call_headers, model_headers])
+        combine_headers([
+            provider_headers,
+            call_headers,
+            model_headers,
+            observability_headers,
+        ])
     }
 
     fn provider_headers(&self) -> Option<Vec<(String, Option<String>)>> {
@@ -1281,6 +1335,7 @@ impl GatewayEmbeddingModel {
                 .collect::<Vec<_>>(),
         );
         let call_headers = optional_headers(call_headers);
+        let observability_headers = gateway_observability_header_entries(&self.settings);
         let model_headers = Some(vec![
             (
                 "ai-embedding-model-specification-version".to_string(),
@@ -1289,7 +1344,12 @@ impl GatewayEmbeddingModel {
             ("ai-model-id".to_string(), Some(self.model_id.clone())),
         ]);
 
-        combine_headers([provider_headers, call_headers, model_headers])
+        combine_headers([
+            provider_headers,
+            call_headers,
+            model_headers,
+            observability_headers,
+        ])
     }
 }
 
@@ -1353,6 +1413,7 @@ impl GatewayImageModel {
                 .collect::<Vec<_>>(),
         );
         let call_headers = optional_headers(call_headers);
+        let observability_headers = gateway_observability_header_entries(&self.settings);
         let model_headers = Some(vec![
             (
                 "ai-image-model-specification-version".to_string(),
@@ -1361,7 +1422,12 @@ impl GatewayImageModel {
             ("ai-model-id".to_string(), Some(self.model_id.clone())),
         ]);
 
-        combine_headers([provider_headers, call_headers, model_headers])
+        combine_headers([
+            provider_headers,
+            call_headers,
+            model_headers,
+            observability_headers,
+        ])
     }
 }
 
@@ -1426,6 +1492,7 @@ impl GatewayRerankingModel {
                 .collect::<Vec<_>>(),
         );
         let call_headers = optional_headers(call_headers);
+        let observability_headers = gateway_observability_header_entries(&self.settings);
         let model_headers = Some(vec![
             (
                 "ai-reranking-model-specification-version".to_string(),
@@ -1434,7 +1501,12 @@ impl GatewayRerankingModel {
             ("ai-model-id".to_string(), Some(self.model_id.clone())),
         ]);
 
-        combine_headers([provider_headers, call_headers, model_headers])
+        combine_headers([
+            provider_headers,
+            call_headers,
+            model_headers,
+            observability_headers,
+        ])
     }
 }
 
@@ -1492,6 +1564,7 @@ impl GatewayVideoModel {
                 .collect::<Vec<_>>(),
         );
         let call_headers = optional_headers(call_headers);
+        let observability_headers = gateway_observability_header_entries(&self.settings);
         let model_headers = Some(vec![
             (
                 "ai-video-model-specification-version".to_string(),
@@ -1508,6 +1581,7 @@ impl GatewayVideoModel {
             provider_headers,
             call_headers,
             model_headers,
+            observability_headers,
             accept_headers,
         ])
     }
@@ -1701,33 +1775,63 @@ fn metadata_cache_refresh_duration(settings: &GatewayProviderSettings) -> Durati
     )
 }
 
-fn resolve_gateway_api_key(settings: &GatewayProviderSettings) -> Option<String> {
-    settings
-        .api_key
-        .clone()
-        .or_else(|| env::var("AI_GATEWAY_API_KEY").ok())
-        .or_else(|| env::var("AI_SDK_RUST_AI_GATEWAY_API_KEY").ok())
-        .filter(|value| !value.trim().is_empty())
+/// Resolves the Gateway bearer token using upstream precedence:
+/// explicit API key, `AI_GATEWAY_API_KEY`, this crate's compatibility
+/// `AI_SDK_RUST_AI_GATEWAY_API_KEY`, then Vercel OIDC.
+pub fn get_gateway_auth_token(
+    settings: &GatewayProviderSettings,
+) -> Result<GatewayAuthToken, GatewayError> {
+    get_gateway_auth_token_with_env(settings, |name| env::var(name))
+}
+
+fn get_gateway_auth_token_with_env(
+    settings: &GatewayProviderSettings,
+    mut load_env: impl FnMut(&str) -> Result<String, env::VarError>,
+) -> Result<GatewayAuthToken, GatewayError> {
+    if let Some(api_key) = non_empty_optional_setting(settings.api_key.clone())
+        .or_else(|| non_empty_env_setting("AI_GATEWAY_API_KEY", &mut load_env))
+        .or_else(|| non_empty_env_setting("AI_SDK_RUST_AI_GATEWAY_API_KEY", &mut load_env))
+    {
+        return Ok(GatewayAuthToken::new(api_key, GatewayAuthMethod::ApiKey));
+    }
+
+    if let Some(oidc_token) = non_empty_env_setting(VERCEL_OIDC_TOKEN_ENV, &mut load_env) {
+        return Ok(GatewayAuthToken::new(oidc_token, GatewayAuthMethod::Oidc));
+    }
+
+    Err(GatewayAuthenticationError::create_contextual_error(false, false).into())
 }
 
 fn gateway_provider_headers(
     settings: &GatewayProviderSettings,
 ) -> BTreeMap<String, Option<String>> {
-    let mut headers = BTreeMap::from([
-        (
-            "ai-gateway-protocol-version".to_string(),
-            Some(AI_GATEWAY_PROTOCOL_VERSION.to_string()),
-        ),
-        (
-            GATEWAY_AUTH_METHOD_HEADER.to_string(),
-            Some("api-key".to_string()),
-        ),
-    ]);
+    gateway_provider_headers_with_auth(settings, get_gateway_auth_token(settings).ok())
+}
 
-    if let Some(api_key) = resolve_gateway_api_key(settings) {
+fn try_gateway_provider_headers(
+    settings: &GatewayProviderSettings,
+) -> Result<BTreeMap<String, Option<String>>, GatewayError> {
+    let auth = get_gateway_auth_token(settings)?;
+    Ok(gateway_provider_headers_with_auth(settings, Some(auth)))
+}
+
+fn gateway_provider_headers_with_auth(
+    settings: &GatewayProviderSettings,
+    auth: Option<GatewayAuthToken>,
+) -> BTreeMap<String, Option<String>> {
+    let mut headers = BTreeMap::from([(
+        "ai-gateway-protocol-version".to_string(),
+        Some(AI_GATEWAY_PROTOCOL_VERSION.to_string()),
+    )]);
+
+    if let Some(auth) = auth {
         headers.insert(
             "Authorization".to_string(),
-            Some(format!("Bearer {api_key}")),
+            Some(format!("Bearer {}", auth.token)),
+        );
+        headers.insert(
+            GATEWAY_AUTH_METHOD_HEADER.to_string(),
+            Some(auth.auth_method.as_str().to_string()),
         );
     }
 
@@ -1742,6 +1846,82 @@ fn gateway_provider_headers(
     .into_iter()
     .map(|(name, value)| (name, Some(value)))
     .collect()
+}
+
+#[cfg(test)]
+fn gateway_provider_headers_with_env(
+    settings: &GatewayProviderSettings,
+    load_env: impl FnMut(&str) -> Result<String, env::VarError>,
+) -> BTreeMap<String, Option<String>> {
+    gateway_provider_headers_with_auth(
+        settings,
+        get_gateway_auth_token_with_env(settings, load_env).ok(),
+    )
+}
+
+/// Builds Gateway observability headers from Vercel deployment metadata.
+pub fn gateway_observability_headers(settings: &GatewayProviderSettings) -> Headers {
+    gateway_observability_headers_with_env(settings, |name| env::var(name))
+}
+
+fn gateway_observability_headers_with_env(
+    settings: &GatewayProviderSettings,
+    mut load_env: impl FnMut(&str) -> Result<String, env::VarError>,
+) -> Headers {
+    let mut headers = Headers::new();
+
+    if let Some(value) = non_empty_env_setting("VERCEL_DEPLOYMENT_ID", &mut load_env) {
+        headers.insert("ai-o11y-deployment-id".to_string(), value);
+    }
+
+    if let Some(value) = non_empty_env_setting("VERCEL_ENV", &mut load_env) {
+        headers.insert("ai-o11y-environment".to_string(), value);
+    }
+
+    if let Some(value) = non_empty_env_setting("VERCEL_REGION", &mut load_env) {
+        headers.insert("ai-o11y-region".to_string(), value);
+    }
+
+    if let Some(value) = non_empty_optional_setting(settings.vercel_request_id.clone())
+        .or_else(|| non_empty_env_setting(VERCEL_REQUEST_ID_ENV, &mut load_env))
+        .or_else(|| non_empty_env_setting(X_VERCEL_ID_ENV, &mut load_env))
+    {
+        headers.insert("ai-o11y-request-id".to_string(), value);
+    }
+
+    if let Some(value) = non_empty_env_setting("VERCEL_PROJECT_ID", &mut load_env) {
+        headers.insert("ai-o11y-project-id".to_string(), value);
+    }
+
+    headers
+}
+
+fn non_empty_optional_setting(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.is_empty())
+}
+
+fn non_empty_env_setting(
+    name: &str,
+    load_env: &mut impl FnMut(&str) -> Result<String, env::VarError>,
+) -> Option<String> {
+    non_empty_optional_setting(load_env(name).ok())
+}
+
+fn gateway_observability_header_entries(
+    settings: &GatewayProviderSettings,
+) -> Option<Vec<(String, Option<String>)>> {
+    let headers = gateway_observability_headers(settings);
+
+    if headers.is_empty() {
+        None
+    } else {
+        Some(
+            headers
+                .into_iter()
+                .map(|(name, value)| (name, Some(value)))
+                .collect(),
+        )
+    }
 }
 
 fn gateway_origin_url(base_url: &str, path: &str) -> Result<String, GatewayError> {
@@ -2950,9 +3130,11 @@ fn provider_api_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        GatewayCredentialType, GatewayGenerationInfoParams, GatewayModelType, GatewayProvider,
-        GatewayProviderSettings, GatewaySpendReportDatePart, GatewaySpendReportGroupBy,
-        GatewaySpendReportParams, GatewayTransport, GatewayTransportFuture, gateway,
+        GatewayAuthMethod, GatewayCredentialType, GatewayGenerationInfoParams, GatewayModelType,
+        GatewayProvider, GatewayProviderSettings, GatewaySpendReportDatePart,
+        GatewaySpendReportGroupBy, GatewaySpendReportParams, GatewayTransport,
+        GatewayTransportFuture, gateway, gateway_observability_headers_with_env,
+        gateway_provider_headers_with_env, get_gateway_auth_token_with_env,
     };
     use crate::embed::{EmbedOptions, embed};
     use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions};
@@ -2986,6 +3168,162 @@ mod tests {
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Waker};
+
+    fn env_lookup<'a>(
+        values: &'a [(&'a str, &'a str)],
+    ) -> impl FnMut(&str) -> Result<String, env::VarError> + 'a {
+        move |name| {
+            values
+                .iter()
+                .find_map(|(key, value)| (*key == name).then(|| (*value).to_string()))
+                .ok_or(env::VarError::NotPresent)
+        }
+    }
+
+    #[test]
+    fn get_gateway_auth_token_matches_upstream_precedence() {
+        let token = get_gateway_auth_token_with_env(
+            &GatewayProviderSettings::new().with_api_key("options-api-key"),
+            env_lookup(&[
+                ("AI_GATEWAY_API_KEY", "env-api-key"),
+                ("AI_SDK_RUST_AI_GATEWAY_API_KEY", "rust-env-api-key"),
+                ("VERCEL_OIDC_TOKEN", "oidc-token"),
+            ]),
+        )
+        .expect("options API key resolves");
+
+        assert_eq!(token.auth_method, GatewayAuthMethod::ApiKey);
+        assert_eq!(token.token, "options-api-key");
+
+        let token = get_gateway_auth_token_with_env(
+            &GatewayProviderSettings::new(),
+            env_lookup(&[
+                ("AI_GATEWAY_API_KEY", "env-api-key"),
+                ("AI_SDK_RUST_AI_GATEWAY_API_KEY", "rust-env-api-key"),
+                ("VERCEL_OIDC_TOKEN", "oidc-token"),
+            ]),
+        )
+        .expect("environment API key resolves");
+
+        assert_eq!(token.auth_method, GatewayAuthMethod::ApiKey);
+        assert_eq!(token.token, "env-api-key");
+
+        let token = get_gateway_auth_token_with_env(
+            &GatewayProviderSettings::new(),
+            env_lookup(&[("VERCEL_OIDC_TOKEN", "oidc-token")]),
+        )
+        .expect("OIDC token resolves when API keys are absent");
+
+        assert_eq!(token.auth_method, GatewayAuthMethod::Oidc);
+        assert_eq!(token.token, "oidc-token");
+    }
+
+    #[test]
+    fn get_gateway_auth_token_ignores_empty_values_without_trimming_whitespace() {
+        let error = get_gateway_auth_token_with_env(
+            &GatewayProviderSettings::new().with_api_key(""),
+            env_lookup(&[
+                ("AI_GATEWAY_API_KEY", ""),
+                ("AI_SDK_RUST_AI_GATEWAY_API_KEY", ""),
+                ("VERCEL_OIDC_TOKEN", ""),
+            ]),
+        )
+        .expect_err("empty credentials are ignored");
+
+        assert!(error.as_authentication().is_some());
+        assert!(error.message().contains("No authentication provided"));
+
+        let token = get_gateway_auth_token_with_env(
+            &GatewayProviderSettings::new(),
+            env_lookup(&[("AI_GATEWAY_API_KEY", "\t\n ")]),
+        )
+        .expect("whitespace-only API keys match upstream truthiness");
+
+        assert_eq!(token.auth_method, GatewayAuthMethod::ApiKey);
+        assert_eq!(token.token, "\t\n ");
+    }
+
+    #[test]
+    fn gateway_provider_headers_support_oidc_auth_method() {
+        let headers = gateway_provider_headers_with_env(
+            &GatewayProviderSettings::new().with_header("custom-header", "value"),
+            env_lookup(&[("VERCEL_OIDC_TOKEN", "oidc-token")]),
+        );
+
+        assert_eq!(
+            headers.get("authorization").and_then(Option::as_deref),
+            Some("Bearer oidc-token")
+        );
+        assert_eq!(
+            headers
+                .get("ai-gateway-auth-method")
+                .and_then(Option::as_deref),
+            Some("oidc")
+        );
+        assert_eq!(
+            headers.get("custom-header").and_then(Option::as_deref),
+            Some("value")
+        );
+    }
+
+    #[test]
+    fn gateway_observability_headers_map_vercel_environment() {
+        let headers = gateway_observability_headers_with_env(
+            &GatewayProviderSettings::new().with_vercel_request_id("req_settings"),
+            env_lookup(&[
+                ("VERCEL_DEPLOYMENT_ID", "dpl_test"),
+                ("VERCEL_ENV", "production"),
+                ("VERCEL_REGION", "iad1"),
+                ("VERCEL_PROJECT_ID", "prj_test"),
+                ("VERCEL_REQUEST_ID", "req_env"),
+            ]),
+        );
+
+        assert_eq!(
+            headers.get("ai-o11y-deployment-id").map(String::as_str),
+            Some("dpl_test")
+        );
+        assert_eq!(
+            headers.get("ai-o11y-environment").map(String::as_str),
+            Some("production")
+        );
+        assert_eq!(
+            headers.get("ai-o11y-region").map(String::as_str),
+            Some("iad1")
+        );
+        assert_eq!(
+            headers.get("ai-o11y-project-id").map(String::as_str),
+            Some("prj_test")
+        );
+        assert_eq!(
+            headers.get("ai-o11y-request-id").map(String::as_str),
+            Some("req_settings")
+        );
+    }
+
+    #[test]
+    fn gateway_observability_headers_skip_empty_values_and_use_request_env_fallback() {
+        let headers = gateway_observability_headers_with_env(
+            &GatewayProviderSettings::new(),
+            env_lookup(&[
+                ("VERCEL_DEPLOYMENT_ID", ""),
+                ("VERCEL_ENV", "preview"),
+                ("VERCEL_REGION", ""),
+                ("X_VERCEL_ID", "iad1::req_env"),
+            ]),
+        );
+
+        assert!(!headers.contains_key("ai-o11y-deployment-id"));
+        assert_eq!(
+            headers.get("ai-o11y-environment").map(String::as_str),
+            Some("preview")
+        );
+        assert!(!headers.contains_key("ai-o11y-region"));
+        assert_eq!(
+            headers.get("ai-o11y-request-id").map(String::as_str),
+            Some("iad1::req_env")
+        );
+    }
 
     #[test]
     fn gateway_model_generates_text_through_generate_text() {
@@ -3024,7 +3362,8 @@ mod tests {
             GatewayProviderSettings::new()
                 .with_base_url("https://api.test.com")
                 .with_api_key("test-token")
-                .with_header("x-provider", "provider-value"),
+                .with_header("x-provider", "provider-value")
+                .with_vercel_request_id("req_gateway_context"),
         )
         .with_transport(transport)
         .language_model("openai/gpt-4.1-mini");
@@ -3099,6 +3438,13 @@ mod tests {
         assert_eq!(
             request.headers.get("x-provider").map(String::as_str),
             Some("provider-value")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-o11y-request-id")
+                .map(String::as_str),
+            Some("req_gateway_context")
         );
     }
 
