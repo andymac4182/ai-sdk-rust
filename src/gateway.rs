@@ -34,7 +34,10 @@ use crate::language_model::{
     LanguageModelStreamPart, LanguageModelStreamResult, LanguageModelStreamResultResponse,
     LanguageModelSupportedUrls, LanguageModelText, LanguageModelUsage, OutputTokenUsage,
 };
-use crate::provider::{ApiCallError, ProviderMetadata, ProviderOptions, SpecificationVersion};
+use crate::provider::{
+    ApiCallError, NoSuchModelError, Provider, ProviderMetadata, ProviderOptions,
+    ProviderWithRerankingModel, ProviderWithVideoModel, SpecificationVersion,
+};
 use crate::provider_utils::{
     FetchErrorInfo, GetFromApiOptions, HandledFetchError, ParseJsonResult, PostJsonToApiOptions,
     ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
@@ -1138,6 +1141,40 @@ impl GatewayProvider {
 impl Default for GatewayProvider {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Provider for GatewayProvider {
+    type LanguageModel = GatewayLanguageModel;
+    type EmbeddingModel = GatewayEmbeddingModel;
+    type ImageModel = GatewayImageModel;
+
+    fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+        Ok(GatewayProvider::language_model(self, model_id))
+    }
+
+    fn embedding_model(&self, model_id: &str) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+        Ok(GatewayProvider::embedding_model(self, model_id))
+    }
+
+    fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+        Ok(GatewayProvider::image_model(self, model_id))
+    }
+}
+
+impl ProviderWithRerankingModel for GatewayProvider {
+    type RerankingModel = GatewayRerankingModel;
+
+    fn reranking_model(&self, model_id: &str) -> Result<Self::RerankingModel, NoSuchModelError> {
+        Ok(GatewayProvider::reranking_model(self, model_id))
+    }
+}
+
+impl ProviderWithVideoModel for GatewayProvider {
+    type VideoModel = GatewayVideoModel;
+
+    fn video_model(&self, model_id: &str) -> Result<Self::VideoModel, NoSuchModelError> {
+        Ok(GatewayProvider::video_model(self, model_id))
     }
 }
 
@@ -3480,7 +3517,10 @@ mod tests {
         LanguageModelUserMessage,
     };
     use crate::prompt::Prompt;
-    use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
+    use crate::provider::{
+        Provider, ProviderMetadata, ProviderOptions, ProviderWithRerankingModel,
+        ProviderWithVideoModel, SpecificationVersion,
+    };
     use crate::provider_utils::{
         FetchErrorInfo, ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod,
         ProviderApiResponse, Tool,
@@ -6592,6 +6632,46 @@ mod tests {
                     .max_videos_per_call()
             ),
             Some(usize::MAX)
+        );
+    }
+
+    #[test]
+    fn gateway_provider_implements_provider_traits() {
+        let provider = GatewayProvider::new();
+
+        assert_eq!(
+            Provider::specification_version(&provider),
+            SpecificationVersion::V4
+        );
+        assert_eq!(
+            Provider::language_model(&provider, "openai/gpt-4.1-mini")
+                .expect("language model exists")
+                .provider(),
+            "gateway"
+        );
+        assert_eq!(
+            Provider::embedding_model(&provider, "openai/text-embedding-3-small")
+                .expect("embedding model exists")
+                .model_id(),
+            "openai/text-embedding-3-small"
+        );
+        assert_eq!(
+            Provider::image_model(&provider, "openai/gpt-image-1")
+                .expect("image model exists")
+                .model_id(),
+            "openai/gpt-image-1"
+        );
+        assert_eq!(
+            ProviderWithRerankingModel::reranking_model(&provider, "cohere/rerank-v3.5")
+                .expect("reranking model exists")
+                .provider(),
+            "gateway"
+        );
+        assert_eq!(
+            ProviderWithVideoModel::video_model(&provider, "google/veo-2.0-generate-001")
+                .expect("video model exists")
+                .provider(),
+            "gateway"
         );
     }
 
