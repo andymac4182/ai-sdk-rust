@@ -1,0 +1,423 @@
+use std::env;
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+
+use crate::headers::Headers;
+use crate::openai_compatible::{
+    OpenAICompatibleChatLanguageModel, OpenAICompatibleProvider, OpenAICompatibleProviderSettings,
+    OpenAICompatibleTransport,
+};
+
+/// OpenAI-compatible Vercel AI Gateway base URL.
+pub const VERCEL_AI_GATEWAY_OPENAI_COMPATIBLE_BASE_URL: &str = "https://ai-gateway.vercel.sh/v1";
+
+const VERCEL_AI_GATEWAY_OPENAI_COMPATIBLE_PROVIDER_NAME: &str = "vercel-ai-gateway";
+
+/// Settings for Vercel AI Gateway's OpenAI-compatible provider surface.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VercelAiGatewayOpenAICompatibleSettings {
+    /// OpenAI-compatible Gateway base URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+
+    /// AI Gateway API key. When omitted, `AI_GATEWAY_API_KEY` and then
+    /// `AI_SDK_RUST_AI_GATEWAY_API_KEY` are read at model creation time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+
+    /// Custom provider-level headers included with each request.
+    #[serde(default, skip_serializing_if = "Headers::is_empty")]
+    pub headers: Headers,
+}
+
+impl VercelAiGatewayOpenAICompatibleSettings {
+    /// Creates empty Vercel AI Gateway OpenAI-compatible settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the OpenAI-compatible Gateway base URL.
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = Some(base_url.into());
+        self
+    }
+
+    /// Sets the AI Gateway API key.
+    pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
+        self.api_key = Some(api_key.into());
+        self
+    }
+
+    /// Adds a provider-level request header.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(name.into(), value.into());
+        self
+    }
+}
+
+/// Vercel AI Gateway provider using the OpenAI-compatible API.
+#[derive(Clone)]
+pub struct VercelAiGatewayOpenAICompatibleProvider {
+    settings: VercelAiGatewayOpenAICompatibleSettings,
+    transport: Option<OpenAICompatibleTransport>,
+}
+
+impl VercelAiGatewayOpenAICompatibleProvider {
+    /// Creates a Vercel AI Gateway OpenAI-compatible provider with default settings.
+    pub fn new() -> Self {
+        Self::from_settings(VercelAiGatewayOpenAICompatibleSettings::new())
+    }
+
+    /// Creates a provider from explicit Vercel AI Gateway settings.
+    pub fn from_settings(settings: VercelAiGatewayOpenAICompatibleSettings) -> Self {
+        Self {
+            settings,
+            transport: None,
+        }
+    }
+
+    /// Sets the AI Gateway API key for this provider.
+    pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
+        self.settings.api_key = Some(api_key.into());
+        self
+    }
+
+    /// Sets the OpenAI-compatible Gateway base URL for this provider.
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.settings.base_url = Some(base_url.into());
+        self
+    }
+
+    /// Adds a provider-level request header.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.settings.headers.insert(name.into(), value.into());
+        self
+    }
+
+    /// Replaces the HTTP transport. This is primarily useful for tests.
+    pub fn with_transport(mut self, transport: OpenAICompatibleTransport) -> Self {
+        self.transport = Some(transport);
+        self
+    }
+
+    /// Creates a Gateway OpenAI-compatible chat language model.
+    pub fn language_model(&self, model_id: impl Into<String>) -> OpenAICompatibleChatLanguageModel {
+        self.openai_compatible_provider().language_model(model_id)
+    }
+
+    /// Alias for [`VercelAiGatewayOpenAICompatibleProvider::language_model`].
+    pub fn chat(&self, model_id: impl Into<String>) -> OpenAICompatibleChatLanguageModel {
+        self.language_model(model_id)
+    }
+
+    fn openai_compatible_provider(&self) -> OpenAICompatibleProvider {
+        let mut settings = OpenAICompatibleProviderSettings::new(
+            VERCEL_AI_GATEWAY_OPENAI_COMPATIBLE_PROVIDER_NAME,
+            self.settings
+                .base_url
+                .as_deref()
+                .unwrap_or(VERCEL_AI_GATEWAY_OPENAI_COMPATIBLE_BASE_URL),
+        );
+
+        if let Some(api_key) = vercel_ai_gateway_api_key(self.settings.api_key.as_ref()) {
+            settings = settings.with_api_key(api_key);
+        }
+
+        for (name, value) in &self.settings.headers {
+            settings = settings.with_header(name.clone(), value.clone());
+        }
+
+        let provider = OpenAICompatibleProvider::from_settings(settings);
+
+        if let Some(transport) = &self.transport {
+            provider.with_transport(Arc::clone(transport))
+        } else {
+            provider
+        }
+    }
+}
+
+impl Default for VercelAiGatewayOpenAICompatibleProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Creates a Vercel AI Gateway OpenAI-compatible provider with explicit settings.
+pub fn create_vercel_ai_gateway_openai_compatible(
+    settings: VercelAiGatewayOpenAICompatibleSettings,
+) -> VercelAiGatewayOpenAICompatibleProvider {
+    VercelAiGatewayOpenAICompatibleProvider::from_settings(settings)
+}
+
+/// Creates a Vercel AI Gateway OpenAI-compatible language model.
+pub fn vercel_ai_gateway_openai_compatible(
+    model_id: impl Into<String>,
+) -> OpenAICompatibleChatLanguageModel {
+    VercelAiGatewayOpenAICompatibleProvider::new().language_model(model_id)
+}
+
+fn vercel_ai_gateway_api_key(explicit_api_key: Option<&String>) -> Option<String> {
+    non_empty_optional_setting(explicit_api_key.cloned())
+        .or_else(|| non_empty_env_setting("AI_GATEWAY_API_KEY"))
+        .or_else(|| non_empty_env_setting("AI_SDK_RUST_AI_GATEWAY_API_KEY"))
+}
+
+fn non_empty_env_setting(name: &str) -> Option<String> {
+    non_empty_optional_setting(env::var(name).ok())
+}
+
+fn non_empty_optional_setting(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        VERCEL_AI_GATEWAY_OPENAI_COMPATIBLE_BASE_URL, VercelAiGatewayOpenAICompatibleProvider,
+        VercelAiGatewayOpenAICompatibleSettings, create_vercel_ai_gateway_openai_compatible,
+        vercel_ai_gateway_openai_compatible,
+    };
+    use crate::generate_text::{GenerateTextOptions, generate_text};
+    use crate::headers::Headers;
+    use crate::json::JsonValue;
+    use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
+    use crate::prompt::Prompt;
+    use crate::provider_utils::{
+        ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+    };
+    use serde_json::json;
+    use std::env;
+    use std::fs;
+    use std::future::Future;
+    use std::future::ready;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    #[test]
+    fn vercel_ai_gateway_openai_compatible_generates_text_through_openai_chat() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "chatcmpl-vercel-gateway",
+                        "created": 1711115037,
+                        "model": "openai/gpt-4.1-mini",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Hello from Vercel AI Gateway"
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 4,
+                            "completion_tokens": 5,
+                            "total_tokens": 9
+                        }
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from([(
+                    "x-request-id".to_string(),
+                    "req_vercel_ai_gateway".to_string(),
+                )])))))
+            });
+        let provider = create_vercel_ai_gateway_openai_compatible(
+            VercelAiGatewayOpenAICompatibleSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://ai-gateway.test/v1/")
+                .with_header("custom-header", "value"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("openai/gpt-4.1-mini");
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(&model, Prompt::from_prompt("Say hello"))
+                .expect("prompt is valid")
+                .with_max_output_tokens(16)
+                .with_temperature(0.0),
+        ));
+
+        assert_eq!(model.provider(), "vercel-ai-gateway.chat");
+        assert_eq!(result.text, "Hello from Vercel AI Gateway");
+        assert_eq!(result.usage.input_tokens.total, Some(4));
+        assert_eq!(result.usage.output_tokens.total, Some(5));
+        assert_eq!(
+            result
+                .response
+                .as_ref()
+                .and_then(|response| response.id.as_deref()),
+            Some("chatcmpl-vercel-gateway")
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://ai-gateway.test/v1/chat/completions");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+        assert!(
+            request
+                .headers
+                .get("user-agent")
+                .is_some_and(|value| value.contains("ai-sdk/openai-compatible/0.1.0"))
+        );
+
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "openai/gpt-4.1-mini",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Say hello"
+                    }
+                ],
+                "max_tokens": 16,
+                "temperature": 0.0
+            })
+        );
+    }
+
+    #[test]
+    fn vercel_ai_gateway_openai_compatible_factory_uses_default_base_url() {
+        let model = vercel_ai_gateway_openai_compatible("openai/gpt-4.1-mini");
+
+        assert_eq!(model.provider(), "vercel-ai-gateway.chat");
+        assert_eq!(model.model_id(), "openai/gpt-4.1-mini");
+        assert_eq!(
+            VERCEL_AI_GATEWAY_OPENAI_COMPATIBLE_BASE_URL,
+            "https://ai-gateway.vercel.sh/v1"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI-compatible model call"]
+    fn live_vercel_ai_gateway_openai_compatible_generate_text() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!(
+                "skipping live Gateway OpenAI-compatible test because no API key is configured"
+            );
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_AI_GATEWAY_OPENAI_COMPATIBLE_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_OPENAI_COMPATIBLE_MODEL"))
+            .or_else(|_| env::var("AI_SDK_RUST_GATEWAY_MODEL"))
+            .or_else(|_| env::var("AI_GATEWAY_MODEL"))
+            .unwrap_or_else(|_| "openai/gpt-4.1-mini".to_string());
+        let model = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key(api_key)
+            .language_model(model_id);
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(
+                &model,
+                Prompt::from_prompt("Reply with exactly: rust-vercel-ai-gateway-openai-ok"),
+            )
+            .expect("prompt is valid")
+            .with_max_output_tokens(24)
+            .with_temperature(0.0),
+        ));
+
+        assert!(
+            result
+                .text
+                .to_lowercase()
+                .contains("rust-vercel-ai-gateway-openai-ok"),
+            "Gateway OpenAI-compatible response did not contain expected marker"
+        );
+    }
+
+    fn live_gateway_api_key() -> Option<String> {
+        env::var("AI_SDK_RUST_AI_GATEWAY_API_KEY")
+            .or_else(|_| env::var("AI_GATEWAY_API_KEY"))
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(load_gateway_api_key_from_dotenv)
+    }
+
+    fn load_gateway_api_key_from_dotenv() -> Option<String> {
+        let contents = fs::read_to_string(".env.local").ok()?;
+
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            let Some((name, value)) = line.split_once('=') else {
+                continue;
+            };
+
+            if matches!(
+                name.trim(),
+                "AI_SDK_RUST_AI_GATEWAY_API_KEY" | "AI_GATEWAY_API_KEY"
+            ) {
+                let value = value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string();
+                if !value.is_empty() {
+                    return Some(value);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn poll_ready<T>(future: impl Future<Output = T>) -> T {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut future = Box::pin(future);
+        match Pin::new(&mut future).poll(&mut context) {
+            Poll::Ready(value) => value,
+            Poll::Pending => {
+                struct NoopWake;
+
+                impl Wake for NoopWake {
+                    fn wake(self: Arc<Self>) {}
+                }
+
+                let waker = Waker::from(Arc::new(NoopWake));
+                let mut context = Context::from_waker(&waker);
+                loop {
+                    match Pin::new(&mut future).poll(&mut context) {
+                        Poll::Ready(value) => break value,
+                        Poll::Pending => std::thread::yield_now(),
+                    }
+                }
+            }
+        }
+    }
+}
