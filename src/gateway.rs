@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::OffsetDateTime;
 use url::Url;
+use url::form_urlencoded::Serializer as FormUrlEncodedSerializer;
 
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
@@ -162,6 +163,378 @@ pub struct GatewayCreditsResponse {
     pub total_used: String,
 }
 
+/// Spend report aggregation dimension.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GatewaySpendReportGroupBy {
+    /// Aggregate by day.
+    Day,
+
+    /// Aggregate by user.
+    User,
+
+    /// Aggregate by model.
+    Model,
+
+    /// Aggregate by tag.
+    Tag,
+
+    /// Aggregate by provider.
+    Provider,
+
+    /// Aggregate by credential type.
+    CredentialType,
+}
+
+impl GatewaySpendReportGroupBy {
+    const fn as_query_value(self) -> &'static str {
+        match self {
+            Self::Day => "day",
+            Self::User => "user",
+            Self::Model => "model",
+            Self::Tag => "tag",
+            Self::Provider => "provider",
+            Self::CredentialType => "credential_type",
+        }
+    }
+}
+
+/// Spend report time granularity when grouping by day.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GatewaySpendReportDatePart {
+    /// Daily report rows.
+    Day,
+
+    /// Hourly report rows.
+    Hour,
+}
+
+impl GatewaySpendReportDatePart {
+    const fn as_query_value(self) -> &'static str {
+        match self {
+            Self::Day => "day",
+            Self::Hour => "hour",
+        }
+    }
+}
+
+/// Gateway credential source used in spend report filters and rows.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GatewayCredentialType {
+    /// Bring-your-own-key credentials.
+    Byok,
+
+    /// Gateway-managed system credentials.
+    System,
+}
+
+impl GatewayCredentialType {
+    const fn as_query_value(self) -> &'static str {
+        match self {
+            Self::Byok => "byok",
+            Self::System => "system",
+        }
+    }
+}
+
+/// Parameters for a Gateway spend report request.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewaySpendReportParams {
+    /// Start date in `YYYY-MM-DD` format, inclusive.
+    pub start_date: String,
+
+    /// End date in `YYYY-MM-DD` format, inclusive.
+    pub end_date: String,
+
+    /// Primary aggregation dimension.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_by: Option<GatewaySpendReportGroupBy>,
+
+    /// Time granularity when grouping by day.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date_part: Option<GatewaySpendReportDatePart>,
+
+    /// Filter to a specific user's spend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+
+    /// Filter to a specific model id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    /// Filter to a specific provider id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+
+    /// Filter to BYOK or system credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_type: Option<GatewayCredentialType>,
+
+    /// Filter to requests with these tags.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+}
+
+impl GatewaySpendReportParams {
+    /// Creates spend report parameters with the required date range.
+    pub fn new(start_date: impl Into<String>, end_date: impl Into<String>) -> Self {
+        Self {
+            start_date: start_date.into(),
+            end_date: end_date.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Sets the primary aggregation dimension.
+    pub fn with_group_by(mut self, group_by: GatewaySpendReportGroupBy) -> Self {
+        self.group_by = Some(group_by);
+        self
+    }
+
+    /// Sets the time granularity for day grouping.
+    pub fn with_date_part(mut self, date_part: GatewaySpendReportDatePart) -> Self {
+        self.date_part = Some(date_part);
+        self
+    }
+
+    /// Filters the report to a user id.
+    pub fn with_user_id(mut self, user_id: impl Into<String>) -> Self {
+        self.user_id = Some(user_id.into());
+        self
+    }
+
+    /// Filters the report to a model id.
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    /// Filters the report to a provider id.
+    pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
+        self.provider = Some(provider.into());
+        self
+    }
+
+    /// Filters the report to a credential type.
+    pub fn with_credential_type(mut self, credential_type: GatewayCredentialType) -> Self {
+        self.credential_type = Some(credential_type);
+        self
+    }
+
+    /// Filters the report to the supplied tags.
+    pub fn with_tags<I, S>(mut self, tags: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.tags = tags.into_iter().map(Into::into).collect();
+        self
+    }
+}
+
+/// One row returned by the Gateway spend report API.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewaySpendReportRow {
+    /// Date string when grouping by day.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub day: Option<String>,
+
+    /// Hour timestamp when grouping by day and hour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hour: Option<String>,
+
+    /// User identifier when grouping by user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+
+    /// Model identifier when grouping by model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    /// Tag value when grouping by tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+
+    /// Provider id when grouping by provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+
+    /// Credential type when grouping by credential type.
+    #[serde(
+        default,
+        rename = "credentialType",
+        alias = "credential_type",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub credential_type: Option<GatewayCredentialType>,
+
+    /// Total cost in USD.
+    #[serde(rename = "totalCost", alias = "total_cost")]
+    pub total_cost: f64,
+
+    /// Market cost in USD.
+    #[serde(
+        default,
+        rename = "marketCost",
+        alias = "market_cost",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub market_cost: Option<f64>,
+
+    /// Number of input tokens.
+    #[serde(
+        default,
+        rename = "inputTokens",
+        alias = "input_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub input_tokens: Option<u64>,
+
+    /// Number of output tokens.
+    #[serde(
+        default,
+        rename = "outputTokens",
+        alias = "output_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub output_tokens: Option<u64>,
+
+    /// Number of cached input tokens.
+    #[serde(
+        default,
+        rename = "cachedInputTokens",
+        alias = "cached_input_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cached_input_tokens: Option<u64>,
+
+    /// Number of cache creation input tokens.
+    #[serde(
+        default,
+        rename = "cacheCreationInputTokens",
+        alias = "cache_creation_input_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cache_creation_input_tokens: Option<u64>,
+
+    /// Number of reasoning tokens.
+    #[serde(
+        default,
+        rename = "reasoningTokens",
+        alias = "reasoning_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reasoning_tokens: Option<u64>,
+
+    /// Number of requests.
+    #[serde(
+        default,
+        rename = "requestCount",
+        alias = "request_count",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub request_count: Option<u64>,
+}
+
+/// Gateway spend report response.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewaySpendReportResponse {
+    /// Report rows.
+    pub results: Vec<GatewaySpendReportRow>,
+}
+
+/// Parameters for a Gateway generation info lookup.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayGenerationInfoParams {
+    /// The generation id to look up.
+    pub id: String,
+}
+
+impl GatewayGenerationInfoParams {
+    /// Creates generation info lookup parameters.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self { id: id.into() }
+    }
+}
+
+/// Detailed information about a specific Gateway generation.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayGenerationInfo {
+    /// The generation id.
+    pub id: String,
+
+    /// Total cost in USD.
+    #[serde(rename = "totalCost", alias = "total_cost")]
+    pub total_cost: f64,
+
+    /// Upstream inference cost in USD.
+    #[serde(rename = "upstreamInferenceCost", alias = "upstream_inference_cost")]
+    pub upstream_inference_cost: f64,
+
+    /// Usage cost in USD.
+    pub usage: f64,
+
+    /// ISO 8601 timestamp when the generation was created.
+    #[serde(rename = "createdAt", alias = "created_at")]
+    pub created_at: String,
+
+    /// Model identifier.
+    pub model: String,
+
+    /// Whether BYOK credentials were used.
+    #[serde(rename = "isByok", alias = "is_byok")]
+    pub is_byok: bool,
+
+    /// Provider that served this generation.
+    #[serde(rename = "providerName", alias = "provider_name")]
+    pub provider_name: String,
+
+    /// Whether streaming was used.
+    pub streamed: bool,
+
+    /// Provider finish reason.
+    #[serde(rename = "finishReason", alias = "finish_reason")]
+    pub finish_reason: String,
+
+    /// Time to first token in milliseconds.
+    pub latency: u64,
+
+    /// Total generation time in milliseconds.
+    #[serde(rename = "generationTime", alias = "generation_time")]
+    pub generation_time: u64,
+
+    /// Number of prompt tokens.
+    #[serde(rename = "promptTokens", alias = "native_tokens_prompt")]
+    pub prompt_tokens: u64,
+
+    /// Number of completion tokens.
+    #[serde(rename = "completionTokens", alias = "native_tokens_completion")]
+    pub completion_tokens: u64,
+
+    /// Reasoning tokens used.
+    #[serde(rename = "reasoningTokens", alias = "native_tokens_reasoning")]
+    pub reasoning_tokens: u64,
+
+    /// Cached tokens used.
+    #[serde(rename = "cachedTokens", alias = "native_tokens_cached")]
+    pub cached_tokens: u64,
+
+    /// Cache creation input tokens.
+    #[serde(rename = "cacheCreationTokens", alias = "native_tokens_cache_creation")]
+    pub cache_creation_tokens: u64,
+
+    /// Billable web search calls.
+    #[serde(rename = "billableWebSearchCalls", alias = "billable_web_search_calls")]
+    pub billable_web_search_calls: u64,
+}
+
 /// Configuration for a Vercel AI Gateway provider instance.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -287,6 +660,36 @@ impl GatewayProvider {
         let transport = Arc::clone(&self.transport);
 
         get_gateway_json(get_options, transport, gateway_credits_response).await
+    }
+
+    /// Returns a Gateway spend report for the supplied date range and filters.
+    pub async fn get_spend_report(
+        &self,
+        params: GatewaySpendReportParams,
+    ) -> Result<GatewaySpendReportResponse, HandledFetchError> {
+        let request_headers = gateway_provider_headers(&self.settings);
+        let url = gateway_spend_report_url(&self.base_url(), &params)?;
+        let get_options = GetFromApiOptions::new(url)
+            .with_headers(request_headers)
+            .with_environment(RuntimeEnvironment::unknown());
+        let transport = Arc::clone(&self.transport);
+
+        get_gateway_json(get_options, transport, gateway_spend_report_response).await
+    }
+
+    /// Returns detailed information for a specific Gateway generation id.
+    pub async fn get_generation_info(
+        &self,
+        params: GatewayGenerationInfoParams,
+    ) -> Result<GatewayGenerationInfo, HandledFetchError> {
+        let request_headers = gateway_provider_headers(&self.settings);
+        let url = gateway_generation_info_url(&self.base_url(), &params)?;
+        let get_options = GetFromApiOptions::new(url)
+            .with_headers(request_headers)
+            .with_environment(RuntimeEnvironment::unknown());
+        let transport = Arc::clone(&self.transport);
+
+        get_gateway_json(get_options, transport, gateway_generation_info_response).await
     }
 
     fn base_url(&self) -> String {
@@ -710,6 +1113,63 @@ fn gateway_origin_url(base_url: &str, path: &str) -> Result<String, HandledFetch
     Ok(origin)
 }
 
+fn gateway_spend_report_url(
+    base_url: &str,
+    params: &GatewaySpendReportParams,
+) -> Result<String, HandledFetchError> {
+    let mut query = FormUrlEncodedSerializer::new(String::new());
+    query.append_pair("start_date", &params.start_date);
+    query.append_pair("end_date", &params.end_date);
+
+    if let Some(group_by) = params.group_by {
+        query.append_pair("group_by", group_by.as_query_value());
+    }
+
+    if let Some(date_part) = params.date_part {
+        query.append_pair("date_part", date_part.as_query_value());
+    }
+
+    if let Some(user_id) = &params.user_id {
+        query.append_pair("user_id", user_id);
+    }
+
+    if let Some(model) = &params.model {
+        query.append_pair("model", model);
+    }
+
+    if let Some(provider) = &params.provider {
+        query.append_pair("provider", provider);
+    }
+
+    if let Some(credential_type) = params.credential_type {
+        query.append_pair("credential_type", credential_type.as_query_value());
+    }
+
+    if !params.tags.is_empty() {
+        query.append_pair("tags", &params.tags.join(","));
+    }
+
+    Ok(format!(
+        "{}?{}",
+        gateway_origin_url(base_url, "/v1/report")?,
+        query.finish()
+    ))
+}
+
+fn gateway_generation_info_url(
+    base_url: &str,
+    params: &GatewayGenerationInfoParams,
+) -> Result<String, HandledFetchError> {
+    let mut query = FormUrlEncodedSerializer::new(String::new());
+    query.append_pair("id", &params.id);
+
+    Ok(format!(
+        "{}?{}",
+        gateway_origin_url(base_url, "/v1/generation")?,
+        query.finish()
+    ))
+}
+
 async fn get_gateway_json<T, V, E>(
     options: GetFromApiOptions,
     transport: GatewayTransport,
@@ -807,6 +1267,24 @@ fn gateway_credits_response(
     value: &JsonValue,
 ) -> Result<GatewayCreditsResponse, serde_json::Error> {
     serde_json::from_value(value.clone())
+}
+
+fn gateway_spend_report_response(
+    value: &JsonValue,
+) -> Result<GatewaySpendReportResponse, serde_json::Error> {
+    serde_json::from_value(value.clone())
+}
+
+#[derive(Deserialize)]
+struct RawGatewayGenerationInfoResponse {
+    data: GatewayGenerationInfo,
+}
+
+fn gateway_generation_info_response(
+    value: &JsonValue,
+) -> Result<GatewayGenerationInfo, serde_json::Error> {
+    serde_json::from_value::<RawGatewayGenerationInfoResponse>(value.clone())
+        .map(|response| response.data)
 }
 
 fn optional_headers(headers: Option<&Headers>) -> Option<Vec<(String, Option<String>)>> {
@@ -1114,8 +1592,9 @@ fn provider_api_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        GatewayModelType, GatewayProvider, GatewayProviderSettings, GatewayTransport,
-        GatewayTransportFuture, gateway,
+        GatewayCredentialType, GatewayGenerationInfoParams, GatewayModelType, GatewayProvider,
+        GatewayProviderSettings, GatewaySpendReportDatePart, GatewaySpendReportGroupBy,
+        GatewaySpendReportParams, GatewayTransport, GatewayTransportFuture, gateway,
     };
     use crate::generate_text::{GenerateTextOptions, generate_text};
     use crate::headers::Headers;
@@ -1575,6 +2054,227 @@ mod tests {
         assert_eq!(api_error.status_code(), Some(429));
         assert_eq!(api_error.message(), "Rate limit exceeded");
         assert!(api_error.is_retryable());
+    }
+
+    #[test]
+    fn gateway_provider_fetches_spend_report_with_query_params() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "results": [
+                        {
+                            "day": "2026-03-01",
+                            "credential_type": "byok",
+                            "total_cost": 12.5,
+                            "market_cost": 11.0,
+                            "input_tokens": 50000,
+                            "output_tokens": 10000,
+                            "cached_input_tokens": 5000,
+                            "cache_creation_input_tokens": 2000,
+                            "reasoning_tokens": 1000,
+                            "request_count": 42
+                        }
+                    ]
+                })
+                .to_string(),
+            ))))
+        });
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com/v4/ai")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+        let result = poll_ready(
+            provider.get_spend_report(
+                GatewaySpendReportParams::new("2026-03-01", "2026-03-25")
+                    .with_group_by(GatewaySpendReportGroupBy::Model)
+                    .with_date_part(GatewaySpendReportDatePart::Hour)
+                    .with_user_id("user_123")
+                    .with_model("anthropic/claude-sonnet-4.5")
+                    .with_provider("anthropic")
+                    .with_credential_type(GatewayCredentialType::Byok)
+                    .with_tags(["production", "api"]),
+            ),
+        )
+        .expect("spend report fetch succeeds");
+
+        assert_eq!(result.results.len(), 1);
+        let row = &result.results[0];
+        assert_eq!(row.day.as_deref(), Some("2026-03-01"));
+        assert_eq!(row.credential_type, Some(GatewayCredentialType::Byok));
+        assert_eq!(row.total_cost, 12.5);
+        assert_eq!(row.market_cost, Some(11.0));
+        assert_eq!(row.input_tokens, Some(50000));
+        assert_eq!(row.output_tokens, Some(10000));
+        assert_eq!(row.cached_input_tokens, Some(5000));
+        assert_eq!(row.cache_creation_input_tokens, Some(2000));
+        assert_eq!(row.reasoning_tokens, Some(1000));
+        assert_eq!(row.request_count, Some(42));
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let url = url::Url::parse(&request.url).expect("request URL is valid");
+
+        assert_eq!(request.method, ProviderApiRequestMethod::Get);
+        assert_eq!(
+            url.as_str().split('?').next(),
+            Some("https://api.test.com/v1/report")
+        );
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "start_date")
+                .map(|(_, value)| value.into_owned()),
+            Some("2026-03-01".to_string())
+        );
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "end_date")
+                .map(|(_, value)| value.into_owned()),
+            Some("2026-03-25".to_string())
+        );
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "group_by")
+                .map(|(_, value)| value.into_owned()),
+            Some("model".to_string())
+        );
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "date_part")
+                .map(|(_, value)| value.into_owned()),
+            Some("hour".to_string())
+        );
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "user_id")
+                .map(|(_, value)| value.into_owned()),
+            Some("user_123".to_string())
+        );
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "model")
+                .map(|(_, value)| value.into_owned()),
+            Some("anthropic/claude-sonnet-4.5".to_string())
+        );
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "provider")
+                .map(|(_, value)| value.into_owned()),
+            Some("anthropic".to_string())
+        );
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "credential_type")
+                .map(|(_, value)| value.into_owned()),
+            Some("byok".to_string())
+        );
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "tags")
+                .map(|(_, value)| value.into_owned()),
+            Some("production,api".to_string())
+        );
+    }
+
+    #[test]
+    fn gateway_provider_fetches_generation_info_and_unwraps_data() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "data": {
+                        "id": "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                        "total_cost": 0.00123,
+                        "upstream_inference_cost": 0.0011,
+                        "usage": 0.00123,
+                        "created_at": "2024-01-01T00:00:00.000Z",
+                        "model": "gpt-4",
+                        "is_byok": false,
+                        "provider_name": "openai",
+                        "streamed": true,
+                        "finish_reason": "stop",
+                        "latency": 200,
+                        "generation_time": 1500,
+                        "native_tokens_prompt": 100,
+                        "native_tokens_completion": 50,
+                        "native_tokens_reasoning": 0,
+                        "native_tokens_cached": 0,
+                        "native_tokens_cache_creation": 0,
+                        "billable_web_search_calls": 0
+                    }
+                })
+                .to_string(),
+            ))))
+        });
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com/v4/ai")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+        let result = poll_ready(
+            provider.get_generation_info(GatewayGenerationInfoParams::new(
+                "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            )),
+        )
+        .expect("generation info fetch succeeds");
+
+        assert_eq!(result.id, "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert_eq!(result.total_cost, 0.00123);
+        assert_eq!(result.upstream_inference_cost, 0.0011);
+        assert_eq!(result.usage, 0.00123);
+        assert_eq!(result.created_at, "2024-01-01T00:00:00.000Z");
+        assert_eq!(result.model, "gpt-4");
+        assert!(!result.is_byok);
+        assert_eq!(result.provider_name, "openai");
+        assert!(result.streamed);
+        assert_eq!(result.finish_reason, "stop");
+        assert_eq!(result.latency, 200);
+        assert_eq!(result.generation_time, 1500);
+        assert_eq!(result.prompt_tokens, 100);
+        assert_eq!(result.completion_tokens, 50);
+        assert_eq!(result.reasoning_tokens, 0);
+        assert_eq!(result.cached_tokens, 0);
+        assert_eq!(result.cache_creation_tokens, 0);
+        assert_eq!(result.billable_web_search_calls, 0);
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let url = url::Url::parse(&request.url).expect("request URL is valid");
+
+        assert_eq!(request.method, ProviderApiRequestMethod::Get);
+        assert_eq!(
+            url.as_str().split('?').next(),
+            Some("https://api.test.com/v1/generation")
+        );
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "id")
+                .map(|(_, value)| value.into_owned()),
+            Some("gen_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string())
+        );
     }
 
     fn gateway_stream_body() -> String {
