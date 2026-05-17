@@ -1058,7 +1058,7 @@ where
     Ok(result)
 }
 
-fn generate_object_output_kind(
+pub(crate) fn generate_object_output_kind(
     schema: &Option<FlexibleSchema>,
     enum_values: Option<&[String]>,
     array_output: bool,
@@ -1081,7 +1081,7 @@ fn response_format_schema(response_format: &LanguageModelResponseFormat) -> Opti
     }
 }
 
-fn generate_object_response_format(
+pub(crate) fn generate_object_response_format(
     schema: &Option<FlexibleSchema>,
     schema_name: &Option<String>,
     schema_description: &Option<String>,
@@ -1159,7 +1159,7 @@ fn append_generate_object_user_agent(call_options: &mut LanguageModelCallOptions
     call_options.headers = Some(with_user_agent_suffix(headers, [format!("ai/{VERSION}")]));
 }
 
-fn parse_generated_object(
+pub(crate) fn parse_generated_object(
     text: &str,
     schema: Option<FlexibleSchema>,
     enum_values: Option<&[String]>,
