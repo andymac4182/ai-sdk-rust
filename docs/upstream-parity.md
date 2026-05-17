@@ -71,7 +71,7 @@ inventory.
 | `packages/fireworks` (`@ai-sdk/fireworks`) | provider package | not-started | none | none | Needs image provider and settings. |
 | `packages/gladia` (`@ai-sdk/gladia`) | provider package | not-started | none | none | Needs transcription provider and error mapping. |
 | `packages/groq` (`@ai-sdk/groq`) | provider package | not-started | none | none | Needs chat, transcription, browser-search tool, usage conversion, message conversion, and tool preparation. |
-| `packages/huggingface` (`@ai-sdk/huggingface`) | provider package | not-started | none | none | Needs OpenAI-compatible provider and responses language model. |
+| `packages/huggingface` (`@ai-sdk/huggingface`) | provider package | in-progress | `src/huggingface.rs` | `huggingface_provider_generates_text_with_request_and_response_metadata`; `huggingface_responses_maps_system_provider_options_and_structured_output`; `huggingface_responses_converts_images_tool_messages_and_content_parts`; `huggingface_responses_reports_unsupported_provider_references`; `huggingface_responses_maps_warnings_errors_and_stream_deferral`; `huggingface_provider_reports_unsupported_embedding_and_image`; `huggingface_provider_uses_default_base_url_and_function_alias`; `huggingface_provider_implements_provider_trait`; `huggingface_provider_settings_serde_accepts_upstream_base_url` | Initial provider foundation mirrors upstream `createHuggingFace` settings for default/custom base URL, `HUGGINGFACE_API_KEY`, custom headers, Hugging Face user-agent suffix, callable-style `huggingface(...)`, `responses`/`languageModel`, provider-v4 trait integration, non-streaming `/responses` text generation, system/user/assistant message conversion, inline and URL image prompt parts, tool-message warnings, response text/reasoning/source/provider-executed tool content extraction, usage conversion, structured output `text.format`, provider-specific `metadata`/`instructions`/`reasoningEffort` options, unsupported embedding/image messages, and explicit streaming deferral. Full SSE streaming, tool preparation/tool choice, full provider-option validation, MCP edge cases, and live Hugging Face validation remain unported. |
 | `packages/hume` (`@ai-sdk/hume`) | provider package | not-started | none | none | Needs speech provider and error mapping. |
 | `packages/klingai` (`@ai-sdk/klingai`) | provider package | not-started | none | none | Needs auth, provider, and video model. |
 | `packages/lmnt` (`@ai-sdk/lmnt`) | provider package | not-started | none | none | Needs speech provider and error mapping. |
@@ -156,7 +156,7 @@ inventory.
 | OpenAI-compatible images | in-progress | `src/openai_compatible.rs` | `openai_compatible_image_model_generates_through_generate_image`; `openai_compatible_image_model_edits_with_files_and_mask`; `openai_compatible_image_model_passes_options_warnings_and_errors` | Mirrors upstream OpenAI-compatible image generation and edit request boundaries for `/images/generations` JSON requests, `/images/edits` form-data requests, base64 image responses, provider option raw/camel-case precedence, unsupported aspect-ratio/seed warnings, response headers, and API error metadata. URL-image download remains intentionally not implemented in this dependency-light provider boundary. |
 | Vercel AI Gateway OpenAI-compatible text and embeddings | in-progress | `src/vercel_ai_gateway.rs`, `src/openai_compatible.rs` | `vercel_ai_gateway_openai_compatible_generates_text_through_openai_chat`; `vercel_ai_gateway_openai_compatible_streams_text_through_openai_chat`; `vercel_ai_gateway_openai_compatible_embeds_through_openai_embeddings`; ignored `live_vercel_ai_gateway_openai_compatible_generate_text`; ignored `live_vercel_ai_gateway_openai_compatible_stream_text`; ignored `live_vercel_ai_gateway_openai_compatible_embed` | Thin Rust provider factory over `https://ai-gateway.vercel.sh/v1` proves `generate_text`, `stream_text`, and `embed`/`embed_many` can call Gateway OpenAI-compatible `/chat/completions` and `/embeddings` with `openai/...` model ids. Broader Gateway OpenAI-compatible endpoint coverage can expand from this slice. |
 | Vercel v0 provider package | in-progress | `src/vercel.rs`, `src/openai_compatible.rs` | `vercel_provider_creates_openai_compatible_chat_model`; `vercel_provider_uses_default_base_url_and_function_alias`; `vercel_provider_reports_unsupported_model_families`; `vercel_provider_implements_provider_trait` | Mirrors upstream `createVercel` construction around OpenAI-compatible chat models with default/custom base URLs, headers, `VERCEL_API_KEY`, provider id `vercel.chat`, Vercel-specific user-agent suffix, and unsupported embedding/image lookups. Live v0 API validation remains optional and unported because this goal currently only has AI Gateway credentials. |
-| Concrete provider packages | in-progress | `src/openai.rs`, `src/open_responses.rs`, `src/vercel.rs`, `src/vercel_ai_gateway.rs`, `src/deepinfra.rs`, `src/togetherai.rs` | OpenAI, Open Responses, Vercel, Vercel AI Gateway, DeepInfra, and TogetherAI provider-wrapper tests listed above | OpenAI, Open Responses, Vercel, Vercel AI Gateway, DeepInfra, and TogetherAI have initial Rust provider-wrapper slices. Most concrete provider package rows above remain unported. |
+| Concrete provider packages | in-progress | `src/openai.rs`, `src/open_responses.rs`, `src/vercel.rs`, `src/vercel_ai_gateway.rs`, `src/deepinfra.rs`, `src/togetherai.rs`, `src/huggingface.rs` | OpenAI, Open Responses, Vercel, Vercel AI Gateway, DeepInfra, TogetherAI, and Hugging Face provider-wrapper tests listed above | OpenAI, Open Responses, Vercel, Vercel AI Gateway, DeepInfra, TogetherAI, and Hugging Face have initial Rust provider-wrapper slices. Most concrete provider package rows above remain unported. |
 
 ## Examples Inventory
 
@@ -194,7 +194,7 @@ focused tests for each portable behavior before changing rows to `verified`.
 | Upstream area | Test files scanned | Status | Notes |
 | --- | ---: | --- | --- |
 | `packages/ai` | 128 | in-progress | Many non-streaming high-level API tests are represented in Rust; stream, UI, agent, telemetry, compatibility, and public mock model tests remain. |
-| Provider package tests | 195 | in-progress | Gateway, Vercel AI Gateway OpenAI-compatible, Vercel v0, OpenAI foundation, Open Responses foundation, DeepInfra foundation, and TogetherAI provider tests now exist. Concrete provider package test files remain largely unported across OpenAI's broader Responses streaming/tools/files/speech/transcription surfaces, Anthropic, Google, Bedrock, xAI, and the remaining provider packages. |
+| Provider package tests | 195 | in-progress | Gateway, Vercel AI Gateway OpenAI-compatible, Vercel v0, OpenAI foundation, Open Responses foundation, DeepInfra foundation, TogetherAI, and Hugging Face provider tests now exist. Concrete provider package test files remain largely unported across OpenAI's broader Responses streaming/tools/files/speech/transcription surfaces, Hugging Face SSE/tool parity, Anthropic, Google, Bedrock, xAI, and the remaining provider packages. |
 | `packages/provider` | 1 | in-progress | Upstream provider contract test is partially covered by Rust provider/model module tests. |
 | `packages/provider-utils` | 77 | in-progress | Many provider support behaviors are represented, but stream/browser/fetch parity is incomplete. |
 | Framework adapter tests | 21 | js-only-documented | Angular, React, RSC, Svelte, and Vue bindings are JavaScript framework-specific; portable transport/message semantics are tracked separately. |
@@ -213,11 +213,12 @@ focused tests for each portable behavior before changing rows to `verified`.
    image/embedding/reranking/video, account metadata, auth/observability,
    provider-executed tools, and error-classification slices with broader
    provider package tests.
-4. Continue layering concrete OpenAI-compatible wrappers: expand the OpenAI and
-   Open Responses foundations into files/tools/speech/transcription and full
-   Responses streaming/tool/provider-option parity, then add Hugging Face.
-   Expand the Vercel AI Gateway OpenAI-compatible vertical slice beyond
-   text/streaming/embeddings as needed.
+4. Continue layering concrete provider wrappers: expand the OpenAI and Open
+   Responses foundations into files/tools/speech/transcription and full
+   Responses streaming/tool/provider-option parity; expand the Hugging Face
+   foundation into SSE streaming, tool preparation/tool choice, and full
+   provider-option validation. Expand the Vercel AI Gateway OpenAI-compatible
+   vertical slice beyond text/streaming/embeddings as needed.
 5. Continue provider package slices until every provider row above is `verified`.
 6. Port MCP, OTel, Workflow, UI-message, chat/completion transport, telemetry,
    logger, and HTTP server example surfaces.

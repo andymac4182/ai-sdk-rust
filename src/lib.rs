@@ -19,6 +19,7 @@ pub mod generate_speech;
 pub mod generate_text;
 pub mod generate_video;
 pub mod headers;
+pub mod huggingface;
 pub mod image_model;
 pub mod image_model_middleware;
 pub mod json;
@@ -186,6 +187,11 @@ pub use generate_video::{
     GenerateVideoPromptImage, GenerateVideoResult, experimental_generate_video, generate_video,
 };
 pub use headers::Headers;
+pub use huggingface::{
+    DEFAULT_HUGGINGFACE_BASE_URL, HuggingFaceProvider, HuggingFaceProviderSettings,
+    HuggingFaceResponsesLanguageModel, HuggingFaceTransport, HuggingFaceTransportFuture,
+    create_huggingface, huggingface,
+};
 pub use image_model::{
     ImageModel, ImageModelCallOptions, ImageModelFile, ImageModelImage, ImageModelProviderMetadata,
     ImageModelProviderMetadataEntry, ImageModelResponse, ImageModelResponseMetadata,
