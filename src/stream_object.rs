@@ -1392,6 +1392,46 @@ mod tests {
     }
 
     #[test]
+    fn stream_object_no_schema_output_streams_partial_objects_without_response_schema() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "{ ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    r#""content": "#,
+                )),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", r#""Hello, "#)),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", r#"!""#)),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", " }")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_object(StreamObjectOptions::new(&model, prompt())));
+
+        assert_eq!(result.object, Some(json!({"content": "Hello, world!"})));
+        assert_eq!(
+            result.partial_object_stream,
+            vec![
+                json!({}),
+                json!({"content": "Hello, "}),
+                json!({"content": "Hello, world"}),
+                json!({"content": "Hello, world!"})
+            ]
+        );
+
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].response_format,
+            Some(LanguageModelResponseFormat::json())
+        );
+    }
+
+    #[test]
     fn stream_object_retains_error_parts() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
