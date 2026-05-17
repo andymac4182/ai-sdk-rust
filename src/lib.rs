@@ -12,6 +12,7 @@ pub mod files;
 pub mod generate_image;
 pub mod generate_speech;
 pub mod generate_text;
+pub mod generate_video;
 pub mod headers;
 pub mod image_model;
 pub mod image_model_middleware;
@@ -109,6 +110,11 @@ pub use generate_text::{
 pub use generate_text::{
     OnFinishEvent, OnStartEvent, OnStepFinishEvent, OnStepStartEvent, OnToolCallFinishEvent,
     OnToolCallStartEvent,
+};
+pub use generate_video::{
+    ExperimentalGenerateVideoResult, GenerateVideoDownload, GenerateVideoDownloadFunction,
+    GenerateVideoDownloadFuture, GenerateVideoError, GenerateVideoOptions, GenerateVideoPrompt,
+    GenerateVideoPromptImage, GenerateVideoResult, experimental_generate_video, generate_video,
 };
 pub use headers::Headers;
 pub use image_model::{
