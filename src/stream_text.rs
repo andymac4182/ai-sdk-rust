@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
+use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -477,6 +479,98 @@ pub enum TextStreamPart {
     Finish(TextStreamFinishPart),
 }
 
+/// Event sent for each portable streamed chunk accepted by `onChunk`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamTextOnChunkEvent {
+    /// Stream chunk emitted by the high-level text stream.
+    pub chunk: TextStreamPart,
+}
+
+/// Future returned by a stream-text chunk callback.
+pub type StreamTextOnChunkFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+/// Callback invoked for portable chunks emitted by `stream_text`.
+pub type StreamTextOnChunkFunction<'a> =
+    dyn Fn(StreamTextOnChunkEvent) -> StreamTextOnChunkFuture<'a> + 'a;
+
+/// Callback wrapper for upstream `onChunk`.
+pub struct StreamTextOnChunk<'a> {
+    on_chunk: Rc<StreamTextOnChunkFunction<'a>>,
+}
+
+impl<'a> StreamTextOnChunk<'a> {
+    /// Creates a chunk callback.
+    pub fn new<F, Fut>(on_chunk: F) -> Self
+    where
+        F: Fn(StreamTextOnChunkEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        Self {
+            on_chunk: Rc::new(move |event| Box::pin(on_chunk(event))),
+        }
+    }
+
+    /// Runs the chunk callback.
+    pub fn chunk(&self, event: StreamTextOnChunkEvent) -> StreamTextOnChunkFuture<'a> {
+        (self.on_chunk)(event)
+    }
+}
+
+impl fmt::Debug for StreamTextOnChunk<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StreamTextOnChunk")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Event sent when a provider stream error part is observed.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamTextOnErrorEvent {
+    /// Provider error represented as JSON.
+    pub error: JsonValue,
+}
+
+/// Future returned by a stream-text error callback.
+pub type StreamTextOnErrorFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+/// Callback invoked for provider errors emitted by `stream_text`.
+pub type StreamTextOnErrorFunction<'a> =
+    dyn Fn(StreamTextOnErrorEvent) -> StreamTextOnErrorFuture<'a> + 'a;
+
+/// Callback wrapper for upstream `onError`.
+pub struct StreamTextOnError<'a> {
+    on_error: Rc<StreamTextOnErrorFunction<'a>>,
+}
+
+impl<'a> StreamTextOnError<'a> {
+    /// Creates an error callback.
+    pub fn new<F, Fut>(on_error: F) -> Self
+    where
+        F: Fn(StreamTextOnErrorEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        Self {
+            on_error: Rc::new(move |event| Box::pin(on_error(event))),
+        }
+    }
+
+    /// Runs the error callback.
+    pub fn error(&self, event: StreamTextOnErrorEvent) -> StreamTextOnErrorFuture<'a> {
+        (self.on_error)(event)
+    }
+}
+
+impl fmt::Debug for StreamTextOnError<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StreamTextOnError")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Request options for a high-level text streaming call.
 pub struct StreamTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Language model used for the streaming call.
@@ -533,6 +627,12 @@ pub struct StreamTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Optional callback invoked after the full streamed generation result is complete.
     pub on_finish: Option<GenerateTextOnFinish<'a>>,
 
+    /// Optional callback invoked for portable stream chunks.
+    pub on_chunk: Option<StreamTextOnChunk<'a>>,
+
+    /// Optional callback invoked for provider error stream parts.
+    pub on_error: Option<StreamTextOnError<'a>>,
+
     /// Maximum number of model-call steps to run.
     pub max_steps: usize,
 
@@ -562,6 +662,8 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             on_tool_execution_end: None,
             on_step_finish: None,
             on_finish: None,
+            on_chunk: None,
+            on_error: None,
             max_steps: 1,
             stop_conditions: Vec::new(),
         }
@@ -594,6 +696,8 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             on_tool_execution_end: None,
             on_step_finish: None,
             on_finish: None,
+            on_chunk: None,
+            on_error: None,
             max_steps: 1,
             stop_conditions: Vec::new(),
         }
@@ -855,6 +959,26 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
         self
     }
 
+    /// Sets a callback that is invoked for each portable stream chunk.
+    pub fn with_on_chunk<F, Fut>(mut self, on_chunk: F) -> Self
+    where
+        F: Fn(StreamTextOnChunkEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_chunk = Some(StreamTextOnChunk::new(on_chunk));
+        self
+    }
+
+    /// Sets a callback that is invoked for provider stream errors.
+    pub fn with_on_error<F, Fut>(mut self, on_error: F) -> Self
+    where
+        F: Fn(StreamTextOnErrorEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_error = Some(StreamTextOnError::new(on_error));
+        self
+    }
+
     /// Sets the maximum number of model-call steps.
     pub fn with_max_steps(mut self, max_steps: usize) -> Self {
         self.max_steps = max_steps.max(1);
@@ -1085,6 +1209,8 @@ where
         on_tool_execution_end,
         on_step_finish,
         on_finish,
+        on_chunk,
+        on_error,
         max_steps,
         stop_conditions,
     } = options;
@@ -1194,6 +1320,8 @@ where
             step_call_options.clone(),
             include_raw_chunks,
             &mut parts,
+            on_chunk.as_ref(),
+            on_error.as_ref(),
         )
         .await;
         let response_time_ms =
@@ -1299,7 +1427,12 @@ where
         );
 
         for tool_result in &local_tool_results {
-            parts.push(TextStreamPart::ToolResult(tool_result.clone()));
+            push_text_stream_part(
+                &mut parts,
+                TextStreamPart::ToolResult(tool_result.clone()),
+                on_chunk.as_ref(),
+            )
+            .await;
         }
 
         collected_step.tool_results.extend(local_tool_results);
@@ -1517,6 +1650,8 @@ async fn collect_stream_text_step<M>(
     call_options: LanguageModelCallOptions,
     include_raw_chunks: bool,
     parts: &mut Vec<TextStreamPart>,
+    on_chunk: Option<&StreamTextOnChunk<'_>>,
+    on_error: Option<&StreamTextOnError<'_>>,
 ) -> CollectedStreamTextStep
 where
     M: LanguageModel + ?Sized,
@@ -1594,7 +1729,12 @@ where
                             if let Some(provider_metadata) = part.provider_metadata {
                                 stream_part = stream_part.with_provider_metadata(provider_metadata);
                             }
-                            parts.push(TextStreamPart::TextDelta(stream_part));
+                            push_text_stream_part(
+                                parts,
+                                TextStreamPart::TextDelta(stream_part),
+                                on_chunk,
+                            )
+                            .await;
                         }
                     }
                     LanguageModelStreamPart::TextEnd(part) => {
@@ -1634,7 +1774,12 @@ where
                         if let Some(provider_metadata) = part.provider_metadata {
                             stream_part = stream_part.with_provider_metadata(provider_metadata);
                         }
-                        parts.push(TextStreamPart::ReasoningDelta(stream_part));
+                        push_text_stream_part(
+                            parts,
+                            TextStreamPart::ReasoningDelta(stream_part),
+                            on_chunk,
+                        )
+                        .await;
                     }
                     LanguageModelStreamPart::ReasoningEnd(part) => {
                         if let Some((block_text, provider_metadata)) =
@@ -1649,10 +1794,20 @@ where
                         parts.push(TextStreamPart::ReasoningEnd(part));
                     }
                     LanguageModelStreamPart::ToolInputStart(part) => {
-                        parts.push(TextStreamPart::ToolInputStart(part));
+                        push_text_stream_part(
+                            parts,
+                            TextStreamPart::ToolInputStart(part),
+                            on_chunk,
+                        )
+                        .await;
                     }
                     LanguageModelStreamPart::ToolInputDelta(part) => {
-                        parts.push(TextStreamPart::ToolInputDelta(part));
+                        push_text_stream_part(
+                            parts,
+                            TextStreamPart::ToolInputDelta(part),
+                            on_chunk,
+                        )
+                        .await;
                     }
                     LanguageModelStreamPart::ToolInputEnd(part) => {
                         parts.push(TextStreamPart::ToolInputEnd(part));
@@ -1666,7 +1821,8 @@ where
                         let tool_call = GenerateTextToolCall::from_language_model_tool_call(&part);
                         tool_calls.push(tool_call.clone());
                         provider_content.push(LanguageModelContent::ToolCall(part));
-                        parts.push(TextStreamPart::ToolCall(tool_call));
+                        push_text_stream_part(parts, TextStreamPart::ToolCall(tool_call), on_chunk)
+                            .await;
                     }
                     LanguageModelStreamPart::ToolResult(part) => {
                         let tool_result = generate_text_tool_result_from_language_model_tool_result(
@@ -1675,12 +1831,17 @@ where
                         );
                         tool_results.push(tool_result.clone());
                         provider_content.push(LanguageModelContent::ToolResult(part));
-                        parts.push(TextStreamPart::ToolResult(tool_result));
+                        push_text_stream_part(
+                            parts,
+                            TextStreamPart::ToolResult(tool_result),
+                            on_chunk,
+                        )
+                        .await;
                     }
                     LanguageModelStreamPart::Custom(part) => {
                         custom_parts.push(part.clone());
                         provider_content.push(LanguageModelContent::Custom(part.clone()));
-                        parts.push(TextStreamPart::Custom(part));
+                        push_text_stream_part(parts, TextStreamPart::Custom(part), on_chunk).await;
                     }
                     LanguageModelStreamPart::File(part) => {
                         files.push(part.clone());
@@ -1697,7 +1858,7 @@ where
                     LanguageModelStreamPart::Source(part) => {
                         sources.push(part.clone());
                         provider_content.push(LanguageModelContent::Source(part.clone()));
-                        parts.push(TextStreamPart::Source(part));
+                        push_text_stream_part(parts, TextStreamPart::Source(part), on_chunk).await;
                     }
                     LanguageModelStreamPart::ResponseMetadata(part) => {
                         response = response.with_response_metadata(part);
@@ -1713,12 +1874,19 @@ where
                     }
                     LanguageModelStreamPart::Raw(part) => {
                         if include_raw_chunks {
-                            parts.push(TextStreamPart::Raw(part));
+                            push_text_stream_part(parts, TextStreamPart::Raw(part), on_chunk).await;
                         }
                     }
                     LanguageModelStreamPart::Error(part) => {
                         finish_reason = FinishReason::Error;
                         errors.push(part.error.clone());
+                        if let Some(on_error) = on_error {
+                            on_error
+                                .error(StreamTextOnErrorEvent {
+                                    error: part.error.clone(),
+                                })
+                                .await;
+                        }
                         parts.push(TextStreamPart::Error(part));
                     }
                     LanguageModelStreamPart::StreamStart(_) => unreachable!(),
@@ -1774,6 +1942,39 @@ where
         performance,
         provider_content,
     }
+}
+
+async fn push_text_stream_part(
+    parts: &mut Vec<TextStreamPart>,
+    part: TextStreamPart,
+    on_chunk: Option<&StreamTextOnChunk<'_>>,
+) {
+    if let Some(on_chunk) = on_chunk
+        && is_stream_text_chunk_callback_part(&part)
+    {
+        on_chunk
+            .chunk(StreamTextOnChunkEvent {
+                chunk: part.clone(),
+            })
+            .await;
+    }
+
+    parts.push(part);
+}
+
+fn is_stream_text_chunk_callback_part(part: &TextStreamPart) -> bool {
+    matches!(
+        part,
+        TextStreamPart::TextDelta(_)
+            | TextStreamPart::ReasoningDelta(_)
+            | TextStreamPart::ToolInputStart(_)
+            | TextStreamPart::ToolInputDelta(_)
+            | TextStreamPart::ToolCall(_)
+            | TextStreamPart::ToolResult(_)
+            | TextStreamPart::Custom(_)
+            | TextStreamPart::Source(_)
+            | TextStreamPart::Raw(_)
+    )
 }
 
 fn text_language_model_content(
@@ -2630,6 +2831,106 @@ mod tests {
                 "on-step-finish",
                 "on-finish"
             ]
+        );
+    }
+
+    #[test]
+    fn stream_text_invokes_chunk_callback_for_portable_chunks() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::Raw(LanguageModelRawStreamPart::new(
+                    json!({"type": "raw-data", "content": "kept"}),
+                )),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "weather",
+                    r#"{"city":"Brisbane"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let callback_events = Arc::new(Mutex::new(Vec::new()));
+        let chunk_events = Arc::clone(&callback_events);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_include_raw_chunks(true)
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |_input, _options| async move { Ok(json!({ "forecast": "sunny" })) },
+                ))
+                .with_on_chunk(move |event| {
+                    let chunk_events = Arc::clone(&chunk_events);
+                    async move {
+                        let label = match event.chunk {
+                            TextStreamPart::Raw(_) => "raw".to_string(),
+                            TextStreamPart::TextDelta(part) => format!("text:{}", part.text),
+                            TextStreamPart::ToolCall(part) => {
+                                format!("tool-call:{}", part.tool_name)
+                            }
+                            TextStreamPart::ToolResult(part) => {
+                                format!("tool-result:{}", part.tool_name)
+                            }
+                            _ => "other".to_string(),
+                        };
+                        chunk_events.lock().expect("events lock").push(label);
+                    }
+                }),
+        ));
+
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(
+            callback_events.lock().expect("events lock").as_slice(),
+            [
+                "raw",
+                "text:Hello",
+                "tool-call:weather",
+                "tool-result:weather"
+            ]
+        );
+    }
+
+    #[test]
+    fn stream_text_invokes_error_callback_for_error_parts() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "Hello")),
+                LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(
+                    json!({"message": "chunk failed"}),
+                )),
+            ]));
+        let callback_errors = Arc::new(Mutex::new(Vec::new()));
+        let errors = Arc::clone(&callback_errors);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")]).with_on_error(
+                move |event| {
+                    let errors = Arc::clone(&errors);
+                    async move {
+                        errors.lock().expect("errors lock").push(
+                            event.error["message"]
+                                .as_str()
+                                .expect("message is a string")
+                                .to_string(),
+                        );
+                    }
+                },
+            ),
+        ));
+
+        assert_eq!(result.finish_reason, FinishReason::Error);
+        assert_eq!(
+            callback_errors.lock().expect("errors lock").as_slice(),
+            ["chunk failed"]
         );
     }
 
