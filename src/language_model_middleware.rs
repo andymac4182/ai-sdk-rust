@@ -246,6 +246,204 @@ pub trait LanguageModelMiddleware<M: LanguageModel> {
     }
 }
 
+/// Language model wrapper that applies one middleware around a provider-v4 model.
+///
+/// Upstream `wrapLanguageModel` accepts one or more middlewares. This Rust
+/// wrapper models the same behavior for a single middleware without allocating
+/// a middleware collection; callers can wrap the returned model again to
+/// compose additional middleware.
+#[derive(Clone, Debug)]
+pub struct WrappedLanguageModel<M, W> {
+    model: M,
+    middleware: W,
+    provider_id: String,
+    model_id: String,
+}
+
+impl<M, W> WrappedLanguageModel<M, W>
+where
+    M: LanguageModel,
+    W: LanguageModelMiddleware<M>,
+{
+    /// Creates a language model wrapper using middleware-provided identity
+    /// overrides when present.
+    pub fn new(model: M, middleware: W) -> Self {
+        let provider_id = middleware
+            .override_provider(LanguageModelMiddlewareModelOptions::new(&model))
+            .unwrap_or_else(|| model.provider().to_string());
+        let model_id = middleware
+            .override_model_id(LanguageModelMiddlewareModelOptions::new(&model))
+            .unwrap_or_else(|| model.model_id().to_string());
+
+        Self {
+            model,
+            middleware,
+            provider_id,
+            model_id,
+        }
+    }
+
+    /// Sets an explicit provider id, taking precedence over middleware identity
+    /// overrides and the wrapped model's provider id.
+    pub fn with_provider_id(mut self, provider_id: impl Into<String>) -> Self {
+        self.provider_id = provider_id.into();
+        self
+    }
+
+    /// Sets an explicit model id, taking precedence over middleware identity
+    /// overrides and the wrapped model's model id.
+    pub fn with_model_id(mut self, model_id: impl Into<String>) -> Self {
+        self.model_id = model_id.into();
+        self
+    }
+
+    /// Returns the wrapped base language model.
+    pub fn model(&self) -> &M {
+        &self.model
+    }
+
+    /// Returns the middleware applied by this wrapper.
+    pub fn middleware(&self) -> &W {
+        &self.middleware
+    }
+
+    /// Consumes the wrapper into the base model and middleware.
+    pub fn into_parts(self) -> (M, W) {
+        (self.model, self.middleware)
+    }
+}
+
+/// Wraps a language model with middleware.
+pub fn wrap_language_model<M, W>(model: M, middleware: W) -> WrappedLanguageModel<M, W>
+where
+    M: LanguageModel,
+    W: LanguageModelMiddleware<M>,
+{
+    WrappedLanguageModel::new(model, middleware)
+}
+
+impl<M, W> LanguageModel for WrappedLanguageModel<M, W>
+where
+    M: LanguageModel + Sync,
+    W: LanguageModelMiddleware<M> + Sync,
+{
+    type SupportedUrlsFuture<'a>
+        = Pin<Box<dyn Future<Output = LanguageModelSupportedUrls> + Send + 'a>>
+    where
+        Self: 'a;
+
+    type GenerateFuture<'a>
+        = Pin<Box<dyn Future<Output = LanguageModelGenerateResult> + Send + 'a>>
+    where
+        Self: 'a;
+
+    type Stream = M::Stream;
+
+    type StreamFuture<'a>
+        = Pin<Box<dyn Future<Output = LanguageModelStreamResult<Self::Stream>> + Send + 'a>>
+    where
+        Self: 'a;
+
+    fn provider(&self) -> &str {
+        &self.provider_id
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    fn supported_urls(&self) -> Self::SupportedUrlsFuture<'_> {
+        Box::pin(async move {
+            if let Some(supported_urls) = self
+                .middleware
+                .override_supported_urls(LanguageModelMiddlewareModelOptions::new(&self.model))
+            {
+                supported_urls.await
+            } else {
+                self.model.supported_urls().await
+            }
+        })
+    }
+
+    fn do_generate(&self, options: LanguageModelCallOptions) -> Self::GenerateFuture<'_> {
+        Box::pin(async move {
+            let params = if let Some(transform_params) =
+                self.middleware
+                    .transform_params(LanguageModelTransformParamsOptions::new(
+                        LanguageModelMiddlewareCallType::Generate,
+                        options.clone(),
+                        &self.model,
+                    )) {
+                transform_params.await
+            } else {
+                options
+            };
+
+            let do_generate_params = params.clone();
+            let do_stream_params = params.clone();
+            let fallback_params = params.clone();
+            let model = &self.model;
+            let do_generate: LanguageModelDoGenerate<'_> =
+                Box::new(move || Box::pin(model.do_generate(do_generate_params)));
+            let do_stream: LanguageModelDoStream<'_, M::Stream> =
+                Box::new(move || Box::pin(model.do_stream(do_stream_params)));
+
+            if let Some(wrap_generate) =
+                self.middleware
+                    .wrap_generate(LanguageModelWrapGenerateOptions::new(
+                        do_generate,
+                        do_stream,
+                        params,
+                        &self.model,
+                    ))
+            {
+                wrap_generate.await
+            } else {
+                self.model.do_generate(fallback_params).await
+            }
+        })
+    }
+
+    fn do_stream(&self, options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
+        Box::pin(async move {
+            let params = if let Some(transform_params) =
+                self.middleware
+                    .transform_params(LanguageModelTransformParamsOptions::new(
+                        LanguageModelMiddlewareCallType::Stream,
+                        options.clone(),
+                        &self.model,
+                    )) {
+                transform_params.await
+            } else {
+                options
+            };
+
+            let do_generate_params = params.clone();
+            let do_stream_params = params.clone();
+            let fallback_params = params.clone();
+            let model = &self.model;
+            let do_generate: LanguageModelDoGenerate<'_> =
+                Box::new(move || Box::pin(model.do_generate(do_generate_params)));
+            let do_stream: LanguageModelDoStream<'_, M::Stream> =
+                Box::new(move || Box::pin(model.do_stream(do_stream_params)));
+
+            if let Some(wrap_stream) =
+                self.middleware
+                    .wrap_stream(LanguageModelWrapStreamOptions::new(
+                        do_generate,
+                        do_stream,
+                        params,
+                        &self.model,
+                    ))
+            {
+                wrap_stream.await
+            } else {
+                self.model.do_stream(fallback_params).await
+            }
+        })
+    }
+}
+
 /// Default provider call settings applied by [`DefaultSettingsMiddleware`].
 ///
 /// Upstream `defaultSettingsMiddleware` accepts a partial provider-v4 language
@@ -578,7 +776,7 @@ mod tests {
         LanguageModelDefaultSettings, LanguageModelMiddleware, LanguageModelMiddlewareCallType,
         LanguageModelMiddlewareModelOptions, LanguageModelTransformParamsOptions,
         LanguageModelWrapGenerateOptions, LanguageModelWrapStreamOptions,
-        default_settings_middleware,
+        default_settings_middleware, wrap_language_model,
     };
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
@@ -754,6 +952,153 @@ mod tests {
         {
             assert_eq!(options.params.include_raw_chunks, Some(true));
             assert_eq!(options.model.provider(), "base-provider");
+
+            Some(Box::pin(async move {
+                let mut result = (options.do_stream)().await;
+                result.stream.push(LanguageModelStreamPart::StreamStart(
+                    LanguageModelStreamStart::new(vec![Warning::Other {
+                        message: "wrapped-stream".to_string(),
+                    }]),
+                ));
+                result
+            }))
+        }
+    }
+
+    struct ParamEchoLanguageModel;
+
+    impl LanguageModel for ParamEchoLanguageModel {
+        type SupportedUrlsFuture<'a>
+            = Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a;
+
+        type GenerateFuture<'a>
+            = Ready<LanguageModelGenerateResult>
+        where
+            Self: 'a;
+
+        type Stream = Vec<LanguageModelStreamPart>;
+
+        type StreamFuture<'a>
+            = Ready<LanguageModelStreamResult<Self::Stream>>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "echo-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            "echo-language"
+        }
+
+        fn supported_urls(&self) -> Self::SupportedUrlsFuture<'_> {
+            ready(BTreeMap::new())
+        }
+
+        fn do_generate(&self, options: LanguageModelCallOptions) -> Self::GenerateFuture<'_> {
+            let message = format!(
+                "generated max {:?}",
+                options.max_output_tokens.unwrap_or_default()
+            );
+            ready(language_result("echo").with_warning(Warning::Other { message }))
+        }
+
+        fn do_stream(&self, options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
+            let message = format!(
+                "stream raw {:?}",
+                options.include_raw_chunks.unwrap_or(false)
+            );
+            ready(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(vec![
+                    Warning::Other { message },
+                ])),
+            ]))
+        }
+    }
+
+    struct TransformAndWrapLanguageMiddleware;
+
+    impl LanguageModelMiddleware<ParamEchoLanguageModel> for TransformAndWrapLanguageMiddleware {
+        type OverrideSupportedUrlsFuture<'a>
+            = Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a,
+            ParamEchoLanguageModel: 'a;
+
+        type TransformParamsFuture<'a>
+            = Ready<LanguageModelCallOptions>
+        where
+            Self: 'a,
+            ParamEchoLanguageModel: 'a;
+
+        type WrapGenerateFuture<'a>
+            = Pin<Box<dyn Future<Output = LanguageModelGenerateResult> + Send + 'a>>
+        where
+            Self: 'a,
+            ParamEchoLanguageModel: 'a;
+
+        type WrapStreamFuture<'a>
+            = Pin<
+            Box<
+                dyn Future<Output = LanguageModelStreamResult<Vec<LanguageModelStreamPart>>>
+                    + Send
+                    + 'a,
+            >,
+        >
+        where
+            Self: 'a,
+            ParamEchoLanguageModel: 'a;
+
+        fn transform_params<'a>(
+            &'a self,
+            mut options: LanguageModelTransformParamsOptions<'a, ParamEchoLanguageModel>,
+        ) -> Option<Self::TransformParamsFuture<'a>>
+        where
+            Self: 'a,
+            ParamEchoLanguageModel: 'a,
+        {
+            match options.call_type {
+                LanguageModelMiddlewareCallType::Generate => {
+                    options.params.max_output_tokens = Some(77);
+                }
+                LanguageModelMiddlewareCallType::Stream => {
+                    options.params.include_raw_chunks = Some(true);
+                }
+            }
+
+            Some(ready(options.params))
+        }
+
+        fn wrap_generate<'a>(
+            &'a self,
+            options: LanguageModelWrapGenerateOptions<'a, ParamEchoLanguageModel>,
+        ) -> Option<Self::WrapGenerateFuture<'a>>
+        where
+            Self: 'a,
+            ParamEchoLanguageModel: 'a,
+        {
+            assert_eq!(options.params.max_output_tokens, Some(77));
+
+            Some(Box::pin(async move {
+                let mut result = (options.do_generate)().await;
+                result.warnings.push(Warning::Other {
+                    message: "wrapped-generate".to_string(),
+                });
+                result
+            }))
+        }
+
+        fn wrap_stream<'a>(
+            &'a self,
+            options: LanguageModelWrapStreamOptions<'a, ParamEchoLanguageModel>,
+        ) -> Option<Self::WrapStreamFuture<'a>>
+        where
+            Self: 'a,
+            ParamEchoLanguageModel: 'a,
+        {
+            assert_eq!(options.params.include_raw_chunks, Some(true));
 
             Some(Box::pin(async move {
                 let mut result = (options.do_stream)().await;
@@ -1105,6 +1450,64 @@ mod tests {
                     &model,
                 ))
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn wrap_language_model_applies_identity_and_supported_url_overrides() {
+        let wrapped = wrap_language_model(StaticLanguageModel, StaticLanguageMiddleware);
+
+        assert_eq!(wrapped.specification_version(), SpecificationVersion::V4);
+        assert_eq!(wrapped.provider(), "base-provider-middleware");
+        assert_eq!(wrapped.model_id(), "language-base-wrapped");
+        assert_eq!(
+            poll_boxed(wrapped.supported_urls()),
+            BTreeMap::from([("application/pdf".to_string(), vec!["\\.pdf$".to_string()])])
+        );
+
+        let explicit = wrap_language_model(StaticLanguageModel, StaticLanguageMiddleware)
+            .with_provider_id("explicit-provider")
+            .with_model_id("explicit-language");
+
+        assert_eq!(explicit.provider(), "explicit-provider");
+        assert_eq!(explicit.model_id(), "explicit-language");
+    }
+
+    #[test]
+    fn wrap_language_model_transforms_params_before_wrapping_generate_and_stream() {
+        let wrapped =
+            wrap_language_model(ParamEchoLanguageModel, TransformAndWrapLanguageMiddleware);
+
+        let generate_result =
+            poll_boxed(wrapped.do_generate(LanguageModelCallOptions::new(Vec::new())));
+        assert_eq!(
+            generate_result.warnings,
+            vec![
+                Warning::Other {
+                    message: "generated max 77".to_string()
+                },
+                Warning::Other {
+                    message: "wrapped-generate".to_string()
+                }
+            ]
+        );
+
+        let stream_result =
+            poll_boxed(wrapped.do_stream(LanguageModelCallOptions::new(Vec::new())));
+        assert_eq!(
+            stream_result.stream,
+            vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(vec![
+                    Warning::Other {
+                        message: "stream raw true".to_string()
+                    }
+                ])),
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(vec![
+                    Warning::Other {
+                        message: "wrapped-stream".to_string()
+                    }
+                ]))
+            ]
         );
     }
 }

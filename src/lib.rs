@@ -178,7 +178,8 @@ pub use language_model_middleware::{
     DefaultSettingsMiddleware, LanguageModelDefaultSettings, LanguageModelDoGenerate,
     LanguageModelDoStream, LanguageModelMiddleware, LanguageModelMiddlewareCallType,
     LanguageModelMiddlewareModelOptions, LanguageModelTransformParamsOptions,
-    LanguageModelWrapGenerateOptions, LanguageModelWrapStreamOptions, default_settings_middleware,
+    LanguageModelWrapGenerateOptions, LanguageModelWrapStreamOptions, WrappedLanguageModel,
+    default_settings_middleware, wrap_language_model,
 };
 pub use prompt::{
     Instructions, InvalidDataContentError, InvalidMessageRoleError, MessageConversionError, Prompt,
