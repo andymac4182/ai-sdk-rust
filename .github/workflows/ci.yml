@@ -28,5 +28,8 @@ jobs:
       - name: Run Clippy
         run: cargo +stable clippy --all-targets --all-features -- -D warnings
 
+      - name: Check naming conventions
+        run: scripts/check-naming-conventions.sh
+
       - name: Run tests
         run: cargo +stable test --all-features

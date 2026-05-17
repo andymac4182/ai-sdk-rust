@@ -11,12 +11,13 @@ ported into Rust-native modules.
 ```sh
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
+scripts/check-naming-conventions.sh
 cargo test --all-features
 ```
 
 ## Codex `/goal` Runner
 
-Use the repo-local helper to run Codex CLI `/goal` on GPT-5.5 with xhigh
+Use the repo-local script to run Codex CLI `/goal` on GPT-5.5 with xhigh
 reasoning in an explicit sibling git worktree:
 
 ```sh
@@ -39,7 +40,7 @@ tests without being pushed.
 
 ## GNHF Codex Runner
 
-Use the repo-local helper to run gnhf with Codex on GPT-5.5 using xhigh
+Use the repo-local script to run gnhf with Codex on GPT-5.5 using xhigh
 reasoning, without changing your global `~/.gnhf/config.yml`.
 
 ```sh
