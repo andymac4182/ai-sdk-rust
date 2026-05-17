@@ -3,6 +3,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use crate::VERSION;
+use crate::generate_text::{GenerateTextToolCall, GenerateTextToolResult};
 use crate::headers::Headers;
 use crate::json::JsonValue;
 use crate::language_model::{
@@ -418,10 +419,10 @@ pub enum TextStreamPart {
     ToolApprovalRequest(LanguageModelToolApprovalRequest),
 
     /// Generated tool call.
-    ToolCall(LanguageModelToolCall),
+    ToolCall(GenerateTextToolCall),
 
     /// Provider-executed tool result.
-    ToolResult(LanguageModelToolResult),
+    ToolResult(GenerateTextToolResult),
 
     /// Provider-specific generated content.
     Custom(LanguageModelCustomContent),
@@ -602,10 +603,10 @@ pub struct StreamTextStep {
     pub reasoning_files: Vec<LanguageModelReasoningFile>,
 
     /// Tool calls emitted by the provider.
-    pub tool_calls: Vec<LanguageModelToolCall>,
+    pub tool_calls: Vec<GenerateTextToolCall>,
 
     /// Tool results emitted by the provider.
-    pub tool_results: Vec<LanguageModelToolResult>,
+    pub tool_results: Vec<GenerateTextToolResult>,
 
     /// Provider-specific custom parts emitted by the provider.
     pub custom_parts: Vec<LanguageModelCustomContent>,
@@ -658,10 +659,10 @@ pub struct StreamTextResult {
     pub reasoning_files: Vec<LanguageModelReasoningFile>,
 
     /// Tool calls emitted by all steps.
-    pub tool_calls: Vec<LanguageModelToolCall>,
+    pub tool_calls: Vec<GenerateTextToolCall>,
 
     /// Tool results emitted by all steps.
-    pub tool_results: Vec<LanguageModelToolResult>,
+    pub tool_results: Vec<GenerateTextToolResult>,
 
     /// Provider-specific custom parts emitted by all steps.
     pub custom_parts: Vec<LanguageModelCustomContent>,
@@ -808,12 +809,17 @@ where
                         parts.push(TextStreamPart::ToolApprovalRequest(part));
                     }
                     LanguageModelStreamPart::ToolCall(part) => {
-                        tool_calls.push(part.clone());
-                        parts.push(TextStreamPart::ToolCall(part));
+                        let tool_call = stream_text_tool_call_from_language_model_tool_call(&part);
+                        tool_calls.push(tool_call.clone());
+                        parts.push(TextStreamPart::ToolCall(tool_call));
                     }
                     LanguageModelStreamPart::ToolResult(part) => {
-                        tool_results.push(part.clone());
-                        parts.push(TextStreamPart::ToolResult(part));
+                        let tool_result = stream_text_tool_result_from_language_model_tool_result(
+                            &part,
+                            &tool_calls,
+                        );
+                        tool_results.push(tool_result.clone());
+                        parts.push(TextStreamPart::ToolResult(tool_result));
                     }
                     LanguageModelStreamPart::Custom(part) => {
                         custom_parts.push(part.clone());
@@ -932,6 +938,69 @@ where
     }
 }
 
+fn stream_text_tool_call_from_language_model_tool_call(
+    tool_call: &LanguageModelToolCall,
+) -> GenerateTextToolCall {
+    let (input, dynamic, invalid, error) = match parse_stream_text_tool_input(&tool_call.input) {
+        Ok(input) => (input, tool_call.dynamic, None, None),
+        Err(error) => (
+            JsonValue::String(tool_call.input.clone()),
+            Some(true),
+            Some(true),
+            Some(format!(
+                "Tool call `{}` has invalid JSON input `{}`: {error}",
+                tool_call.tool_name, tool_call.input
+            )),
+        ),
+    };
+
+    GenerateTextToolCall {
+        tool_call_id: tool_call.tool_call_id.clone(),
+        tool_name: tool_call.tool_name.clone(),
+        input,
+        title: None,
+        provider_executed: tool_call.provider_executed,
+        dynamic,
+        invalid,
+        error,
+        provider_metadata: tool_call.provider_metadata.clone(),
+        tool_metadata: None,
+    }
+}
+
+fn stream_text_tool_result_from_language_model_tool_result(
+    tool_result: &LanguageModelToolResult,
+    tool_calls: &[GenerateTextToolCall],
+) -> GenerateTextToolResult {
+    let matching_tool_call = tool_calls
+        .iter()
+        .find(|tool_call| tool_call.tool_call_id == tool_result.tool_call_id);
+
+    GenerateTextToolResult {
+        tool_call_id: tool_result.tool_call_id.clone(),
+        tool_name: tool_result.tool_name.clone(),
+        input: matching_tool_call.map_or(JsonValue::Null, |tool_call| tool_call.input.clone()),
+        output: tool_result.result.as_value().clone(),
+        title: matching_tool_call.and_then(|tool_call| tool_call.title.clone()),
+        is_error: tool_result.is_error,
+        provider_executed: Some(true),
+        dynamic: matching_tool_call
+            .and_then(|tool_call| tool_call.dynamic)
+            .or(tool_result.dynamic),
+        preliminary: tool_result.preliminary,
+        provider_metadata: tool_result.provider_metadata.clone(),
+        tool_metadata: matching_tool_call.and_then(|tool_call| tool_call.tool_metadata.clone()),
+    }
+}
+
+fn parse_stream_text_tool_input(input: &str) -> Result<JsonValue, serde_json::Error> {
+    if input.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+
+    serde_json::from_str(input)
+}
+
 fn ensure_start_step(
     parts: &mut Vec<TextStreamPart>,
     start_step_index: &mut Option<usize>,
@@ -972,6 +1041,7 @@ mod tests {
     use serde_json::{Map, json};
 
     use super::*;
+    use crate::json::NonNullJsonValue;
     use crate::language_model::{
         FinishReason, InputTokenUsage, LanguageModelErrorStreamPart, LanguageModelFinishReason,
         LanguageModelMessage, LanguageModelRawStreamPart, LanguageModelStreamFinish,
@@ -1271,6 +1341,107 @@ mod tests {
                 .parts
                 .iter()
                 .any(|part| matches!(part, TextStreamPart::ReasoningDelta(_)))
+        );
+    }
+
+    #[test]
+    fn stream_text_maps_tool_input_deltas_and_high_level_tool_outputs() {
+        let provider_metadata = ProviderMetadata::from([(
+            "testProvider".to_string(),
+            Map::from_iter([("someKey".to_string(), json!("someValue"))]),
+        )]);
+        let tool_result_output =
+            NonNullJsonValue::new(json!("result:Sparkle Day")).expect("result is non-null");
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolInputStart(
+                    LanguageModelToolInputStart::new("call-1", "tool1")
+                        .with_provider_metadata(provider_metadata.clone()),
+                ),
+                LanguageModelStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                    "call-1",
+                    "{\"value\":",
+                )),
+                LanguageModelStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                    "call-1",
+                    "\"Sparkle Day\"}",
+                )),
+                LanguageModelStreamPart::ToolInputEnd(LanguageModelToolInputEnd::new("call-1")),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "tool1",
+                    "{\"value\":\"Sparkle Day\"}",
+                )),
+                LanguageModelStreamPart::ToolResult(LanguageModelToolResult::new(
+                    "call-1",
+                    "tool1",
+                    tool_result_output,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Call the tool")],
+        )));
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].input, json!({"value": "Sparkle Day"}));
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(
+            result.tool_results[0].input,
+            json!({"value": "Sparkle Day"})
+        );
+        assert_eq!(result.tool_results[0].output, json!("result:Sparkle Day"));
+        assert_eq!(result.tool_results[0].provider_executed, Some(true));
+
+        assert!(
+            result
+                .parts
+                .iter()
+                .any(|part| matches!(part, TextStreamPart::ToolInputDelta(_)))
+        );
+        assert!(result.parts.iter().any(|part| {
+            matches!(
+                part,
+                TextStreamPart::ToolInputStart(part)
+                    if part.provider_metadata == Some(provider_metadata.clone())
+            )
+        }));
+
+        let tool_call_part = result
+            .parts
+            .iter()
+            .find(|part| matches!(part, TextStreamPart::ToolCall(_)))
+            .expect("tool call part exists");
+        assert_eq!(
+            serde_json::to_value(tool_call_part).expect("tool call serializes"),
+            json!({
+                "type": "tool-call",
+                "toolCallId": "call-1",
+                "toolName": "tool1",
+                "input": { "value": "Sparkle Day" }
+            })
+        );
+
+        let tool_result_part = result
+            .parts
+            .iter()
+            .find(|part| matches!(part, TextStreamPart::ToolResult(_)))
+            .expect("tool result part exists");
+        assert_eq!(
+            serde_json::to_value(tool_result_part).expect("tool result serializes"),
+            json!({
+                "type": "tool-result",
+                "toolCallId": "call-1",
+                "toolName": "tool1",
+                "input": { "value": "Sparkle Day" },
+                "output": "result:Sparkle Day",
+                "providerExecuted": true
+            })
         );
     }
 }
