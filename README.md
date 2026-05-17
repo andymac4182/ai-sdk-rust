@@ -15,6 +15,12 @@ scripts/check-naming-conventions.sh
 cargo test --all-features
 ```
 
+## Examples
+
+```sh
+cargo run --example kitchen_sink
+```
+
 ## Codex `/goal` Runner
 
 Use the repo-local script to run Codex CLI `/goal` on GPT-5.5 with xhigh
