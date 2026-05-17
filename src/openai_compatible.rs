@@ -8,6 +8,10 @@ use serde_json::json;
 use time::OffsetDateTime;
 use url::Url;
 
+use crate::embedding_model::{
+    EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelResponse, EmbeddingModelResult,
+    EmbeddingModelUsage,
+};
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
 use crate::language_model::{
@@ -22,7 +26,7 @@ use crate::language_model::{
     LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
     LanguageModelUsage, OutputTokenUsage,
 };
-use crate::provider::{ProviderMetadata, SpecificationVersion};
+use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
 use crate::provider_utils::{
     FetchErrorInfo, HandledFetchError, ParseJsonResult, PostJsonToApiOptions, ProviderApiRequest,
     ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
@@ -569,14 +573,123 @@ impl OpenAICompatibleEmbeddingModel {
         &self.config.provider
     }
 
-    #[cfg(test)]
+    async fn do_embed_result(&self, options: EmbeddingModelCallOptions) -> EmbeddingModelResult {
+        let (request_body, warnings) = openai_compatible_embedding_request_body(
+            &self.model_id,
+            &self.config.provider,
+            &options,
+        );
+        let request_body_for_error = request_body.clone();
+        let request_body_for_response = request_body.clone();
+        let request_headers = self.request_headers(options.headers.as_ref());
+        let url = match self.model_url("/embeddings") {
+            Ok(url) => url,
+            Err(message) => {
+                return openai_compatible_embedding_error_result(
+                    &self.config.settings.name,
+                    message,
+                    request_body_for_error,
+                    None,
+                    None,
+                );
+            }
+        };
+        let post_options = PostJsonToApiOptions::new(url, request_body)
+            .with_headers(request_headers)
+            .with_environment(RuntimeEnvironment::unknown());
+        let transport = Arc::clone(&self.config.transport);
+
+        match post_json_to_api(
+            post_options,
+            move |request| (transport)(request),
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    openai_compatible_embedding_response,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_json_error_response_handler(
+                    response.json_error_response_handler_options(request),
+                    clone_json_value,
+                    openai_compatible_error_message,
+                    |_, _| None,
+                ))
+            },
+        )
+        .await
+        {
+            Ok(response) => openai_compatible_embedding_result_from_response(
+                response.value,
+                response.raw_value,
+                response.response_headers,
+                request_body_for_response,
+                warnings,
+            ),
+            Err(error) => openai_compatible_embedding_result_from_error(
+                &self.config.settings.name,
+                error,
+                request_body_for_error,
+            ),
+        }
+    }
+
     fn model_url(&self, path: &str) -> Result<String, String> {
         openai_compatible_url(&self.config.settings, path)
     }
 
-    #[cfg(test)]
-    fn request_headers(&self) -> Headers {
-        openai_compatible_provider_headers(&self.config.settings)
+    fn request_headers(&self, call_headers: Option<&Headers>) -> BTreeMap<String, Option<String>> {
+        combine_headers([
+            Some(
+                openai_compatible_provider_headers(&self.config.settings)
+                    .into_iter()
+                    .map(|(name, value)| (name, Some(value)))
+                    .collect::<Vec<_>>(),
+            ),
+            optional_headers(call_headers),
+        ])
+    }
+}
+
+impl EmbeddingModel for OpenAICompatibleEmbeddingModel {
+    type MaxEmbeddingsPerCallFuture<'a>
+        = Ready<Option<usize>>
+    where
+        Self: 'a;
+
+    type SupportsParallelCallsFuture<'a>
+        = Ready<bool>
+    where
+        Self: 'a;
+
+    type EmbedFuture<'a>
+        = Pin<Box<dyn Future<Output = EmbeddingModelResult> + Send + 'a>>
+    where
+        Self: 'a;
+
+    fn specification_version(&self) -> SpecificationVersion {
+        SpecificationVersion::V4
+    }
+
+    fn provider(&self) -> &str {
+        &self.config.provider
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    fn max_embeddings_per_call(&self) -> Self::MaxEmbeddingsPerCallFuture<'_> {
+        ready(Some(2048))
+    }
+
+    fn supports_parallel_calls(&self) -> Self::SupportsParallelCallsFuture<'_> {
+        ready(true)
+    }
+
+    fn do_embed(&self, options: EmbeddingModelCallOptions) -> Self::EmbedFuture<'_> {
+        Box::pin(self.do_embed_result(options))
     }
 }
 
@@ -752,6 +865,103 @@ fn openai_compatible_chat_stream_request_body(
     }
 
     (body, warnings)
+}
+
+fn openai_compatible_embedding_request_body(
+    model_id: &str,
+    provider: &str,
+    options: &EmbeddingModelCallOptions,
+) -> (JsonValue, Vec<Warning>) {
+    let mut body = JsonObject::new();
+    let mut warnings = Vec::new();
+    body.insert("model".to_string(), JsonValue::String(model_id.to_string()));
+    body.insert("input".to_string(), json!(&options.values));
+    body.insert(
+        "encoding_format".to_string(),
+        JsonValue::String("float".to_string()),
+    );
+
+    if let Some(provider_options) = &options.provider_options {
+        for warning in
+            openai_compatible_embedding_provider_options(provider, provider_options, &mut body)
+        {
+            warnings.push(warning);
+        }
+    }
+
+    (JsonValue::Object(body), warnings)
+}
+
+fn openai_compatible_embedding_provider_options(
+    provider: &str,
+    provider_options: &ProviderOptions,
+    body: &mut JsonObject,
+) -> Vec<Warning> {
+    let mut warnings = Vec::new();
+
+    if let Some(options) = provider_options.get("openai-compatible") {
+        warnings.push(Warning::Deprecated {
+            setting: "providerOptions key 'openai-compatible'".to_string(),
+            message: "Use 'openaiCompatible' instead.".to_string(),
+        });
+        add_openai_compatible_embedding_body_options(body, options);
+    }
+
+    if let Some(options) = provider_options.get("openaiCompatible") {
+        add_openai_compatible_embedding_body_options(body, options);
+    }
+
+    let provider_options_name = provider.split('.').next().unwrap_or(provider);
+    let camel_provider_options_name = to_openai_compatible_camel_case(provider_options_name);
+
+    if let Some(options) = provider_options.get(provider_options_name) {
+        if camel_provider_options_name != provider_options_name {
+            warnings.push(Warning::Deprecated {
+                setting: format!("providerOptions key '{provider_options_name}'"),
+                message: format!("Use '{camel_provider_options_name}' instead."),
+            });
+        }
+        add_openai_compatible_embedding_body_options(body, options);
+    }
+
+    if camel_provider_options_name != provider_options_name
+        && let Some(options) = provider_options.get(&camel_provider_options_name)
+    {
+        add_openai_compatible_embedding_body_options(body, options);
+    }
+
+    warnings
+}
+
+fn add_openai_compatible_embedding_body_options(body: &mut JsonObject, options: &JsonObject) {
+    if let Some(dimensions) = options.get("dimensions").filter(|value| value.is_number()) {
+        body.insert("dimensions".to_string(), dimensions.clone());
+    }
+
+    if let Some(user) = options.get("user").and_then(JsonValue::as_str) {
+        body.insert("user".to_string(), JsonValue::String(user.to_string()));
+    }
+}
+
+fn to_openai_compatible_camel_case(value: &str) -> String {
+    let mut output = String::new();
+    let mut uppercase_next = false;
+
+    for character in value.chars() {
+        if matches!(character, '-' | '_') {
+            uppercase_next = true;
+            continue;
+        }
+
+        if uppercase_next {
+            output.extend(character.to_uppercase());
+            uppercase_next = false;
+        } else {
+            output.push(character);
+        }
+    }
+
+    output
 }
 
 fn openai_compatible_response_format(
@@ -1197,6 +1407,112 @@ fn add_openai_compatible_prediction_metadata(
     }
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct OpenAICompatibleEmbeddingResponse {
+    data: Vec<OpenAICompatibleEmbeddingData>,
+    #[serde(default)]
+    usage: Option<OpenAICompatibleEmbeddingUsage>,
+    #[serde(default, alias = "providerMetadata")]
+    provider_metadata: Option<ProviderMetadata>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct OpenAICompatibleEmbeddingData {
+    embedding: Vec<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct OpenAICompatibleEmbeddingUsage {
+    prompt_tokens: u64,
+}
+
+fn openai_compatible_embedding_response(
+    value: &JsonValue,
+) -> Result<OpenAICompatibleEmbeddingResponse, serde_json::Error> {
+    serde_json::from_value(value.clone())
+}
+
+fn openai_compatible_embedding_result_from_response(
+    response: OpenAICompatibleEmbeddingResponse,
+    raw_response: Option<JsonValue>,
+    response_headers: Option<Headers>,
+    request_body: JsonValue,
+    warnings: Vec<Warning>,
+) -> EmbeddingModelResult {
+    let mut result = EmbeddingModelResult::new(
+        response
+            .data
+            .into_iter()
+            .map(|item| item.embedding)
+            .collect(),
+    );
+
+    if let Some(usage) = response.usage {
+        result = result.with_usage(EmbeddingModelUsage::new(usage.prompt_tokens));
+    }
+
+    if let Some(provider_metadata) = response.provider_metadata {
+        result = result.with_provider_metadata(provider_metadata);
+    }
+
+    for warning in warnings {
+        result = result.with_warning(warning);
+    }
+
+    let mut response_metadata =
+        EmbeddingModelResponse::new().with_body(raw_response.unwrap_or(request_body));
+
+    if let Some(headers) = response_headers {
+        response_metadata = with_embedding_response_headers(response_metadata, headers);
+    }
+
+    result.with_response(response_metadata)
+}
+
+fn openai_compatible_embedding_result_from_error(
+    provider_name: &str,
+    error: HandledFetchError,
+    request_body: JsonValue,
+) -> EmbeddingModelResult {
+    let (message, headers, body) = match error {
+        HandledFetchError::Original { error } => (error.message().to_string(), None, None),
+        HandledFetchError::ApiCall { error } => (
+            error.message().to_string(),
+            error.response_headers().cloned(),
+            error.response_body().map(String::from),
+        ),
+    };
+    openai_compatible_embedding_error_result(
+        provider_name,
+        message,
+        request_body,
+        headers,
+        body.as_deref(),
+    )
+}
+
+fn openai_compatible_embedding_error_result(
+    provider_name: &str,
+    message: String,
+    request_body: JsonValue,
+    response_headers: Option<Headers>,
+    raw_body: Option<&str>,
+) -> EmbeddingModelResult {
+    let response_body = raw_body
+        .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+        .or_else(|| raw_body.map(|body| JsonValue::String(body.to_string())))
+        .unwrap_or(request_body);
+    let mut response = EmbeddingModelResponse::new().with_body(response_body);
+
+    if let Some(headers) = response_headers {
+        response = with_embedding_response_headers(response, headers);
+    }
+
+    EmbeddingModelResult::new(Vec::new())
+        .with_provider_metadata(openai_compatible_error_metadata(provider_name, message))
+        .with_response(response)
+}
+
 fn openai_compatible_error_generate_result(
     provider_name: &str,
     message: String,
@@ -1320,6 +1636,17 @@ fn with_stream_response_headers(
     response
 }
 
+fn with_embedding_response_headers(
+    mut response: EmbeddingModelResponse,
+    headers: Headers,
+) -> EmbeddingModelResponse {
+    for (name, value) in headers {
+        response = response.with_header(name, value);
+    }
+
+    response
+}
+
 fn default_openai_compatible_transport() -> OpenAICompatibleTransport {
     Arc::new(|request| Box::pin(ready(execute_openai_compatible_request(request))))
 }
@@ -1406,6 +1733,8 @@ mod tests {
         OpenAICompatibleProvider, OpenAICompatibleProviderSettings, OpenAICompatibleTransport,
         OpenAICompatibleTransportFuture, create_openai_compatible,
     };
+    use crate::embed::{EmbedManyOptions, embed_many};
+    use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions};
     use crate::generate_text::{GenerateTextOptions, generate_text};
     use crate::headers::Headers;
     use crate::json::JsonValue;
@@ -1414,6 +1743,7 @@ mod tests {
         LanguageModelResponseFormat, LanguageModelStreamPart, LanguageModelSystemMessage,
     };
     use crate::prompt::Prompt;
+    use crate::provider::ProviderOptions;
     use crate::provider_utils::{
         ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     };
@@ -1492,9 +1822,9 @@ mod tests {
         );
         assert_eq!(
             embedding
-                .request_headers()
+                .request_headers(None)
                 .get("user-agent")
-                .map(String::as_str),
+                .and_then(Option::as_deref),
             Some("ai-sdk/openai-compatible/0.1.0")
         );
         assert_eq!(
@@ -1503,6 +1833,243 @@ mod tests {
                 .get("user-agent")
                 .map(String::as_str),
             Some("ai-sdk/openai-compatible/0.1.0")
+        );
+    }
+
+    #[test]
+    fn openai_compatible_embedding_model_embeds_through_embed_many() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "object": "list",
+                        "data": [
+                            {
+                                "object": "embedding",
+                                "index": 0,
+                                "embedding": [0.1, 0.2, 0.3]
+                            },
+                            {
+                                "object": "embedding",
+                                "index": 1,
+                                "embedding": [0.4, 0.5, 0.6]
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 8,
+                            "total_tokens": 8
+                        },
+                        "providerMetadata": {
+                            "test-provider": {
+                                "traceId": "trace-embedding"
+                            }
+                        }
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from([(
+                    "x-request-id".to_string(),
+                    "req_embedding".to_string(),
+                )])))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com/")
+                .with_api_key("test-api-key")
+                .with_query_param("api-version", "2026-01-01"),
+        )
+        .with_transport(transport)
+        .embedding_model("text-embedding-3-large");
+
+        assert_eq!(poll_ready(model.max_embeddings_per_call()), Some(2048));
+        assert!(poll_ready(model.supports_parallel_calls()));
+
+        let result = poll_ready(embed_many(
+            EmbedManyOptions::new(&model, ["sunny day", "rainy city"])
+                .with_header("x-call", "embed-many"),
+        ));
+
+        assert_eq!(
+            result.embeddings,
+            vec![vec![0.1, 0.2, 0.3], vec![0.4, 0.5, 0.6]]
+        );
+        assert_eq!(result.usage.tokens, 8);
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("test-provider"))
+                .and_then(|metadata| metadata.get("traceId"))
+                .and_then(JsonValue::as_str),
+            Some("trace-embedding")
+        );
+        assert_eq!(
+            result
+                .responses
+                .as_ref()
+                .and_then(|responses| responses.first())
+                .and_then(Option::as_ref)
+                .and_then(|response| response.headers.as_ref())
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("req_embedding")
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(
+            request.url,
+            "https://api.example.com/embeddings?api-version=2026-01-01"
+        );
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request.headers.get("x-call").map(String::as_str),
+            Some("embed-many")
+        );
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "text-embedding-3-large",
+                "input": ["sunny day", "rainy city"],
+                "encoding_format": "float"
+            }))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_embedding_model_passes_options_and_errors() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "data": [
+                            {
+                                "embedding": [0.1, 0.2]
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 3
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
+            "test-provider",
+            "https://api.example.com",
+        ))
+        .with_transport(transport)
+        .embedding_model("text-embedding-3-small");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai-compatible": {
+                "dimensions": 64,
+                "user": "user-123"
+            },
+            "openaiCompatible": {
+                "dimensions": 32
+            },
+            "test-provider": {
+                "user": "user-456"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = poll_ready(
+            model.do_embed(
+                EmbeddingModelCallOptions::new(vec!["hello".to_string()])
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(result.embeddings, vec![vec![0.1, 0.2]]);
+        assert!(result.warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Deprecated { setting, .. }
+                    if setting == "providerOptions key 'openai-compatible'"
+            )
+        }));
+        assert!(result.warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Deprecated { setting, .. }
+                    if setting == "providerOptions key 'test-provider'"
+            )
+        }));
+        assert_eq!(
+            captured_request
+                .lock()
+                .expect("captured request mutex is not poisoned")
+                .clone()
+                .expect("request is captured")
+                .body
+                .and_then(|body| body.as_text().map(str::to_string))
+                .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok()),
+            Some(json!({
+                "model": "text-embedding-3-small",
+                "input": ["hello"],
+                "encoding_format": "float",
+                "dimensions": 32,
+                "user": "user-456"
+            }))
+        );
+
+        let error_transport: OpenAICompatibleTransport =
+            Arc::new(|_request| -> OpenAICompatibleTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    401,
+                    "Unauthorized",
+                    json!({
+                        "error": {
+                            "message": "Invalid API key"
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let error_model = OpenAICompatibleProvider::from_settings(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com"),
+        )
+        .with_transport(error_transport)
+        .embedding_model("text-embedding-3-small");
+        let error_result = poll_ready(
+            error_model.do_embed(EmbeddingModelCallOptions::new(vec!["hello".to_string()])),
+        );
+
+        assert!(error_result.embeddings.is_empty());
+        assert_eq!(
+            error_result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("test-provider"))
+                .and_then(|metadata| metadata.get("errorMessage"))
+                .and_then(JsonValue::as_str),
+            Some("Invalid API key")
         );
     }
 
