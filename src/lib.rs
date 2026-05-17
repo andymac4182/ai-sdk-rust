@@ -69,11 +69,11 @@ pub use files::{Files, FilesUploadFileCallOptions, FilesUploadFileData, FilesUpl
 pub use gateway::{
     DEFAULT_GATEWAY_BASE_URL, GatewayCredentialType, GatewayCreditsResponse, GatewayEmbeddingModel,
     GatewayFetchMetadataResponse, GatewayGenerationInfo, GatewayGenerationInfoParams,
-    GatewayLanguageModel, GatewayLanguageModelEntry, GatewayLanguageModelPricing,
-    GatewayLanguageModelSpecification, GatewayModelType, GatewayProvider, GatewayProviderSettings,
-    GatewaySpendReportDatePart, GatewaySpendReportGroupBy, GatewaySpendReportParams,
-    GatewaySpendReportResponse, GatewaySpendReportRow, GatewayTransport, GatewayTransportFuture,
-    create_gateway, gateway,
+    GatewayImageModel, GatewayLanguageModel, GatewayLanguageModelEntry,
+    GatewayLanguageModelPricing, GatewayLanguageModelSpecification, GatewayModelType,
+    GatewayProvider, GatewayProviderSettings, GatewaySpendReportDatePart,
+    GatewaySpendReportGroupBy, GatewaySpendReportParams, GatewaySpendReportResponse,
+    GatewaySpendReportRow, GatewayTransport, GatewayTransportFuture, create_gateway, gateway,
 };
 pub use generate_image::{
     ExperimentalGenerateImageResult, GenerateImageOptions, GenerateImagePrompt,

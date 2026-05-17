@@ -15,8 +15,13 @@ use crate::embedding_model::{
     EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelResponse, EmbeddingModelResult,
     EmbeddingModelUsage,
 };
+use crate::file_data::FileDataContent;
 use crate::headers::Headers;
-use crate::json::{JsonObject, JsonValue};
+use crate::image_model::{
+    ImageModel, ImageModelCallOptions, ImageModelFile, ImageModelProviderMetadata,
+    ImageModelProviderMetadataEntry, ImageModelResponse, ImageModelResult, ImageModelUsage,
+};
+use crate::json::{JsonArray, JsonObject, JsonValue};
 use crate::language_model::{
     FinishReason, InputTokenUsage, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
     LanguageModelCustomContent, LanguageModelErrorStreamPart, LanguageModelFinishReason,
@@ -28,7 +33,7 @@ use crate::provider::{ProviderMetadata, SpecificationVersion};
 use crate::provider_utils::{
     FetchErrorInfo, GetFromApiOptions, HandledFetchError, ParseJsonResult, PostJsonToApiOptions,
     ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
-    ProviderApiResponseHandlerError, RuntimeEnvironment, combine_headers,
+    ProviderApiResponseHandlerError, RuntimeEnvironment, combine_headers, convert_to_base64,
     create_event_source_response_handler, create_json_error_response_handler,
     create_json_response_handler, get_from_api, post_json_to_api, with_user_agent_suffix,
     without_trailing_slash,
@@ -695,6 +700,20 @@ impl GatewayProvider {
         self.embedding_model(model_id)
     }
 
+    /// Creates a Gateway image model.
+    pub fn image_model(&self, model_id: impl Into<String>) -> GatewayImageModel {
+        GatewayImageModel {
+            model_id: model_id.into(),
+            settings: self.settings.clone(),
+            transport: Arc::clone(&self.transport),
+        }
+    }
+
+    /// Alias for [`GatewayProvider::image_model`].
+    pub fn image(&self, model_id: impl Into<String>) -> GatewayImageModel {
+        self.image_model(model_id)
+    }
+
     /// Returns available Gateway models for the authenticated account.
     pub async fn get_available_models(
         &self,
@@ -819,6 +838,14 @@ pub struct GatewayLanguageModel {
 /// Native AI SDK Gateway embedding model.
 #[derive(Clone)]
 pub struct GatewayEmbeddingModel {
+    model_id: String,
+    settings: GatewayProviderSettings,
+    transport: GatewayTransport,
+}
+
+/// Native AI SDK Gateway image model.
+#[derive(Clone)]
+pub struct GatewayImageModel {
     model_id: String,
     settings: GatewayProviderSettings,
     transport: GatewayTransport,
@@ -1185,6 +1212,78 @@ impl GatewayEmbeddingModel {
     }
 }
 
+impl GatewayImageModel {
+    /// Returns a copy of this model that uses the supplied HTTP transport.
+    pub fn with_transport(mut self, transport: GatewayTransport) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    async fn do_generate_result(&self, options: ImageModelCallOptions) -> ImageModelResult {
+        let request_body = gateway_image_request_body(&options);
+        let request_headers = self.request_headers(options.headers.as_ref());
+        let post_options = PostJsonToApiOptions::new(self.image_model_url(), request_body)
+            .with_headers(request_headers)
+            .with_environment(RuntimeEnvironment::unknown());
+        let transport = Arc::clone(&self.transport);
+
+        match post_json_to_api(
+            post_options,
+            move |request| (transport)(request),
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    gateway_image_response,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_json_error_response_handler(
+                    response.json_error_response_handler_options(request),
+                    clone_json_value,
+                    gateway_error_to_message,
+                    |_, _| None,
+                ))
+            },
+        )
+        .await
+        {
+            Ok(response) => image_result_from_response(
+                &self.model_id,
+                response.value,
+                response.response_headers,
+            ),
+            Err(error) => image_result_from_error(&self.model_id, error),
+        }
+    }
+
+    fn image_model_url(&self) -> String {
+        format!("{}/image-model", self.base_url())
+    }
+
+    fn base_url(&self) -> String {
+        gateway_base_url(&self.settings)
+    }
+
+    fn request_headers(&self, call_headers: Option<&Headers>) -> BTreeMap<String, Option<String>> {
+        let provider_headers = Some(
+            gateway_provider_headers(&self.settings)
+                .into_iter()
+                .collect::<Vec<_>>(),
+        );
+        let call_headers = optional_headers(call_headers);
+        let model_headers = Some(vec![
+            (
+                "ai-image-model-specification-version".to_string(),
+                Some("4".to_string()),
+            ),
+            ("ai-model-id".to_string(), Some(self.model_id.clone())),
+        ]);
+
+        combine_headers([provider_headers, call_headers, model_headers])
+    }
+}
+
 impl LanguageModel for GatewayLanguageModel {
     type SupportedUrlsFuture<'a>
         = Ready<LanguageModelSupportedUrls>
@@ -1269,6 +1368,38 @@ impl EmbeddingModel for GatewayEmbeddingModel {
 
     fn do_embed(&self, options: EmbeddingModelCallOptions) -> Self::EmbedFuture<'_> {
         Box::pin(self.do_embed_result(options))
+    }
+}
+
+impl ImageModel for GatewayImageModel {
+    type MaxImagesPerCallFuture<'a>
+        = Ready<Option<usize>>
+    where
+        Self: 'a;
+
+    type GenerateFuture<'a>
+        = Pin<Box<dyn Future<Output = ImageModelResult> + Send + 'a>>
+    where
+        Self: 'a;
+
+    fn specification_version(&self) -> SpecificationVersion {
+        SpecificationVersion::V4
+    }
+
+    fn provider(&self) -> &str {
+        GATEWAY_PROVIDER_ID
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    fn max_images_per_call(&self) -> Self::MaxImagesPerCallFuture<'_> {
+        ready(Some(usize::MAX))
+    }
+
+    fn do_generate(&self, options: ImageModelCallOptions) -> Self::GenerateFuture<'_> {
+        Box::pin(self.do_generate_result(options))
     }
 }
 
@@ -1580,6 +1711,211 @@ fn embedding_result_from_error(
         .with_response(response)
 }
 
+fn gateway_image_request_body(options: &ImageModelCallOptions) -> JsonValue {
+    let mut body = JsonObject::new();
+
+    if let Some(prompt) = &options.prompt {
+        body.insert("prompt".to_string(), JsonValue::String(prompt.clone()));
+    }
+
+    body.insert("n".to_string(), json!(options.n));
+
+    if let Some(size) = &options.size {
+        body.insert("size".to_string(), JsonValue::String(size.clone()));
+    }
+
+    if let Some(aspect_ratio) = &options.aspect_ratio {
+        body.insert(
+            "aspectRatio".to_string(),
+            JsonValue::String(aspect_ratio.clone()),
+        );
+    }
+
+    if let Some(seed) = options.seed {
+        body.insert("seed".to_string(), json!(seed));
+    }
+
+    body.insert(
+        "providerOptions".to_string(),
+        serde_json::to_value(&options.provider_options).unwrap_or(JsonValue::Null),
+    );
+
+    if let Some(files) = &options.files {
+        body.insert(
+            "files".to_string(),
+            JsonValue::Array(files.iter().map(gateway_image_file_value).collect()),
+        );
+    }
+
+    if let Some(mask) = &options.mask {
+        body.insert("mask".to_string(), gateway_image_file_value(mask));
+    }
+
+    JsonValue::Object(body)
+}
+
+fn gateway_image_file_value(file: &ImageModelFile) -> JsonValue {
+    match file {
+        ImageModelFile::File {
+            media_type,
+            data,
+            provider_options,
+        } => {
+            let mut value = JsonObject::new();
+            value.insert("type".to_string(), JsonValue::String("file".to_string()));
+            value.insert(
+                "mediaType".to_string(),
+                JsonValue::String(media_type.clone()),
+            );
+            value.insert(
+                "data".to_string(),
+                JsonValue::String(convert_to_base64(data)),
+            );
+
+            if let Some(provider_options) = provider_options {
+                value.insert(
+                    "providerOptions".to_string(),
+                    serde_json::to_value(provider_options).unwrap_or(JsonValue::Null),
+                );
+            }
+
+            JsonValue::Object(value)
+        }
+        ImageModelFile::Url {
+            url,
+            provider_options,
+        } => {
+            let mut value = JsonObject::new();
+            value.insert("type".to_string(), JsonValue::String("url".to_string()));
+            value.insert("url".to_string(), JsonValue::String(url.to_string()));
+
+            if let Some(provider_options) = provider_options {
+                value.insert(
+                    "providerOptions".to_string(),
+                    serde_json::to_value(provider_options).unwrap_or(JsonValue::Null),
+                );
+            }
+
+            JsonValue::Object(value)
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct GatewayImageResponse {
+    images: Vec<String>,
+    #[serde(default)]
+    warnings: Vec<crate::warning::Warning>,
+    #[serde(default)]
+    provider_metadata: Option<JsonValue>,
+    #[serde(default)]
+    usage: Option<ImageModelUsage>,
+}
+
+fn gateway_image_response(value: &JsonValue) -> Result<GatewayImageResponse, serde_json::Error> {
+    serde_json::from_value(value.clone())
+}
+
+fn image_result_from_response(
+    model_id: &str,
+    response: GatewayImageResponse,
+    response_headers: Option<Headers>,
+) -> ImageModelResult {
+    let mut result = ImageModelResult::new(
+        response
+            .images
+            .into_iter()
+            .map(FileDataContent::Base64)
+            .collect(),
+        image_response(model_id, response_headers),
+    );
+
+    for warning in response.warnings {
+        result = result.with_warning(warning);
+    }
+
+    if let Some(provider_metadata) = response
+        .provider_metadata
+        .and_then(gateway_image_provider_metadata)
+    {
+        result = result.with_provider_metadata(provider_metadata);
+    }
+
+    if let Some(usage) = response.usage {
+        result = result.with_usage(usage);
+    }
+
+    result
+}
+
+fn image_result_from_error(model_id: &str, error: HandledFetchError) -> ImageModelResult {
+    let (message, headers) = match error {
+        HandledFetchError::Original { error } => (error.message().to_string(), None),
+        HandledFetchError::ApiCall { error } => (
+            error.message().to_string(),
+            error.response_headers().cloned(),
+        ),
+    };
+
+    ImageModelResult::new(Vec::new(), image_response(model_id, headers))
+        .with_provider_metadata(gateway_image_error_metadata(message))
+}
+
+fn image_response(model_id: &str, headers: Option<Headers>) -> ImageModelResponse {
+    let mut response = ImageModelResponse::new(OffsetDateTime::now_utc(), model_id);
+
+    if let Some(headers) = headers {
+        response = with_image_response_headers(response, headers);
+    }
+
+    response
+}
+
+fn gateway_image_provider_metadata(value: JsonValue) -> Option<ImageModelProviderMetadata> {
+    let object = value.as_object()?;
+    let mut metadata = ImageModelProviderMetadata::new();
+
+    for (provider_name, entry_value) in object {
+        let Some(entry_object) = entry_value.as_object() else {
+            continue;
+        };
+        let images = entry_object
+            .get("images")
+            .and_then(JsonValue::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut extra = JsonObject::new();
+
+        for (key, value) in entry_object {
+            if key != "images" {
+                extra.insert(key.clone(), value.clone());
+            }
+        }
+
+        metadata.insert(
+            provider_name.clone(),
+            ImageModelProviderMetadataEntry { images, extra },
+        );
+    }
+
+    Some(metadata)
+}
+
+fn gateway_image_error_metadata(message: String) -> ImageModelProviderMetadata {
+    let mut metadata = ImageModelProviderMetadata::new();
+    let mut extra = JsonObject::new();
+    extra.insert("errorMessage".to_string(), JsonValue::String(message));
+    metadata.insert(
+        GATEWAY_PROVIDER_ID.to_string(),
+        ImageModelProviderMetadataEntry {
+            images: JsonArray::new(),
+            extra,
+        },
+    );
+    metadata
+}
+
 fn gateway_spend_report_response(
     value: &JsonValue,
 ) -> Result<GatewaySpendReportResponse, serde_json::Error> {
@@ -1831,6 +2167,17 @@ fn with_embedding_response_headers(
     response
 }
 
+fn with_image_response_headers(
+    mut response: ImageModelResponse,
+    headers: Headers,
+) -> ImageModelResponse {
+    for (name, value) in headers {
+        response = response.with_header(name, value);
+    }
+
+    response
+}
+
 fn default_gateway_transport() -> GatewayTransport {
     Arc::new(|request| Box::pin(ready(execute_gateway_request(request))))
 }
@@ -1920,15 +2267,18 @@ mod tests {
     };
     use crate::embed::{EmbedOptions, embed};
     use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions};
+    use crate::file_data::FileDataContent;
+    use crate::generate_image::{GenerateImageOptions, generate_image};
     use crate::generate_text::{GenerateTextOptions, generate_text};
     use crate::headers::Headers;
+    use crate::image_model::{ImageModel, ImageModelCallOptions, ImageModelFile};
     use crate::json::JsonValue;
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
         LanguageModelStreamPart,
     };
     use crate::prompt::Prompt;
-    use crate::provider::ProviderOptions;
+    use crate::provider::{ProviderMetadata, ProviderOptions};
     use crate::provider_utils::{
         ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     };
@@ -2343,6 +2693,299 @@ mod tests {
     }
 
     #[test]
+    fn gateway_image_model_generates_through_generate_image() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "images": ["iVBORw0KGgo=", "iVBORw0KGgoAAAANSUhEUg=="],
+                    "warnings": [
+                        {
+                            "type": "unsupported",
+                            "feature": "size",
+                            "details": "Use aspect ratio instead."
+                        },
+                        {
+                            "type": "other",
+                            "message": "Gateway routed request"
+                        }
+                    ],
+                    "usage": {
+                        "inputTokens": 27,
+                        "outputTokens": 6240,
+                        "totalTokens": 6267
+                    },
+                    "providerMetadata": {
+                        "openai": {
+                            "images": [
+                                {
+                                    "revisedPrompt": "A small red cube"
+                                }
+                            ]
+                        },
+                        "gateway": {
+                            "routing": {
+                                "provider": "openai"
+                            },
+                            "generationId": "gen_image_123"
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .with_headers(Headers::from([(
+                "x-request-id".to_string(),
+                "img_req".to_string(),
+            )])))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token")
+                .with_header("x-provider", "provider-value"),
+        )
+        .with_transport(transport)
+        .image_model("openai/gpt-image-1");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "quality": "high"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = poll_ready(generate_image(
+            GenerateImageOptions::new(&model, "A small red cube")
+                .with_n(2)
+                .with_size("1024x1024")
+                .with_aspect_ratio("1:1")
+                .with_seed(42)
+                .with_provider_options(provider_options)
+                .with_header("Custom-Header", "test-value"),
+        ))
+        .expect("image generation succeeds");
+
+        assert_eq!(result.images.len(), 2);
+        assert_eq!(result.image.base64(), "iVBORw0KGgo=");
+        assert_eq!(result.warnings.len(), 2);
+        assert_eq!(result.usage.input_tokens, Some(27));
+        assert_eq!(result.usage.output_tokens, Some(6240));
+        assert_eq!(result.usage.total_tokens, Some(6267));
+        assert_eq!(
+            result
+                .provider_metadata
+                .get("gateway")
+                .and_then(|metadata| metadata.extra.get("generationId"))
+                .and_then(JsonValue::as_str),
+            Some("gen_image_123")
+        );
+        assert_eq!(
+            result
+                .responses
+                .first()
+                .and_then(|response| response.headers.as_ref())
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("img_req")
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://api.test.com/image-model");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-token")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-image-model-specification-version")
+                .map(String::as_str),
+            Some("4")
+        );
+        assert_eq!(
+            request.headers.get("ai-model-id").map(String::as_str),
+            Some("openai/gpt-image-1")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("test-value")
+        );
+        assert_eq!(
+            request.headers.get("x-provider").map(String::as_str),
+            Some("provider-value")
+        );
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+        assert_eq!(
+            request_body.get("prompt").and_then(JsonValue::as_str),
+            Some("A small red cube")
+        );
+        assert_eq!(request_body.get("n").and_then(JsonValue::as_u64), Some(2));
+        assert_eq!(
+            request_body
+                .get("providerOptions")
+                .and_then(|options| options.get("openai"))
+                .and_then(|openai| openai.get("quality"))
+                .and_then(JsonValue::as_str),
+            Some("high")
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_encodes_files_and_mask() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "images": ["base64-image"]
+                })
+                .to_string(),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .image_model("openai/gpt-image-1");
+        let file_options: ProviderMetadata = serde_json::from_value(json!({
+            "openai": {
+                "quality": "hd"
+            }
+        }))
+        .expect("provider metadata deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Edit these images")
+                    .with_files(vec![
+                        ImageModelFile::file(
+                            "image/png",
+                            FileDataContent::Bytes(b"Hello".to_vec()),
+                        )
+                        .with_provider_options(file_options),
+                        ImageModelFile::file(
+                            "image/jpeg",
+                            FileDataContent::Base64("already-encoded".to_string()),
+                        ),
+                        ImageModelFile::url(
+                            url::Url::parse("https://example.com/image.png").expect("URL is valid"),
+                        ),
+                    ])
+                    .with_mask(ImageModelFile::file(
+                        "image/png",
+                        FileDataContent::Bytes(vec![4, 5, 6]),
+                    )),
+            ),
+        );
+
+        assert_eq!(result.images.len(), 1);
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body
+                .pointer("/files/0/data")
+                .and_then(JsonValue::as_str),
+            Some("SGVsbG8=")
+        );
+        assert_eq!(
+            request_body
+                .pointer("/files/0/providerOptions/openai/quality")
+                .and_then(JsonValue::as_str),
+            Some("hd")
+        );
+        assert_eq!(
+            request_body
+                .pointer("/files/1/data")
+                .and_then(JsonValue::as_str),
+            Some("already-encoded")
+        );
+        assert_eq!(
+            request_body
+                .pointer("/files/2/url")
+                .and_then(JsonValue::as_str),
+            Some("https://example.com/image.png")
+        );
+        assert_eq!(
+            request_body
+                .pointer("/mask/data")
+                .and_then(JsonValue::as_str),
+            Some("BAUG")
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_maps_gateway_error_to_metadata() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                400,
+                "Bad Request",
+                json!({
+                    "error": {
+                        "message": "Invalid image prompt",
+                        "type": "invalid_request_error"
+                    }
+                })
+                .to_string(),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .image_model("openai/gpt-image-1");
+        let result =
+            poll_ready(model.do_generate(ImageModelCallOptions::new(1).with_prompt("bad prompt")));
+
+        assert!(result.images.is_empty());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.extra.get("errorMessage"))
+                .and_then(JsonValue::as_str),
+            Some("Invalid image prompt")
+        );
+    }
+
+    #[test]
     fn gateway_function_uses_default_gateway_provider() {
         let model = gateway("openai/gpt-4.1-mini");
 
@@ -2365,6 +3008,28 @@ mod tests {
                 .text_embedding_model("openai/text-embedding-3-small")
                 .provider(),
             "gateway"
+        );
+    }
+
+    #[test]
+    fn gateway_provider_creates_image_model_aliases() {
+        let provider = GatewayProvider::new();
+
+        assert_eq!(
+            provider.image("openai/gpt-image-1").model_id(),
+            "openai/gpt-image-1"
+        );
+        assert_eq!(
+            provider.image_model("openai/gpt-image-1").provider(),
+            "gateway"
+        );
+        assert_eq!(
+            poll_ready(
+                provider
+                    .image_model("openai/gpt-image-1")
+                    .max_images_per_call()
+            ),
+            Some(usize::MAX)
         );
     }
 
@@ -3006,6 +3671,31 @@ mod tests {
         assert!(
             !result.embedding.is_empty(),
             "gateway embedding response was empty"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI image call"]
+    fn live_gateway_openai_generate_image() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!("skipping live Gateway image test because no API key is configured");
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_GATEWAY_IMAGE_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_IMAGE_MODEL"))
+            .unwrap_or_else(|_| "openai/gpt-image-1".to_string());
+        let model = GatewayProvider::new()
+            .with_api_key(api_key)
+            .image_model(model_id);
+        let result = poll_ready(generate_image(GenerateImageOptions::new(
+            &model,
+            "A small plain rust-colored square on a white background",
+        )))
+        .expect("gateway image generation succeeds");
+
+        assert!(
+            !result.image.base64().is_empty(),
+            "gateway image response was empty"
         );
     }
 
