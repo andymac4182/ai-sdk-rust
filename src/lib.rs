@@ -9,6 +9,7 @@ pub mod embedding_model;
 pub mod embedding_model_middleware;
 pub mod file_data;
 pub mod files;
+pub mod gateway;
 pub mod generate_image;
 pub mod generate_object;
 pub mod generate_speech;
@@ -65,6 +66,10 @@ pub use file_data::{
     ProviderReferenceError,
 };
 pub use files::{Files, FilesUploadFileCallOptions, FilesUploadFileData, FilesUploadFileResult};
+pub use gateway::{
+    DEFAULT_GATEWAY_BASE_URL, GatewayLanguageModel, GatewayProvider, GatewayProviderSettings,
+    GatewayTransport, GatewayTransportFuture, create_gateway, gateway,
+};
 pub use generate_image::{
     ExperimentalGenerateImageResult, GenerateImageOptions, GenerateImagePrompt,
     GenerateImagePromptImage, GenerateImagePromptImages, GenerateImageResult,

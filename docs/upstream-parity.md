@@ -46,7 +46,7 @@ inventory.
 | `packages/ai` (`ai`) | core package | in-progress | `src/lib.rs`, `src/generate_text.rs`, `src/stream_text.rs`, `src/generate_object.rs`, `src/embed.rs`, `src/generate_image.rs`, `src/generate_speech.rs`, `src/generate_video.rs`, `src/transcribe.rs`, `src/rerank.rs`, `src/upload_file.rs`, `src/upload_skill.rs`, `src/registry.rs`, `src/provider_middleware.rs`, `src/mock_models.rs`, `src/text_stream_response.rs`, `src/ui_message_stream.rs` | Unit tests in matching modules; `mock_models::tests::*`; `examples/kitchen_sink.rs` | Non-streaming generation, streamed text collection with local tool continuation, object, image, speech, video, transcription, embeddings, reranking, upload, registry, provider-level middleware wrapping, tool input examples middleware, extract JSON middleware, simulate streaming middleware, text-stream response helpers, initial UI-message stream SSE helpers, tool loops, public mock provider-v4 models, and many provider-v4 shapes exist. Agent, full UI-message processing, telemetry, logger, and remaining stream edge cases remain unported. |
 | `packages/provider` (`@ai-sdk/provider`) | provider contracts | in-progress | `src/provider.rs`, `src/language_model.rs`, `src/embedding_model.rs`, `src/image_model.rs`, `src/speech_model.rs`, `src/transcription_model.rs`, `src/reranking_model.rs`, `src/video_model.rs`, `src/files.rs`, `src/skills.rs`, `src/json.rs`, `src/warning.rs`, `src/file_data.rs` | Contract and serialization tests in each module | Provider-v4 shapes are partially verified. Upstream v2/v3 compatibility surfaces and exact stream abstractions remain unported. |
 | `packages/provider-utils` (`@ai-sdk/provider-utils`) | provider support library | in-progress | `src/provider_utils.rs`, `src/retry.rs`, `src/headers.rs` | Large upstream-shape unit-test coverage in `src/provider_utils.rs` and `src/retry.rs` | Many schema, header, retry, media, response-handler, tool, API-request, and user-agent helpers exist. Browser stream adapters and exact fetch/runtime integration remain incomplete. |
-| `packages/gateway` (`@ai-sdk/gateway`) | provider package | not-started | none | none | Needs Vercel AI Gateway provider, metadata, credits, spend report, language/embedding/image/reranking/video model contracts, gateway error types, and optional integration tests using ignored `.env.local` keys. |
+| `packages/gateway` (`@ai-sdk/gateway`) | provider package | in-progress | `src/gateway.rs` | `gateway_model_generates_text_through_generate_text`; `gateway_model_maps_gateway_error_to_error_finish_reason`; ignored `live_gateway_openai_generate_text` | Native AI SDK Gateway language model generation slice exists for `gateway("openai/...")` with fake-transport tests and optional `.env.local` live OpenAI model validation. Metadata, credits, spend report, streaming, embedding/image/reranking/video model contracts, and gateway-specific error types remain unported. |
 | `packages/openai` (`@ai-sdk/openai`) | provider package | not-started | none | none | Needs OpenAI chat, responses, completion, embedding, image, speech, transcription, files, provider tools, and error mapping. |
 | `packages/openai-compatible` (`@ai-sdk/openai-compatible`) | provider base package | not-started | none | none | Needs OpenAI-compatible provider foundation used by multiple providers. |
 | `packages/open-responses` (`@ai-sdk/open-responses`) | provider package | not-started | none | none | Needs OpenAI responses-compatible language model and conversion tests. |
@@ -148,7 +148,7 @@ inventory.
 | Telemetry and logger | not-started | none | none | Upstream `packages/ai/src/telemetry/*`, `packages/otel`, and `logger/log-warnings.ts` remain unported. |
 | MCP client and tool bridge | not-started | none | none | Upstream `packages/mcp` remains unported. |
 | Workflow agent package | not-started | none | none | Upstream `packages/workflow` remains unported. |
-| Gateway provider and metadata APIs | not-started | none | none | Upstream `packages/gateway` remains unported. |
+| Gateway provider and metadata APIs | in-progress | `src/gateway.rs` | `gateway_model_generates_text_through_generate_text`; ignored `live_gateway_openai_generate_text` | Minimal provider settings, `create_gateway`, `gateway`, and non-streaming language model calls are ported. Metadata discovery, credits, spend reports, generation info, streaming, model-family helpers, and gateway error classes remain unported. |
 | Concrete provider packages | not-started | none | none | All provider implementation package rows above remain unported. |
 
 ## Examples Inventory
@@ -202,9 +202,9 @@ focused tests for each portable behavior before changing rows to `verified`.
    propagation, and remaining stream transform details.
 2. Continue `streamObject` parity with telemetry, retries/abort, and remaining
    partial-output strategy edge cases.
-3. Start the Gateway provider package with contract-first models and fake HTTP
-   tests, then add optional `.env.local` integration tests that skip when keys
-   are absent.
+3. Expand Gateway beyond the generateText vertical slice: streaming, metadata
+   discovery, credits, spend reports, generation info, embedding/image/reranking/video
+   models, gateway-specific errors, and broader provider package tests.
 4. Start the OpenAI-compatible provider foundation, then layer concrete
    OpenAI, Vercel, DeepInfra, Hugging Face, and Together AI provider wrappers.
 5. Continue provider package slices until every provider row above is `verified`.
