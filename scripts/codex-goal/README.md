@@ -1,8 +1,9 @@
 # ai-sdk-rust Codex Goal Runner
 
-Use this when you want Codex CLI `/goal` to continue the port without GNHF.
-The launcher creates an explicit sibling git worktree, starts Codex inside that
-worktree, and copies a compact `/goal` condition to the clipboard.
+Use this when you want Codex CLI `/goal` to pursue full portable parity with
+upstream `vercel/ai` without GNHF. The launcher creates an explicit sibling git
+worktree, starts Codex inside that worktree, and copies a compact `/goal`
+condition to the clipboard.
 
 ```sh
 cd /Users/andrewmcclenaghan/dev/andymac4182/ai-sdk-rust
@@ -30,3 +31,8 @@ If the main checkout has an ignored `.env.local`, the launcher symlinks it into
 the worktree. That makes `AI_GATEWAY_API_KEY` and
 `AI_SDK_RUST_AI_GATEWAY_API_KEY` available for integration tests without
 putting secrets in git.
+
+The goal condition tells Codex to maintain `docs/upstream-parity.md` and keep
+working until every upstream package, provider, public API, example, testable
+behavior, and portable feature is verified or explicitly documented as
+JavaScript-only.

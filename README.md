@@ -24,7 +24,8 @@ cargo run --example kitchen_sink
 ## Codex `/goal` Runner
 
 Use the repo-local script to run Codex CLI `/goal` on GPT-5.5 with xhigh
-reasoning in an explicit sibling git worktree:
+reasoning in an explicit sibling git worktree. The goal is full portable parity
+with upstream `vercel/ai`, tracked in `docs/upstream-parity.md`:
 
 ```sh
 codex login

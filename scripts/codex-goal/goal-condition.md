@@ -1,4 +1,4 @@
-Run the ai-sdk-rust Vercel AI SDK port goal.
+Run the ai-sdk-rust full Vercel AI SDK parity goal.
 
 Main checkout: `/Users/andrewmcclenaghan/dev/andymac4182/ai-sdk-rust`
 Full brief in this worktree: `scripts/codex-goal/port-ai-sdk.md`
@@ -8,29 +8,34 @@ above. If it is, stop immediately. Then read the full brief from the current
 worktree and follow it as the source of truth. Do not summarize it and stop.
 Execute it.
 
-Goal: use the current working directory as your worktree and make substantial,
-validated progress on an idiomatic Rust port of the Vercel AI SDK. Prioritize a
-working `generate_text(...)` vertical slice with deterministic tool-loop
-execution before adding more horizontal provider surface area.
+Goal: use the current working directory as your worktree and keep working until
+ai-sdk-rust has Rust equivalents for EVERY package, provider, library, example,
+testable behavior, and feature in upstream `vercel/ai`, except JavaScript-only
+surfaces that are explicitly documented as intentionally non-portable.
 
 Use `npx opensrc@latest path github:vercel/ai` as the upstream source of truth.
+First build/update `docs/upstream-parity.md`: record upstream commit/package
+inventory, every provider package, every core/helper/library package, public
+APIs, examples, tests, and feature status. Do not mark the goal complete while
+any ledger row is unported, unverified, or undocumented. Re-scan upstream often.
+
 Preserve Rust 2024 style, serde shapes, builders, public exports, tests, and
 workspace boundaries that align with upstream package responsibilities. Build
-against fake/test `LanguageModel` first, then use the ignored `.env.local`
+against deterministic fake models first, then use the ignored `.env.local`
 Vercel AI Gateway variables only for optional integration validation. Never
 print or commit secrets.
 
 Work in coherent slices. For each slice: rebase on latest main, implement,
-test, commit, then merge yourself back to `main` using the serialized
-`/tmp/ai-sdk-rust-main-merge.lock` protocol in the full brief, validate again
-on `main`, and push `main`. Repeat until no useful next SDK slice remains or a
-real blocker appears.
+test, update the parity ledger, commit, then merge yourself back to `main`
+using the serialized `/tmp/ai-sdk-rust-main-merge.lock` protocol in the full
+brief, validate again on `main`, and push `main`. Repeat until the parity
+ledger proves full upstream coverage or a real blocker appears.
 
 Use Codex agent/team/background-worker features if available to parallelize
-upstream research, implementation, and verification. Integrate the work
-yourself before committing.
+upstream research, ledger updates, implementation, and verification. Integrate
+the work yourself before committing.
 
 Run the strongest available gates: `cargo fmt --all --check`, `cargo clippy
---all-targets --all-features -- -D warnings`, and `cargo test --all-features`.
-Stop instead of forcing state if main is dirty, merge conflicts are ambiguous,
-or validation cannot be made green.
+--all-targets --all-features -- -D warnings`, `scripts/check-naming-conventions.sh`,
+and `cargo test --all-features`. Stop instead of forcing state if main is
+dirty, merge conflicts are ambiguous, or validation cannot be made green.
