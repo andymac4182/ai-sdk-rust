@@ -3408,7 +3408,7 @@ mod tests {
         GatewaySpendReportGroupBy, GatewaySpendReportParams, GatewayTransport,
         GatewayTransportFuture, gateway, gateway_observability_headers_with_env,
         gateway_provider_headers_with_env, gateway_provider_options,
-        get_gateway_auth_token_with_env,
+        get_gateway_auth_token_with_env, metadata_cache_refresh_duration,
     };
     use crate::embed::{EmbedOptions, embed};
     use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions};
@@ -5445,6 +5445,73 @@ mod tests {
     }
 
     #[test]
+    fn gateway_image_model_preserves_metadata_entries_without_images() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "images": ["base64-image"],
+                    "providerMetadata": {
+                        "openai": {
+                            "quality": "high",
+                            "nested": {
+                                "revisedPrompt": "A brighter cube"
+                            }
+                        },
+                        "gateway": {
+                            "routing": {
+                                "provider": "openai"
+                            }
+                        }
+                    }
+                })
+                .to_string(),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .image_model("openai/gpt-image-1");
+        let result =
+            poll_ready(model.do_generate(ImageModelCallOptions::new(1).with_prompt("A red cube")));
+        let metadata = result
+            .provider_metadata
+            .expect("provider metadata is preserved");
+        let openai_metadata = metadata.get("openai").expect("OpenAI metadata exists");
+        let gateway_metadata = metadata.get("gateway").expect("Gateway metadata exists");
+
+        assert_eq!(openai_metadata.images, Vec::<JsonValue>::new());
+        assert_eq!(
+            openai_metadata
+                .extra
+                .get("quality")
+                .and_then(JsonValue::as_str),
+            Some("high")
+        );
+        assert_eq!(
+            openai_metadata
+                .extra
+                .get("nested")
+                .and_then(|metadata| metadata.get("revisedPrompt"))
+                .and_then(JsonValue::as_str),
+            Some("A brighter cube")
+        );
+        assert_eq!(gateway_metadata.images, Vec::<JsonValue>::new());
+        assert_eq!(
+            gateway_metadata
+                .extra
+                .get("routing")
+                .and_then(|metadata| metadata.get("provider"))
+                .and_then(JsonValue::as_str),
+            Some("openai")
+        );
+    }
+
+    #[test]
     fn gateway_image_model_encodes_files_and_mask() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -5999,6 +6066,71 @@ mod tests {
     }
 
     #[test]
+    fn gateway_video_model_preserves_empty_and_nested_provider_metadata() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                format!(
+                    "data: {}\n\n",
+                    json!({
+                        "type": "result",
+                        "videos": [
+                            {
+                                "type": "base64",
+                                "data": "AAAAIGZ0eXBtcDQy",
+                                "mediaType": "video/mp4"
+                            }
+                        ],
+                        "providerMetadata": {
+                            "google": {
+                                "cost": {
+                                    "input": "0.000001",
+                                    "output": "0.000003"
+                                }
+                            },
+                            "gateway": {}
+                        }
+                    })
+                ),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .video_model("google/veo-2.0-generate-001");
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("Animate")));
+        let metadata = result
+            .provider_metadata
+            .expect("provider metadata is preserved");
+
+        assert_eq!(
+            metadata
+                .get("google")
+                .and_then(|metadata| metadata.get("cost"))
+                .and_then(|metadata| metadata.get("input"))
+                .and_then(JsonValue::as_str),
+            Some("0.000001")
+        );
+        assert_eq!(
+            metadata
+                .get("google")
+                .and_then(|metadata| metadata.get("cost"))
+                .and_then(|metadata| metadata.get("output"))
+                .and_then(JsonValue::as_str),
+            Some("0.000003")
+        );
+        assert_eq!(
+            metadata.get("gateway").expect("Gateway metadata exists"),
+            &JsonObject::new()
+        );
+    }
+
+    #[test]
     fn gateway_video_model_encodes_image_inputs_and_returns_url_videos() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -6540,6 +6672,16 @@ mod tests {
     }
 
     #[test]
+    fn gateway_provider_uses_default_metadata_cache_refresh_interval() {
+        let settings = GatewayProviderSettings::new();
+
+        assert_eq!(
+            metadata_cache_refresh_duration(&settings),
+            std::time::Duration::from_secs(5 * 60)
+        );
+    }
+
+    #[test]
     fn gateway_provider_refreshes_available_models_when_cache_disabled() {
         let request_count = Arc::new(Mutex::new(0_u32));
         let request_count_for_transport = Arc::clone(&request_count);
@@ -6630,6 +6772,82 @@ mod tests {
     }
 
     #[test]
+    fn gateway_provider_account_methods_use_default_gateway_urls() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let captured_requests_for_transport = Arc::clone(&captured_requests);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            captured_requests_for_transport
+                .lock()
+                .expect("captured requests mutex is not poisoned")
+                .push(request.clone());
+
+            let body = if request.url.ends_with("/v4/ai/config") {
+                json!({
+                    "models": []
+                })
+            } else if request.url.ends_with("/v1/credits") {
+                json!({
+                    "balance": "100.00",
+                    "total_used": "50.00"
+                })
+            } else {
+                json!({
+                    "results": []
+                })
+            };
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                body.to_string(),
+            ))))
+        });
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new().with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        let metadata =
+            poll_ready(provider.get_available_models()).expect("metadata fetch succeeds");
+        let credits = poll_ready(provider.get_credits()).expect("credits fetch succeeds");
+        let spend_report = poll_ready(
+            provider.get_spend_report(GatewaySpendReportParams::new("2026-03-01", "2026-03-25")),
+        )
+        .expect("spend report fetch succeeds");
+
+        assert!(metadata.models.is_empty());
+        assert_eq!(credits.balance, "100.00");
+        assert!(spend_report.results.is_empty());
+
+        let requests = captured_requests
+            .lock()
+            .expect("captured requests mutex is not poisoned");
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].url, "https://ai-gateway.vercel.sh/v4/ai/config");
+        assert_eq!(requests[1].url, "https://ai-gateway.vercel.sh/v1/credits");
+
+        let report_url = url::Url::parse(&requests[2].url).expect("report URL is valid");
+        assert_eq!(
+            report_url.as_str().split('?').next(),
+            Some("https://ai-gateway.vercel.sh/v1/report")
+        );
+        assert_eq!(
+            report_url
+                .query_pairs()
+                .find(|(key, _)| key == "start_date")
+                .map(|(_, value)| value.into_owned()),
+            Some("2026-03-01".to_string())
+        );
+        assert_eq!(
+            report_url
+                .query_pairs()
+                .find(|(key, _)| key == "end_date")
+                .map(|(_, value)| value.into_owned()),
+            Some("2026-03-25".to_string())
+        );
+    }
+
+    #[test]
     fn gateway_provider_metadata_surfaces_api_errors() {
         let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
             Box::pin(ready(Ok(ProviderApiResponse::text(
@@ -6658,6 +6876,52 @@ mod tests {
         assert_eq!(rate_limit_error.status_code(), 429);
         assert_eq!(rate_limit_error.message(), "Rate limit exceeded");
         assert!(rate_limit_error.is_retryable());
+    }
+
+    #[test]
+    fn gateway_provider_account_apis_surface_malformed_json_error_responses() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                500,
+                "Internal Server Error",
+                "{not json",
+            ))))
+        });
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com/v4/ai")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        let spend_error = poll_ready(
+            provider.get_spend_report(GatewaySpendReportParams::new("2026-03-01", "2026-03-25")),
+        )
+        .expect_err("malformed spend report error body fails");
+        let spend_response_error = spend_error
+            .as_response()
+            .expect("malformed spend report error maps to response error");
+
+        assert_eq!(spend_response_error.status_code(), 500);
+        assert_eq!(
+            spend_response_error.response(),
+            Some(&JsonValue::String("{not json".to_string()))
+        );
+        assert!(spend_response_error.validation_error().is_some());
+
+        let generation_error =
+            poll_ready(provider.get_generation_info(GatewayGenerationInfoParams::new("gen_123")))
+                .expect_err("malformed generation info error body fails");
+        let generation_response_error = generation_error
+            .as_response()
+            .expect("malformed generation info error maps to response error");
+
+        assert_eq!(generation_response_error.status_code(), 500);
+        assert_eq!(
+            generation_response_error.response(),
+            Some(&JsonValue::String("{not json".to_string()))
+        );
+        assert!(generation_response_error.validation_error().is_some());
     }
 
     #[test]
