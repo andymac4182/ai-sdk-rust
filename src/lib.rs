@@ -24,6 +24,7 @@ pub mod json;
 pub mod language_model;
 pub mod language_model_middleware;
 pub mod mock_models;
+pub mod openai_compatible;
 pub mod prompt;
 pub mod provider;
 pub mod provider_middleware;
@@ -228,6 +229,12 @@ pub use language_model_middleware::{
 pub use mock_models::{
     MockEmbeddingModel, MockImageModel, MockLanguageModel, MockProvider, MockRerankingModel,
     MockSpeechModel, MockTranscriptionModel, MockVideoModel,
+};
+pub use openai_compatible::{
+    OpenAICompatibleChatLanguageModel, OpenAICompatibleCompletionLanguageModel,
+    OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel, OpenAICompatibleProvider,
+    OpenAICompatibleProviderSettings, OpenAICompatibleTransport, OpenAICompatibleTransportFuture,
+    create_openai_compatible,
 };
 pub use prompt::{
     Instructions, InvalidDataContentError, InvalidMessageRoleError, MessageConversionError, Prompt,
