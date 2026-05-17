@@ -4,6 +4,7 @@
 /// The crate version compiled into the library.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod baseten;
 pub mod cerebras;
 pub mod deepinfra;
 pub mod embed;
@@ -55,6 +56,9 @@ pub mod vercel_ai_gateway;
 pub mod video_model;
 pub mod warning;
 
+pub use baseten::{
+    BasetenProvider, BasetenProviderSettings, DEFAULT_BASETEN_BASE_URL, baseten, create_baseten,
+};
 pub use cerebras::{
     CerebrasProvider, CerebrasProviderSettings, DEFAULT_CEREBRAS_BASE_URL, cerebras,
     create_cerebras,
