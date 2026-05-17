@@ -1,25 +1,43 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::future::Future;
+use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
 use crate::VERSION;
-use crate::generate_text::{GenerateTextToolCall, GenerateTextToolResult};
+use crate::generate_text::{
+    ActiveTools, GenerateTextModelInfo, GenerateTextStep, GenerateTextTool, GenerateTextToolCall,
+    GenerateTextToolResult, StopCondition, ToolCallRepair, ToolCallRepairOptions,
+    ToolInputRefinement, ToolInputRefinementError, execute_tool_calls,
+    filter_active_language_model_tools, generate_text_call_id,
+    generate_text_tool_result_from_language_model_tool_result, is_stop_condition_met,
+    mark_runtime_dynamic_tool_calls, mark_tool_call_metadata, mark_tool_call_titles,
+    mark_tool_result_metadata, mark_unavailable_tool_calls, refine_tool_inputs,
+    refresh_tool_call_views, refresh_tool_result_views, repair_tool_calls,
+    response_messages_for_step_without_approvals, should_continue_after_tool_results,
+    sync_tool_result_inputs,
+};
 use crate::headers::Headers;
-use crate::json::JsonValue;
+use crate::json::{JsonObject, JsonValue};
 use crate::language_model::{
-    FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelCustomContent,
-    LanguageModelErrorStreamPart, LanguageModelFile, LanguageModelPrompt,
-    LanguageModelRawStreamPart, LanguageModelReasoningEnd, LanguageModelReasoningFile,
-    LanguageModelReasoningStart, LanguageModelRequest, LanguageModelSource,
-    LanguageModelStreamPart, LanguageModelStreamResponseMetadata,
-    LanguageModelStreamResultResponse, LanguageModelTextEnd, LanguageModelTextStart,
-    LanguageModelToolApprovalRequest, LanguageModelToolCall, LanguageModelToolChoice,
-    LanguageModelToolInputDelta, LanguageModelToolInputEnd, LanguageModelToolInputStart,
-    LanguageModelToolResult, LanguageModelUsage,
+    FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
+    LanguageModelCustomContent, LanguageModelErrorStreamPart, LanguageModelFile,
+    LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelPrompt,
+    LanguageModelRawStreamPart, LanguageModelReasoning, LanguageModelReasoningEnd,
+    LanguageModelReasoningFile, LanguageModelReasoningStart, LanguageModelRequest,
+    LanguageModelResponse, LanguageModelSource, LanguageModelStreamPart,
+    LanguageModelStreamResponseMetadata, LanguageModelStreamResultResponse, LanguageModelText,
+    LanguageModelTextEnd, LanguageModelTextStart, LanguageModelToolApprovalRequest,
+    LanguageModelToolChoice, LanguageModelToolInputDelta, LanguageModelToolInputEnd,
+    LanguageModelToolInputStart, LanguageModelUsage,
 };
 use crate::prompt::{Prompt, standardize_prompt};
 use crate::provider::{InvalidPromptError, ProviderMetadata, ProviderOptions};
-use crate::provider_utils::with_user_agent_suffix;
+use crate::provider_utils::{
+    ExperimentalSandbox, Tool, prepare_tools_with_context, with_user_agent_suffix,
+};
 use crate::text_stream_response::{
     TextStreamResponse, TextStreamResponseInit, TextStreamResponseOptions,
     TextStreamResponseWriter, create_text_stream_response, pipe_text_stream_to_response,
@@ -460,6 +478,33 @@ pub struct StreamTextOptions<'a, M: LanguageModel + ?Sized> {
 
     /// Provider-level call options sent to the model.
     pub call_options: LanguageModelCallOptions,
+
+    /// High-level Rust tools made available to the model.
+    pub tools: Vec<Tool>,
+
+    /// User-defined runtime context attached to every streamed step.
+    pub runtime_context: JsonObject,
+
+    /// Tool-specific context keyed by tool name.
+    pub tools_context: JsonObject,
+
+    /// Experimental sandbox environment passed through to Rust tool execution.
+    pub experimental_sandbox: Option<Arc<dyn ExperimentalSandbox>>,
+
+    /// Optional active tool names used to restrict the available tool set.
+    pub active_tools: ActiveTools,
+
+    /// Per-tool input refinements applied after parsing valid tool calls.
+    pub tool_input_refinements: BTreeMap<String, ToolInputRefinement>,
+
+    /// Optional callback used to repair invalid model tool calls before execution.
+    pub tool_call_repair: Option<ToolCallRepair>,
+
+    /// Maximum number of model-call steps to run.
+    pub max_steps: usize,
+
+    /// Additional stop conditions checked after every completed step.
+    pub stop_conditions: Vec<StopCondition>,
 }
 
 impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
@@ -468,6 +513,15 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
         Self {
             model,
             call_options: LanguageModelCallOptions::new(prompt),
+            tools: Vec::new(),
+            runtime_context: JsonObject::new(),
+            tools_context: JsonObject::new(),
+            experimental_sandbox: None,
+            active_tools: None,
+            tool_input_refinements: BTreeMap::new(),
+            tool_call_repair: None,
+            max_steps: 1,
+            stop_conditions: Vec::new(),
         }
     }
 
@@ -482,6 +536,15 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
         Self {
             model,
             call_options,
+            tools: Vec::new(),
+            runtime_context: JsonObject::new(),
+            tools_context: JsonObject::new(),
+            experimental_sandbox: None,
+            active_tools: None,
+            tool_input_refinements: BTreeMap::new(),
+            tool_call_repair: None,
+            max_steps: 1,
+            stop_conditions: Vec::new(),
         }
     }
 
@@ -536,18 +599,112 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
         self
     }
 
-    /// Adds a provider-facing tool that is available to the model.
-    pub fn with_tool(mut self, tool: crate::language_model::LanguageModelTool) -> Self {
-        self.call_options
-            .tools
-            .get_or_insert_with(Vec::new)
-            .push(tool);
+    /// Adds a tool that is available to the model.
+    pub fn with_tool(mut self, tool: impl Into<GenerateTextTool>) -> Self {
+        match tool.into() {
+            GenerateTextTool::Rust(tool) => self.tools.push(*tool),
+            GenerateTextTool::LanguageModel(tool) => self
+                .call_options
+                .tools
+                .get_or_insert_with(Vec::new)
+                .push(tool),
+        }
+
+        self
+    }
+
+    /// Sets the user-defined runtime context attached to every streamed step.
+    pub fn with_runtime_context(mut self, runtime_context: JsonObject) -> Self {
+        self.runtime_context = runtime_context;
+        self
+    }
+
+    /// Sets the tool-specific context map keyed by tool name.
+    pub fn with_tools_context(mut self, tools_context: JsonObject) -> Self {
+        self.tools_context = tools_context;
+        self
+    }
+
+    /// Sets the experimental sandbox available to Rust tool executors.
+    pub fn with_experimental_sandbox(
+        mut self,
+        experimental_sandbox: Arc<dyn ExperimentalSandbox>,
+    ) -> Self {
+        self.experimental_sandbox = Some(experimental_sandbox);
+        self
+    }
+
+    /// Adds or replaces context for a single tool.
+    pub fn with_tool_context(
+        mut self,
+        tool_name: impl Into<String>,
+        context: impl Into<JsonValue>,
+    ) -> Self {
+        self.tools_context.insert(tool_name.into(), context.into());
         self
     }
 
     /// Sets the tool selection strategy.
     pub fn with_tool_choice(mut self, tool_choice: LanguageModelToolChoice) -> Self {
         self.call_options.tool_choice = Some(tool_choice);
+        self
+    }
+
+    /// Sets the active tool names for this streaming call.
+    pub fn with_active_tools(
+        mut self,
+        active_tools: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.active_tools = Some(active_tools.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Adds or replaces an input refinement for one tool.
+    pub fn with_tool_input_refinement<F, Fut>(
+        mut self,
+        tool_name: impl Into<String>,
+        refine: F,
+    ) -> Self
+    where
+        F: Fn(JsonValue) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<JsonValue, ToolInputRefinementError>> + Send + 'static,
+    {
+        self.tool_input_refinements
+            .insert(tool_name.into(), ToolInputRefinement::new(refine));
+        self
+    }
+
+    /// Sets a callback that can repair unavailable or invalid streamed tool calls.
+    pub fn with_tool_call_repair<F, Fut, E>(mut self, repair: F) -> Self
+    where
+        F: Fn(ToolCallRepairOptions) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Option<crate::language_model::LanguageModelToolCall>, E>>
+            + Send
+            + 'static,
+        E: fmt::Display,
+    {
+        self.tool_call_repair = Some(ToolCallRepair::new(repair));
+        self
+    }
+
+    /// Sets the maximum number of model-call steps.
+    pub fn with_max_steps(mut self, max_steps: usize) -> Self {
+        self.max_steps = max_steps.max(1);
+        self
+    }
+
+    /// Adds a stop condition that is checked after every completed step.
+    pub fn with_stop_condition(mut self, stop_condition: StopCondition) -> Self {
+        self.stop_conditions.push(stop_condition);
+        self
+    }
+
+    /// Replaces the additional stop conditions checked after every completed step.
+    pub fn with_stop_conditions(
+        mut self,
+        stop_conditions: impl IntoIterator<Item = StopCondition>,
+    ) -> Self {
+        self.stop_conditions = stop_conditions.into_iter().collect();
         self
     }
 
@@ -744,10 +901,321 @@ where
     let StreamTextOptions {
         model,
         mut call_options,
+        tools,
+        runtime_context,
+        tools_context,
+        experimental_sandbox,
+        active_tools,
+        tool_input_refinements,
+        tool_call_repair,
+        max_steps,
+        stop_conditions,
     } = options;
     let include_raw_chunks = call_options.include_raw_chunks.unwrap_or(false);
-    append_stream_text_user_agent(&mut call_options);
+    let mut parts = vec![TextStreamPart::Start(TextStreamStartPart::new())];
+    let base_language_model_tools = call_options.tools.take();
+    let mut current_prompt = call_options.prompt.clone();
+    let active_tools = active_tools.as_deref();
+    let call_id = generate_text_call_id();
+    let max_steps = max_steps.max(1);
+    let mut stream_steps = Vec::new();
+    let mut generate_steps = Vec::new();
 
+    for step_number in 0..max_steps {
+        let step_prompt = current_prompt.clone();
+        let step_tools =
+            crate::generate_text::filter_active_tools(Some(tools.clone()), active_tools)
+                .unwrap_or_default();
+        let mut step_language_model_tools =
+            filter_active_language_model_tools(base_language_model_tools.clone(), active_tools);
+
+        if let Some(mut prepared_tools) = prepare_tools_with_context(
+            &step_tools,
+            Some(&tools_context),
+            experimental_sandbox.as_ref(),
+        ) {
+            step_language_model_tools
+                .get_or_insert_with(Vec::new)
+                .append(&mut prepared_tools);
+        }
+
+        let mut step_call_options = call_options.clone();
+        step_call_options.prompt = step_prompt.clone();
+        step_call_options.tools = step_language_model_tools;
+        append_stream_text_user_agent(&mut step_call_options);
+
+        let mut collected_step = collect_stream_text_step(
+            model,
+            step_call_options.clone(),
+            include_raw_chunks,
+            &mut parts,
+        )
+        .await;
+
+        mark_unavailable_tool_calls(
+            &mut collected_step.tool_calls,
+            step_call_options.tools.as_deref(),
+        );
+        repair_tool_calls(
+            &mut collected_step.tool_calls,
+            &collected_step.provider_content,
+            tool_call_repair.as_ref(),
+            &step_tools,
+            step_call_options.tools.as_deref(),
+            &step_prompt,
+        )
+        .await;
+        refine_tool_inputs(&mut collected_step.tool_calls, &tool_input_refinements).await;
+        sync_tool_result_inputs(&mut collected_step.tool_results, &collected_step.tool_calls);
+        mark_runtime_dynamic_tool_calls(&mut collected_step.tool_calls, &step_tools);
+        mark_tool_call_titles(&mut collected_step.tool_calls, &step_tools);
+        mark_tool_call_metadata(&mut collected_step.tool_calls, &step_tools);
+        mark_tool_result_metadata(
+            &mut collected_step.tool_results,
+            &collected_step.tool_calls,
+            &step_tools,
+        );
+
+        let mut generate_step = collected_step.to_generate_text_step(
+            call_id.clone(),
+            step_number,
+            GenerateTextModelInfo::new(model.provider(), model.model_id()),
+            runtime_context.clone(),
+            tools_context.clone(),
+        );
+
+        let provider_result_tool_call_ids = collected_step
+            .tool_results
+            .iter()
+            .filter(|tool_result| tool_result.provider_executed == Some(true))
+            .map(|tool_result| tool_result.tool_call_id.clone())
+            .collect::<BTreeSet<_>>();
+        let executable_tool_calls = generate_step
+            .tool_calls
+            .iter()
+            .filter(|tool_call| !provider_result_tool_call_ids.contains(&tool_call.tool_call_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let (local_tool_results, tool_execution_ms) = execute_tool_calls(
+            &call_id,
+            &step_tools,
+            &executable_tool_calls,
+            &step_prompt,
+            &tools_context,
+            &BTreeSet::new(),
+            (experimental_sandbox.as_ref(), None, None),
+        )
+        .await;
+        let should_continue =
+            should_continue_after_tool_results(&generate_step, &local_tool_results, 0, false);
+
+        for tool_result in &local_tool_results {
+            parts.push(TextStreamPart::ToolResult(tool_result.clone()));
+        }
+
+        collected_step.tool_results.extend(local_tool_results);
+        mark_tool_result_metadata(
+            &mut collected_step.tool_results,
+            &collected_step.tool_calls,
+            &step_tools,
+        );
+        generate_step.tool_results = collected_step.tool_results.clone();
+        refresh_tool_result_views(&mut generate_step);
+        generate_step.performance.tool_execution_ms = tool_execution_ms;
+
+        let response_messages = response_messages_for_step_without_approvals(
+            &generate_step,
+            &collected_step.provider_content,
+            &step_tools,
+        )
+        .await
+        .unwrap_or_default();
+        generate_step.response_messages = response_messages.clone();
+        generate_step
+            .response
+            .get_or_insert_with(LanguageModelResponse::new)
+            .messages = Some(response_messages.clone());
+
+        parts.push(TextStreamPart::FinishStep(TextStreamFinishStepPart::new(
+            collected_step.response.clone(),
+            collected_step.usage.clone(),
+            collected_step.performance,
+            collected_step.finish_reason.clone(),
+            collected_step.raw_finish_reason.clone(),
+            collected_step.provider_metadata.clone(),
+        )));
+
+        stream_steps.push(collected_step.into_stream_text_step());
+        generate_steps.push(generate_step);
+
+        if should_continue
+            && !is_stop_condition_met(&stop_conditions, &generate_steps)
+            && step_number + 1 < max_steps
+        {
+            if response_messages.is_empty() {
+                break;
+            }
+
+            current_prompt = step_prompt;
+            current_prompt.extend(response_messages);
+        } else {
+            break;
+        }
+    }
+
+    let final_step = stream_steps
+        .last()
+        .expect("stream_text always creates at least one step");
+    let total_usage = add_stream_text_step_usage(&stream_steps);
+    parts.push(TextStreamPart::Finish(TextStreamFinishPart::new(
+        final_step.finish_reason.clone(),
+        final_step.raw_finish_reason.clone(),
+        total_usage.clone(),
+    )));
+
+    StreamTextResult {
+        parts,
+        text_stream: final_step.text_stream.clone(),
+        text: final_step.text.clone(),
+        reasoning_text: final_step.reasoning_text.clone(),
+        sources: stream_steps
+            .iter()
+            .flat_map(|step| step.sources.iter().cloned())
+            .collect(),
+        files: stream_steps
+            .iter()
+            .flat_map(|step| step.files.iter().cloned())
+            .collect(),
+        reasoning_files: stream_steps
+            .iter()
+            .flat_map(|step| step.reasoning_files.iter().cloned())
+            .collect(),
+        tool_calls: stream_steps
+            .iter()
+            .flat_map(|step| step.tool_calls.iter().cloned())
+            .collect(),
+        tool_results: stream_steps
+            .iter()
+            .flat_map(|step| step.tool_results.iter().cloned())
+            .collect(),
+        custom_parts: stream_steps
+            .iter()
+            .flat_map(|step| step.custom_parts.iter().cloned())
+            .collect(),
+        errors: stream_steps
+            .iter()
+            .flat_map(|step| step.errors.iter().cloned())
+            .collect(),
+        warnings: stream_steps
+            .iter()
+            .flat_map(|step| step.warnings.iter().cloned())
+            .collect(),
+        usage: final_step.usage.clone(),
+        total_usage,
+        finish_reason: final_step.finish_reason.clone(),
+        raw_finish_reason: final_step.raw_finish_reason.clone(),
+        request: final_step.request.clone(),
+        response: final_step.response.clone(),
+        provider_metadata: final_step.provider_metadata.clone(),
+        steps: stream_steps,
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CollectedStreamTextStep {
+    request: Option<LanguageModelRequest>,
+    response: StreamTextResponseMetadata,
+    warnings: Vec<Warning>,
+    text: String,
+    text_stream: Vec<String>,
+    reasoning_text: Option<String>,
+    sources: Vec<LanguageModelSource>,
+    files: Vec<LanguageModelFile>,
+    reasoning_files: Vec<LanguageModelReasoningFile>,
+    tool_calls: Vec<GenerateTextToolCall>,
+    tool_results: Vec<GenerateTextToolResult>,
+    custom_parts: Vec<LanguageModelCustomContent>,
+    errors: Vec<JsonValue>,
+    usage: LanguageModelUsage,
+    finish_reason: FinishReason,
+    raw_finish_reason: Option<String>,
+    provider_metadata: Option<ProviderMetadata>,
+    performance: StreamTextStepPerformance,
+    provider_content: Vec<LanguageModelContent>,
+}
+
+impl CollectedStreamTextStep {
+    fn to_generate_text_step(
+        &self,
+        call_id: String,
+        step_number: usize,
+        model: GenerateTextModelInfo,
+        runtime_context: JsonObject,
+        tools_context: JsonObject,
+    ) -> GenerateTextStep {
+        let mut step = GenerateTextStep::from_language_model_result(
+            call_id,
+            step_number,
+            model,
+            LanguageModelGenerateResult {
+                content: self.provider_content.clone(),
+                finish_reason: LanguageModelFinishReason {
+                    unified: self.finish_reason.clone(),
+                    raw: self.raw_finish_reason.clone(),
+                },
+                usage: self.usage.clone(),
+                provider_metadata: self.provider_metadata.clone(),
+                request: self.request.clone(),
+                response: Some(language_model_response_from_stream_metadata(
+                    self.response.clone(),
+                )),
+                warnings: self.warnings.clone(),
+            },
+        );
+
+        step.runtime_context = runtime_context;
+        step.tools_context = tools_context;
+        step.tool_calls = self.tool_calls.clone();
+        refresh_tool_call_views(&mut step);
+        step.tool_results = self.tool_results.clone();
+        refresh_tool_result_views(&mut step);
+        step
+    }
+
+    fn into_stream_text_step(self) -> StreamTextStep {
+        StreamTextStep {
+            request: self.request,
+            response: self.response,
+            warnings: self.warnings,
+            text: self.text,
+            text_stream: self.text_stream,
+            reasoning_text: self.reasoning_text,
+            sources: self.sources,
+            files: self.files,
+            reasoning_files: self.reasoning_files,
+            tool_calls: self.tool_calls,
+            tool_results: self.tool_results,
+            custom_parts: self.custom_parts,
+            errors: self.errors,
+            usage: self.usage,
+            finish_reason: self.finish_reason,
+            raw_finish_reason: self.raw_finish_reason,
+            provider_metadata: self.provider_metadata,
+            performance: self.performance,
+        }
+    }
+}
+
+async fn collect_stream_text_step<M>(
+    model: &M,
+    call_options: LanguageModelCallOptions,
+    include_raw_chunks: bool,
+    parts: &mut Vec<TextStreamPart>,
+) -> CollectedStreamTextStep
+where
+    M: LanguageModel + ?Sized,
+    M::Stream: IntoIterator<Item = LanguageModelStreamPart>,
+{
     let stream_result = model.do_stream(call_options).await;
     let request = stream_result.request;
     let envelope_response = stream_result.response;
@@ -757,7 +1225,6 @@ where
     }
 
     let step_start = Instant::now();
-    let mut parts = vec![TextStreamPart::Start(TextStreamStartPart::new())];
     let mut start_step_index = None;
     let mut warnings = Vec::new();
     let mut text = String::new();
@@ -775,6 +1242,9 @@ where
     let mut finish_reason = FinishReason::Other;
     let mut raw_finish_reason = None;
     let mut provider_metadata = None;
+    let mut provider_content = Vec::new();
+    let mut text_blocks = BTreeMap::<String, (String, Option<ProviderMetadata>)>::new();
+    let mut reasoning_blocks = BTreeMap::<String, (String, Option<ProviderMetadata>)>::new();
 
     for part in stream_result.stream {
         match part {
@@ -783,7 +1253,7 @@ where
             }
             part => {
                 ensure_start_step(
-                    &mut parts,
+                    parts,
                     &mut start_step_index,
                     request.clone(),
                     warnings.clone(),
@@ -791,12 +1261,29 @@ where
 
                 match part {
                     LanguageModelStreamPart::TextStart(part) => {
+                        text_blocks.insert(
+                            part.id.clone(),
+                            (String::new(), part.provider_metadata.clone()),
+                        );
                         parts.push(TextStreamPart::TextStart(part));
                     }
                     LanguageModelStreamPart::TextDelta(part) => {
                         if !part.delta.is_empty() {
                             text.push_str(&part.delta);
                             text_stream.push(part.delta.clone());
+                            if let Some((block_text, block_metadata)) =
+                                text_blocks.get_mut(&part.id)
+                            {
+                                block_text.push_str(&part.delta);
+                                if block_metadata.is_none() {
+                                    *block_metadata = part.provider_metadata.clone();
+                                }
+                            } else {
+                                provider_content.push(text_language_model_content(
+                                    part.delta.clone(),
+                                    part.provider_metadata.clone(),
+                                ));
+                            }
                             let mut stream_part = TextStreamTextDeltaPart::new(part.id, part.delta);
                             if let Some(provider_metadata) = part.provider_metadata {
                                 stream_part = stream_part.with_provider_metadata(provider_metadata);
@@ -805,14 +1292,37 @@ where
                         }
                     }
                     LanguageModelStreamPart::TextEnd(part) => {
+                        if let Some((block_text, provider_metadata)) = text_blocks.remove(&part.id)
+                            && !block_text.is_empty()
+                        {
+                            provider_content
+                                .push(text_language_model_content(block_text, provider_metadata));
+                        }
                         parts.push(TextStreamPart::TextEnd(part));
                     }
                     LanguageModelStreamPart::ReasoningStart(part) => {
+                        reasoning_blocks.insert(
+                            part.id.clone(),
+                            (String::new(), part.provider_metadata.clone()),
+                        );
                         parts.push(TextStreamPart::ReasoningStart(part));
                     }
                     LanguageModelStreamPart::ReasoningDelta(part) => {
                         has_reasoning_text = true;
                         reasoning_text.push_str(&part.delta);
+                        if let Some((block_text, block_metadata)) =
+                            reasoning_blocks.get_mut(&part.id)
+                        {
+                            block_text.push_str(&part.delta);
+                            if block_metadata.is_none() {
+                                *block_metadata = part.provider_metadata.clone();
+                            }
+                        } else {
+                            provider_content.push(reasoning_language_model_content(
+                                part.delta.clone(),
+                                part.provider_metadata.clone(),
+                            ));
+                        }
                         let mut stream_part =
                             TextStreamReasoningDeltaPart::new(part.id, part.delta);
                         if let Some(provider_metadata) = part.provider_metadata {
@@ -821,6 +1331,15 @@ where
                         parts.push(TextStreamPart::ReasoningDelta(stream_part));
                     }
                     LanguageModelStreamPart::ReasoningEnd(part) => {
+                        if let Some((block_text, provider_metadata)) =
+                            reasoning_blocks.remove(&part.id)
+                            && !block_text.is_empty()
+                        {
+                            provider_content.push(reasoning_language_model_content(
+                                block_text,
+                                provider_metadata,
+                            ));
+                        }
                         parts.push(TextStreamPart::ReasoningEnd(part));
                     }
                     LanguageModelStreamPart::ToolInputStart(part) => {
@@ -833,37 +1352,45 @@ where
                         parts.push(TextStreamPart::ToolInputEnd(part));
                     }
                     LanguageModelStreamPart::ToolApprovalRequest(part) => {
+                        provider_content
+                            .push(LanguageModelContent::ToolApprovalRequest(part.clone()));
                         parts.push(TextStreamPart::ToolApprovalRequest(part));
                     }
                     LanguageModelStreamPart::ToolCall(part) => {
-                        let tool_call = stream_text_tool_call_from_language_model_tool_call(&part);
+                        let tool_call = GenerateTextToolCall::from_language_model_tool_call(&part);
                         tool_calls.push(tool_call.clone());
+                        provider_content.push(LanguageModelContent::ToolCall(part));
                         parts.push(TextStreamPart::ToolCall(tool_call));
                     }
                     LanguageModelStreamPart::ToolResult(part) => {
-                        let tool_result = stream_text_tool_result_from_language_model_tool_result(
+                        let tool_result = generate_text_tool_result_from_language_model_tool_result(
                             &part,
                             &tool_calls,
                         );
                         tool_results.push(tool_result.clone());
+                        provider_content.push(LanguageModelContent::ToolResult(part));
                         parts.push(TextStreamPart::ToolResult(tool_result));
                     }
                     LanguageModelStreamPart::Custom(part) => {
                         custom_parts.push(part.clone());
+                        provider_content.push(LanguageModelContent::Custom(part.clone()));
                         parts.push(TextStreamPart::Custom(part));
                     }
                     LanguageModelStreamPart::File(part) => {
                         files.push(part.clone());
+                        provider_content.push(LanguageModelContent::File(part.clone()));
                         parts.push(TextStreamPart::File(TextStreamFilePart::new(part)));
                     }
                     LanguageModelStreamPart::ReasoningFile(part) => {
                         reasoning_files.push(part.clone());
+                        provider_content.push(LanguageModelContent::ReasoningFile(part.clone()));
                         parts.push(TextStreamPart::ReasoningFile(
                             TextStreamReasoningFilePart::new(part),
                         ));
                     }
                     LanguageModelStreamPart::Source(part) => {
                         sources.push(part.clone());
+                        provider_content.push(LanguageModelContent::Source(part.clone()));
                         parts.push(TextStreamPart::Source(part));
                     }
                     LanguageModelStreamPart::ResponseMetadata(part) => {
@@ -894,8 +1421,23 @@ where
         }
     }
 
+    for (_, (block_text, provider_metadata)) in text_blocks {
+        if !block_text.is_empty() {
+            provider_content.push(text_language_model_content(block_text, provider_metadata));
+        }
+    }
+
+    for (_, (block_text, provider_metadata)) in reasoning_blocks {
+        if !block_text.is_empty() {
+            provider_content.push(reasoning_language_model_content(
+                block_text,
+                provider_metadata,
+            ));
+        }
+    }
+
     ensure_start_step(
-        &mut parts,
+        parts,
         &mut start_step_index,
         request.clone(),
         warnings.clone(),
@@ -904,48 +1446,14 @@ where
     let performance = StreamTextStepPerformance {
         step_time_ms: u64::try_from(step_start.elapsed().as_millis()).unwrap_or(u64::MAX),
     };
-    let finish_step = TextStreamFinishStepPart::new(
-        response.clone(),
-        usage.clone(),
-        performance,
-        finish_reason.clone(),
-        raw_finish_reason.clone(),
-        provider_metadata.clone(),
-    );
-    parts.push(TextStreamPart::FinishStep(finish_step));
-    parts.push(TextStreamPart::Finish(TextStreamFinishPart::new(
-        finish_reason.clone(),
-        raw_finish_reason.clone(),
-        usage.clone(),
-    )));
 
-    let reasoning_text = has_reasoning_text.then_some(reasoning_text);
-    let step = StreamTextStep {
-        request: request.clone(),
-        response: response.clone(),
-        warnings: warnings.clone(),
-        text: text.clone(),
-        text_stream: text_stream.clone(),
-        reasoning_text: reasoning_text.clone(),
-        sources: sources.clone(),
-        files: files.clone(),
-        reasoning_files: reasoning_files.clone(),
-        tool_calls: tool_calls.clone(),
-        tool_results: tool_results.clone(),
-        custom_parts: custom_parts.clone(),
-        errors: errors.clone(),
-        usage: usage.clone(),
-        finish_reason: finish_reason.clone(),
-        raw_finish_reason: raw_finish_reason.clone(),
-        provider_metadata: provider_metadata.clone(),
-        performance,
-    };
-
-    StreamTextResult {
-        parts,
-        text_stream,
+    CollectedStreamTextStep {
+        request,
+        response,
+        warnings,
         text,
-        reasoning_text,
+        text_stream,
+        reasoning_text: has_reasoning_text.then_some(reasoning_text),
         sources,
         files,
         reasoning_files,
@@ -953,79 +1461,87 @@ where
         tool_results,
         custom_parts,
         errors,
-        warnings,
-        usage: usage.clone(),
-        total_usage: usage,
+        usage,
         finish_reason,
         raw_finish_reason,
-        request,
-        response,
         provider_metadata,
-        steps: vec![step],
+        performance,
+        provider_content,
     }
 }
 
-fn stream_text_tool_call_from_language_model_tool_call(
-    tool_call: &LanguageModelToolCall,
-) -> GenerateTextToolCall {
-    let (input, dynamic, invalid, error) = match parse_stream_text_tool_input(&tool_call.input) {
-        Ok(input) => (input, tool_call.dynamic, None, None),
-        Err(error) => (
-            JsonValue::String(tool_call.input.clone()),
-            Some(true),
-            Some(true),
-            Some(format!(
-                "Tool call `{}` has invalid JSON input `{}`: {error}",
-                tool_call.tool_name, tool_call.input
-            )),
-        ),
-    };
+fn text_language_model_content(
+    text: String,
+    provider_metadata: Option<ProviderMetadata>,
+) -> LanguageModelContent {
+    let mut content = LanguageModelText::new(text);
+    if let Some(provider_metadata) = provider_metadata {
+        content = content.with_provider_metadata(provider_metadata);
+    }
 
-    GenerateTextToolCall {
-        tool_call_id: tool_call.tool_call_id.clone(),
-        tool_name: tool_call.tool_name.clone(),
-        input,
-        title: None,
-        provider_executed: tool_call.provider_executed,
-        dynamic,
-        invalid,
-        error,
-        provider_metadata: tool_call.provider_metadata.clone(),
-        tool_metadata: None,
+    LanguageModelContent::Text(content)
+}
+
+fn reasoning_language_model_content(
+    text: String,
+    provider_metadata: Option<ProviderMetadata>,
+) -> LanguageModelContent {
+    let mut content = LanguageModelReasoning::new(text);
+    if let Some(provider_metadata) = provider_metadata {
+        content = content.with_provider_metadata(provider_metadata);
+    }
+
+    LanguageModelContent::Reasoning(content)
+}
+
+fn language_model_response_from_stream_metadata(
+    metadata: StreamTextResponseMetadata,
+) -> LanguageModelResponse {
+    LanguageModelResponse {
+        messages: None,
+        id: metadata.id,
+        timestamp: metadata.timestamp,
+        model_id: metadata.model_id,
+        headers: metadata.headers,
+        body: None,
     }
 }
 
-fn stream_text_tool_result_from_language_model_tool_result(
-    tool_result: &LanguageModelToolResult,
-    tool_calls: &[GenerateTextToolCall],
-) -> GenerateTextToolResult {
-    let matching_tool_call = tool_calls
+fn add_stream_text_step_usage(steps: &[StreamTextStep]) -> LanguageModelUsage {
+    steps
         .iter()
-        .find(|tool_call| tool_call.tool_call_id == tool_result.tool_call_id);
-
-    GenerateTextToolResult {
-        tool_call_id: tool_result.tool_call_id.clone(),
-        tool_name: tool_result.tool_name.clone(),
-        input: matching_tool_call.map_or(JsonValue::Null, |tool_call| tool_call.input.clone()),
-        output: tool_result.result.as_value().clone(),
-        title: matching_tool_call.and_then(|tool_call| tool_call.title.clone()),
-        is_error: tool_result.is_error,
-        provider_executed: Some(true),
-        dynamic: matching_tool_call
-            .and_then(|tool_call| tool_call.dynamic)
-            .or(tool_result.dynamic),
-        preliminary: tool_result.preliminary,
-        provider_metadata: tool_result.provider_metadata.clone(),
-        tool_metadata: matching_tool_call.and_then(|tool_call| tool_call.tool_metadata.clone()),
-    }
+        .fold(LanguageModelUsage::default(), |mut usage, step| {
+            usage.input_tokens.total =
+                add_optional_counts(usage.input_tokens.total, step.usage.input_tokens.total);
+            usage.input_tokens.no_cache = add_optional_counts(
+                usage.input_tokens.no_cache,
+                step.usage.input_tokens.no_cache,
+            );
+            usage.input_tokens.cache_read = add_optional_counts(
+                usage.input_tokens.cache_read,
+                step.usage.input_tokens.cache_read,
+            );
+            usage.input_tokens.cache_write = add_optional_counts(
+                usage.input_tokens.cache_write,
+                step.usage.input_tokens.cache_write,
+            );
+            usage.output_tokens.total =
+                add_optional_counts(usage.output_tokens.total, step.usage.output_tokens.total);
+            usage.output_tokens.text =
+                add_optional_counts(usage.output_tokens.text, step.usage.output_tokens.text);
+            usage.output_tokens.reasoning = add_optional_counts(
+                usage.output_tokens.reasoning,
+                step.usage.output_tokens.reasoning,
+            );
+            usage
+        })
 }
 
-fn parse_stream_text_tool_input(input: &str) -> Result<JsonValue, serde_json::Error> {
-    if input.trim().is_empty() {
-        return Ok(serde_json::json!({}));
+fn add_optional_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (None, None) => None,
+        (left, right) => Some(left.unwrap_or(0) + right.unwrap_or(0)),
     }
-
-    serde_json::from_str(input)
 }
 
 fn ensure_start_step(
@@ -1068,17 +1584,21 @@ mod tests {
     use serde_json::{Map, json};
 
     use super::*;
+    use crate::generate_text::has_tool_call;
     use crate::json::NonNullJsonValue;
     use crate::language_model::{
-        FinishReason, InputTokenUsage, LanguageModelErrorStreamPart, LanguageModelFinishReason,
-        LanguageModelMessage, LanguageModelRawStreamPart, LanguageModelStreamFinish,
-        LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
-        LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSystemMessage,
-        LanguageModelTextDelta, LanguageModelTextPart, LanguageModelUserContentPart,
-        LanguageModelUserMessage, OutputTokenUsage,
+        FinishReason, InputTokenUsage, LanguageModelAssistantContentPart,
+        LanguageModelErrorStreamPart, LanguageModelFinishReason, LanguageModelMessage,
+        LanguageModelRawStreamPart, LanguageModelStreamFinish, LanguageModelStreamResponseMetadata,
+        LanguageModelStreamResult, LanguageModelStreamResultResponse, LanguageModelStreamStart,
+        LanguageModelSystemMessage, LanguageModelTextDelta, LanguageModelTextPart,
+        LanguageModelToolCall, LanguageModelToolContentPart, LanguageModelToolResult,
+        LanguageModelToolResultOutput, LanguageModelUserContentPart, LanguageModelUserMessage,
+        OutputTokenUsage,
     };
     use crate::mock_models::MockLanguageModel;
     use crate::prompt::Prompt;
+    use crate::provider_utils::Tool;
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
         let waker = Waker::noop();
@@ -1118,6 +1638,13 @@ mod tests {
         LanguageModelFinishReason {
             unified: FinishReason::Stop,
             raw: Some("stop".to_string()),
+        }
+    }
+
+    fn tool_calls_finish_reason() -> LanguageModelFinishReason {
+        LanguageModelFinishReason {
+            unified: FinishReason::ToolCalls,
+            raw: Some("tool_calls".to_string()),
         }
     }
 
@@ -1493,5 +2020,207 @@ mod tests {
                 "providerExecuted": true
             })
         );
+    }
+
+    #[test]
+    fn stream_text_executes_local_tool_and_continues_to_final_text() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "weather",
+                    r#"{"city":"Brisbane"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "Brisbane is sunny.",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |input, options| async move {
+                        Ok(json!({
+                            "forecast": "sunny",
+                            "city": input["city"],
+                            "toolCallId": options.tool_call_id
+                        }))
+                    },
+                ))
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(model.stream_calls().len(), 2);
+        assert_eq!(model.stream_calls()[1].prompt.len(), 3);
+        assert!(matches!(
+            &model.stream_calls()[1].prompt[1],
+            LanguageModelMessage::Assistant(message)
+                if matches!(
+                    &message.content[0],
+                    LanguageModelAssistantContentPart::ToolCall(part)
+                        if part.tool_name == "weather"
+                            && part.input == json!({"city": "Brisbane"})
+                )
+        ));
+        assert!(matches!(
+            &model.stream_calls()[1].prompt[2],
+            LanguageModelMessage::Tool(message)
+                if matches!(
+                    &message.content[0],
+                    LanguageModelToolContentPart::ToolResult(part)
+                        if part.tool_name == "weather"
+                            && part.output == LanguageModelToolResultOutput::json(json!({
+                                "forecast": "sunny",
+                                "city": "Brisbane",
+                                "toolCallId": "call-1"
+                            }))
+                )
+        ));
+
+        assert_eq!(result.steps.len(), 2);
+        assert_eq!(result.text, "Brisbane is sunny.");
+        assert_eq!(result.text_stream, vec!["Brisbane is sunny."]);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].output["forecast"], "sunny");
+        assert_eq!(result.usage, usage());
+        assert_eq!(result.total_usage.input_tokens.total, Some(6));
+        assert_eq!(result.total_usage.output_tokens.total, Some(20));
+
+        let part_names = result
+            .parts
+            .iter()
+            .map(|part| match part {
+                TextStreamPart::Start(_) => "start",
+                TextStreamPart::StartStep(_) => "start-step",
+                TextStreamPart::ToolCall(_) => "tool-call",
+                TextStreamPart::ToolResult(_) => "tool-result",
+                TextStreamPart::FinishStep(_) => "finish-step",
+                TextStreamPart::TextStart(_) => "text-start",
+                TextStreamPart::TextDelta(_) => "text-delta",
+                TextStreamPart::TextEnd(_) => "text-end",
+                TextStreamPart::Finish(_) => "finish",
+                _ => "other",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            part_names,
+            vec![
+                "start",
+                "start-step",
+                "tool-call",
+                "tool-result",
+                "finish-step",
+                "start-step",
+                "text-start",
+                "text-delta",
+                "text-end",
+                "finish-step",
+                "finish"
+            ]
+        );
+    }
+
+    #[test]
+    fn stream_text_stops_after_max_steps_even_when_tool_calls_continue() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "weather",
+                    r#"{"city":"Brisbane"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |_input, _options| async move { Ok(json!({ "forecast": "sunny" })) },
+                ))
+                .with_max_steps(1),
+        ));
+
+        assert_eq!(model.stream_calls().len(), 1);
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.finish_reason, FinishReason::ToolCalls);
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].output["forecast"], "sunny");
+    }
+
+    #[test]
+    fn stream_text_honors_stop_condition_after_streamed_tool_call() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "weather",
+                    r#"{"city":"Brisbane"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "should not run",
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |_input, _options| async move { Ok(json!({ "forecast": "sunny" })) },
+                ))
+                .with_max_steps(3)
+                .with_stop_condition(has_tool_call(["weather"])),
+        ));
+
+        assert_eq!(model.stream_calls().len(), 1);
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.finish_reason, FinishReason::ToolCalls);
+        assert_eq!(result.tool_calls[0].tool_name, "weather");
     }
 }

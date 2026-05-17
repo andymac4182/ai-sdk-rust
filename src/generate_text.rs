@@ -3921,7 +3921,7 @@ impl Serialize for GenerateTextToolCall {
 }
 
 impl GenerateTextToolCall {
-    fn from_language_model_tool_call(tool_call: &LanguageModelToolCall) -> Self {
+    pub(crate) fn from_language_model_tool_call(tool_call: &LanguageModelToolCall) -> Self {
         let (input, dynamic, invalid, error) = match parse_tool_input(&tool_call.input) {
             Ok(input) => (input, tool_call.dynamic, None, None),
             Err(error) => (
@@ -4626,7 +4626,7 @@ pub struct GenerateTextStep {
 }
 
 impl GenerateTextStep {
-    fn from_language_model_result(
+    pub(crate) fn from_language_model_result(
         call_id: impl Into<String>,
         step_number: usize,
         model: GenerateTextModelInfo,
@@ -5414,7 +5414,7 @@ fn merge_provider_options(
     Some(provider_options)
 }
 
-fn generate_text_call_id() -> String {
+pub(crate) fn generate_text_call_id() -> String {
     let generate_call_id =
         create_id_generator(IdGeneratorOptions::new().with_prefix("call").with_size(24))
             .expect("default generate_text call id configuration is valid");
@@ -5510,7 +5510,7 @@ fn dynamic_tool_calls(tool_calls: &[GenerateTextToolCall]) -> Vec<GenerateTextTo
         .collect()
 }
 
-fn refresh_tool_call_views(step: &mut GenerateTextStep) {
+pub(crate) fn refresh_tool_call_views(step: &mut GenerateTextStep) {
     step.static_tool_calls = static_tool_calls(&step.tool_calls);
     step.dynamic_tool_calls = dynamic_tool_calls(&step.tool_calls);
 }
@@ -5690,7 +5690,7 @@ fn tool_approval_response_output(
     output
 }
 
-fn generate_text_tool_result_from_language_model_tool_result(
+pub(crate) fn generate_text_tool_result_from_language_model_tool_result(
     tool_result: &LanguageModelToolResult,
     tool_calls: &[GenerateTextToolCall],
 ) -> GenerateTextToolResult {
@@ -5825,7 +5825,7 @@ fn dynamic_tool_results(tool_results: &[GenerateTextToolResult]) -> Vec<Generate
         .collect()
 }
 
-fn refresh_tool_result_views(step: &mut GenerateTextStep) {
+pub(crate) fn refresh_tool_result_views(step: &mut GenerateTextStep) {
     step.static_tool_results = static_tool_results(&step.tool_results);
     step.dynamic_tool_results = dynamic_tool_results(&step.tool_results);
 }
@@ -6088,7 +6088,7 @@ fn tool_approval_response_part(
     response
 }
 
-async fn execute_tool_calls(
+pub(crate) async fn execute_tool_calls(
     call_id: &str,
     tools: &[Tool],
     tool_calls: &[GenerateTextToolCall],
@@ -6216,7 +6216,7 @@ fn validate_tool_execution_context(
     .map(Some)
 }
 
-fn should_continue_after_tool_results(
+pub(crate) fn should_continue_after_tool_results(
     step: &GenerateTextStep,
     tool_results: &[GenerateTextToolResult],
     denied_client_tool_call_count: usize,
@@ -6269,6 +6269,14 @@ async fn response_messages_for_step(
     } else {
         Some(messages)
     }
+}
+
+pub(crate) async fn response_messages_for_step_without_approvals(
+    step: &GenerateTextStep,
+    provider_content: &[LanguageModelContent],
+    tools: &[Tool],
+) -> Option<Vec<LanguageModelMessage>> {
+    response_messages_for_step(step, provider_content, &StepToolApprovals::default(), tools).await
 }
 
 fn assistant_message_from_step(
@@ -6642,7 +6650,7 @@ fn invalid_tool_input_message(
     InvalidToolInputError::new(tool_name, input, JsonParseError::new(input, cause)).to_string()
 }
 
-fn mark_unavailable_tool_calls(
+pub(crate) fn mark_unavailable_tool_calls(
     tool_calls: &mut [GenerateTextToolCall],
     available_tools: Option<&[LanguageModelTool]>,
 ) {
@@ -6675,7 +6683,7 @@ fn mark_unavailable_tool_calls(
     }
 }
 
-async fn repair_tool_calls(
+pub(crate) async fn repair_tool_calls(
     tool_calls: &mut [GenerateTextToolCall],
     content: &[LanguageModelContent],
     repair: Option<&ToolCallRepair>,
@@ -6801,7 +6809,7 @@ fn available_tool_names(available_tools: Option<&[LanguageModelTool]>) -> Option
     available_tools.map(|tools| tools.iter().map(language_model_tool_name).collect())
 }
 
-async fn refine_tool_inputs(
+pub(crate) async fn refine_tool_inputs(
     tool_calls: &mut [GenerateTextToolCall],
     refinements: &BTreeMap<String, ToolInputRefinement>,
 ) {
@@ -6831,7 +6839,7 @@ async fn refine_tool_inputs(
     }
 }
 
-fn sync_tool_result_inputs(
+pub(crate) fn sync_tool_result_inputs(
     tool_results: &mut [GenerateTextToolResult],
     tool_calls: &[GenerateTextToolCall],
 ) {
@@ -6845,7 +6853,10 @@ fn sync_tool_result_inputs(
     }
 }
 
-fn mark_runtime_dynamic_tool_calls(tool_calls: &mut [GenerateTextToolCall], tools: &[Tool]) {
+pub(crate) fn mark_runtime_dynamic_tool_calls(
+    tool_calls: &mut [GenerateTextToolCall],
+    tools: &[Tool],
+) {
     for tool_call in tool_calls {
         if tools
             .iter()
@@ -6856,7 +6867,7 @@ fn mark_runtime_dynamic_tool_calls(tool_calls: &mut [GenerateTextToolCall], tool
     }
 }
 
-fn mark_tool_call_titles(tool_calls: &mut [GenerateTextToolCall], tools: &[Tool]) {
+pub(crate) fn mark_tool_call_titles(tool_calls: &mut [GenerateTextToolCall], tools: &[Tool]) {
     for tool_call in tool_calls {
         if tool_call.title.is_some() {
             continue;
@@ -6872,7 +6883,7 @@ fn mark_tool_call_titles(tool_calls: &mut [GenerateTextToolCall], tools: &[Tool]
     }
 }
 
-fn mark_tool_call_metadata(tool_calls: &mut [GenerateTextToolCall], tools: &[Tool]) {
+pub(crate) fn mark_tool_call_metadata(tool_calls: &mut [GenerateTextToolCall], tools: &[Tool]) {
     for tool_call in tool_calls {
         if tool_call.tool_metadata.is_some() {
             continue;
@@ -6888,7 +6899,7 @@ fn mark_tool_call_metadata(tool_calls: &mut [GenerateTextToolCall], tools: &[Too
     }
 }
 
-fn mark_tool_result_metadata(
+pub(crate) fn mark_tool_result_metadata(
     tool_results: &mut [GenerateTextToolResult],
     tool_calls: &[GenerateTextToolCall],
     tools: &[Tool],
@@ -6937,7 +6948,7 @@ fn language_model_tool_name(tool: &LanguageModelTool) -> String {
     }
 }
 
-fn filter_active_language_model_tools(
+pub(crate) fn filter_active_language_model_tools(
     tools: Option<Vec<LanguageModelTool>>,
     active_tools: Option<&[String]>,
 ) -> Option<Vec<LanguageModelTool>> {
