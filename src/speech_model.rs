@@ -201,17 +201,86 @@ impl SpeechModelResponse {
     }
 }
 
+/// High-level speech response metadata.
+///
+/// Upstream `SpeechModelResponseMetadata` uses the same JSON shape as the
+/// provider-v4 speech response, including the optional provider response body.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeechModelResponseMetadata {
+    /// Timestamp for the start of the generated response.
+    #[serde(with = "time::serde::rfc3339")]
+    pub timestamp: OffsetDateTime,
+
+    /// Provider model identifier used for the response.
+    pub model_id: String,
+
+    /// Response headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Headers>,
+
+    /// Provider response body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<JsonValue>,
+}
+
+impl SpeechModelResponseMetadata {
+    /// Creates high-level speech response metadata.
+    pub fn new(timestamp: OffsetDateTime, model_id: impl Into<String>) -> Self {
+        Self {
+            timestamp,
+            model_id: model_id.into(),
+            headers: None,
+            body: None,
+        }
+    }
+
+    /// Creates high-level metadata from a provider-v4 speech response.
+    pub fn from_response(response: SpeechModelResponse) -> Self {
+        Self {
+            timestamp: response.timestamp,
+            model_id: response.model_id,
+            headers: response.headers,
+            body: response.body,
+        }
+    }
+
+    /// Adds a response header.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers
+            .get_or_insert_with(Headers::new)
+            .insert(name.into(), value.into());
+        self
+    }
+
+    /// Sets the raw provider response body.
+    pub fn with_body(mut self, body: JsonValue) -> Self {
+        self.body = Some(body);
+        self
+    }
+}
+
+impl From<SpeechModelResponse> for SpeechModelResponseMetadata {
+    fn from(response: SpeechModelResponse) -> Self {
+        Self::from_response(response)
+    }
+}
+
 /// Error returned when high-level speech generation produces no audio.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NoSpeechGeneratedError {
-    responses: Vec<SpeechModelResponse>,
+    responses: Vec<SpeechModelResponseMetadata>,
 }
 
 impl NoSpeechGeneratedError {
     /// Creates a no-speech error with response metadata from attempted provider calls.
-    pub fn new(responses: impl IntoIterator<Item = SpeechModelResponse>) -> Self {
+    pub fn new<R, I>(responses: I) -> Self
+    where
+        R: Into<SpeechModelResponseMetadata>,
+        I: IntoIterator<Item = R>,
+    {
         Self {
-            responses: responses.into_iter().collect(),
+            responses: responses.into_iter().map(Into::into).collect(),
         }
     }
 
@@ -221,12 +290,12 @@ impl NoSpeechGeneratedError {
     }
 
     /// Returns response metadata for attempted provider calls.
-    pub fn responses(&self) -> &[SpeechModelResponse] {
+    pub fn responses(&self) -> &[SpeechModelResponseMetadata] {
         &self.responses
     }
 
     /// Converts this error into its response metadata.
-    pub fn into_responses(self) -> Vec<SpeechModelResponse> {
+    pub fn into_responses(self) -> Vec<SpeechModelResponseMetadata> {
         self.responses
     }
 }
@@ -296,7 +365,7 @@ impl SpeechModelResult {
 mod tests {
     use super::{
         NoSpeechGeneratedError, SpeechModel, SpeechModelCallOptions, SpeechModelRequest,
-        SpeechModelResponse, SpeechModelResult,
+        SpeechModelResponse, SpeechModelResponseMetadata, SpeechModelResult,
     };
     use crate::file_data::FileDataContent;
     use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
@@ -546,8 +615,53 @@ mod tests {
     }
 
     #[test]
+    fn response_metadata_serializes_upstream_shape_with_body() {
+        let response_timestamp =
+            OffsetDateTime::parse("2026-05-16T10:00:00Z", &Rfc3339).expect("timestamp parses");
+        let metadata = SpeechModelResponseMetadata::new(response_timestamp, "openai/tts-1")
+            .with_header("x-request-id", "req_123")
+            .with_body(json!({
+                "duration": 1.3
+            }));
+
+        assert_eq!(
+            serde_json::to_value(metadata).expect("metadata serializes"),
+            json!({
+                "timestamp": "2026-05-16T10:00:00Z",
+                "modelId": "openai/tts-1",
+                "headers": {
+                    "x-request-id": "req_123"
+                },
+                "body": {
+                    "duration": 1.3
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn response_metadata_converts_from_provider_response_without_dropping_body() {
+        let response_timestamp =
+            OffsetDateTime::parse("2026-05-16T10:00:00Z", &Rfc3339).expect("timestamp parses");
+        let response = SpeechModelResponse::new(response_timestamp, "openai/tts-1")
+            .with_header("x-request-id", "req_123")
+            .with_body(json!({
+                "duration": 1.3
+            }));
+
+        assert_eq!(
+            SpeechModelResponseMetadata::from_response(response),
+            SpeechModelResponseMetadata::new(response_timestamp, "openai/tts-1")
+                .with_header("x-request-id", "req_123")
+                .with_body(json!({
+                    "duration": 1.3
+                }))
+        );
+    }
+
+    #[test]
     fn no_speech_generated_error_matches_upstream_message() {
-        let error = NoSpeechGeneratedError::new([]);
+        let error = NoSpeechGeneratedError::new(Vec::<SpeechModelResponseMetadata>::new());
 
         assert_eq!(error.message(), "No speech audio generated.");
         assert_eq!(error.to_string(), "No speech audio generated.");
@@ -563,10 +677,11 @@ mod tests {
             .with_body(json!({
                 "audio": []
             }));
+        let metadata = SpeechModelResponseMetadata::from_response(response.clone());
 
         let error = NoSpeechGeneratedError::new([response.clone()]);
 
-        assert_eq!(error.responses(), std::slice::from_ref(&response));
-        assert_eq!(error.into_responses(), vec![response]);
+        assert_eq!(error.responses(), std::slice::from_ref(&metadata));
+        assert_eq!(error.into_responses(), vec![metadata]);
     }
 }

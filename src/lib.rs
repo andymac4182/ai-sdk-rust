@@ -265,7 +265,7 @@ pub use skills::{
 };
 pub use speech_model::{
     NoSpeechGeneratedError, SpeechModel, SpeechModelAudio, SpeechModelCallOptions,
-    SpeechModelRequest, SpeechModelResponse, SpeechModelResult,
+    SpeechModelRequest, SpeechModelResponse, SpeechModelResponseMetadata, SpeechModelResult,
 };
 pub use transcribe::{
     ExperimentalTranscriptionResult, TranscribeAudio, TranscribeDownload,

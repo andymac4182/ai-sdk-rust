@@ -5,7 +5,7 @@ use crate::headers::Headers;
 use crate::provider::{ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{Base64DecodeError, detect_media_type, with_user_agent_suffix};
 use crate::speech_model::{
-    NoSpeechGeneratedError, SpeechModel, SpeechModelCallOptions, SpeechModelResponse,
+    NoSpeechGeneratedError, SpeechModel, SpeechModelCallOptions, SpeechModelResponseMetadata,
     SpeechModelResult,
 };
 use crate::warning::Warning;
@@ -121,7 +121,7 @@ pub struct SpeechResult {
     pub warnings: Vec<Warning>,
 
     /// Response metadata from provider calls.
-    pub responses: Vec<SpeechModelResponse>,
+    pub responses: Vec<SpeechModelResponseMetadata>,
 
     /// Provider-specific metadata returned by the provider.
     pub provider_metadata: ProviderMetadata,
@@ -129,12 +129,18 @@ pub struct SpeechResult {
 
 impl SpeechResult {
     /// Creates a high-level speech result.
-    pub fn new(
+    pub fn new<R, I>(
         audio: GeneratedAudioFile,
         warnings: Vec<Warning>,
-        responses: Vec<SpeechModelResponse>,
+        responses: I,
         provider_metadata: ProviderMetadata,
-    ) -> Result<Self, NoSpeechGeneratedError> {
+    ) -> Result<Self, NoSpeechGeneratedError>
+    where
+        R: Into<SpeechModelResponseMetadata>,
+        I: IntoIterator<Item = R>,
+    {
+        let responses = responses.into_iter().map(Into::into).collect::<Vec<_>>();
+
         if audio_data_is_empty(audio.file.data()) {
             return Err(NoSpeechGeneratedError::new(responses));
         }
@@ -295,7 +301,7 @@ pub async fn generate_speech<M: SpeechModel + ?Sized>(
     Ok(SpeechResult {
         audio,
         warnings,
-        responses: vec![response],
+        responses: vec![response.into()],
         provider_metadata: provider_metadata.unwrap_or_default(),
     })
 }
@@ -346,7 +352,8 @@ mod tests {
     use crate::headers::Headers;
     use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
     use crate::speech_model::{
-        SpeechModel, SpeechModelCallOptions, SpeechModelResponse, SpeechModelResult,
+        SpeechModel, SpeechModelCallOptions, SpeechModelResponse, SpeechModelResponseMetadata,
+        SpeechModelResult,
     };
     use crate::warning::Warning;
     use serde_json::json;
@@ -431,6 +438,10 @@ mod tests {
         )
     }
 
+    fn speech_response_metadata(model_id: &str) -> SpeechModelResponseMetadata {
+        SpeechModelResponseMetadata::from_response(speech_response(model_id))
+    }
+
     #[test]
     fn generated_audio_file_serializes_upstream_shape_and_infers_format() {
         let mpeg_audio = GeneratedAudioFile::from_base64("audio/mpeg", "SUQzBAAAAAAA");
@@ -478,7 +489,14 @@ mod tests {
             vec![Warning::Other {
                 message: "setting ignored".to_string(),
             }],
-            vec![speech_response("openai/tts-1").with_header("x-request-id", "req_123")],
+            vec![
+                SpeechModelResponseMetadata::from_response(
+                    speech_response("openai/tts-1").with_header("x-request-id", "req_123"),
+                )
+                .with_body(json!({
+                    "duration": 1.3
+                })),
+            ],
             provider_metadata,
         )
         .expect("result has audio");
@@ -503,6 +521,9 @@ mod tests {
                         "modelId": "openai/tts-1",
                         "headers": {
                             "x-request-id": "req_123"
+                        },
+                        "body": {
+                            "duration": 1.3
                         }
                     }
                 ],
@@ -537,7 +558,10 @@ mod tests {
         assert_eq!(result.audio.format(), "wav");
         assert_eq!(result.warnings, Vec::<Warning>::new());
         assert_eq!(result.provider_metadata, ProviderMetadata::new());
-        assert_eq!(result.responses, vec![speech_response("speech-test")]);
+        assert_eq!(
+            result.responses,
+            vec![speech_response_metadata("speech-test")]
+        );
     }
 
     #[test]
@@ -615,7 +639,9 @@ mod tests {
         );
         assert_eq!(
             result.responses,
-            vec![speech_response("speech-test").with_header("x-response-id", "res_123")]
+            vec![SpeechModelResponseMetadata::from_response(
+                speech_response("speech-test").with_header("x-response-id", "res_123")
+            )]
         );
         assert_eq!(result.provider_metadata, provider_metadata);
     }
@@ -652,7 +678,10 @@ mod tests {
         .expect_err("empty audio errors");
 
         assert_eq!(error.message(), "No speech audio generated.");
-        assert_eq!(error.responses(), &[response]);
+        assert_eq!(
+            error.responses(),
+            &[SpeechModelResponseMetadata::from_response(response)]
+        );
     }
 
     #[test]
