@@ -1,13 +1,16 @@
-use std::future::Future;
+use std::future::{Future, Pending, Ready, ready};
 use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
 
+use crate::headers::Headers;
+use crate::json::{JsonObject, JsonValue};
 use crate::language_model::{
     LanguageModel, LanguageModelCallOptions, LanguageModelGenerateResult,
-    LanguageModelStreamResult, LanguageModelSupportedUrls,
+    LanguageModelResponseFormat, LanguageModelStreamResult, LanguageModelSupportedUrls,
+    LanguageModelTool, LanguageModelToolChoice,
 };
-use crate::provider::SpecificationVersion;
+use crate::provider::{ProviderOptions, SpecificationVersion};
 
 /// Original language generation operation passed to middleware wrappers.
 pub type LanguageModelDoGenerate<'a> = Box<
@@ -243,12 +246,339 @@ pub trait LanguageModelMiddleware<M: LanguageModel> {
     }
 }
 
+/// Default provider call settings applied by [`DefaultSettingsMiddleware`].
+///
+/// Upstream `defaultSettingsMiddleware` accepts a partial provider-v4 language
+/// model call options object without `prompt`. Rust keeps that same boundary as
+/// an explicit settings record and treats `None` as "no default".
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageModelDefaultSettings {
+    /// Default maximum number of output tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
+
+    /// Default sampling temperature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+
+    /// Default stop sequences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_sequences: Option<Vec<String>>,
+
+    /// Default nucleus sampling setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+
+    /// Default top-k sampling setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u64>,
+
+    /// Default presence penalty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f64>,
+
+    /// Default frequency penalty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f64>,
+
+    /// Default response format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<LanguageModelResponseFormat>,
+
+    /// Default deterministic sampling seed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+
+    /// Default provider tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<LanguageModelTool>>,
+
+    /// Default provider tool choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<LanguageModelToolChoice>,
+
+    /// Default HTTP headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Headers>,
+
+    /// Default provider-specific options.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+}
+
+impl LanguageModelDefaultSettings {
+    /// Creates an empty default-settings record.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the default maximum number of output tokens.
+    pub fn with_max_output_tokens(mut self, max_output_tokens: u64) -> Self {
+        self.max_output_tokens = Some(max_output_tokens);
+        self
+    }
+
+    /// Sets the default sampling temperature.
+    pub fn with_temperature(mut self, temperature: f64) -> Self {
+        self.temperature = Some(temperature);
+        self
+    }
+
+    /// Adds a default stop sequence.
+    pub fn with_stop_sequence(mut self, stop_sequence: impl Into<String>) -> Self {
+        self.stop_sequences
+            .get_or_insert_with(Vec::new)
+            .push(stop_sequence.into());
+        self
+    }
+
+    /// Sets the default nucleus sampling value.
+    pub fn with_top_p(mut self, top_p: f64) -> Self {
+        self.top_p = Some(top_p);
+        self
+    }
+
+    /// Sets the default top-k sampling value.
+    pub fn with_top_k(mut self, top_k: u64) -> Self {
+        self.top_k = Some(top_k);
+        self
+    }
+
+    /// Sets the default presence penalty.
+    pub fn with_presence_penalty(mut self, presence_penalty: f64) -> Self {
+        self.presence_penalty = Some(presence_penalty);
+        self
+    }
+
+    /// Sets the default frequency penalty.
+    pub fn with_frequency_penalty(mut self, frequency_penalty: f64) -> Self {
+        self.frequency_penalty = Some(frequency_penalty);
+        self
+    }
+
+    /// Sets the default response format.
+    pub fn with_response_format(mut self, response_format: LanguageModelResponseFormat) -> Self {
+        self.response_format = Some(response_format);
+        self
+    }
+
+    /// Sets the default deterministic sampling seed.
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
+    /// Adds a default provider tool.
+    pub fn with_tool(mut self, tool: LanguageModelTool) -> Self {
+        self.tools.get_or_insert_with(Vec::new).push(tool);
+        self
+    }
+
+    /// Sets the default tool choice.
+    pub fn with_tool_choice(mut self, tool_choice: LanguageModelToolChoice) -> Self {
+        self.tool_choice = Some(tool_choice);
+        self
+    }
+
+    /// Adds a default HTTP header.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers
+            .get_or_insert_with(Headers::new)
+            .insert(name.into(), value.into());
+        self
+    }
+
+    /// Sets the default provider-specific options.
+    pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
+        self.provider_options = Some(provider_options);
+        self
+    }
+}
+
+/// Language model middleware that applies default call settings.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultSettingsMiddleware {
+    /// Settings applied when callers leave the corresponding call option unset.
+    pub settings: LanguageModelDefaultSettings,
+}
+
+impl DefaultSettingsMiddleware {
+    /// Creates default-settings middleware from a settings record.
+    pub fn new(settings: LanguageModelDefaultSettings) -> Self {
+        Self { settings }
+    }
+
+    fn apply_settings(&self, mut params: LanguageModelCallOptions) -> LanguageModelCallOptions {
+        if params.max_output_tokens.is_none() {
+            params.max_output_tokens = self.settings.max_output_tokens;
+        }
+
+        if params.temperature.is_none() {
+            params.temperature = self.settings.temperature;
+        }
+
+        if params.stop_sequences.is_none() {
+            params.stop_sequences = self.settings.stop_sequences.clone();
+        }
+
+        if params.top_p.is_none() {
+            params.top_p = self.settings.top_p;
+        }
+
+        if params.top_k.is_none() {
+            params.top_k = self.settings.top_k;
+        }
+
+        if params.presence_penalty.is_none() {
+            params.presence_penalty = self.settings.presence_penalty;
+        }
+
+        if params.frequency_penalty.is_none() {
+            params.frequency_penalty = self.settings.frequency_penalty;
+        }
+
+        if params.response_format.is_none() {
+            params.response_format = self.settings.response_format.clone();
+        }
+
+        if params.seed.is_none() {
+            params.seed = self.settings.seed;
+        }
+
+        if params.tools.is_none() {
+            params.tools = self.settings.tools.clone();
+        }
+
+        if params.tool_choice.is_none() {
+            params.tool_choice = self.settings.tool_choice.clone();
+        }
+
+        params.headers = merge_headers(self.settings.headers.as_ref(), params.headers);
+        params.provider_options = merge_provider_options_deep(
+            self.settings.provider_options.as_ref(),
+            params.provider_options,
+        );
+
+        params
+    }
+}
+
+/// Creates language model middleware that applies default call settings.
+pub fn default_settings_middleware(
+    settings: LanguageModelDefaultSettings,
+) -> DefaultSettingsMiddleware {
+    DefaultSettingsMiddleware::new(settings)
+}
+
+impl<M: LanguageModel> LanguageModelMiddleware<M> for DefaultSettingsMiddleware {
+    type OverrideSupportedUrlsFuture<'a>
+        = Ready<LanguageModelSupportedUrls>
+    where
+        Self: 'a,
+        M: 'a;
+
+    type TransformParamsFuture<'a>
+        = Ready<LanguageModelCallOptions>
+    where
+        Self: 'a,
+        M: 'a;
+
+    type WrapGenerateFuture<'a>
+        = Pending<LanguageModelGenerateResult>
+    where
+        Self: 'a,
+        M: 'a;
+
+    type WrapStreamFuture<'a>
+        = Pending<LanguageModelStreamResult<M::Stream>>
+    where
+        Self: 'a,
+        M: 'a;
+
+    fn transform_params<'a>(
+        &'a self,
+        options: LanguageModelTransformParamsOptions<'a, M>,
+    ) -> Option<Self::TransformParamsFuture<'a>>
+    where
+        M: 'a,
+    {
+        Some(ready(self.apply_settings(options.params)))
+    }
+}
+
+fn merge_headers(
+    default_headers: Option<&Headers>,
+    params_headers: Option<Headers>,
+) -> Option<Headers> {
+    if default_headers.is_none() && params_headers.is_none() {
+        return None;
+    }
+
+    let mut headers = default_headers.cloned().unwrap_or_default();
+
+    if let Some(params_headers) = params_headers {
+        headers.extend(params_headers);
+    }
+
+    Some(headers)
+}
+
+fn merge_provider_options_deep(
+    default_provider_options: Option<&ProviderOptions>,
+    params_provider_options: Option<ProviderOptions>,
+) -> Option<ProviderOptions> {
+    if default_provider_options.is_none() && params_provider_options.is_none() {
+        return None;
+    }
+
+    let mut provider_options = default_provider_options.cloned().unwrap_or_default();
+
+    if let Some(params_provider_options) = params_provider_options {
+        for (provider, params_options) in params_provider_options {
+            match provider_options.get_mut(&provider) {
+                Some(default_options) => {
+                    *default_options = merge_json_objects(default_options, &params_options);
+                }
+                None => {
+                    provider_options.insert(provider, params_options);
+                }
+            }
+        }
+    }
+
+    Some(provider_options)
+}
+
+fn merge_json_objects(default_object: &JsonObject, params_object: &JsonObject) -> JsonObject {
+    let mut merged = default_object.clone();
+
+    for (key, params_value) in params_object {
+        if matches!(key.as_str(), "__proto__" | "constructor" | "prototype") {
+            continue;
+        }
+
+        let merged_value = match (merged.get(key), params_value) {
+            (Some(JsonValue::Object(default_nested)), JsonValue::Object(params_nested)) => {
+                JsonValue::Object(merge_json_objects(default_nested, params_nested))
+            }
+            _ => params_value.clone(),
+        };
+
+        merged.insert(key.clone(), merged_value);
+    }
+
+    merged
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        LanguageModelMiddleware, LanguageModelMiddlewareCallType,
+        LanguageModelDefaultSettings, LanguageModelMiddleware, LanguageModelMiddlewareCallType,
         LanguageModelMiddlewareModelOptions, LanguageModelTransformParamsOptions,
         LanguageModelWrapGenerateOptions, LanguageModelWrapStreamOptions,
+        default_settings_middleware,
     };
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
@@ -479,6 +809,140 @@ mod tests {
             serde_json::from_value::<LanguageModelMiddlewareCallType>(json!("stream"))
                 .expect("call type deserializes"),
             LanguageModelMiddlewareCallType::Stream
+        );
+    }
+
+    #[test]
+    fn language_model_default_settings_serialize_as_upstream_partial_call_options() {
+        let settings = LanguageModelDefaultSettings::new()
+            .with_max_output_tokens(100)
+            .with_temperature(0.7)
+            .with_stop_sequence("stop")
+            .with_top_p(0.9)
+            .with_top_k(40)
+            .with_presence_penalty(0.1)
+            .with_frequency_penalty(0.2)
+            .with_seed(42)
+            .with_header("x-default", "default");
+
+        assert_eq!(
+            serde_json::to_value(settings).expect("default settings serialize"),
+            json!({
+                "maxOutputTokens": 100,
+                "temperature": 0.7,
+                "stopSequences": ["stop"],
+                "topP": 0.9,
+                "topK": 40,
+                "presencePenalty": 0.1,
+                "frequencyPenalty": 0.2,
+                "seed": 42,
+                "headers": {
+                    "x-default": "default"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn default_settings_middleware_applies_defaults_without_overriding_params() {
+        let model = StaticLanguageModel;
+        let middleware = default_settings_middleware(
+            LanguageModelDefaultSettings::new()
+                .with_max_output_tokens(100)
+                .with_temperature(0.7)
+                .with_stop_sequence("stop")
+                .with_header("x-default", "default")
+                .with_header("x-shared", "default"),
+        );
+
+        let mut params = LanguageModelCallOptions::new(Vec::new())
+            .with_temperature(0.5)
+            .with_header("x-shared", "param");
+        params.top_p = Some(0.9);
+
+        let transformed = middleware
+            .transform_params(LanguageModelTransformParamsOptions::new(
+                LanguageModelMiddlewareCallType::Generate,
+                params,
+                &model,
+            ))
+            .expect("default settings transform exists");
+        let transformed = poll_ready(transformed);
+
+        assert_eq!(transformed.max_output_tokens, Some(100));
+        assert_eq!(transformed.temperature, Some(0.5));
+        assert_eq!(transformed.stop_sequences, Some(vec!["stop".to_string()]));
+        assert_eq!(transformed.top_p, Some(0.9));
+        assert_eq!(
+            transformed.headers,
+            Some(BTreeMap::from([
+                ("x-default".to_string(), "default".to_string()),
+                ("x-shared".to_string(), "param".to_string()),
+            ]))
+        );
+    }
+
+    #[test]
+    fn default_settings_middleware_deep_merges_provider_options() {
+        let model = StaticLanguageModel;
+        let default_provider_options: crate::provider::ProviderOptions =
+            serde_json::from_value(json!({
+                "anthropic": {
+                    "cacheControl": { "type": "ephemeral" },
+                    "tools": {
+                        "retrieval": { "enabled": true },
+                        "math": { "enabled": true }
+                    }
+                },
+                "openai": {
+                    "logit_bias": { "50256": -100 }
+                }
+            }))
+            .expect("default provider options deserialize");
+        let params_provider_options: crate::provider::ProviderOptions =
+            serde_json::from_value(json!({
+                "anthropic": {
+                    "tools": {
+                        "retrieval": { "enabled": false },
+                        "code": { "enabled": true }
+                    },
+                    "otherSetting": "value"
+                }
+            }))
+            .expect("params provider options deserialize");
+        let middleware = default_settings_middleware(
+            LanguageModelDefaultSettings::new().with_provider_options(default_provider_options),
+        );
+
+        let params = LanguageModelCallOptions::new(Vec::new())
+            .with_provider_options(params_provider_options);
+
+        let transformed = middleware
+            .transform_params(LanguageModelTransformParamsOptions::new(
+                LanguageModelMiddlewareCallType::Stream,
+                params,
+                &model,
+            ))
+            .expect("default settings transform exists");
+        let transformed = poll_ready(transformed);
+
+        assert_eq!(
+            serde_json::to_value(transformed.provider_options)
+                .expect("merged provider options serialize"),
+            json!({
+                "anthropic": {
+                    "cacheControl": { "type": "ephemeral" },
+                    "tools": {
+                        "retrieval": { "enabled": false },
+                        "math": { "enabled": true },
+                        "code": { "enabled": true }
+                    },
+                    "otherSetting": "value"
+                },
+                "openai": {
+                    "logit_bias": { "50256": -100 }
+                }
+            })
         );
     }
 

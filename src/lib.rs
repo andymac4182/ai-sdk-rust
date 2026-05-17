@@ -172,10 +172,10 @@ pub use language_model::{
     LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
 };
 pub use language_model_middleware::{
-    LanguageModelDoGenerate, LanguageModelDoStream, LanguageModelMiddleware,
-    LanguageModelMiddlewareCallType, LanguageModelMiddlewareModelOptions,
-    LanguageModelTransformParamsOptions, LanguageModelWrapGenerateOptions,
-    LanguageModelWrapStreamOptions,
+    DefaultSettingsMiddleware, LanguageModelDefaultSettings, LanguageModelDoGenerate,
+    LanguageModelDoStream, LanguageModelMiddleware, LanguageModelMiddlewareCallType,
+    LanguageModelMiddlewareModelOptions, LanguageModelTransformParamsOptions,
+    LanguageModelWrapGenerateOptions, LanguageModelWrapStreamOptions, default_settings_middleware,
 };
 pub use prompt::{
     Instructions, InvalidDataContentError, InvalidMessageRoleError, MessageConversionError, Prompt,
