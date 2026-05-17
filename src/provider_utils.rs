@@ -28,6 +28,7 @@ use crate::language_model::{
     LanguageModelFilePart, LanguageModelFunctionTool, LanguageModelMessage, LanguageModelPrompt,
     LanguageModelProviderTool, LanguageModelReasoningEffort, LanguageModelStreamPart,
     LanguageModelSupportedUrls, LanguageModelSystemMessage, LanguageModelTool,
+    LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
     LanguageModelToolCall, LanguageModelToolInputDelta, LanguageModelToolInputEnd,
     LanguageModelToolInputExample, LanguageModelToolInputStart, LanguageModelToolResultOutput,
 };
@@ -3772,6 +3773,131 @@ impl ToolDescriptionOptions {
 /// Runtime-dependent tool description callback.
 pub type ToolDescriptionFunction = dyn Fn(ToolDescriptionOptions) -> String + Send + Sync;
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum ToolApprovalRequestKind {
+    #[serde(rename = "tool-approval-request")]
+    ToolApprovalRequest,
+}
+
+/// Tool approval request prompt part.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolApprovalRequest {
+    #[serde(rename = "type")]
+    kind: ToolApprovalRequestKind,
+
+    /// ID of the tool approval.
+    pub approval_id: String,
+
+    /// ID of the tool call that the approval request is for.
+    pub tool_call_id: String,
+
+    /// Whether the tool was automatically approved or denied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_automatic: Option<bool>,
+}
+
+impl ToolApprovalRequest {
+    /// Creates a tool approval request prompt part.
+    pub fn new(approval_id: impl Into<String>, tool_call_id: impl Into<String>) -> Self {
+        Self {
+            kind: ToolApprovalRequestKind::ToolApprovalRequest,
+            approval_id: approval_id.into(),
+            tool_call_id: tool_call_id.into(),
+            is_automatic: None,
+        }
+    }
+
+    /// Sets whether this approval request was resolved automatically.
+    pub fn with_automatic(mut self, is_automatic: bool) -> Self {
+        self.is_automatic = Some(is_automatic);
+        self
+    }
+
+    /// Converts this high-level prompt part into the provider-v4 prompt shape.
+    pub fn to_language_model_part(&self) -> LanguageModelToolApprovalRequestPart {
+        let mut part = LanguageModelToolApprovalRequestPart::new(
+            self.approval_id.clone(),
+            self.tool_call_id.clone(),
+        );
+
+        if let Some(is_automatic) = self.is_automatic {
+            part = part.with_automatic(is_automatic);
+        }
+
+        part
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum ToolApprovalResponseKind {
+    #[serde(rename = "tool-approval-response")]
+    ToolApprovalResponse,
+}
+
+/// Tool approval response prompt part.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolApprovalResponse {
+    #[serde(rename = "type")]
+    kind: ToolApprovalResponseKind,
+
+    /// ID of the tool approval.
+    pub approval_id: String,
+
+    /// Whether the approval was granted.
+    pub approved: bool,
+
+    /// Optional reason for the approval or denial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+
+    /// Whether the approved or denied tool call is provider-executed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_executed: Option<bool>,
+}
+
+impl ToolApprovalResponse {
+    /// Creates a tool approval response prompt part.
+    pub fn new(approval_id: impl Into<String>, approved: bool) -> Self {
+        Self {
+            kind: ToolApprovalResponseKind::ToolApprovalResponse,
+            approval_id: approval_id.into(),
+            approved,
+            reason: None,
+            provider_executed: None,
+        }
+    }
+
+    /// Adds an approval or denial reason.
+    pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
+        self.reason = Some(reason.into());
+        self
+    }
+
+    /// Sets whether the tool call is provider-executed.
+    pub fn with_provider_executed(mut self, provider_executed: bool) -> Self {
+        self.provider_executed = Some(provider_executed);
+        self
+    }
+
+    /// Converts this high-level prompt part into the provider-v4 prompt shape.
+    ///
+    /// The provider-v4 prompt response does not include the high-level
+    /// `providerExecuted` flag; callers can inspect it before conversion when
+    /// deciding whether to send the response to the model.
+    pub fn to_language_model_part(&self) -> LanguageModelToolApprovalResponsePart {
+        let mut part =
+            LanguageModelToolApprovalResponsePart::new(self.approval_id.clone(), self.approved);
+
+        if let Some(reason) = &self.reason {
+            part = part.with_reason(reason.clone());
+        }
+
+        part
+    }
+}
+
 /// Options passed when converting a tool result into model-facing output.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -6992,7 +7118,8 @@ mod tests {
     use crate::language_model::{
         LanguageModelFilePart, LanguageModelFunctionTool, LanguageModelMessage,
         LanguageModelProviderTool, LanguageModelReasoningEffort, LanguageModelSystemMessage,
-        LanguageModelTextPart, LanguageModelTool, LanguageModelToolResultOutput,
+        LanguageModelTextPart, LanguageModelTool, LanguageModelToolApprovalRequestPart,
+        LanguageModelToolApprovalResponsePart, LanguageModelToolResultOutput,
         LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::{
@@ -7019,13 +7146,13 @@ mod tests {
         Schema, SerializedModelOptions, StatusCodeErrorResponseHandlerOptions,
         StreamingToolCallDelta, StreamingToolCallDeltaFunction, StreamingToolCallTracker,
         StreamingToolCallTrackerOptions, StreamingToolCallTypeValidation, Tool,
-        ToolDescriptionOptions, ToolExecutionError, ToolExecutionOptions, ToolModelOutputOptions,
-        ValidateTypesResult, ValidationResult, add_additional_properties_to_json_schema, as_array,
-        as_flexible_schema, as_schema, combine_headers, convert_base64_to_bytes,
-        convert_bytes_to_base64, convert_image_model_file_to_data_uri,
-        convert_inline_file_data_to_bytes, convert_to_base64, convert_to_form_data,
-        create_binary_response_handler, create_event_source_response_handler, create_id_generator,
-        create_json_error_response_handler, create_json_response_handler,
+        ToolApprovalRequest, ToolApprovalResponse, ToolDescriptionOptions, ToolExecutionError,
+        ToolExecutionOptions, ToolModelOutputOptions, ValidateTypesResult, ValidationResult,
+        add_additional_properties_to_json_schema, as_array, as_flexible_schema, as_schema,
+        combine_headers, convert_base64_to_bytes, convert_bytes_to_base64,
+        convert_image_model_file_to_data_uri, convert_inline_file_data_to_bytes, convert_to_base64,
+        convert_to_form_data, create_binary_response_handler, create_event_source_response_handler,
+        create_id_generator, create_json_error_response_handler, create_json_response_handler,
         create_provider_defined_tool_factory,
         create_provider_defined_tool_factory_with_output_schema,
         create_provider_executed_tool_factory, create_status_code_error_response_handler,
@@ -7103,6 +7230,87 @@ mod tests {
         assert_eq!(
             get_error_message(Some(&json!({ "code": "bad_request" }))),
             "{\"code\":\"bad_request\"}"
+        );
+    }
+
+    #[test]
+    fn tool_approval_request_serializes_upstream_prompt_part_shape() {
+        let request = ToolApprovalRequest::new("approval-1", "call-1").with_automatic(true);
+
+        assert_eq!(
+            serde_json::to_value(&request).expect("tool approval request serializes"),
+            json!({
+                "type": "tool-approval-request",
+                "approvalId": "approval-1",
+                "toolCallId": "call-1",
+                "isAutomatic": true
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ToolApprovalRequest>(json!({
+                "type": "tool-approval-request",
+                "approvalId": "approval-1",
+                "toolCallId": "call-1",
+                "isAutomatic": true
+            }))
+            .expect("tool approval request deserializes"),
+            request
+        );
+        assert_eq!(
+            request.to_language_model_part(),
+            LanguageModelToolApprovalRequestPart::new("approval-1", "call-1").with_automatic(true)
+        );
+        assert_eq!(
+            serde_json::to_value(ToolApprovalRequest::new("approval-2", "call-2"))
+                .expect("minimal request serializes"),
+            json!({
+                "type": "tool-approval-request",
+                "approvalId": "approval-2",
+                "toolCallId": "call-2"
+            })
+        );
+    }
+
+    #[test]
+    fn tool_approval_response_serializes_upstream_prompt_part_shape() {
+        let response = ToolApprovalResponse::new("approval-1", false)
+            .with_reason("Requires billing access.")
+            .with_provider_executed(true);
+
+        assert_eq!(
+            serde_json::to_value(&response).expect("tool approval response serializes"),
+            json!({
+                "type": "tool-approval-response",
+                "approvalId": "approval-1",
+                "approved": false,
+                "reason": "Requires billing access.",
+                "providerExecuted": true
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ToolApprovalResponse>(json!({
+                "type": "tool-approval-response",
+                "approvalId": "approval-1",
+                "approved": false,
+                "reason": "Requires billing access.",
+                "providerExecuted": true
+            }))
+            .expect("tool approval response deserializes"),
+            response
+        );
+        assert_eq!(
+            response.to_language_model_part(),
+            LanguageModelToolApprovalResponsePart::new("approval-1", false)
+                .with_reason("Requires billing access.")
+        );
+        assert_eq!(
+            serde_json::to_value(ToolApprovalResponse::new("approval-2", true))
+                .expect("minimal response serializes"),
+            json!({
+                "type": "tool-approval-response",
+                "approvalId": "approval-2",
+                "approved": true
+            })
         );
     }
 
