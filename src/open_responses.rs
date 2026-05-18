@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::convert::Infallible;
 use std::future::{Future, Ready, ready};
 use std::pin::Pin;
@@ -22,10 +22,10 @@ use crate::language_model::{
     LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
     LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
     LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
-    LanguageModelTool, LanguageModelToolCall, LanguageModelToolChoice,
-    LanguageModelToolContentPart, LanguageModelToolResult, LanguageModelToolResultContentPart,
-    LanguageModelToolResultOutput, LanguageModelUsage, LanguageModelUserContentPart,
-    OutputTokenUsage,
+    LanguageModelTool, LanguageModelToolApprovalRequest, LanguageModelToolCall,
+    LanguageModelToolChoice, LanguageModelToolContentPart, LanguageModelToolResult,
+    LanguageModelToolResultContentPart, LanguageModelToolResultOutput, LanguageModelUsage,
+    LanguageModelUserContentPart, OutputTokenUsage,
 };
 use crate::openai_compatible::{OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel};
 use crate::provider::{
@@ -1379,6 +1379,8 @@ fn open_responses_content(
     let provider_tool_names = open_responses_provider_tool_names();
     let tool_name_mapping = create_tool_name_mapping(tools.iter().flatten(), &provider_tool_names);
     let web_search_tool_name = open_responses_web_search_response_tool_name(tools);
+    let shell_provider_executed = open_responses_shell_provider_executed(tools);
+    let mut hosted_tool_search_call_ids = VecDeque::<String>::new();
 
     for part in response
         .get("output")
@@ -1437,6 +1439,207 @@ fn open_responses_content(
                     tool_name,
                     input,
                 )));
+            }
+            Some("custom_tool_call") => {
+                has_tool_calls = true;
+                let tool_call_id = part
+                    .get("call_id")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default();
+                let tool_name = part
+                    .get("name")
+                    .and_then(JsonValue::as_str)
+                    .map(|name| tool_name_mapping.to_custom_tool_name(name))
+                    .unwrap_or_default();
+                let input = open_responses_stringified_json(
+                    part.get("input").cloned().unwrap_or(JsonValue::Null),
+                );
+
+                content.push(LanguageModelContent::ToolCall(LanguageModelToolCall::new(
+                    tool_call_id,
+                    tool_name,
+                    input,
+                )));
+            }
+            Some("tool_search_call") => {
+                let tool_call_id = open_responses_tool_search_call_id(part);
+                let hosted = matches!(
+                    part.get("execution").and_then(JsonValue::as_str),
+                    Some("server")
+                );
+
+                if hosted {
+                    hosted_tool_search_call_ids.push_back(tool_call_id.clone());
+                }
+
+                let mut tool_call = LanguageModelToolCall::new(
+                    tool_call_id,
+                    tool_name_mapping.to_custom_tool_name("tool_search"),
+                    open_responses_tool_search_input(part),
+                );
+
+                if hosted {
+                    tool_call = tool_call.with_provider_executed(true);
+                }
+
+                content.push(LanguageModelContent::ToolCall(tool_call));
+            }
+            Some("tool_search_output") => {
+                let tool_call_id = part
+                    .get("call_id")
+                    .and_then(JsonValue::as_str)
+                    .map(ToString::to_string)
+                    .or_else(|| hosted_tool_search_call_ids.pop_front())
+                    .or_else(|| {
+                        part.get("id")
+                            .and_then(JsonValue::as_str)
+                            .map(ToString::to_string)
+                    })
+                    .unwrap_or_default();
+                open_responses_push_tool_result(
+                    &mut content,
+                    &tool_call_id,
+                    &tool_name_mapping.to_custom_tool_name("tool_search"),
+                    json!({
+                        "tools": part.get("tools").cloned().unwrap_or_else(|| JsonValue::Array(Vec::new()))
+                    }),
+                );
+            }
+            Some("local_shell_call") => {
+                let tool_call_id = part
+                    .get("call_id")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default();
+
+                content.push(LanguageModelContent::ToolCall(LanguageModelToolCall::new(
+                    tool_call_id,
+                    tool_name_mapping.to_custom_tool_name("local_shell"),
+                    json!({
+                        "action": part.get("action").cloned().unwrap_or(JsonValue::Null)
+                    })
+                    .to_string(),
+                )));
+            }
+            Some("shell_call") => {
+                let tool_call_id = part
+                    .get("call_id")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default();
+                let mut tool_call = LanguageModelToolCall::new(
+                    tool_call_id,
+                    tool_name_mapping.to_custom_tool_name("shell"),
+                    open_responses_shell_call_input(part),
+                );
+
+                if shell_provider_executed {
+                    tool_call = tool_call.with_provider_executed(true);
+                }
+
+                content.push(LanguageModelContent::ToolCall(tool_call));
+            }
+            Some("shell_call_output") => {
+                let tool_call_id = part
+                    .get("call_id")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default();
+                open_responses_push_tool_result(
+                    &mut content,
+                    tool_call_id,
+                    &tool_name_mapping.to_custom_tool_name("shell"),
+                    open_responses_shell_call_output(part),
+                );
+            }
+            Some("apply_patch_call") => {
+                let tool_call_id = part
+                    .get("call_id")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default();
+
+                content.push(LanguageModelContent::ToolCall(LanguageModelToolCall::new(
+                    tool_call_id,
+                    tool_name_mapping.to_custom_tool_name("apply_patch"),
+                    json!({
+                        "callId": part.get("call_id").cloned().unwrap_or(JsonValue::Null),
+                        "operation": part.get("operation").cloned().unwrap_or(JsonValue::Null)
+                    })
+                    .to_string(),
+                )));
+            }
+            Some("mcp_call") => {
+                let tool_call_id = part
+                    .get("id")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default();
+                let tool_name = part
+                    .get("name")
+                    .and_then(JsonValue::as_str)
+                    .map(|name| format!("mcp.{name}"))
+                    .unwrap_or_else(|| "mcp".to_string());
+                let input = part
+                    .get("arguments")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or("{}");
+
+                content.push(LanguageModelContent::ToolCall(
+                    LanguageModelToolCall::new(tool_call_id, tool_name.clone(), input)
+                        .with_provider_executed(true)
+                        .with_dynamic(true),
+                ));
+                content.push(LanguageModelContent::ToolResult(
+                    open_responses_mcp_tool_result(part, tool_call_id, &tool_name),
+                ));
+            }
+            Some("mcp_approval_request") => {
+                let tool_call_id = part
+                    .get("id")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default();
+                let approval_id = part
+                    .get("approval_request_id")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or(tool_call_id);
+                let tool_name = part
+                    .get("name")
+                    .and_then(JsonValue::as_str)
+                    .map(|name| format!("mcp.{name}"))
+                    .unwrap_or_else(|| "mcp".to_string());
+                let input = part
+                    .get("arguments")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or("{}");
+
+                content.push(LanguageModelContent::ToolCall(
+                    LanguageModelToolCall::new(tool_call_id, tool_name, input)
+                        .with_provider_executed(true)
+                        .with_dynamic(true),
+                ));
+                content.push(LanguageModelContent::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequest::new(approval_id, tool_call_id),
+                ));
+            }
+            Some("computer_call") => {
+                let tool_call_id = part
+                    .get("id")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default();
+                let tool_name = tool_name_mapping.to_custom_tool_name("computer_use");
+
+                content.push(LanguageModelContent::ToolCall(
+                    LanguageModelToolCall::new(tool_call_id, tool_name.clone(), "")
+                        .with_provider_executed(true),
+                ));
+                open_responses_push_tool_result(
+                    &mut content,
+                    tool_call_id,
+                    &tool_name,
+                    json!({
+                        "type": "computer_use_tool_result",
+                        "status": part
+                            .get("status")
+                            .cloned()
+                            .unwrap_or_else(|| JsonValue::String("completed".to_string()))
+                    }),
+                );
             }
             Some("web_search_call") => {
                 let tool_call_id = part
@@ -1542,6 +1745,130 @@ fn open_responses_web_search_response_tool_name(tools: &Option<Vec<LanguageModel
             }
         })
         .unwrap_or_else(|| "web_search".to_string())
+}
+
+fn open_responses_shell_provider_executed(tools: &Option<Vec<LanguageModelTool>>) -> bool {
+    tools.iter().flatten().any(|tool| {
+        let LanguageModelTool::Provider(tool) = tool else {
+            return false;
+        };
+
+        tool.id == "openai.shell"
+            && matches!(
+                tool.args
+                    .get("environment")
+                    .and_then(JsonValue::as_object)
+                    .and_then(|environment| environment.get("type"))
+                    .and_then(JsonValue::as_str),
+                Some("containerAuto" | "containerReference")
+            )
+    })
+}
+
+fn open_responses_stringified_json(value: JsonValue) -> String {
+    serde_json::to_string(&value).unwrap_or_else(|_| "null".to_string())
+}
+
+fn open_responses_tool_search_call_id(part: &JsonValue) -> String {
+    part.get("call_id")
+        .and_then(JsonValue::as_str)
+        .or_else(|| part.get("id").and_then(JsonValue::as_str))
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn open_responses_tool_search_input(part: &JsonValue) -> String {
+    json!({
+        "arguments": part.get("arguments").cloned().unwrap_or(JsonValue::Null),
+        "call_id": part.get("call_id").cloned().unwrap_or(JsonValue::Null)
+    })
+    .to_string()
+}
+
+fn open_responses_shell_call_input(part: &JsonValue) -> String {
+    json!({
+        "action": {
+            "commands": part
+                .get("action")
+                .and_then(JsonValue::as_object)
+                .and_then(|action| action.get("commands"))
+                .cloned()
+                .unwrap_or_else(|| JsonValue::Array(Vec::new()))
+        }
+    })
+    .to_string()
+}
+
+fn open_responses_shell_call_output(part: &JsonValue) -> JsonValue {
+    json!({
+        "output": part
+            .get("output")
+            .and_then(JsonValue::as_array)
+            .map(|items| {
+                JsonValue::Array(
+                    items
+                        .iter()
+                        .map(open_responses_shell_output_item)
+                        .collect(),
+                )
+            })
+            .unwrap_or_else(|| JsonValue::Array(Vec::new()))
+    })
+}
+
+fn open_responses_shell_output_item(item: &JsonValue) -> JsonValue {
+    let outcome = item
+        .get("outcome")
+        .and_then(JsonValue::as_object)
+        .map(
+            |outcome| match outcome.get("type").and_then(JsonValue::as_str) {
+                Some("exit") => json!({
+                    "type": "exit",
+                    "exitCode": outcome.get("exit_code").cloned().unwrap_or(JsonValue::Null)
+                }),
+                _ => json!({ "type": "timeout" }),
+            },
+        )
+        .unwrap_or_else(|| json!({ "type": "timeout" }));
+
+    json!({
+        "stdout": item.get("stdout").cloned().unwrap_or(JsonValue::Null),
+        "stderr": item.get("stderr").cloned().unwrap_or(JsonValue::Null),
+        "outcome": outcome
+    })
+}
+
+fn open_responses_mcp_tool_result(
+    part: &JsonValue,
+    tool_call_id: &str,
+    tool_name: &str,
+) -> LanguageModelToolResult {
+    let mut result = JsonObject::new();
+    result.insert("type".to_string(), JsonValue::String("call".to_string()));
+    result.insert(
+        "serverLabel".to_string(),
+        part.get("server_label").cloned().unwrap_or(JsonValue::Null),
+    );
+    result.insert(
+        "name".to_string(),
+        part.get("name").cloned().unwrap_or(JsonValue::Null),
+    );
+    result.insert(
+        "arguments".to_string(),
+        part.get("arguments").cloned().unwrap_or(JsonValue::Null),
+    );
+
+    if let Some(output) = part.get("output").filter(|output| !output.is_null()) {
+        result.insert("output".to_string(), output.clone());
+    }
+
+    if let Some(error) = part.get("error").filter(|error| !error.is_null()) {
+        result.insert("error".to_string(), error.clone());
+    }
+
+    let result = NonNullJsonValue::new(JsonValue::Object(result))
+        .expect("MCP tool result object is non-null JSON");
+    LanguageModelToolResult::new(tool_call_id, tool_name, result).with_dynamic(true)
 }
 
 fn open_responses_web_search_output(action: Option<&JsonValue>) -> JsonValue {
@@ -2693,9 +3020,9 @@ mod tests {
     use crate::headers::Headers;
     use crate::json::{JsonObject, JsonValue};
     use crate::language_model::{
-        FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelFilePart,
-        LanguageModelMessage, LanguageModelProviderTool, LanguageModelStreamPart,
-        LanguageModelTextPart, LanguageModelTool, LanguageModelToolChoice,
+        FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
+        LanguageModelFilePart, LanguageModelMessage, LanguageModelProviderTool,
+        LanguageModelStreamPart, LanguageModelTextPart, LanguageModelTool, LanguageModelToolChoice,
         LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::prompt::Prompt;
@@ -3480,6 +3807,346 @@ mod tests {
             result.tool_results[3].output,
             json!({
                 "result": "base64-image"
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_maps_additional_response_tool_items() {
+        let transport: OpenResponsesTransport =
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_additional_tool_items",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "id": "custom_item",
+                                "type": "custom_tool_call",
+                                "call_id": "custom_1",
+                                "name": "write_sql",
+                                "input": "select 1"
+                            },
+                            {
+                                "id": "tsc_1",
+                                "type": "tool_search_call",
+                                "execution": "server",
+                                "call_id": null,
+                                "status": "completed",
+                                "arguments": {
+                                    "goal": "Find a weather tool"
+                                }
+                            },
+                            {
+                                "id": "tso_1",
+                                "type": "tool_search_output",
+                                "execution": "server",
+                                "call_id": null,
+                                "status": "completed",
+                                "tools": [
+                                    {
+                                        "type": "function",
+                                        "name": "get_weather"
+                                    }
+                                ]
+                            },
+                            {
+                                "id": "local_shell_item",
+                                "type": "local_shell_call",
+                                "call_id": "local_shell_1",
+                                "action": {
+                                    "type": "exec",
+                                    "command": ["pwd"]
+                                }
+                            },
+                            {
+                                "id": "shell_item",
+                                "type": "shell_call",
+                                "call_id": "shell_1",
+                                "status": "completed",
+                                "action": {
+                                    "commands": ["echo hi"]
+                                }
+                            },
+                            {
+                                "id": "shell_output_item",
+                                "type": "shell_call_output",
+                                "call_id": "shell_1",
+                                "status": "completed",
+                                "output": [
+                                    {
+                                        "stdout": "hi",
+                                        "stderr": "",
+                                        "outcome": {
+                                            "type": "exit",
+                                            "exit_code": 0
+                                        }
+                                    },
+                                    {
+                                        "stdout": "",
+                                        "stderr": "timed out",
+                                        "outcome": {
+                                            "type": "timeout"
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                "id": "patch_item",
+                                "type": "apply_patch_call",
+                                "call_id": "patch_1",
+                                "status": "completed",
+                                "operation": {
+                                    "type": "update_file",
+                                    "path": "src/lib.rs",
+                                    "diff": "@@"
+                                }
+                            },
+                            {
+                                "id": "mcp_1",
+                                "type": "mcp_call",
+                                "status": "completed",
+                                "arguments": "{\"query\":\"rust\"}",
+                                "name": "lookup",
+                                "server_label": "docs",
+                                "output": "{\"answer\":\"ok\"}"
+                            },
+                            {
+                                "id": "mcp_pending_1",
+                                "type": "mcp_approval_request",
+                                "server_label": "deployments",
+                                "name": "deploy",
+                                "arguments": "{\"target\":\"prod\"}",
+                                "approval_request_id": "approval_1"
+                            },
+                            {
+                                "id": "computer_1",
+                                "type": "computer_call",
+                                "status": "completed"
+                            },
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Additional tools mapped"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 13,
+                            "output_tokens": 8
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Use additional tools"),
+                    )]),
+                )])
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.tool_search",
+                    "toolSearch",
+                    JsonObject::new(),
+                )))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.local_shell",
+                    "localShell",
+                    JsonObject::new(),
+                )))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.shell",
+                    "hostShell",
+                    json_object(json!({
+                        "environment": {
+                            "type": "containerAuto"
+                        }
+                    })),
+                )))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.apply_patch",
+                    "patchTool",
+                    JsonObject::new(),
+                )))
+                .with_tool(LanguageModelTool::Provider(
+                    LanguageModelProviderTool::new("openai.mcp", "mcpTool", JsonObject::new()),
+                )),
+            ),
+        );
+
+        assert_eq!(&result.finish_reason.unified, &FinishReason::ToolCalls);
+
+        let tool_calls = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let tool_results = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let approvals = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::ToolApprovalRequest(approval) => Some(approval),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(tool_calls.len(), 8);
+        assert_eq!(tool_results.len(), 4);
+        assert_eq!(approvals.len(), 1);
+
+        assert_eq!(tool_calls[0].tool_name, "write_sql");
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&tool_calls[0].input)
+                .expect("custom tool input parses"),
+            json!("select 1")
+        );
+        assert_eq!(tool_calls[1].tool_name, "toolSearch");
+        assert_eq!(tool_calls[1].tool_call_id, "tsc_1");
+        assert_eq!(tool_calls[1].provider_executed, Some(true));
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&tool_calls[1].input)
+                .expect("tool search input parses"),
+            json!({
+                "arguments": {
+                    "goal": "Find a weather tool"
+                },
+                "call_id": null
+            })
+        );
+        assert_eq!(tool_results[0].tool_call_id, "tsc_1");
+        assert_eq!(tool_results[0].tool_name, "toolSearch");
+        assert_eq!(
+            tool_results[0].result.as_value(),
+            &json!({
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "get_weather"
+                    }
+                ]
+            })
+        );
+
+        assert_eq!(tool_calls[2].tool_name, "localShell");
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&tool_calls[2].input)
+                .expect("local shell input parses"),
+            json!({
+                "action": {
+                    "type": "exec",
+                    "command": ["pwd"]
+                }
+            })
+        );
+        assert_eq!(tool_calls[3].tool_name, "hostShell");
+        assert_eq!(tool_calls[3].provider_executed, Some(true));
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&tool_calls[3].input).expect("shell input parses"),
+            json!({
+                "action": {
+                    "commands": ["echo hi"]
+                }
+            })
+        );
+        assert_eq!(tool_results[1].tool_name, "hostShell");
+        assert_eq!(
+            tool_results[1].result.as_value(),
+            &json!({
+                "output": [
+                    {
+                        "stdout": "hi",
+                        "stderr": "",
+                        "outcome": {
+                            "type": "exit",
+                            "exitCode": 0
+                        }
+                    },
+                    {
+                        "stdout": "",
+                        "stderr": "timed out",
+                        "outcome": {
+                            "type": "timeout"
+                        }
+                    }
+                ]
+            })
+        );
+
+        assert_eq!(tool_calls[4].tool_name, "patchTool");
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&tool_calls[4].input)
+                .expect("apply patch input parses"),
+            json!({
+                "callId": "patch_1",
+                "operation": {
+                    "type": "update_file",
+                    "path": "src/lib.rs",
+                    "diff": "@@"
+                }
+            })
+        );
+        assert_eq!(tool_calls[5].tool_name, "mcp.lookup");
+        assert_eq!(tool_calls[5].provider_executed, Some(true));
+        assert_eq!(tool_calls[5].dynamic, Some(true));
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&tool_calls[5].input).expect("mcp input parses"),
+            json!({
+                "query": "rust"
+            })
+        );
+        assert_eq!(tool_results[2].tool_name, "mcp.lookup");
+        assert_eq!(tool_results[2].dynamic, Some(true));
+        assert_eq!(
+            tool_results[2].result.as_value(),
+            &json!({
+                "type": "call",
+                "serverLabel": "docs",
+                "name": "lookup",
+                "arguments": "{\"query\":\"rust\"}",
+                "output": "{\"answer\":\"ok\"}"
+            })
+        );
+
+        assert_eq!(tool_calls[6].tool_name, "mcp.deploy");
+        assert_eq!(tool_calls[6].provider_executed, Some(true));
+        assert_eq!(tool_calls[6].dynamic, Some(true));
+        assert_eq!(approvals[0].approval_id, "approval_1");
+        assert_eq!(approvals[0].tool_call_id, "mcp_pending_1");
+        assert_eq!(tool_calls[7].tool_name, "computer_use");
+        assert_eq!(tool_calls[7].input, "");
+        assert_eq!(tool_calls[7].provider_executed, Some(true));
+        assert_eq!(
+            tool_results[3].result.as_value(),
+            &json!({
+                "type": "computer_use_tool_result",
+                "status": "completed"
             })
         );
     }
