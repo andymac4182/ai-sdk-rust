@@ -150,17 +150,26 @@ blocker that needs human input.
    exceptions only when mirroring upstream package names.
 13. Do not churn dependencies, CI, or unrelated modules unless the next SDK
     slice genuinely requires it.
-14. Port every upstream provider package in its matching crate. Prefer
+14. Work in this order: finish all common/core SDK packages and Vercel AI
+    Gateway provider coverage first, then return to the remaining standalone
+    providers. The first phase includes `packages/ai`, `packages/provider`,
+    `packages/provider-utils`, `packages/openai-compatible`,
+    `packages/open-responses`, `packages/gateway`, the Vercel AI Gateway
+    OpenAI-compatible and Open Responses routes, and portable non-provider
+    package rows such as MCP, OTel, Workflow, telemetry, logger, UI transport,
+    chat/completion transport, and test-server support. Do not pick another
+    unrelated standalone provider slice while those rows remain unverified.
+15. Port every upstream provider package in its matching crate. Prefer
     contract-first typed provider crates with fake/deterministic tests, then add
     HTTP/gateway-backed integration tests where credentials are available. Do
     not add root modules for provider-owned API except re-export shims or
     cross-crate primitives that are not owned by the provider package.
-15. Port examples and docs once the corresponding API works. Rust examples
+16. Port examples and docs once the corresponding API works. Rust examples
     should be runnable and should map clearly to upstream examples.
-16. When enough works end to end, add a kitchen sink example app that
+17. When enough works end to end, add a kitchen sink example app that
     demonstrates working generate text, tool execution, provider contracts, and
     any available gateway-backed validation.
-17. Keep expanding until the parity ledger is complete. A single slice is never
+18. Keep expanding until the parity ledger is complete. A single slice is never
     enough unless the ledger already proves full upstream parity.
 
 ## Parallel Work
@@ -196,7 +205,9 @@ Repeat this loop until the goal is complete or you hit a real blocker:
 
 1. Pull the latest `main` into your worktree branch.
 2. Re-scan or consult `docs/upstream-parity.md`.
-3. Pick the highest-value unported or unverified upstream package/API/provider.
+3. Pick the highest-value unported or unverified upstream package/API/provider,
+   respecting the required ordering: common/core SDK packages and Vercel AI
+   Gateway first, unrelated standalone providers after those rows are closed.
 4. Implement it with tests and docs/examples where useful.
 5. Update `docs/upstream-parity.md` with status, evidence, and next queue.
 6. Run validation.
