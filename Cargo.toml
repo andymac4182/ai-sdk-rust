@@ -2,6 +2,7 @@
 members = [
     ".",
     "crates/ai-sdk-gateway",
+    "crates/ai-sdk-openai-compatible",
     "crates/ai-sdk-provider",
     "crates/ai-sdk-provider-utils",
     "crates/ai-sdk-assemblyai",
@@ -42,6 +43,7 @@ all = "warn"
 
 [dependencies]
 ai-sdk-gateway = { path = "crates/ai-sdk-gateway" }
+ai-sdk-openai-compatible = { path = "crates/ai-sdk-openai-compatible" }
 ai-sdk-provider = { path = "crates/ai-sdk-provider" }
 ai-sdk-provider-utils = { path = "crates/ai-sdk-provider-utils" }
 regex = "1.12.2"
