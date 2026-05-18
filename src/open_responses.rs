@@ -15,13 +15,14 @@ use crate::language_model::{
     FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
     LanguageModelCallOptions, LanguageModelContent, LanguageModelErrorStreamPart,
     LanguageModelFilePart, LanguageModelFinishReason, LanguageModelGenerateResult,
-    LanguageModelMessage, LanguageModelRawStreamPart, LanguageModelReasoning,
-    LanguageModelReasoningDelta, LanguageModelReasoningEnd, LanguageModelReasoningStart,
-    LanguageModelRequest, LanguageModelResponse, LanguageModelResponseFormat,
-    LanguageModelStreamFinish, LanguageModelStreamPart, LanguageModelStreamResponseMetadata,
-    LanguageModelStreamResult, LanguageModelStreamResultResponse, LanguageModelStreamStart,
-    LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd,
-    LanguageModelTextStart, LanguageModelTool, LanguageModelToolCall, LanguageModelToolChoice,
+    LanguageModelMessage, LanguageModelProviderTool, LanguageModelRawStreamPart,
+    LanguageModelReasoning, LanguageModelReasoningDelta, LanguageModelReasoningEnd,
+    LanguageModelReasoningStart, LanguageModelRequest, LanguageModelResponse,
+    LanguageModelResponseFormat, LanguageModelStreamFinish, LanguageModelStreamPart,
+    LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
+    LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
+    LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
+    LanguageModelTool, LanguageModelToolCall, LanguageModelToolChoice,
     LanguageModelToolContentPart, LanguageModelToolResultContentPart,
     LanguageModelToolResultOutput, LanguageModelUsage, LanguageModelUserContentPart,
     OutputTokenUsage,
@@ -36,8 +37,8 @@ use crate::provider_utils::{
     ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     ProviderApiResponseHandlerError, RuntimeEnvironment, combine_headers, convert_to_base64,
     create_event_source_response_handler, create_json_error_response_handler,
-    create_json_response_handler, get_top_level_media_type, post_json_to_api,
-    resolve_full_media_type, with_user_agent_suffix,
+    create_json_response_handler, create_tool_name_mapping, get_top_level_media_type,
+    post_json_to_api, resolve_full_media_type, with_user_agent_suffix,
 };
 use crate::warning::Warning;
 
@@ -858,6 +859,10 @@ fn open_responses_prepare_tools(
     tool_choice: &Option<LanguageModelToolChoice>,
     warnings: &mut Vec<Warning>,
 ) -> (Option<Vec<JsonValue>>, Option<JsonValue>) {
+    let provider_tool_names = open_responses_provider_tool_names();
+    let tool_name_mapping = create_tool_name_mapping(tools.iter().flatten(), &provider_tool_names);
+    let mut custom_provider_tool_names = BTreeSet::new();
+
     let prepared_tools = tools.as_ref().and_then(|tools| {
         let prepared_tools = tools
             .iter()
@@ -886,15 +891,19 @@ fn open_responses_prepare_tools(
                         function.insert("strict".to_string(), JsonValue::Bool(strict));
                     }
 
+                    if let Some(defer_loading) =
+                        open_responses_function_tool_defer_loading(tool.provider_options.as_ref())
+                    {
+                        function.insert("defer_loading".to_string(), defer_loading);
+                    }
+
                     Some(JsonValue::Object(function))
                 }
-                LanguageModelTool::Provider(tool) => {
-                    warnings.push(Warning::Unsupported {
-                        feature: format!("provider-defined tool {}", tool.id),
-                        details: None,
-                    });
-                    None
-                }
+                LanguageModelTool::Provider(tool) => open_responses_prepare_provider_tool(
+                    tool,
+                    warnings,
+                    &mut custom_provider_tool_names,
+                ),
             })
             .collect::<Vec<_>>();
 
@@ -905,13 +914,422 @@ fn open_responses_prepare_tools(
         LanguageModelToolChoice::Auto => JsonValue::String("auto".to_string()),
         LanguageModelToolChoice::None => JsonValue::String("none".to_string()),
         LanguageModelToolChoice::Required => JsonValue::String("required".to_string()),
-        LanguageModelToolChoice::Tool { tool_name } => json!({
-            "type": "function",
-            "name": tool_name
-        }),
+        LanguageModelToolChoice::Tool { tool_name } => {
+            let resolved_tool_name = tool_name_mapping.to_provider_tool_name(tool_name);
+
+            if open_responses_hosted_tool_choice_type(&resolved_tool_name) {
+                json!({ "type": resolved_tool_name })
+            } else if custom_provider_tool_names.contains(&resolved_tool_name) {
+                json!({
+                    "type": "custom",
+                    "name": resolved_tool_name
+                })
+            } else {
+                json!({
+                    "type": "function",
+                    "name": resolved_tool_name
+                })
+            }
+        }
     });
 
     (prepared_tools, prepared_tool_choice)
+}
+
+fn open_responses_provider_tool_names() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "openai.code_interpreter".to_string(),
+            "code_interpreter".to_string(),
+        ),
+        ("openai.file_search".to_string(), "file_search".to_string()),
+        (
+            "openai.image_generation".to_string(),
+            "image_generation".to_string(),
+        ),
+        ("openai.local_shell".to_string(), "local_shell".to_string()),
+        ("openai.shell".to_string(), "shell".to_string()),
+        ("openai.web_search".to_string(), "web_search".to_string()),
+        (
+            "openai.web_search_preview".to_string(),
+            "web_search_preview".to_string(),
+        ),
+        ("openai.mcp".to_string(), "mcp".to_string()),
+        ("openai.apply_patch".to_string(), "apply_patch".to_string()),
+        ("openai.tool_search".to_string(), "tool_search".to_string()),
+    ])
+}
+
+fn open_responses_function_tool_defer_loading(
+    provider_options: Option<&ProviderOptions>,
+) -> Option<JsonValue> {
+    provider_options
+        .and_then(|provider_options| provider_options.get("openai"))
+        .and_then(|openai_options| openai_options.get("deferLoading"))
+        .filter(|value| value.is_boolean())
+        .cloned()
+}
+
+fn open_responses_prepare_provider_tool(
+    tool: &LanguageModelProviderTool,
+    warnings: &mut Vec<Warning>,
+    custom_provider_tool_names: &mut BTreeSet<String>,
+) -> Option<JsonValue> {
+    let prepared = match tool.id.as_str() {
+        "openai.file_search" => open_responses_file_search_tool(&tool.args),
+        "openai.local_shell" => open_responses_tool_with_type("local_shell"),
+        "openai.shell" => open_responses_shell_tool(&tool.args),
+        "openai.apply_patch" => open_responses_tool_with_type("apply_patch"),
+        "openai.web_search_preview" => open_responses_web_search_preview_tool(&tool.args),
+        "openai.web_search" => open_responses_web_search_tool(&tool.args),
+        "openai.code_interpreter" => open_responses_code_interpreter_tool(&tool.args),
+        "openai.image_generation" => open_responses_image_generation_tool(&tool.args),
+        "openai.mcp" => open_responses_mcp_tool(&tool.args),
+        "openai.custom" => {
+            custom_provider_tool_names.insert(tool.name.clone());
+            open_responses_custom_tool(tool)
+        }
+        "openai.tool_search" => open_responses_tool_search_tool(&tool.args),
+        _ => {
+            warnings.push(Warning::Unsupported {
+                feature: format!("provider-defined tool {}", tool.id),
+                details: None,
+            });
+            return None;
+        }
+    };
+
+    Some(JsonValue::Object(prepared))
+}
+
+fn open_responses_tool_with_type(tool_type: &str) -> JsonObject {
+    let mut tool = JsonObject::new();
+    tool.insert("type".to_string(), JsonValue::String(tool_type.to_string()));
+    tool
+}
+
+fn open_responses_arg(args: &JsonObject, key: &str) -> Option<JsonValue> {
+    args.get(key).filter(|value| !value.is_null()).cloned()
+}
+
+fn open_responses_insert_arg(
+    target: &mut JsonObject,
+    target_key: &str,
+    args: &JsonObject,
+    source_key: &str,
+) {
+    if let Some(value) = open_responses_arg(args, source_key) {
+        target.insert(target_key.to_string(), value);
+    }
+}
+
+fn open_responses_file_search_tool(args: &JsonObject) -> JsonObject {
+    let mut tool = open_responses_tool_with_type("file_search");
+    open_responses_insert_arg(&mut tool, "vector_store_ids", args, "vectorStoreIds");
+    open_responses_insert_arg(&mut tool, "max_num_results", args, "maxNumResults");
+
+    if let Some(ranking) = args.get("ranking").and_then(JsonValue::as_object) {
+        let mut ranking_options = JsonObject::new();
+        open_responses_insert_arg(&mut ranking_options, "ranker", ranking, "ranker");
+        open_responses_insert_arg(
+            &mut ranking_options,
+            "score_threshold",
+            ranking,
+            "scoreThreshold",
+        );
+
+        if !ranking_options.is_empty() {
+            tool.insert(
+                "ranking_options".to_string(),
+                JsonValue::Object(ranking_options),
+            );
+        }
+    }
+
+    open_responses_insert_arg(&mut tool, "filters", args, "filters");
+    tool
+}
+
+fn open_responses_web_search_preview_tool(args: &JsonObject) -> JsonObject {
+    let mut tool = open_responses_tool_with_type("web_search_preview");
+    open_responses_insert_arg(&mut tool, "search_context_size", args, "searchContextSize");
+    open_responses_insert_arg(&mut tool, "user_location", args, "userLocation");
+    tool
+}
+
+fn open_responses_web_search_tool(args: &JsonObject) -> JsonObject {
+    let mut tool = open_responses_tool_with_type("web_search");
+    open_responses_insert_arg(&mut tool, "external_web_access", args, "externalWebAccess");
+
+    if let Some(filters) = args.get("filters").and_then(JsonValue::as_object) {
+        let mut mapped_filters = JsonObject::new();
+        open_responses_insert_arg(
+            &mut mapped_filters,
+            "allowed_domains",
+            filters,
+            "allowedDomains",
+        );
+
+        if !mapped_filters.is_empty() {
+            tool.insert("filters".to_string(), JsonValue::Object(mapped_filters));
+        }
+    }
+
+    open_responses_insert_arg(&mut tool, "search_context_size", args, "searchContextSize");
+    open_responses_insert_arg(&mut tool, "user_location", args, "userLocation");
+    tool
+}
+
+fn open_responses_code_interpreter_tool(args: &JsonObject) -> JsonObject {
+    let mut tool = open_responses_tool_with_type("code_interpreter");
+    let container = match open_responses_arg(args, "container") {
+        Some(JsonValue::String(container_id)) => JsonValue::String(container_id),
+        Some(JsonValue::Object(container)) => {
+            let mut mapped_container = JsonObject::new();
+            mapped_container.insert("type".to_string(), JsonValue::String("auto".to_string()));
+            open_responses_insert_arg(&mut mapped_container, "file_ids", &container, "fileIds");
+            JsonValue::Object(mapped_container)
+        }
+        _ => json!({ "type": "auto" }),
+    };
+
+    tool.insert("container".to_string(), container);
+    tool
+}
+
+fn open_responses_image_generation_tool(args: &JsonObject) -> JsonObject {
+    let mut tool = open_responses_tool_with_type("image_generation");
+    open_responses_insert_arg(&mut tool, "background", args, "background");
+    open_responses_insert_arg(&mut tool, "input_fidelity", args, "inputFidelity");
+
+    if let Some(mask) = args.get("inputImageMask").and_then(JsonValue::as_object) {
+        let mut mapped_mask = JsonObject::new();
+        open_responses_insert_arg(&mut mapped_mask, "file_id", mask, "fileId");
+        open_responses_insert_arg(&mut mapped_mask, "image_url", mask, "imageUrl");
+
+        if !mapped_mask.is_empty() {
+            tool.insert(
+                "input_image_mask".to_string(),
+                JsonValue::Object(mapped_mask),
+            );
+        }
+    }
+
+    open_responses_insert_arg(&mut tool, "model", args, "model");
+    open_responses_insert_arg(&mut tool, "moderation", args, "moderation");
+    open_responses_insert_arg(&mut tool, "partial_images", args, "partialImages");
+    open_responses_insert_arg(&mut tool, "quality", args, "quality");
+    open_responses_insert_arg(&mut tool, "output_compression", args, "outputCompression");
+    open_responses_insert_arg(&mut tool, "output_format", args, "outputFormat");
+    open_responses_insert_arg(&mut tool, "size", args, "size");
+    tool
+}
+
+fn open_responses_mcp_tool(args: &JsonObject) -> JsonObject {
+    let mut tool = open_responses_tool_with_type("mcp");
+    open_responses_insert_arg(&mut tool, "server_label", args, "serverLabel");
+
+    if let Some(allowed_tools) = args.get("allowedTools") {
+        let mapped_allowed_tools = if let Some(filter) = allowed_tools.as_object() {
+            let mut mapped_filter = JsonObject::new();
+            open_responses_insert_arg(&mut mapped_filter, "read_only", filter, "readOnly");
+            open_responses_insert_arg(&mut mapped_filter, "tool_names", filter, "toolNames");
+            JsonValue::Object(mapped_filter)
+        } else {
+            allowed_tools.clone()
+        };
+        tool.insert("allowed_tools".to_string(), mapped_allowed_tools);
+    }
+
+    open_responses_insert_arg(&mut tool, "authorization", args, "authorization");
+    open_responses_insert_arg(&mut tool, "connector_id", args, "connectorId");
+    open_responses_insert_arg(&mut tool, "headers", args, "headers");
+
+    let require_approval = args
+        .get("requireApproval")
+        .and_then(open_responses_mcp_require_approval)
+        .unwrap_or_else(|| JsonValue::String("never".to_string()));
+    tool.insert("require_approval".to_string(), require_approval);
+
+    open_responses_insert_arg(&mut tool, "server_description", args, "serverDescription");
+    open_responses_insert_arg(&mut tool, "server_url", args, "serverUrl");
+    tool
+}
+
+fn open_responses_mcp_require_approval(require_approval: &JsonValue) -> Option<JsonValue> {
+    if matches!(require_approval.as_str(), Some("always") | Some("never")) {
+        return Some(require_approval.clone());
+    }
+
+    let never = require_approval
+        .as_object()
+        .and_then(|approval| approval.get("never"))
+        .and_then(JsonValue::as_object)?;
+    let mut never_filter = JsonObject::new();
+    open_responses_insert_arg(&mut never_filter, "tool_names", never, "toolNames");
+    Some(json!({ "never": never_filter }))
+}
+
+fn open_responses_custom_tool(tool: &LanguageModelProviderTool) -> JsonObject {
+    let mut prepared = open_responses_tool_with_type("custom");
+    prepared.insert("name".to_string(), JsonValue::String(tool.name.clone()));
+    open_responses_insert_arg(&mut prepared, "description", &tool.args, "description");
+    open_responses_insert_arg(&mut prepared, "format", &tool.args, "format");
+    prepared
+}
+
+fn open_responses_shell_tool(args: &JsonObject) -> JsonObject {
+    let mut tool = open_responses_tool_with_type("shell");
+
+    if let Some(environment) = args.get("environment").and_then(JsonValue::as_object) {
+        let mapped_environment = open_responses_shell_environment(environment);
+        tool.insert(
+            "environment".to_string(),
+            JsonValue::Object(mapped_environment),
+        );
+    }
+
+    tool
+}
+
+fn open_responses_shell_environment(environment: &JsonObject) -> JsonObject {
+    match environment.get("type").and_then(JsonValue::as_str) {
+        Some("containerReference") => {
+            let mut mapped_environment = open_responses_tool_with_type("container_reference");
+            open_responses_insert_arg(
+                &mut mapped_environment,
+                "container_id",
+                environment,
+                "containerId",
+            );
+            mapped_environment
+        }
+        Some("containerAuto") => {
+            let mut mapped_environment = open_responses_tool_with_type("container_auto");
+            open_responses_insert_arg(&mut mapped_environment, "file_ids", environment, "fileIds");
+            open_responses_insert_arg(
+                &mut mapped_environment,
+                "memory_limit",
+                environment,
+                "memoryLimit",
+            );
+
+            if let Some(network_policy) = environment
+                .get("networkPolicy")
+                .and_then(JsonValue::as_object)
+            {
+                mapped_environment.insert(
+                    "network_policy".to_string(),
+                    JsonValue::Object(open_responses_shell_network_policy(network_policy)),
+                );
+            }
+
+            if let Some(skills) = environment.get("skills").and_then(JsonValue::as_array) {
+                mapped_environment.insert(
+                    "skills".to_string(),
+                    JsonValue::Array(
+                        skills
+                            .iter()
+                            .filter_map(open_responses_shell_skill)
+                            .map(JsonValue::Object)
+                            .collect(),
+                    ),
+                );
+            }
+
+            mapped_environment
+        }
+        _ => {
+            let mut mapped_environment = open_responses_tool_with_type("local");
+            open_responses_insert_arg(&mut mapped_environment, "skills", environment, "skills");
+            mapped_environment
+        }
+    }
+}
+
+fn open_responses_shell_network_policy(network_policy: &JsonObject) -> JsonObject {
+    if matches!(
+        network_policy.get("type").and_then(JsonValue::as_str),
+        Some("disabled")
+    ) {
+        return open_responses_tool_with_type("disabled");
+    }
+
+    let mut mapped_policy = open_responses_tool_with_type("allowlist");
+    open_responses_insert_arg(
+        &mut mapped_policy,
+        "allowed_domains",
+        network_policy,
+        "allowedDomains",
+    );
+    open_responses_insert_arg(
+        &mut mapped_policy,
+        "domain_secrets",
+        network_policy,
+        "domainSecrets",
+    );
+    mapped_policy
+}
+
+fn open_responses_shell_skill(skill: &JsonValue) -> Option<JsonObject> {
+    let skill = skill.as_object()?;
+
+    if matches!(
+        skill.get("type").and_then(JsonValue::as_str),
+        Some("skillReference")
+    ) {
+        let mut mapped_skill = open_responses_tool_with_type("skill_reference");
+        let skill_id = skill
+            .get("providerReference")
+            .and_then(JsonValue::as_object)
+            .and_then(|reference| reference.get("openai"))
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default();
+        mapped_skill.insert(
+            "skill_id".to_string(),
+            JsonValue::String(skill_id.to_string()),
+        );
+        mapped_skill.insert(
+            "version".to_string(),
+            open_responses_arg(skill, "version")
+                .unwrap_or_else(|| JsonValue::String("latest".to_string())),
+        );
+        return Some(mapped_skill);
+    }
+
+    let mut mapped_skill = open_responses_tool_with_type("inline");
+    open_responses_insert_arg(&mut mapped_skill, "name", skill, "name");
+    open_responses_insert_arg(&mut mapped_skill, "description", skill, "description");
+
+    if let Some(source) = skill.get("source").and_then(JsonValue::as_object) {
+        let mut mapped_source = open_responses_tool_with_type("base64");
+        open_responses_insert_arg(&mut mapped_source, "media_type", source, "mediaType");
+        open_responses_insert_arg(&mut mapped_source, "data", source, "data");
+        mapped_skill.insert("source".to_string(), JsonValue::Object(mapped_source));
+    }
+
+    Some(mapped_skill)
+}
+
+fn open_responses_tool_search_tool(args: &JsonObject) -> JsonObject {
+    let mut tool = open_responses_tool_with_type("tool_search");
+    open_responses_insert_arg(&mut tool, "execution", args, "execution");
+    open_responses_insert_arg(&mut tool, "description", args, "description");
+    open_responses_insert_arg(&mut tool, "parameters", args, "parameters");
+    tool
+}
+
+fn open_responses_hosted_tool_choice_type(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "code_interpreter"
+            | "file_search"
+            | "image_generation"
+            | "web_search_preview"
+            | "web_search"
+            | "mcp"
+            | "apply_patch"
+    )
 }
 
 fn open_responses_text_format(
@@ -2096,8 +2514,9 @@ mod tests {
     use crate::json::{JsonObject, JsonValue};
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelFilePart,
-        LanguageModelMessage, LanguageModelStreamPart, LanguageModelTextPart,
-        LanguageModelToolChoice, LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelMessage, LanguageModelProviderTool, LanguageModelStreamPart,
+        LanguageModelTextPart, LanguageModelTool, LanguageModelToolChoice,
+        LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::prompt::Prompt;
     use crate::provider::{ModelType, Provider, ProviderMetadata, ProviderOptions};
@@ -2504,6 +2923,187 @@ mod tests {
                 "description": "An answer object.",
                 "schema": object_schema,
                 "strict": true
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_openai_hosted_tools() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_tools",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Hosted tools prepared"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 7,
+                            "output_tokens": 3
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(&model, Prompt::from_prompt("Use hosted tools"))
+                .expect("prompt is valid")
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.web_search",
+                    "liveSearch",
+                    json_object(json!({
+                        "externalWebAccess": true,
+                        "filters": {
+                            "allowedDomains": ["example.com", "docs.rs"]
+                        },
+                        "searchContextSize": "high",
+                        "userLocation": {
+                            "type": "approximate",
+                            "country": "US",
+                            "city": "San Francisco",
+                            "region": "California",
+                            "timezone": "America/Los_Angeles"
+                        }
+                    })),
+                )))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.file_search",
+                    "fileSearch",
+                    json_object(json!({
+                        "vectorStoreIds": ["vs_123"],
+                        "maxNumResults": 5,
+                        "ranking": {
+                            "ranker": "auto",
+                            "scoreThreshold": 0.25
+                        },
+                        "filters": {
+                            "type": "eq",
+                            "key": "kind",
+                            "value": "docs"
+                        }
+                    })),
+                )))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.code_interpreter",
+                    "codeRunner",
+                    json_object(json!({
+                        "container": {
+                            "fileIds": ["file_123", "file_456"]
+                        }
+                    })),
+                )))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.custom",
+                    "write_sql",
+                    json_object(json!({
+                        "description": "Write SQL statements.",
+                        "format": {
+                            "type": "grammar",
+                            "syntax": "lark",
+                            "definition": "start: SELECT"
+                        }
+                    })),
+                )))
+                .with_tool_choice(LanguageModelToolChoice::Tool {
+                    tool_name: "liveSearch".to_string(),
+                }),
+        ));
+
+        assert_eq!(result.text, "Hosted tools prepared");
+        assert!(result.warnings.is_empty());
+
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "web_search",
+                    "external_web_access": true,
+                    "filters": {
+                        "allowed_domains": ["example.com", "docs.rs"]
+                    },
+                    "search_context_size": "high",
+                    "user_location": {
+                        "type": "approximate",
+                        "country": "US",
+                        "city": "San Francisco",
+                        "region": "California",
+                        "timezone": "America/Los_Angeles"
+                    }
+                },
+                {
+                    "type": "file_search",
+                    "vector_store_ids": ["vs_123"],
+                    "max_num_results": 5,
+                    "ranking_options": {
+                        "ranker": "auto",
+                        "score_threshold": 0.25
+                    },
+                    "filters": {
+                        "type": "eq",
+                        "key": "kind",
+                        "value": "docs"
+                    }
+                },
+                {
+                    "type": "code_interpreter",
+                    "container": {
+                        "type": "auto",
+                        "file_ids": ["file_123", "file_456"]
+                    }
+                },
+                {
+                    "type": "custom",
+                    "name": "write_sql",
+                    "description": "Write SQL statements.",
+                    "format": {
+                        "type": "grammar",
+                        "syntax": "lark",
+                        "definition": "start: SELECT"
+                    }
+                }
+            ])
+        );
+        assert_eq!(
+            request_body["tool_choice"],
+            json!({
+                "type": "web_search"
             })
         );
     }
@@ -3060,6 +3660,10 @@ mod tests {
                     .and_then(JsonValue::as_str)
                     .is_some_and(|output| output.contains("\"forecast\":\"sunny\""))
         }));
+    }
+
+    fn json_object(value: JsonValue) -> JsonObject {
+        serde_json::from_value(value).expect("value is a JSON object")
     }
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
