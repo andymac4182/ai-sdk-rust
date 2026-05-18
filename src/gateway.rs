@@ -6319,6 +6319,53 @@ mod tests {
     }
 
     #[test]
+    fn gateway_image_model_maps_partial_and_missing_usage() {
+        let call_count = Arc::new(Mutex::new(0usize));
+        let call_count_for_transport = Arc::clone(&call_count);
+        let transport: GatewayTransport = Arc::new(move |_request| -> GatewayTransportFuture {
+            let mut call_count = call_count_for_transport
+                .lock()
+                .expect("call count mutex is not poisoned");
+            *call_count += 1;
+            let response_body = match *call_count {
+                1 => json!({
+                    "images": ["iVBORw0KGgo="],
+                    "usage": {
+                        "inputTokens": 10
+                    }
+                }),
+                _ => json!({
+                    "images": ["iVBORw0KGgo="]
+                }),
+            };
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                response_body.to_string(),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .image_model("openai/gpt-image-1");
+
+        let partial_usage =
+            poll_ready(model.do_generate(ImageModelCallOptions::new(1).with_prompt("Partial")));
+        let usage = partial_usage.usage.expect("partial usage is preserved");
+        assert_eq!(usage.input_tokens, Some(10));
+        assert_eq!(usage.output_tokens, None);
+        assert_eq!(usage.total_tokens, None);
+
+        let missing_usage =
+            poll_ready(model.do_generate(ImageModelCallOptions::new(1).with_prompt("Missing")));
+        assert_eq!(missing_usage.usage, None);
+    }
+
+    #[test]
     fn gateway_reranking_model_reranks_through_rerank() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
