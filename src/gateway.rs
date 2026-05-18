@@ -6930,6 +6930,82 @@ mod tests {
                 .and_then(JsonValue::as_str),
             Some("Rate limit exceeded")
         );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("errorType"))
+                .and_then(JsonValue::as_str),
+            Some("rate_limit_exceeded")
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("statusCode"))
+                .and_then(JsonValue::as_u64),
+            Some(429)
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("isRetryable"))
+                .and_then(JsonValue::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_maps_heartbeat_only_sse_to_metadata() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                ":\n\n".to_string(),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .video_model("google/veo-2.0-generate-001");
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("bad prompt")));
+
+        assert!(result.videos.is_empty());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("errorMessage"))
+                .and_then(JsonValue::as_str),
+            Some("Invalid error response format: SSE stream ended without a data event")
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("errorType"))
+                .and_then(JsonValue::as_str),
+            Some("response_error")
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("statusCode"))
+                .and_then(JsonValue::as_u64),
+            Some(200)
+        );
     }
 
     #[test]

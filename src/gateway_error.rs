@@ -868,10 +868,16 @@ pub fn create_gateway_error_from_api_call(
     error: &ApiCallError,
     auth_method: Option<GatewayAuthMethod>,
 ) -> GatewayError {
+    let default_message = if error.message().is_empty() {
+        "Gateway request failed"
+    } else {
+        error.message()
+    };
+
     create_gateway_error_from_response(
         extract_gateway_api_call_response(error),
         error.status_code().unwrap_or(500),
-        "Gateway request failed",
+        default_message,
         auth_method,
     )
 }
@@ -1135,6 +1141,27 @@ mod tests {
             Some("Slow down")
         );
         assert_eq!(gateway_error.status_code(), 429);
+    }
+
+    #[test]
+    fn create_gateway_error_from_api_call_preserves_message_without_error_data() {
+        let api_error = ApiCallError::new(
+            "SSE stream ended without a data event",
+            "https://api.test",
+            json!({}),
+        )
+        .with_status_code(200);
+        let gateway_error = create_gateway_error_from_api_call(&api_error, None);
+
+        let response_error = gateway_error
+            .as_response()
+            .expect("empty error data maps to response error");
+        assert!(
+            response_error
+                .message()
+                .contains("SSE stream ended without a data event")
+        );
+        assert_eq!(response_error.status_code(), 200);
     }
 
     #[test]
