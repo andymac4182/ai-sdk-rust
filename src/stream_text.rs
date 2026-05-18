@@ -51,6 +51,11 @@ use crate::text_stream_response::{
     TextStreamResponse, TextStreamResponseInit, TextStreamResponseOptions,
     TextStreamResponseWriter, create_text_stream_response, pipe_text_stream_to_response,
 };
+use crate::ui_message_stream::{
+    UiMessageChunk, UiMessageStreamResponse, UiMessageStreamResponseInit,
+    UiMessageStreamResponseOptions, UiMessageStreamResponseWriter,
+    create_ui_message_stream_response, pipe_ui_message_stream_to_response,
+};
 use crate::warning::Warning;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1155,10 +1160,195 @@ pub struct StreamTextResult {
     pub steps: Vec<StreamTextStep>,
 }
 
+/// Options for converting a [`StreamTextResult`] into UI-message stream chunks.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamTextUiMessageStreamOptions {
+    /// Optional response message id to include in the stream-start chunk.
+    pub message_id: Option<String>,
+
+    /// Whether reasoning chunks should be included. Defaults to `true`.
+    pub send_reasoning: bool,
+
+    /// Whether the stream-start chunk should be included. Defaults to `true`.
+    pub send_start: bool,
+
+    /// Whether the stream-finish chunk should be included. Defaults to `true`.
+    pub send_finish: bool,
+}
+
+impl StreamTextUiMessageStreamOptions {
+    /// Creates default UI-message stream conversion options.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the response message id included in the stream-start chunk.
+    pub fn with_message_id(mut self, message_id: impl Into<String>) -> Self {
+        self.message_id = Some(message_id.into());
+        self
+    }
+
+    /// Sets whether reasoning chunks should be included.
+    pub fn with_send_reasoning(mut self, send_reasoning: bool) -> Self {
+        self.send_reasoning = send_reasoning;
+        self
+    }
+
+    /// Sets whether the stream-start chunk should be included.
+    pub fn with_send_start(mut self, send_start: bool) -> Self {
+        self.send_start = send_start;
+        self
+    }
+
+    /// Sets whether the stream-finish chunk should be included.
+    pub fn with_send_finish(mut self, send_finish: bool) -> Self {
+        self.send_finish = send_finish;
+        self
+    }
+}
+
+impl Default for StreamTextUiMessageStreamOptions {
+    fn default() -> Self {
+        Self {
+            message_id: None,
+            send_reasoning: true,
+            send_start: true,
+            send_finish: true,
+        }
+    }
+}
+
 impl StreamTextResult {
     /// Returns the final collected step.
     pub fn final_step(&self) -> Option<&StreamTextStep> {
         self.steps.last()
+    }
+
+    /// Converts collected stream parts into UI-message stream chunks.
+    pub fn to_ui_message_stream(&self) -> Vec<UiMessageChunk> {
+        self.to_ui_message_stream_with_options(StreamTextUiMessageStreamOptions::default())
+    }
+
+    /// Converts collected stream parts into UI-message stream chunks with options.
+    pub fn to_ui_message_stream_with_options(
+        &self,
+        options: StreamTextUiMessageStreamOptions,
+    ) -> Vec<UiMessageChunk> {
+        let mut chunks = Vec::new();
+
+        for part in &self.parts {
+            match part {
+                TextStreamPart::Start(_) => {
+                    if options.send_start {
+                        chunks.push(match &options.message_id {
+                            Some(message_id) => {
+                                UiMessageChunk::start_with_message_id(message_id.clone())
+                            }
+                            None => UiMessageChunk::start(),
+                        });
+                    }
+                }
+                TextStreamPart::StartStep(_) => {
+                    chunks.push(UiMessageChunk::start_step());
+                }
+                TextStreamPart::TextStart(part) => {
+                    chunks.push(UiMessageChunk::TextStart {
+                        id: part.id.clone(),
+                        provider_metadata: part.provider_metadata.clone(),
+                    });
+                }
+                TextStreamPart::TextDelta(part) => {
+                    chunks.push(UiMessageChunk::TextDelta {
+                        id: part.id.clone(),
+                        delta: part.text.clone(),
+                        provider_metadata: part.provider_metadata.clone(),
+                    });
+                }
+                TextStreamPart::TextEnd(part) => {
+                    chunks.push(UiMessageChunk::TextEnd {
+                        id: part.id.clone(),
+                        provider_metadata: part.provider_metadata.clone(),
+                    });
+                }
+                TextStreamPart::ReasoningStart(part) => {
+                    if options.send_reasoning {
+                        chunks.push(UiMessageChunk::ReasoningStart {
+                            id: part.id.clone(),
+                            provider_metadata: part.provider_metadata.clone(),
+                        });
+                    }
+                }
+                TextStreamPart::ReasoningDelta(part) => {
+                    if options.send_reasoning {
+                        chunks.push(UiMessageChunk::ReasoningDelta {
+                            id: part.id.clone(),
+                            delta: part.text.clone(),
+                            provider_metadata: part.provider_metadata.clone(),
+                        });
+                    }
+                }
+                TextStreamPart::ReasoningEnd(part) => {
+                    if options.send_reasoning {
+                        chunks.push(UiMessageChunk::ReasoningEnd {
+                            id: part.id.clone(),
+                            provider_metadata: part.provider_metadata.clone(),
+                        });
+                    }
+                }
+                TextStreamPart::Error(part) => {
+                    chunks.push(UiMessageChunk::error(ui_message_error_text(&part.error)));
+                }
+                TextStreamPart::FinishStep(_) => {
+                    chunks.push(UiMessageChunk::finish_step());
+                }
+                TextStreamPart::Finish(part) => {
+                    if options.send_finish {
+                        chunks.push(UiMessageChunk::finish_with_reason(
+                            part.finish_reason.clone(),
+                        ));
+                    }
+                }
+                TextStreamPart::ToolInputStart(_)
+                | TextStreamPart::ToolInputDelta(_)
+                | TextStreamPart::ToolInputEnd(_)
+                | TextStreamPart::ToolApprovalRequest(_)
+                | TextStreamPart::ToolCall(_)
+                | TextStreamPart::ToolResult(_)
+                | TextStreamPart::Custom(_)
+                | TextStreamPart::File(_)
+                | TextStreamPart::ReasoningFile(_)
+                | TextStreamPart::Source(_)
+                | TextStreamPart::Raw(_) => {}
+            }
+        }
+
+        chunks
+    }
+
+    /// Creates a UI-message stream response from collected stream parts.
+    pub fn to_ui_message_stream_response(
+        &self,
+        init: UiMessageStreamResponseInit,
+    ) -> UiMessageStreamResponse {
+        create_ui_message_stream_response(UiMessageStreamResponseOptions::from_init(
+            self.to_ui_message_stream(),
+            init,
+        ))
+    }
+
+    /// Pipes UI-message stream chunks to a response writer.
+    pub fn pipe_ui_message_stream_to_response<W>(
+        &self,
+        response: &mut W,
+        init: UiMessageStreamResponseInit,
+    ) -> Result<(), W::Error>
+    where
+        W: UiMessageStreamResponseWriter,
+    {
+        pipe_ui_message_stream_to_response(
+            response,
+            UiMessageStreamResponseOptions::from_init(self.to_ui_message_stream(), init),
+        )
     }
 
     /// Creates a text-stream response from the collected final-step text stream.
@@ -1985,6 +2175,13 @@ fn is_stream_text_chunk_callback_part(part: &TextStreamPart) -> bool {
     )
 }
 
+fn ui_message_error_text(error: &JsonValue) -> String {
+    error
+        .as_str()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "An error occurred.".to_string())
+}
+
 fn text_language_model_content(
     text: String,
     provider_metadata: Option<ProviderMetadata>,
@@ -2106,12 +2303,12 @@ mod tests {
     use crate::language_model::{
         FinishReason, InputTokenUsage, LanguageModelAssistantContentPart,
         LanguageModelErrorStreamPart, LanguageModelFinishReason, LanguageModelMessage,
-        LanguageModelRawStreamPart, LanguageModelStreamFinish, LanguageModelStreamResponseMetadata,
-        LanguageModelStreamResult, LanguageModelStreamResultResponse, LanguageModelStreamStart,
-        LanguageModelSystemMessage, LanguageModelTextDelta, LanguageModelTextPart,
-        LanguageModelToolCall, LanguageModelToolContentPart, LanguageModelToolResult,
-        LanguageModelToolResultOutput, LanguageModelUserContentPart, LanguageModelUserMessage,
-        OutputTokenUsage,
+        LanguageModelRawStreamPart, LanguageModelReasoningDelta, LanguageModelStreamFinish,
+        LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
+        LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSystemMessage,
+        LanguageModelTextDelta, LanguageModelTextPart, LanguageModelToolCall,
+        LanguageModelToolContentPart, LanguageModelToolResult, LanguageModelToolResultOutput,
+        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::mock_models::MockLanguageModel;
     use crate::prompt::Prompt;
@@ -2293,6 +2490,156 @@ mod tests {
         assert_eq!(
             text_response.decoded_body().expect("response body decodes"),
             result.text_stream
+        );
+    }
+
+    #[test]
+    fn stream_text_result_converts_to_ui_message_stream() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", ", ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Say hello")],
+        )));
+
+        assert_eq!(
+            serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize"),
+            json!([
+                { "type": "start" },
+                { "type": "start-step" },
+                { "type": "text-start", "id": "1" },
+                { "type": "text-delta", "id": "1", "delta": "Hello" },
+                { "type": "text-delta", "id": "1", "delta": ", " },
+                { "type": "text-delta", "id": "1", "delta": "world!" },
+                { "type": "text-end", "id": "1" },
+                { "type": "finish-step" },
+                { "type": "finish", "finishReason": "stop" }
+            ])
+        );
+    }
+
+    #[test]
+    fn stream_text_result_ui_message_stream_options_control_start_finish_and_reasoning() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("r1")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "r1", "hidden",
+                )),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("r1")),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "visible")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Say hello")],
+        )));
+
+        let chunks = result.to_ui_message_stream_with_options(
+            StreamTextUiMessageStreamOptions::new()
+                .with_message_id("msg-123")
+                .with_send_reasoning(false)
+                .with_send_finish(false),
+        );
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                { "type": "start", "messageId": "msg-123" },
+                { "type": "start-step" },
+                { "type": "text-start", "id": "1" },
+                { "type": "text-delta", "id": "1", "delta": "visible" },
+                { "type": "text-end", "id": "1" },
+                { "type": "finish-step" }
+            ])
+        );
+    }
+
+    #[test]
+    fn stream_text_result_creates_ui_message_stream_response() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Say hello")],
+        )));
+
+        let response = result.to_ui_message_stream_response(
+            UiMessageStreamResponseInit::new()
+                .with_status(201)
+                .with_header("x-ui", "yes"),
+        );
+
+        assert_eq!(response.status, 201);
+        assert_eq!(
+            response.headers.get("content-type").map(String::as_str),
+            Some(crate::ui_message_stream::UI_MESSAGE_STREAM_CONTENT_TYPE)
+        );
+        assert_eq!(
+            response.headers.get("x-ui").map(String::as_str),
+            Some("yes")
+        );
+        assert_eq!(
+            response.decoded_body().expect("response body decodes"),
+            vec![
+                r#"data: {"type":"start"}
+
+"#
+                .to_string(),
+                r#"data: {"type":"start-step"}
+
+"#
+                .to_string(),
+                r#"data: {"type":"text-start","id":"1"}
+
+"#
+                .to_string(),
+                r#"data: {"type":"text-delta","id":"1","delta":"Hello"}
+
+"#
+                .to_string(),
+                r#"data: {"type":"text-end","id":"1"}
+
+"#
+                .to_string(),
+                r#"data: {"type":"finish-step"}
+
+"#
+                .to_string(),
+                r#"data: {"type":"finish","finishReason":"stop"}
+
+"#
+                .to_string(),
+                "data: [DONE]\n\n".to_string()
+            ]
         );
     }
 

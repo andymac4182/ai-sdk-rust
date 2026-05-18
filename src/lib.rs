@@ -375,9 +375,10 @@ pub use stream_object::{
 };
 pub use stream_text::{
     StreamTextOptions, StreamTextResponseMetadata, StreamTextResult, StreamTextStep,
-    StreamTextStepPerformance, TextStreamFilePart, TextStreamFinishPart, TextStreamFinishStepPart,
-    TextStreamPart, TextStreamReasoningDeltaPart, TextStreamReasoningFilePart, TextStreamStartPart,
-    TextStreamStartStepPart, TextStreamTextDeltaPart, stream_text,
+    StreamTextStepPerformance, StreamTextUiMessageStreamOptions, TextStreamFilePart,
+    TextStreamFinishPart, TextStreamFinishStepPart, TextStreamPart, TextStreamReasoningDeltaPart,
+    TextStreamReasoningFilePart, TextStreamStartPart, TextStreamStartStepPart,
+    TextStreamTextDeltaPart, stream_text,
 };
 pub use text_stream_response::{
     TEXT_STREAM_CONTENT_TYPE, TextStreamResponse, TextStreamResponseInit,
