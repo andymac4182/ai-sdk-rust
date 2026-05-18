@@ -10,7 +10,7 @@ use time::OffsetDateTime;
 
 use crate::file_data::FileData;
 use crate::headers::Headers;
-use crate::json::{JsonObject, JsonValue};
+use crate::json::{JsonObject, JsonValue, NonNullJsonValue};
 use crate::language_model::{
     FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
     LanguageModelCallOptions, LanguageModelContent, LanguageModelErrorStreamPart,
@@ -23,7 +23,7 @@ use crate::language_model::{
     LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
     LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
     LanguageModelTool, LanguageModelToolCall, LanguageModelToolChoice,
-    LanguageModelToolContentPart, LanguageModelToolResultContentPart,
+    LanguageModelToolContentPart, LanguageModelToolResult, LanguageModelToolResultContentPart,
     LanguageModelToolResultOutput, LanguageModelUsage, LanguageModelUserContentPart,
     OutputTokenUsage,
 };
@@ -265,6 +265,7 @@ impl OpenResponsesLanguageModel {
                 response.raw_value,
                 response.response_headers,
                 request_body_for_response,
+                &options.tools,
                 warnings,
             ),
             Err(error) => self.generate_result_from_error(error, request_body_for_error),
@@ -359,9 +360,10 @@ impl OpenResponsesLanguageModel {
         raw_response: Option<JsonValue>,
         response_headers: Option<Headers>,
         request_body: JsonValue,
+        tools: &Option<Vec<LanguageModelTool>>,
         warnings: Vec<Warning>,
     ) -> LanguageModelGenerateResult {
-        let (content, has_tool_calls) = open_responses_content(&response);
+        let (content, has_tool_calls) = open_responses_content(&response, tools);
         let usage = open_responses_usage(response.get("usage"));
         let finish_reason = map_open_responses_finish_reason(
             response
@@ -1368,9 +1370,15 @@ fn open_responses_text_format(
     Some(JsonValue::Object(format))
 }
 
-fn open_responses_content(response: &JsonValue) -> (Vec<LanguageModelContent>, bool) {
+fn open_responses_content(
+    response: &JsonValue,
+    tools: &Option<Vec<LanguageModelTool>>,
+) -> (Vec<LanguageModelContent>, bool) {
     let mut content = Vec::new();
     let mut has_tool_calls = false;
+    let provider_tool_names = open_responses_provider_tool_names();
+    let tool_name_mapping = create_tool_name_mapping(tools.iter().flatten(), &provider_tool_names);
+    let web_search_tool_name = open_responses_web_search_response_tool_name(tools);
 
     for part in response
         .get("output")
@@ -1430,11 +1438,183 @@ fn open_responses_content(response: &JsonValue) -> (Vec<LanguageModelContent>, b
                     input,
                 )));
             }
+            Some("web_search_call") => {
+                let tool_call_id = part
+                    .get("id")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default();
+                let tool_name = tool_name_mapping.to_custom_tool_name(&web_search_tool_name);
+
+                content.push(LanguageModelContent::ToolCall(
+                    LanguageModelToolCall::new(tool_call_id, tool_name.clone(), "{}")
+                        .with_provider_executed(true),
+                ));
+                open_responses_push_tool_result(
+                    &mut content,
+                    tool_call_id,
+                    &tool_name,
+                    open_responses_web_search_output(part.get("action")),
+                );
+            }
+            Some("file_search_call") => {
+                let tool_call_id = part
+                    .get("id")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default();
+                let tool_name = tool_name_mapping.to_custom_tool_name("file_search");
+
+                content.push(LanguageModelContent::ToolCall(
+                    LanguageModelToolCall::new(tool_call_id, tool_name.clone(), "{}")
+                        .with_provider_executed(true),
+                ));
+                open_responses_push_tool_result(
+                    &mut content,
+                    tool_call_id,
+                    &tool_name,
+                    open_responses_file_search_output(part),
+                );
+            }
+            Some("code_interpreter_call") => {
+                let tool_call_id = part
+                    .get("id")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default();
+                let tool_name = tool_name_mapping.to_custom_tool_name("code_interpreter");
+                let input = json!({
+                    "code": part.get("code").cloned().unwrap_or(JsonValue::Null),
+                    "containerId": part.get("container_id").cloned().unwrap_or(JsonValue::Null)
+                })
+                .to_string();
+
+                content.push(LanguageModelContent::ToolCall(
+                    LanguageModelToolCall::new(tool_call_id, tool_name.clone(), input)
+                        .with_provider_executed(true),
+                ));
+                open_responses_push_tool_result(
+                    &mut content,
+                    tool_call_id,
+                    &tool_name,
+                    json!({
+                        "outputs": part.get("outputs").cloned().unwrap_or(JsonValue::Null)
+                    }),
+                );
+            }
+            Some("image_generation_call") => {
+                let tool_call_id = part
+                    .get("id")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default();
+                let tool_name = tool_name_mapping.to_custom_tool_name("image_generation");
+
+                content.push(LanguageModelContent::ToolCall(
+                    LanguageModelToolCall::new(tool_call_id, tool_name.clone(), "{}")
+                        .with_provider_executed(true),
+                ));
+                open_responses_push_tool_result(
+                    &mut content,
+                    tool_call_id,
+                    &tool_name,
+                    json!({
+                        "result": part.get("result").cloned().unwrap_or(JsonValue::Null)
+                    }),
+                );
+            }
             _ => {}
         }
     }
 
     (content, has_tool_calls)
+}
+
+fn open_responses_web_search_response_tool_name(tools: &Option<Vec<LanguageModelTool>>) -> String {
+    tools
+        .iter()
+        .flatten()
+        .find_map(|tool| {
+            let LanguageModelTool::Provider(tool) = tool else {
+                return None;
+            };
+
+            match tool.id.as_str() {
+                "openai.web_search" => Some("web_search".to_string()),
+                "openai.web_search_preview" => Some("web_search_preview".to_string()),
+                _ => None,
+            }
+        })
+        .unwrap_or_else(|| "web_search".to_string())
+}
+
+fn open_responses_web_search_output(action: Option<&JsonValue>) -> JsonValue {
+    let Some(action) = action.and_then(JsonValue::as_object) else {
+        return json!({});
+    };
+
+    match action.get("type").and_then(JsonValue::as_str) {
+        Some("search") => {
+            let mut mapped_action = open_responses_tool_with_type("search");
+            open_responses_insert_arg(&mut mapped_action, "query", action, "query");
+
+            let mut output = JsonObject::new();
+            output.insert("action".to_string(), JsonValue::Object(mapped_action));
+            open_responses_insert_arg(&mut output, "sources", action, "sources");
+            JsonValue::Object(output)
+        }
+        Some("open_page") => json!({
+            "action": {
+                "type": "openPage",
+                "url": action.get("url").cloned().unwrap_or(JsonValue::Null)
+            }
+        }),
+        Some("find_in_page") => json!({
+            "action": {
+                "type": "findInPage",
+                "url": action.get("url").cloned().unwrap_or(JsonValue::Null),
+                "pattern": action.get("pattern").cloned().unwrap_or(JsonValue::Null)
+            }
+        }),
+        _ => json!({}),
+    }
+}
+
+fn open_responses_file_search_output(part: &JsonValue) -> JsonValue {
+    json!({
+        "queries": part.get("queries").cloned().unwrap_or_else(|| JsonValue::Array(Vec::new())),
+        "results": part
+            .get("results")
+            .and_then(JsonValue::as_array)
+            .map(|results| {
+                JsonValue::Array(
+                    results
+                        .iter()
+                        .map(open_responses_file_search_result)
+                        .collect(),
+                )
+            })
+            .unwrap_or(JsonValue::Null)
+    })
+}
+
+fn open_responses_file_search_result(result: &JsonValue) -> JsonValue {
+    json!({
+        "attributes": result.get("attributes").cloned().unwrap_or_else(|| json!({})),
+        "fileId": result.get("file_id").cloned().unwrap_or(JsonValue::Null),
+        "filename": result.get("filename").cloned().unwrap_or(JsonValue::Null),
+        "score": result.get("score").cloned().unwrap_or(JsonValue::Null),
+        "text": result.get("text").cloned().unwrap_or(JsonValue::Null)
+    })
+}
+
+fn open_responses_push_tool_result(
+    content: &mut Vec<LanguageModelContent>,
+    tool_call_id: &str,
+    tool_name: &str,
+    result: JsonValue,
+) {
+    if let Ok(result) = NonNullJsonValue::new(result) {
+        content.push(LanguageModelContent::ToolResult(
+            LanguageModelToolResult::new(tool_call_id, tool_name, result),
+        ));
+    }
 }
 
 fn map_open_responses_finish_reason(
@@ -3104,6 +3284,202 @@ mod tests {
             request_body["tool_choice"],
             json!({
                 "type": "web_search"
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_maps_openai_hosted_tool_outputs() {
+        let transport: OpenResponsesTransport =
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_hosted_tool_outputs",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "id": "ws_123",
+                                "type": "web_search_call",
+                                "status": "completed",
+                                "action": {
+                                    "type": "search",
+                                    "query": "AI SDK Rust",
+                                    "sources": [
+                                        {
+                                            "type": "url",
+                                            "url": "https://example.com"
+                                        }
+                                    ]
+                                }
+                            },
+                            {
+                                "id": "fs_123",
+                                "type": "file_search_call",
+                                "status": "completed",
+                                "queries": ["rust sdk"],
+                                "results": [
+                                    {
+                                        "attributes": {
+                                            "kind": "docs"
+                                        },
+                                        "file_id": "file_123",
+                                        "filename": "guide.md",
+                                        "score": 0.91,
+                                        "text": "Guide text"
+                                    }
+                                ]
+                            },
+                            {
+                                "id": "ci_123",
+                                "type": "code_interpreter_call",
+                                "status": "completed",
+                                "code": "print(1)",
+                                "container_id": "container_123",
+                                "outputs": [
+                                    {
+                                        "type": "logs",
+                                        "logs": "1"
+                                    }
+                                ]
+                            },
+                            {
+                                "id": "ig_123",
+                                "type": "image_generation_call",
+                                "status": "completed",
+                                "result": "base64-image"
+                            },
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Hosted tools completed"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 11,
+                            "output_tokens": 7
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(&model, Prompt::from_prompt("Use hosted tools"))
+                .expect("prompt is valid")
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.web_search",
+                    "liveSearch",
+                    JsonObject::new(),
+                )))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.file_search",
+                    "docSearch",
+                    json_object(json!({
+                        "vectorStoreIds": ["vs_123"]
+                    })),
+                )))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.code_interpreter",
+                    "codeRunner",
+                    JsonObject::new(),
+                )))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.image_generation",
+                    "imageMaker",
+                    JsonObject::new(),
+                ))),
+        ));
+
+        assert_eq!(result.text, "Hosted tools completed");
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.tool_calls.len(), 4);
+        assert_eq!(result.tool_results.len(), 4);
+        assert!(
+            result
+                .tool_calls
+                .iter()
+                .all(|tool_call| tool_call.provider_executed == Some(true))
+        );
+        assert!(
+            result
+                .tool_results
+                .iter()
+                .all(|tool_result| tool_result.provider_executed == Some(true))
+        );
+        assert_eq!(result.tool_calls[0].tool_name, "liveSearch");
+        assert_eq!(result.tool_calls[0].provider_executed, Some(true));
+        assert_eq!(result.tool_results[0].tool_name, "liveSearch");
+        assert_eq!(
+            result.tool_results[0].output,
+            json!({
+                "action": {
+                    "type": "search",
+                    "query": "AI SDK Rust"
+                },
+                "sources": [
+                    {
+                        "type": "url",
+                        "url": "https://example.com"
+                    }
+                ]
+            })
+        );
+        assert_eq!(result.tool_calls[1].tool_name, "docSearch");
+        assert_eq!(
+            result.tool_results[1].output,
+            json!({
+                "queries": ["rust sdk"],
+                "results": [
+                    {
+                        "attributes": {
+                            "kind": "docs"
+                        },
+                        "fileId": "file_123",
+                        "filename": "guide.md",
+                        "score": 0.91,
+                        "text": "Guide text"
+                    }
+                ]
+            })
+        );
+        assert_eq!(result.tool_calls[2].tool_name, "codeRunner");
+        assert_eq!(
+            result.tool_calls[2].input,
+            json!({
+                "code": "print(1)",
+                "containerId": "container_123"
+            })
+        );
+        assert_eq!(
+            result.tool_results[2].output,
+            json!({
+                "outputs": [
+                    {
+                        "type": "logs",
+                        "logs": "1"
+                    }
+                ]
+            })
+        );
+        assert_eq!(result.tool_calls[3].tool_name, "imageMaker");
+        assert_eq!(
+            result.tool_results[3].output,
+            json!({
+                "result": "base64-image"
             })
         );
     }
