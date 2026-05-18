@@ -1616,6 +1616,10 @@ fn open_responses_compaction_item(item_id: &str, encrypted_content: Option<&str>
 }
 
 fn open_responses_function_call_arguments(input: &JsonValue) -> String {
+    if input.is_null() {
+        return "{}".to_string();
+    }
+
     input
         .as_str()
         .map(str::to_string)
@@ -8801,6 +8805,11 @@ mod tests {
                     "get_weather",
                     JsonValue::String("{\"location\":\"Berlin\"}".to_string()),
                 )),
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call_null",
+                    "get_weather",
+                    JsonValue::Null,
+                )),
             ])),
         ])));
 
@@ -8840,6 +8849,12 @@ mod tests {
                         "call_id": "call_string",
                         "name": "get_weather",
                         "arguments": "{\"location\":\"Berlin\"}"
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_null",
+                        "name": "get_weather",
+                        "arguments": "{}"
                     }
                 ]
             }))
