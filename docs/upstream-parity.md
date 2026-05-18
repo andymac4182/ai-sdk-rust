@@ -249,14 +249,16 @@ focused tests for each portable behavior before changing rows to `verified`.
    library surfaces are complete enough for end-to-end use.
 7. Port MCP, OTel, Workflow, UI-message, chat/completion transport, telemetry,
    logger, and HTTP server example surfaces.
-8. Package-aligned crate splitting is required, not optional cleanup. The Rust
-   workspace must converge on a 1:1 mapping between Rust crates and upstream
-   `vercel/ai` TypeScript packages. Today the port is merging multiple upstream
-   packages into the single `ai-sdk-rust` crate; every additional package folded
-   into that crate increases the future extraction cost and makes dependency
-   boundaries harder to recover. New parity work should preserve the upstream
-   package boundary in module layout, public API ownership, docs, and tests, and
-   should prefer introducing or preparing the corresponding crate instead of
-   deepening the monolithic root crate. The root crate should become an
-   aggregate/re-export layer where useful, while package crates own their
-   corresponding upstream types, provider/options surface, docs, and tests.
+8. Package-aligned crate splitting is a required architecture direction, not a
+   future cleanup task. The Rust workspace must converge on a strict 1:1 mapping
+   between Rust crates and upstream `vercel/ai` TypeScript packages. The current
+   single `ai-sdk-rust` crate is already merging multiple upstream packages into
+   one Rust boundary, and continuing to add package surfaces there will make the
+   eventual split harder, riskier, and more expensive. Future iterations should
+   treat each upstream TypeScript package as owning a corresponding Rust crate by
+   default; adding more package-owned types, provider/options surfaces, docs, or
+   tests directly to the root crate should be considered temporary technical
+   debt that needs an explicit reason and a follow-up extraction path. The root
+   crate should move toward an aggregate/re-export role where useful, while
+   package crates own their corresponding upstream API, dependency boundary,
+   provider/options surface, docs, and tests.
