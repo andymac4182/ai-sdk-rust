@@ -663,6 +663,8 @@ fn merge_open_responses_provider_options(
         .trim();
     let camel_provider_options_name =
         open_responses_camel_case_provider_options_key(raw_provider_options_name);
+    let passthrough_options =
+        open_responses_provider_option_passthrough_enabled(raw_provider_options_name);
 
     if let Some(options) = provider_options.get(raw_provider_options_name) {
         if camel_provider_options_name != raw_provider_options_name {
@@ -672,13 +674,13 @@ fn merge_open_responses_provider_options(
             });
         }
 
-        body.extend(options.clone());
+        merge_open_responses_provider_option_object(options, passthrough_options, body);
     }
 
     if camel_provider_options_name != raw_provider_options_name
         && let Some(options) = provider_options.get(&camel_provider_options_name)
     {
-        body.extend(options.clone());
+        merge_open_responses_provider_option_object(options, passthrough_options, body);
     }
 
     merge_vercel_ai_gateway_open_responses_provider_options(
@@ -686,6 +688,31 @@ fn merge_open_responses_provider_options(
         provider_options,
         body,
     );
+}
+
+fn open_responses_provider_option_passthrough_enabled(provider_options_name: &str) -> bool {
+    matches!(
+        provider_options_name,
+        "openai" | "azure" | "vercel-ai-gateway"
+    )
+}
+
+fn merge_open_responses_provider_option_object(
+    options: &JsonObject,
+    passthrough_options: bool,
+    body: &mut JsonObject,
+) {
+    if passthrough_options {
+        body.extend(options.clone());
+        return;
+    }
+
+    for key in ["reasoningSummary", "reasoning_summary"] {
+        if let Some(value) = options.get(key) {
+            body.insert(key.to_string(), value.clone());
+            return;
+        }
+    }
 }
 
 fn merge_vercel_ai_gateway_open_responses_provider_options(
@@ -985,6 +1012,10 @@ fn open_responses_store_enabled(
         .next()
         .unwrap_or(provider_options_name)
         .trim();
+    if !open_responses_provider_option_passthrough_enabled(raw_provider_options_name) {
+        return true;
+    }
+
     let camel_provider_options_name =
         open_responses_camel_case_provider_options_key(raw_provider_options_name);
     let mut store = None;
@@ -5575,7 +5606,11 @@ mod tests {
         };
         let provider_options: ProviderOptions = serde_json::from_value(json!({
             "lmstudio": {
-                "reasoningSummary": "auto"
+                "reasoningSummary": "auto",
+                "store": false,
+                "metadata": {
+                    "trace": "ignored"
+                }
             }
         }))
         .expect("provider options deserialize");
@@ -5636,6 +5671,8 @@ mod tests {
             })
         );
         assert!(bodies[0].get("reasoningSummary").is_none());
+        assert!(bodies[0].get("store").is_none());
+        assert!(bodies[0].get("metadata").is_none());
         assert_eq!(
             bodies[1]["reasoning"],
             json!({
