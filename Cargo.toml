@@ -1,6 +1,7 @@
 [workspace]
 members = [
     ".",
+    "crates/ai-sdk-azure",
     "crates/ai-sdk-deepseek",
     "crates/ai-sdk-lmnt",
     "crates/ai-sdk-moonshotai",

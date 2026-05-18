@@ -78,6 +78,10 @@ pub struct OpenAICompatibleProviderSettings {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub query_params: BTreeMap<String, String>,
 
+    /// Provider ids for model types whose upstream package uses a non-default suffix.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_provider_names: BTreeMap<String, String>,
+
     /// Include usage information in streaming responses when supported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_usage: Option<bool>,
@@ -104,6 +108,7 @@ impl OpenAICompatibleProviderSettings {
             api_key: None,
             headers: Headers::new(),
             query_params: BTreeMap::new(),
+            model_provider_names: BTreeMap::new(),
             include_usage: None,
             supports_structured_outputs: None,
             supports_json_object_response_format: None,
@@ -126,6 +131,17 @@ impl OpenAICompatibleProviderSettings {
     /// Adds a custom URL query parameter.
     pub fn with_query_param(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.query_params.insert(name.into(), value.into());
+        self
+    }
+
+    /// Overrides the provider id used for a model type.
+    pub fn with_model_provider_name(
+        mut self,
+        model_type: impl Into<String>,
+        provider_name: impl Into<String>,
+    ) -> Self {
+        self.model_provider_names
+            .insert(model_type.into(), provider_name.into());
         self
     }
 
@@ -417,8 +433,14 @@ fn openai_compatible_model_config(
     settings: &OpenAICompatibleProviderSettings,
     transport: &OpenAICompatibleTransport,
 ) -> OpenAICompatibleModelConfig {
+    let provider = settings
+        .model_provider_names
+        .get(model_type)
+        .cloned()
+        .unwrap_or_else(|| format!("{}.{}", settings.name, model_type));
+
     OpenAICompatibleModelConfig {
-        provider: format!("{}.{}", settings.name, model_type),
+        provider,
         settings: settings.clone(),
         transport: Arc::clone(transport),
     }
