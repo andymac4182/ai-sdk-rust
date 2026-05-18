@@ -8,19 +8,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::OffsetDateTime;
 
+use crate::file_data::FileData;
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
 use crate::language_model::{
     FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
     LanguageModelCallOptions, LanguageModelContent, LanguageModelErrorStreamPart,
-    LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelMessage,
-    LanguageModelRawStreamPart, LanguageModelReasoning, LanguageModelReasoningDelta,
-    LanguageModelReasoningEnd, LanguageModelReasoningStart, LanguageModelRequest,
-    LanguageModelResponse, LanguageModelResponseFormat, LanguageModelStreamFinish,
-    LanguageModelStreamPart, LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
-    LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
-    LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
-    LanguageModelTool, LanguageModelToolCall, LanguageModelToolChoice,
+    LanguageModelFilePart, LanguageModelFinishReason, LanguageModelGenerateResult,
+    LanguageModelMessage, LanguageModelRawStreamPart, LanguageModelReasoning,
+    LanguageModelReasoningDelta, LanguageModelReasoningEnd, LanguageModelReasoningStart,
+    LanguageModelRequest, LanguageModelResponse, LanguageModelResponseFormat,
+    LanguageModelStreamFinish, LanguageModelStreamPart, LanguageModelStreamResponseMetadata,
+    LanguageModelStreamResult, LanguageModelStreamResultResponse, LanguageModelStreamStart,
+    LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd,
+    LanguageModelTextStart, LanguageModelTool, LanguageModelToolCall, LanguageModelToolChoice,
     LanguageModelToolContentPart, LanguageModelToolResultContentPart,
     LanguageModelToolResultOutput, LanguageModelUsage, LanguageModelUserContentPart,
     OutputTokenUsage,
@@ -32,9 +33,10 @@ use crate::provider::{
 use crate::provider_utils::{
     FetchErrorInfo, HandledFetchError, ParseJsonResult, PostJsonToApiOptions, ProviderApiRequest,
     ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
-    ProviderApiResponseHandlerError, RuntimeEnvironment, combine_headers,
+    ProviderApiResponseHandlerError, RuntimeEnvironment, combine_headers, convert_to_base64,
     create_event_source_response_handler, create_json_error_response_handler,
-    create_json_response_handler, post_json_to_api, with_user_agent_suffix,
+    create_json_response_handler, get_top_level_media_type, post_json_to_api,
+    resolve_full_media_type, with_user_agent_suffix,
 };
 use crate::warning::Warning;
 
@@ -679,11 +681,8 @@ fn open_responses_input(
                                 "text": text.text
                             }));
                         }
-                        LanguageModelUserContentPart::File(_) => {
-                            return Err(
-                                "Open Responses file prompt parts are not implemented yet."
-                                    .to_string(),
-                            );
+                        LanguageModelUserContentPart::File(file) => {
+                            content.push(open_responses_file_part(file)?);
                         }
                     }
                 }
@@ -764,6 +763,51 @@ fn open_responses_input(
     let instructions = (!system_messages.is_empty()).then(|| system_messages.join("\n"));
 
     Ok((input, instructions))
+}
+
+fn open_responses_file_part(file: &LanguageModelFilePart) -> Result<JsonValue, String> {
+    let top_level_media_type = get_top_level_media_type(&file.media_type);
+
+    match &file.data {
+        FileData::Reference { .. } => Err(
+            "Open Responses file parts with provider references are not implemented yet."
+                .to_string(),
+        ),
+        FileData::Text { .. } => {
+            Err("Open Responses text file parts are not implemented yet.".to_string())
+        }
+        FileData::Url { url } => {
+            if top_level_media_type == "image" {
+                Ok(json!({
+                    "type": "input_image",
+                    "image_url": url.as_str()
+                }))
+            } else {
+                Ok(json!({
+                    "type": "input_file",
+                    "file_url": url.as_str()
+                }))
+            }
+        }
+        FileData::Data { data } => {
+            let full_media_type =
+                resolve_full_media_type(file).map_err(|error| error.message().to_string())?;
+            let data_uri = format!("data:{full_media_type};base64,{}", convert_to_base64(data));
+
+            if top_level_media_type == "image" {
+                Ok(json!({
+                    "type": "input_image",
+                    "image_url": data_uri
+                }))
+            } else {
+                Ok(json!({
+                    "type": "input_file",
+                    "filename": file.filename.as_deref().unwrap_or("data"),
+                    "file_data": data_uri
+                }))
+            }
+        }
+    }
 }
 
 fn open_responses_tool_result_output(
@@ -1908,14 +1952,15 @@ mod tests {
         OpenResponsesProvider, OpenResponsesProviderSettings, OpenResponsesTransport,
         OpenResponsesTransportFuture, create_open_responses, map_open_responses_finish_reason,
     };
+    use crate::file_data::{FileData, FileDataContent};
     use crate::generate_object::{GenerateObjectOptions, generate_object};
     use crate::generate_text::{GenerateTextOptions, generate_text};
     use crate::headers::Headers;
     use crate::json::{JsonObject, JsonValue};
     use crate::language_model::{
-        FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelMessage,
-        LanguageModelStreamPart, LanguageModelTextPart, LanguageModelToolChoice,
-        LanguageModelUserContentPart, LanguageModelUserMessage,
+        FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelFilePart,
+        LanguageModelMessage, LanguageModelStreamPart, LanguageModelTextPart,
+        LanguageModelToolChoice, LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::prompt::Prompt;
     use crate::provider::{ModelType, Provider, ProviderMetadata, ProviderOptions};
@@ -1930,6 +1975,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
+    use url::Url;
 
     #[test]
     fn open_responses_provider_generates_text_with_request_and_response_metadata() {
@@ -2076,6 +2122,140 @@ mod tests {
                 "metadata": {
                     "trace": "responses-test"
                 }
+            }))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_user_file_prompt_parts() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_files",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "File prompt accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 9,
+                            "output_tokens": 4
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(
+                &model,
+                Prompt::from_messages(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![
+                        LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
+                            "Summarize these inputs",
+                        )),
+                        LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                            FileData::Data {
+                                data: FileDataContent::Bytes(vec![0, 1, 2, 3]),
+                            },
+                            "image/png",
+                        )),
+                        LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                            FileData::Url {
+                                url: Url::parse("https://example.com/photo.jpg")
+                                    .expect("url parses"),
+                            },
+                            "image/jpeg",
+                        )),
+                        LanguageModelUserContentPart::File(
+                            LanguageModelFilePart::new(
+                                FileData::Data {
+                                    data: FileDataContent::Base64("JVBERi0=".to_string()),
+                                },
+                                "application/pdf",
+                            )
+                            .with_filename("report.pdf"),
+                        ),
+                        LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                            FileData::Url {
+                                url: Url::parse("https://example.com/report.pdf")
+                                    .expect("url parses"),
+                            },
+                            "application/pdf",
+                        )),
+                    ]),
+                )]),
+            )
+            .expect("prompt is valid"),
+        ));
+
+        assert_eq!(result.text, "File prompt accepted");
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "gpt-4.1-mini",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Summarize these inputs"
+                            },
+                            {
+                                "type": "input_image",
+                                "image_url": "data:image/png;base64,AAECAw=="
+                            },
+                            {
+                                "type": "input_image",
+                                "image_url": "https://example.com/photo.jpg"
+                            },
+                            {
+                                "type": "input_file",
+                                "filename": "report.pdf",
+                                "file_data": "data:application/pdf;base64,JVBERi0="
+                            },
+                            {
+                                "type": "input_file",
+                                "file_url": "https://example.com/report.pdf"
+                            }
+                        ]
+                    }
+                ]
             }))
         );
     }
