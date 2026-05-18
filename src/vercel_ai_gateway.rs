@@ -2555,6 +2555,99 @@ mod tests {
     }
 
     #[test]
+    fn vercel_ai_gateway_openai_responses_streams_file_prompt_parts() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    openai_responses_stream_body(),
+                )
+                .with_headers(Headers::from([(
+                    "content-type".to_string(),
+                    "text/event-stream".to_string(),
+                )])))))
+            });
+        let provider = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://ai-gateway.test/v1/")
+            .with_transport(transport);
+        let model = provider.responses("openai/gpt-4.1-mini");
+        let result = poll_ready(stream_text(
+            StreamTextOptions::from_prompt(
+                &model,
+                Prompt::from_messages(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![
+                        LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
+                            "Summarize the report",
+                        )),
+                        LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                            FileData::Url {
+                                url: Url::parse("https://example.com/report.pdf")
+                                    .expect("url parses"),
+                            },
+                            "application/pdf",
+                        )),
+                    ]),
+                )]),
+            )
+            .expect("prompt is valid"),
+        ));
+
+        assert_eq!(result.text, "Hello Gateway Responses stream");
+        assert_eq!(
+            result.text_stream,
+            vec!["Hello ", "Gateway Responses stream"]
+        );
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(5));
+        assert_eq!(result.usage.output_tokens.total, Some(4));
+        assert_eq!(result.response.id.as_deref(), Some("resp_gateway_stream"));
+        assert!(result.provider_metadata.is_none());
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://ai-gateway.test/v1/responses");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "openai/gpt-4.1-mini",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Summarize the report"
+                            },
+                            {
+                                "type": "input_file",
+                                "file_url": "https://example.com/report.pdf"
+                            }
+                        ]
+                    }
+                ],
+                "stream": true
+            }))
+        );
+    }
+
+    #[test]
     fn vercel_ai_gateway_openai_responses_runs_generate_text_tool_loop_end_to_end() {
         let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
         let captured_requests_for_transport = Arc::clone(&captured_requests);
