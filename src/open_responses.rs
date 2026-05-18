@@ -5942,6 +5942,122 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_resolves_top_level_image_media_types() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_top_level_images",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Top-level images accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 9,
+                            "output_tokens": 4
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let png_base64 = "iVBORw0KGgo=";
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Base64(png_base64.to_string()),
+                    },
+                    "image/png",
+                )),
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Base64(png_base64.to_string()),
+                    },
+                    "image",
+                )),
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Url {
+                        url: Url::parse("https://example.com/x.png").expect("url parses"),
+                    },
+                    "image",
+                )),
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Base64(png_base64.to_string()),
+                    },
+                    "image/*",
+                )),
+            ])),
+        ])));
+
+        assert!(result.warnings.is_empty());
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "gpt-4.1-mini",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_image",
+                                "image_url": "data:image/png;base64,iVBORw0KGgo="
+                            },
+                            {
+                                "type": "input_image",
+                                "image_url": "data:image/png;base64,iVBORw0KGgo="
+                            },
+                            {
+                                "type": "input_image",
+                                "image_url": "https://example.com/x.png"
+                            },
+                            {
+                                "type": "input_image",
+                                "image_url": "data:image/png;base64,iVBORw0KGgo="
+                            }
+                        ]
+                    }
+                ]
+            }))
+        );
+    }
+
+    #[test]
     fn open_responses_provider_generates_object_with_json_schema_response_format() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
