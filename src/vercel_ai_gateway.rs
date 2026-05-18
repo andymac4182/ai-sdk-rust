@@ -6,9 +6,11 @@ use serde::{Deserialize, Serialize};
 use crate::headers::Headers;
 use crate::openai_compatible::{
     OpenAICompatibleChatLanguageModel, OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel,
-    OpenAICompatibleProvider, OpenAICompatibleProviderSettings, OpenAICompatibleTransport,
+    OpenAICompatibleModelListResponse, OpenAICompatibleProvider, OpenAICompatibleProviderSettings,
+    OpenAICompatibleTransport,
 };
 use crate::provider::{ModelType, NoSuchModelError, Provider};
+use crate::provider_utils::HandledFetchError;
 
 /// OpenAI-compatible Vercel AI Gateway base URL.
 pub const VERCEL_AI_GATEWAY_OPENAI_COMPATIBLE_BASE_URL: &str = "https://ai-gateway.vercel.sh/v1";
@@ -137,6 +139,13 @@ impl VercelAiGatewayOpenAICompatibleProvider {
         model_id: impl Into<String>,
     ) -> Result<OpenAICompatibleImageModel, NoSuchModelError> {
         Err(NoSuchModelError::new(model_id, ModelType::ImageModel))
+    }
+
+    /// Lists models from Vercel AI Gateway's OpenAI-compatible `/models` endpoint.
+    pub async fn list_models(
+        &self,
+    ) -> Result<OpenAICompatibleModelListResponse, HandledFetchError> {
+        self.openai_compatible_provider().list_models().await
     }
 
     fn openai_compatible_provider(&self) -> OpenAICompatibleProvider {
@@ -1187,6 +1196,108 @@ mod tests {
     }
 
     #[test]
+    fn vercel_ai_gateway_openai_compatible_lists_models() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "object": "list",
+                        "data": [
+                            {
+                                "id": "openai/gpt-4.1-mini",
+                                "object": "model",
+                                "owned_by": "openai"
+                            },
+                            {
+                                "id": "anthropic/claude-sonnet-4.5",
+                                "object": "model",
+                                "owned_by": "anthropic"
+                            },
+                            {
+                                "id": "google/gemini-2.5-flash",
+                                "object": "model",
+                                "owned_by": "google"
+                            },
+                            {
+                                "id": "xai/grok-4-fast",
+                                "object": "model",
+                                "owned_by": "xai"
+                            },
+                            {
+                                "id": "cohere/embed-v4.0",
+                                "object": "model",
+                                "owned_by": "cohere",
+                                "modelType": "embedding"
+                            }
+                        ]
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from([(
+                    "x-request-id".to_string(),
+                    "gateway_models_req".to_string(),
+                )])))))
+            });
+        let provider = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://ai-gateway.test/v1/")
+            .with_header("custom-header", "value")
+            .with_transport(transport);
+
+        let result = poll_ready(provider.list_models()).expect("model list succeeds");
+        let ids = result.model_ids().collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "openai/gpt-4.1-mini",
+                "anthropic/claude-sonnet-4.5",
+                "google/gemini-2.5-flash",
+                "xai/grok-4-fast",
+                "cohere/embed-v4.0"
+            ]
+        );
+        assert_eq!(result.data[0].owned_by.as_deref(), Some("openai"));
+        assert_eq!(
+            result.data[4]
+                .metadata
+                .get("modelType")
+                .and_then(JsonValue::as_str),
+            Some("embedding")
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Get);
+        assert_eq!(request.url, "https://ai-gateway.test/v1/models");
+        assert!(request.body.is_none());
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+        assert!(
+            request
+                .headers
+                .get("user-agent")
+                .is_some_and(|value| value.contains("ai-sdk/openai-compatible/0.1.0"))
+        );
+    }
+
+    #[test]
     fn vercel_ai_gateway_openai_compatible_streams_text_through_openai_chat() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -1922,6 +2033,28 @@ mod tests {
         assert!(
             !result.embedding.is_empty(),
             "Gateway OpenAI-compatible embedding response was empty"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI-compatible model list call"]
+    fn live_vercel_ai_gateway_openai_compatible_list_models() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!(
+                "skipping live Gateway OpenAI-compatible model list test because no API key is configured"
+            );
+            return;
+        };
+        let provider = VercelAiGatewayOpenAICompatibleProvider::new().with_api_key(api_key);
+        let result = poll_ready(provider.list_models()).expect("Gateway model list fetch succeeds");
+
+        assert!(
+            !result.data.is_empty(),
+            "Gateway OpenAI-compatible model list was empty"
+        );
+        assert!(
+            result.model_ids().any(|model_id| model_id.contains('/')),
+            "Gateway model list did not include provider-qualified model ids"
         );
     }
 

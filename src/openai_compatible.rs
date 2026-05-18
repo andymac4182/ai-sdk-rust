@@ -34,14 +34,14 @@ use crate::language_model::{
 };
 use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
 use crate::provider_utils::{
-    ConvertToFormDataOptions, FetchErrorInfo, FormDataInputValue, FormDataValue, HandledFetchError,
-    InjectJsonInstructionIntoMessagesOptions, ParseJsonResult, PostFormDataToApiOptions,
-    PostJsonToApiOptions, ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod,
-    ProviderApiResponse, ProviderApiResponseHandlerError, RuntimeEnvironment,
-    StreamingToolCallDelta, StreamingToolCallDeltaFunction, StreamingToolCallTracker,
-    combine_headers, convert_base64_to_bytes, convert_to_base64, convert_to_form_data,
-    create_event_source_response_handler, create_json_error_response_handler,
-    create_json_response_handler, detect_media_type, generate_id,
+    ConvertToFormDataOptions, FetchErrorInfo, FormDataInputValue, FormDataValue, GetFromApiOptions,
+    HandledFetchError, InjectJsonInstructionIntoMessagesOptions, ParseJsonResult,
+    PostFormDataToApiOptions, PostJsonToApiOptions, ProviderApiRequest, ProviderApiRequestBody,
+    ProviderApiRequestMethod, ProviderApiResponse, ProviderApiResponseHandlerError,
+    RuntimeEnvironment, StreamingToolCallDelta, StreamingToolCallDeltaFunction,
+    StreamingToolCallTracker, combine_headers, convert_base64_to_bytes, convert_to_base64,
+    convert_to_form_data, create_event_source_response_handler, create_json_error_response_handler,
+    create_json_response_handler, detect_media_type, generate_id, get_from_api,
     inject_json_instruction_into_messages, post_form_data_to_api, post_json_to_api,
     with_user_agent_suffix, without_trailing_slash,
 };
@@ -156,6 +156,52 @@ impl OpenAICompatibleProviderSettings {
     }
 }
 
+/// A model entry returned by an OpenAI-compatible `/models` response.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct OpenAICompatibleModelEntry {
+    /// Provider-specific model id.
+    pub id: String,
+
+    /// OpenAI-compatible object type, usually `model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<String>,
+
+    /// Creation timestamp when the provider includes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<i64>,
+
+    /// Owning provider or organization when the provider includes it.
+    #[serde(
+        default,
+        rename = "owned_by",
+        alias = "ownedBy",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub owned_by: Option<String>,
+
+    /// Additional provider-specific model metadata.
+    #[serde(default, flatten)]
+    pub metadata: JsonObject,
+}
+
+/// OpenAI-compatible `/models` response.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct OpenAICompatibleModelListResponse {
+    /// OpenAI-compatible object type, usually `list`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<String>,
+
+    /// Models returned by the provider.
+    pub data: Vec<OpenAICompatibleModelEntry>,
+}
+
+impl OpenAICompatibleModelListResponse {
+    /// Iterates over returned model ids.
+    pub fn model_ids(&self) -> impl Iterator<Item = &str> {
+        self.data.iter().map(|model| model.id.as_str())
+    }
+}
+
 /// OpenAI-compatible provider.
 #[derive(Clone)]
 pub struct OpenAICompatibleProvider {
@@ -224,6 +270,44 @@ impl OpenAICompatibleProvider {
             model_id,
             openai_compatible_model_config("image", &self.settings, &self.transport),
         )
+    }
+
+    /// Lists models from an OpenAI-compatible `/models` endpoint.
+    pub async fn list_models(
+        &self,
+    ) -> Result<OpenAICompatibleModelListResponse, HandledFetchError> {
+        let url = openai_compatible_url(&self.settings, "/models")
+            .map_err(openai_compatible_url_fetch_error)?;
+        let request_headers = openai_compatible_provider_headers(&self.settings)
+            .into_iter()
+            .map(|(name, value)| (name, Some(value)))
+            .collect::<BTreeMap<_, _>>();
+        let get_options = GetFromApiOptions::new(url)
+            .with_headers(request_headers)
+            .with_environment(RuntimeEnvironment::unknown());
+        let transport = Arc::clone(&self.transport);
+
+        get_from_api(
+            get_options,
+            move |request| (transport)(request),
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    openai_compatible_model_list_response,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_json_error_response_handler(
+                    response.json_error_response_handler_options(request),
+                    clone_json_value,
+                    openai_compatible_error_message,
+                    |_, _| None,
+                ))
+            },
+        )
+        .await
+        .map(|response| response.value)
     }
 }
 
@@ -3567,6 +3651,18 @@ fn openai_compatible_response_timestamp(value: Option<&JsonValue>) -> Option<Off
     }
 }
 
+fn openai_compatible_model_list_response(
+    value: &JsonValue,
+) -> Result<OpenAICompatibleModelListResponse, serde_json::Error> {
+    serde_json::from_value(value.clone())
+}
+
+fn openai_compatible_url_fetch_error(message: String) -> HandledFetchError {
+    HandledFetchError::Original {
+        error: FetchErrorInfo::new(message),
+    }
+}
+
 fn with_response_headers(
     mut response: LanguageModelResponse,
     headers: Headers,
@@ -3811,6 +3907,95 @@ mod tests {
                 .get("user-agent")
                 .and_then(Option::as_deref),
             Some("ai-sdk/openai-compatible/0.1.0")
+        );
+    }
+
+    #[test]
+    fn openai_compatible_provider_lists_models() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "object": "list",
+                        "data": [
+                            {
+                                "id": "provider/chat-model",
+                                "object": "model",
+                                "created": 1711115037,
+                                "owned_by": "provider",
+                                "contextWindow": 128000
+                            },
+                            {
+                                "id": "provider/embedding-model",
+                                "object": "model",
+                                "ownedBy": "provider"
+                            }
+                        ]
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from([(
+                    "x-request-id".to_string(),
+                    "models_req".to_string(),
+                )])))))
+            });
+        let provider = create_openai_compatible(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com/v1/")
+                .with_api_key("test-api-key")
+                .with_header("custom-header", "value")
+                .with_query_param("catalog", "current"),
+        )
+        .with_transport(transport);
+
+        let result = poll_ready(provider.list_models()).expect("model list succeeds");
+        assert_eq!(result.object.as_deref(), Some("list"));
+        assert_eq!(
+            result.model_ids().collect::<Vec<_>>(),
+            vec!["provider/chat-model", "provider/embedding-model"]
+        );
+        assert_eq!(result.data[0].created, Some(1711115037));
+        assert_eq!(result.data[0].owned_by.as_deref(), Some("provider"));
+        assert_eq!(
+            result.data[0]
+                .metadata
+                .get("contextWindow")
+                .and_then(JsonValue::as_u64),
+            Some(128000)
+        );
+        assert_eq!(result.data[1].owned_by.as_deref(), Some("provider"));
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Get);
+        assert_eq!(
+            request.url,
+            "https://api.example.com/v1/models?catalog=current"
+        );
+        assert!(request.body.is_none());
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+        assert!(
+            request
+                .headers
+                .get("user-agent")
+                .is_some_and(|value| value.contains("ai-sdk/openai-compatible/0.1.0"))
         );
     }
 

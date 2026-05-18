@@ -265,9 +265,9 @@ pub use openai::{
 };
 pub use openai_compatible::{
     OpenAICompatibleChatLanguageModel, OpenAICompatibleCompletionLanguageModel,
-    OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel, OpenAICompatibleProvider,
-    OpenAICompatibleProviderSettings, OpenAICompatibleTransport, OpenAICompatibleTransportFuture,
-    create_openai_compatible,
+    OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel, OpenAICompatibleModelEntry,
+    OpenAICompatibleModelListResponse, OpenAICompatibleProvider, OpenAICompatibleProviderSettings,
+    OpenAICompatibleTransport, OpenAICompatibleTransportFuture, create_openai_compatible,
 };
 pub use prompt::{
     Instructions, InvalidDataContentError, InvalidMessageRoleError, MessageConversionError, Prompt,
