@@ -1772,6 +1772,33 @@ fn open_responses_metadata(provider_name: &str, provider: JsonObject) -> Provide
     metadata
 }
 
+fn open_responses_item_metadata(provider_name: &str, item: &JsonValue) -> Option<ProviderMetadata> {
+    let mut metadata = JsonObject::new();
+
+    if let Some(item_id) = item.get("id").filter(|value| !value.is_null()) {
+        metadata.insert("itemId".to_string(), item_id.clone());
+    }
+
+    if let Some(namespace) = item.get("namespace").filter(|value| !value.is_null()) {
+        metadata.insert("namespace".to_string(), namespace.clone());
+    }
+
+    (!metadata.is_empty()).then(|| open_responses_metadata(provider_name, metadata))
+}
+
+fn open_responses_namespace_metadata(
+    provider_name: &str,
+    item: &JsonValue,
+) -> Option<ProviderMetadata> {
+    let mut metadata = JsonObject::new();
+
+    if let Some(namespace) = item.get("namespace").filter(|value| !value.is_null()) {
+        metadata.insert("namespace".to_string(), namespace.clone());
+    }
+
+    (!metadata.is_empty()).then(|| open_responses_metadata(provider_name, metadata))
+}
+
 fn open_responses_text_metadata(
     provider_name: &str,
     item: &JsonValue,
@@ -2164,11 +2191,14 @@ fn open_responses_push_stream_tool_result(
     tool_call_id: &str,
     tool_name: &str,
     result: JsonValue,
+    provider_metadata: Option<ProviderMetadata>,
 ) {
     if let Ok(result) = NonNullJsonValue::new(result) {
-        stream.push(LanguageModelStreamPart::ToolResult(
-            LanguageModelToolResult::new(tool_call_id, tool_name, result),
-        ));
+        let mut tool_result = LanguageModelToolResult::new(tool_call_id, tool_name, result);
+        if let Some(provider_metadata) = provider_metadata {
+            tool_result = tool_result.with_provider_metadata(provider_metadata);
+        }
+        stream.push(LanguageModelStreamPart::ToolResult(tool_result));
     }
 }
 
@@ -2866,14 +2896,21 @@ fn open_responses_stream_result_from_response(
                                         && let Some(tool_call) =
                                             ongoing_tool_calls.remove(&output_index)
                                     {
-                                        stream.push(LanguageModelStreamPart::ToolInputEnd(
-                                            LanguageModelToolInputEnd::new(tool_call.tool_call_id),
-                                        ));
+                                        let mut input_end =
+                                            LanguageModelToolInputEnd::new(tool_call.tool_call_id);
+                                        if let Some(metadata) =
+                                            open_responses_namespace_metadata(provider_name, item)
+                                        {
+                                            input_end = input_end.with_provider_metadata(metadata);
+                                        }
+                                        stream
+                                            .push(LanguageModelStreamPart::ToolInputEnd(input_end));
                                     }
                                     if open_responses_push_tool_call_from_item(
                                         &mut stream,
                                         &mut emitted_tool_calls,
                                         &mut pending_tool_calls,
+                                        provider_name,
                                         item,
                                     ) {
                                         has_tool_calls = true;
@@ -2891,6 +2928,7 @@ fn open_responses_stream_result_from_response(
                                         tool_call_id,
                                         &tool_name,
                                         open_responses_web_search_output(item.get("action")),
+                                        None,
                                     );
                                 }
                                 Some("file_search_call") => {
@@ -2905,6 +2943,7 @@ fn open_responses_stream_result_from_response(
                                         tool_call_id,
                                         &tool_name,
                                         open_responses_file_search_output(item),
+                                        None,
                                     );
                                 }
                                 Some("code_interpreter_call") => {
@@ -2951,6 +2990,7 @@ fn open_responses_stream_result_from_response(
                                         json!({
                                             "outputs": item.get("outputs").cloned().unwrap_or(JsonValue::Null)
                                         }),
+                                        None,
                                     );
                                 }
                                 Some("image_generation_call") => {
@@ -2967,6 +3007,7 @@ fn open_responses_stream_result_from_response(
                                         json!({
                                             "result": item.get("result").cloned().unwrap_or(JsonValue::Null)
                                         }),
+                                        None,
                                     );
                                 }
                                 Some("custom_tool_call") => {
@@ -2992,9 +3033,14 @@ fn open_responses_stream_result_from_response(
                                     let input = open_responses_stringified_json(
                                         item.get("input").cloned().unwrap_or(JsonValue::Null),
                                     );
-                                    stream.push(LanguageModelStreamPart::ToolCall(
-                                        LanguageModelToolCall::new(tool_call_id, tool_name, input),
-                                    ));
+                                    let mut tool_call =
+                                        LanguageModelToolCall::new(tool_call_id, tool_name, input);
+                                    if let Some(metadata) =
+                                        open_responses_item_metadata(provider_name, item)
+                                    {
+                                        tool_call = tool_call.with_provider_metadata(metadata);
+                                    }
+                                    stream.push(LanguageModelStreamPart::ToolCall(tool_call));
                                 }
                                 Some("tool_search_call") => {
                                     let tool_call_id = open_responses_tool_search_call_id(item);
@@ -3015,6 +3061,12 @@ fn open_responses_stream_result_from_response(
 
                                     if hosted {
                                         tool_call = tool_call.with_provider_executed(true);
+                                    }
+
+                                    if let Some(metadata) =
+                                        open_responses_item_metadata(provider_name, item)
+                                    {
+                                        tool_call = tool_call.with_provider_metadata(metadata);
                                     }
 
                                     stream.push(LanguageModelStreamPart::ToolCall(tool_call));
@@ -3038,6 +3090,7 @@ fn open_responses_stream_result_from_response(
                                         json!({
                                             "tools": item.get("tools").cloned().unwrap_or_else(|| JsonValue::Array(Vec::new()))
                                         }),
+                                        open_responses_item_metadata(provider_name, item),
                                     );
                                 }
                                 Some("local_shell_call") => {
@@ -3046,16 +3099,20 @@ fn open_responses_stream_result_from_response(
                                         .and_then(JsonValue::as_str)
                                         .unwrap_or_default();
 
-                                    stream.push(LanguageModelStreamPart::ToolCall(
-                                        LanguageModelToolCall::new(
-                                            tool_call_id,
-                                            tool_name_mapping.to_custom_tool_name("local_shell"),
-                                            json!({
-                                                "action": item.get("action").cloned().unwrap_or(JsonValue::Null)
-                                            })
-                                            .to_string(),
-                                        ),
-                                    ));
+                                    let mut tool_call = LanguageModelToolCall::new(
+                                        tool_call_id,
+                                        tool_name_mapping.to_custom_tool_name("local_shell"),
+                                        json!({
+                                            "action": item.get("action").cloned().unwrap_or(JsonValue::Null)
+                                        })
+                                        .to_string(),
+                                    );
+                                    if let Some(metadata) =
+                                        open_responses_item_metadata(provider_name, item)
+                                    {
+                                        tool_call = tool_call.with_provider_metadata(metadata);
+                                    }
+                                    stream.push(LanguageModelStreamPart::ToolCall(tool_call));
                                 }
                                 Some("shell_call") => {
                                     let tool_call_id = item
@@ -3072,6 +3129,12 @@ fn open_responses_stream_result_from_response(
                                         tool_call = tool_call.with_provider_executed(true);
                                     }
 
+                                    if let Some(metadata) =
+                                        open_responses_item_metadata(provider_name, item)
+                                    {
+                                        tool_call = tool_call.with_provider_metadata(metadata);
+                                    }
+
                                     stream.push(LanguageModelStreamPart::ToolCall(tool_call));
                                 }
                                 Some("shell_call_output") => {
@@ -3084,6 +3147,7 @@ fn open_responses_stream_result_from_response(
                                         tool_call_id,
                                         &tool_name_mapping.to_custom_tool_name("shell"),
                                         open_responses_shell_call_output(item),
+                                        None,
                                     );
                                 }
                                 Some("apply_patch_call") => {
@@ -3107,18 +3171,21 @@ fn open_responses_stream_result_from_response(
                                     if item.get("status").and_then(JsonValue::as_str)
                                         == Some("completed")
                                     {
-                                        stream.push(LanguageModelStreamPart::ToolCall(
-                                            LanguageModelToolCall::new(
-                                                tool_call_id,
-                                                tool_name_mapping
-                                                    .to_custom_tool_name("apply_patch"),
-                                                json!({
-                                                    "callId": item.get("call_id").cloned().unwrap_or(JsonValue::Null),
-                                                    "operation": item.get("operation").cloned().unwrap_or(JsonValue::Null)
-                                                })
-                                                .to_string(),
-                                            ),
-                                        ));
+                                        let mut tool_call = LanguageModelToolCall::new(
+                                            tool_call_id,
+                                            tool_name_mapping.to_custom_tool_name("apply_patch"),
+                                            json!({
+                                                "callId": item.get("call_id").cloned().unwrap_or(JsonValue::Null),
+                                                "operation": item.get("operation").cloned().unwrap_or(JsonValue::Null)
+                                            })
+                                            .to_string(),
+                                        );
+                                        if let Some(metadata) =
+                                            open_responses_item_metadata(provider_name, item)
+                                        {
+                                            tool_call = tool_call.with_provider_metadata(metadata);
+                                        }
+                                        stream.push(LanguageModelStreamPart::ToolCall(tool_call));
                                     }
                                 }
                                 Some("mcp_call") => {
@@ -3145,13 +3212,20 @@ fn open_responses_stream_result_from_response(
                                         .with_provider_executed(true)
                                         .with_dynamic(true),
                                     ));
-                                    stream.push(LanguageModelStreamPart::ToolResult(
-                                        open_responses_mcp_tool_result(
+                                    stream.push(LanguageModelStreamPart::ToolResult({
+                                        let mut tool_result = open_responses_mcp_tool_result(
                                             item,
                                             tool_call_id,
                                             &tool_name,
-                                        ),
-                                    ));
+                                        );
+                                        if let Some(metadata) =
+                                            open_responses_item_metadata(provider_name, item)
+                                        {
+                                            tool_result =
+                                                tool_result.with_provider_metadata(metadata);
+                                        }
+                                        tool_result
+                                    }));
                                 }
                                 Some("mcp_approval_request") => {
                                     let tool_call_id = item
@@ -3211,6 +3285,7 @@ fn open_responses_stream_result_from_response(
                                                 .cloned()
                                                 .unwrap_or_else(|| JsonValue::String("completed".to_string()))
                                         }),
+                                        None,
                                     );
                                 }
                                 Some("message") => {
@@ -3288,6 +3363,7 @@ fn open_responses_stream_result_from_response(
                                         &mut stream,
                                         &mut emitted_tool_calls,
                                         &mut pending_tool_calls,
+                                        provider_name,
                                         item,
                                     ) {
                                         has_tool_calls = true;
@@ -3303,6 +3379,7 @@ fn open_responses_stream_result_from_response(
                                 &mut stream,
                                 &mut emitted_tool_calls,
                                 &mut pending_tool_calls,
+                                provider_name,
                                 response,
                             );
                             finish_reason = map_open_responses_finish_reason(
@@ -3727,6 +3804,7 @@ fn open_responses_push_tool_calls_from_response(
     stream: &mut Vec<LanguageModelStreamPart>,
     emitted_tool_calls: &mut BTreeSet<String>,
     pending_tool_calls: &mut BTreeMap<String, PendingOpenResponsesToolCall>,
+    provider_name: &str,
     response: &JsonValue,
 ) -> bool {
     let mut has_tool_calls = false;
@@ -3741,6 +3819,7 @@ fn open_responses_push_tool_calls_from_response(
             stream,
             emitted_tool_calls,
             pending_tool_calls,
+            provider_name,
             item,
         );
     }
@@ -3766,6 +3845,7 @@ fn open_responses_push_tool_call_from_item(
     stream: &mut Vec<LanguageModelStreamPart>,
     emitted_tool_calls: &mut BTreeSet<String>,
     pending_tool_calls: &mut BTreeMap<String, PendingOpenResponsesToolCall>,
+    provider_name: &str,
     item: &JsonValue,
 ) -> bool {
     if !matches!(
@@ -3815,9 +3895,11 @@ fn open_responses_push_tool_call_from_item(
         return true;
     }
 
-    stream.push(LanguageModelStreamPart::ToolCall(
-        LanguageModelToolCall::new(tool_call_id, tool_name, input),
-    ));
+    let mut tool_call = LanguageModelToolCall::new(tool_call_id, tool_name, input);
+    if let Some(metadata) = open_responses_item_metadata(provider_name, item) {
+        tool_call = tool_call.with_provider_metadata(metadata);
+    }
+    stream.push(LanguageModelStreamPart::ToolCall(tool_call));
     true
 }
 
@@ -4482,6 +4564,16 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
     use url::Url;
+
+    fn openai_metadata_value<'a>(
+        provider_metadata: &'a Option<ProviderMetadata>,
+        key: &str,
+    ) -> Option<&'a JsonValue> {
+        provider_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("openai"))
+            .and_then(|metadata| metadata.get(key))
+    }
 
     #[test]
     fn open_responses_provider_generates_text_with_request_and_response_metadata() {
@@ -6758,9 +6850,24 @@ mod tests {
         assert_eq!(tool_calls[0].tool_call_id, "custom_1");
         assert_eq!(tool_calls[0].tool_name, "write_sql");
         assert_eq!(tool_calls[0].input, "\"select 1\"");
+        assert_eq!(
+            openai_metadata_value(&tool_calls[0].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some("custom_item")
+        );
         assert_eq!(tool_calls[1].tool_name, "toolSearch");
         assert_eq!(tool_calls[1].provider_executed, Some(true));
+        assert_eq!(
+            openai_metadata_value(&tool_calls[1].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some("tsc_1")
+        );
         assert_eq!(tool_results[0].tool_call_id, "tsc_1");
+        assert_eq!(
+            openai_metadata_value(&tool_results[0].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some("tso_1")
+        );
         assert_eq!(
             tool_results[0].result.as_value(),
             &json!({
@@ -6773,8 +6880,18 @@ mod tests {
             })
         );
         assert_eq!(tool_calls[2].tool_name, "localShell");
+        assert_eq!(
+            openai_metadata_value(&tool_calls[2].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some("local_1")
+        );
         assert_eq!(tool_calls[3].tool_name, "hostShell");
         assert_eq!(tool_calls[3].provider_executed, Some(true));
+        assert_eq!(
+            openai_metadata_value(&tool_calls[3].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some("shell_1")
+        );
         assert_eq!(
             tool_results[1].result.as_value(),
             &json!({
@@ -6791,11 +6908,21 @@ mod tests {
             })
         );
         assert_eq!(tool_calls[4].tool_name, "patchTool");
+        assert_eq!(
+            openai_metadata_value(&tool_calls[4].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some("patch_1")
+        );
         assert_eq!(tool_calls[5].tool_name, "mcp.lookup");
         assert_eq!(tool_calls[5].provider_executed, Some(true));
         assert_eq!(tool_calls[5].dynamic, Some(true));
         assert_eq!(tool_results[2].tool_name, "mcp.lookup");
         assert_eq!(tool_results[2].dynamic, Some(true));
+        assert_eq!(
+            openai_metadata_value(&tool_results[2].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some("mcp_1")
+        );
         assert_eq!(tool_calls[6].tool_name, "mcp.approve");
         assert!(
             result
@@ -6829,7 +6956,7 @@ mod tests {
                 let sse = [
                     r#"data: {"type":"response.created","response":{"id":"resp_stream_tool","created_at":1711115037,"model":"gpt-4.1-mini"}}"#,
                     "",
-                    r#"data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_weather","name":"weather","arguments":""}}"#,
+                    r#"data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_weather","name":"weather","arguments":"","namespace":"weather_ns"}}"#,
                     "",
                     r#"data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"{\"location\""}"#,
                     "",
@@ -6837,7 +6964,7 @@ mod tests {
                     "",
                     r#"data: {"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":0,"arguments":"{\"location\":\"Brisbane\"}"}"#,
                     "",
-                    r#"data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_weather","name":"weather","arguments":""}}"#,
+                    r#"data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_weather","name":"weather","arguments":"","namespace":"weather_ns"}}"#,
                     "",
                     r#"data: {"type":"response.completed","response":{"id":"resp_stream_tool","created_at":1711115037,"model":"gpt-4.1-mini","output":[{"id":"fc_1","type":"function_call","call_id":"call_weather","name":"weather","arguments":"{\"location\":\"Brisbane\"}"}],"usage":{"input_tokens":6,"output_tokens":3}}}"#,
                     "",
@@ -6872,6 +6999,29 @@ mod tests {
         assert_eq!(tool_call.tool_call_id, "call_weather");
         assert_eq!(tool_call.tool_name, "weather");
         assert_eq!(tool_call.input, r#"{"location":"Brisbane"}"#);
+        assert_eq!(
+            openai_metadata_value(&tool_call.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some("fc_1")
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_call.provider_metadata, "namespace")
+                .and_then(JsonValue::as_str),
+            Some("weather_ns")
+        );
+        let input_end = stream_result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolInputEnd(input_end) => Some(input_end),
+                _ => None,
+            })
+            .expect("stream includes tool input end");
+        assert_eq!(
+            openai_metadata_value(&input_end.provider_metadata, "namespace")
+                .and_then(JsonValue::as_str),
+            Some("weather_ns")
+        );
         assert_eq!(
             stream_result.stream.iter().find_map(|part| match part {
                 LanguageModelStreamPart::Finish(finish) => {
