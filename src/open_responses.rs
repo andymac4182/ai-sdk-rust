@@ -493,6 +493,7 @@ fn open_responses_request_body(
     let provider_tool_names = open_responses_provider_tool_names();
     let tool_name_mapping =
         create_tool_name_mapping(options.tools.iter().flatten(), &provider_tool_names);
+    let has_shell_tool = open_responses_has_provider_tool(&options.tools, "openai.shell");
     let store = open_responses_store_enabled(provider_options_name, provider_options);
     let has_conversation =
         open_responses_conversation_enabled(provider_options_name, provider_options);
@@ -512,6 +513,7 @@ fn open_responses_request_body(
         has_conversation,
         provider_options_name,
         &tool_name_mapping,
+        has_shell_tool,
         &mut warnings,
     )?;
     let mut body = JsonObject::new();
@@ -948,6 +950,7 @@ fn open_responses_input(
     has_conversation: bool,
     provider_options_name: &str,
     tool_name_mapping: &ToolNameMapping,
+    has_shell_tool: bool,
     warnings: &mut Vec<Warning>,
 ) -> Result<(Vec<JsonValue>, Option<String>), String> {
     let mut input = Vec::new();
@@ -1094,6 +1097,12 @@ fn open_responses_input(
                                 continue;
                             }
 
+                            if has_shell_tool && resolved_tool_name == "shell" {
+                                assistant_items
+                                    .push(open_responses_shell_call_item(tool_call, item_id));
+                                continue;
+                            }
+
                             assistant_items.push(json!({
                                 "type": "function_call",
                                 "call_id": tool_call.tool_call_id,
@@ -1138,6 +1147,17 @@ fn open_responses_input(
                                         Some(item_id),
                                         JsonValue::Null,
                                         "server",
+                                        output,
+                                    ));
+                                }
+                                continue;
+                            }
+
+                            if has_shell_tool && resolved_tool_name == "shell" {
+                                if let Some(output) = open_responses_tool_result_json(&part.output)
+                                {
+                                    assistant_items.push(open_responses_shell_call_output_item(
+                                        &part.tool_call_id,
                                         output,
                                     ));
                                 }
@@ -1193,6 +1213,17 @@ fn open_responses_input(
                                     None,
                                     JsonValue::String(part.tool_call_id.clone()),
                                     "client",
+                                    output,
+                                ));
+                                continue;
+                            }
+
+                            if has_shell_tool
+                                && resolved_tool_name == "shell"
+                                && let Some(output) = open_responses_tool_result_json(&part.output)
+                            {
+                                input.push(open_responses_shell_call_output_item(
+                                    &part.tool_call_id,
                                     output,
                                 ));
                                 continue;
@@ -1334,6 +1365,97 @@ fn open_responses_tool_search_output_item(
             .unwrap_or_else(|| JsonValue::Array(Vec::new())),
     );
     JsonValue::Object(item)
+}
+
+fn open_responses_shell_call_item(
+    tool_call: &LanguageModelToolCallPart,
+    item_id: Option<&str>,
+) -> JsonValue {
+    let parsed_input = open_responses_prompt_json_object_input(&tool_call.input);
+    let action = parsed_input
+        .get("action")
+        .and_then(JsonValue::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut request_action = JsonObject::new();
+    request_action.insert(
+        "commands".to_string(),
+        action
+            .get("commands")
+            .cloned()
+            .unwrap_or_else(|| JsonValue::Array(Vec::new())),
+    );
+    if let Some(timeout_ms) = action.get("timeoutMs").filter(|value| !value.is_null()) {
+        request_action.insert("timeout_ms".to_string(), timeout_ms.clone());
+    }
+    if let Some(max_output_length) = action
+        .get("maxOutputLength")
+        .filter(|value| !value.is_null())
+    {
+        request_action.insert("max_output_length".to_string(), max_output_length.clone());
+    }
+
+    json!({
+        "type": "shell_call",
+        "call_id": tool_call.tool_call_id,
+        "id": item_id.unwrap_or(tool_call.tool_call_id.as_str()),
+        "status": "completed",
+        "action": request_action
+    })
+}
+
+fn open_responses_shell_call_output_item(call_id: &str, output: &JsonValue) -> JsonValue {
+    json!({
+        "type": "shell_call_output",
+        "call_id": call_id,
+        "output": output
+            .get("output")
+            .and_then(JsonValue::as_array)
+            .map(|items| {
+                JsonValue::Array(
+                    items
+                        .iter()
+                        .map(open_responses_shell_prompt_output_item)
+                        .collect(),
+                )
+            })
+            .unwrap_or_else(|| JsonValue::Array(Vec::new()))
+    })
+}
+
+fn open_responses_shell_prompt_output_item(item: &JsonValue) -> JsonValue {
+    let outcome = item
+        .get("outcome")
+        .and_then(JsonValue::as_object)
+        .map(
+            |outcome| match outcome.get("type").and_then(JsonValue::as_str) {
+                Some("exit") => json!({
+                    "type": "exit",
+                    "exit_code": outcome
+                        .get("exitCode")
+                        .or_else(|| outcome.get("exit_code"))
+                        .cloned()
+                        .unwrap_or(JsonValue::Null)
+                }),
+                _ => json!({ "type": "timeout" }),
+            },
+        )
+        .unwrap_or_else(|| json!({ "type": "timeout" }));
+
+    json!({
+        "stdout": item.get("stdout").cloned().unwrap_or(JsonValue::Null),
+        "stderr": item.get("stderr").cloned().unwrap_or(JsonValue::Null),
+        "outcome": outcome
+    })
+}
+
+fn open_responses_prompt_json_object_input(input: &JsonValue) -> JsonObject {
+    let parsed_input = input
+        .as_str()
+        .and_then(|input| serde_json::from_str::<JsonValue>(input).ok())
+        .unwrap_or_else(|| input.clone());
+
+    parsed_input.as_object().cloned().unwrap_or_default()
 }
 
 fn open_responses_store_enabled(
@@ -2794,6 +2916,16 @@ fn open_responses_web_search_response_tool_name(tools: &Option<Vec<LanguageModel
             }
         })
         .unwrap_or_else(|| "web_search".to_string())
+}
+
+fn open_responses_has_provider_tool(tools: &Option<Vec<LanguageModelTool>>, tool_id: &str) -> bool {
+    tools.iter().flatten().any(|tool| {
+        let LanguageModelTool::Provider(tool) = tool else {
+            return false;
+        };
+
+        tool.id == tool_id
+    })
 }
 
 fn open_responses_shell_provider_executed(tools: &Option<Vec<LanguageModelTool>>) -> bool {
@@ -5385,6 +5517,21 @@ mod tests {
             .and_then(|metadata| metadata.get(key))
     }
 
+    fn open_responses_test_shell_tool() -> LanguageModelTool {
+        let mut args = JsonObject::new();
+        args.insert(
+            "environment".to_string(),
+            json!({
+                "type": "containerAuto"
+            }),
+        );
+        LanguageModelTool::Provider(LanguageModelProviderTool::new(
+            "openai.shell",
+            "shell",
+            args,
+        ))
+    }
+
     #[test]
     fn open_responses_provider_generates_text_with_request_and_response_metadata() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
@@ -6435,6 +6582,261 @@ mod tests {
                         {
                             "type": "output_text",
                             "text": "Search complete."
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_reconstructs_shell_history_with_store_false() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_shell_history",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Shell history accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 12,
+                            "output_tokens": 4
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let item_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "itemId": "shell_item_1"
+            }
+        }))
+        .expect("provider options deserialize");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "store": false
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![
+                    LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                        LanguageModelAssistantContentPart::ToolCall(
+                            LanguageModelToolCallPart::new(
+                                "call_shell_1",
+                                "shell",
+                                json!({
+                                    "action": {
+                                        "commands": ["ls -la"],
+                                        "timeoutMs": 1000,
+                                        "maxOutputLength": 2000
+                                    }
+                                }),
+                            )
+                            .with_provider_options(item_options),
+                        ),
+                    ])),
+                    LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                        LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                            "call_shell_1",
+                            "shell",
+                            LanguageModelToolResultOutput::json(json!({
+                                "output": [
+                                    {
+                                        "stdout": "ok\n",
+                                        "stderr": "",
+                                        "outcome": {
+                                            "type": "exit",
+                                            "exitCode": 0
+                                        }
+                                    }
+                                ]
+                            })),
+                        )),
+                    ])),
+                ])
+                .with_tool(open_responses_test_shell_tool())
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "shell_call",
+                    "call_id": "call_shell_1",
+                    "id": "shell_item_1",
+                    "status": "completed",
+                    "action": {
+                        "commands": ["ls -la"],
+                        "timeout_ms": 1000,
+                        "max_output_length": 2000
+                    }
+                },
+                {
+                    "type": "shell_call_output",
+                    "call_id": "call_shell_1",
+                    "output": [
+                        {
+                            "stdout": "ok\n",
+                            "stderr": "",
+                            "outcome": {
+                                "type": "exit",
+                                "exit_code": 0
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_reconstructs_stored_assistant_shell_outputs() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_assistant_shell_history",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Stored shell history accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 10,
+                            "output_tokens": 3
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let item_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "itemId": "shell_output_item"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                    LanguageModelAssistantMessage::new(vec![
+                        LanguageModelAssistantContentPart::ToolResult(
+                            LanguageModelToolResultPart::new(
+                                "call_shell_stored",
+                                "shell",
+                                LanguageModelToolResultOutput::json(json!({
+                                    "output": [
+                                        {
+                                            "stdout": "",
+                                            "stderr": "timed out",
+                                            "outcome": {
+                                                "type": "timeout"
+                                            }
+                                        }
+                                    ]
+                                })),
+                            )
+                            .with_provider_options(item_options),
+                        ),
+                    ]),
+                )])
+                .with_tool(open_responses_test_shell_tool()),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "shell_call_output",
+                    "call_id": "call_shell_stored",
+                    "output": [
+                        {
+                            "stdout": "",
+                            "stderr": "timed out",
+                            "outcome": {
+                                "type": "timeout"
+                            }
                         }
                     ]
                 }
