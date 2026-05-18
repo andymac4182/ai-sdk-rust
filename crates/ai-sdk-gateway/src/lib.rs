@@ -2,8 +2,26 @@
 
 #![forbid(unsafe_code)]
 
+/// The Gateway crate version compiled into the library.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub mod gateway;
 pub mod gateway_error;
 pub mod gateway_tools;
+
+pub use gateway::{
+    DEFAULT_GATEWAY_BASE_URL, GatewayAuthToken, GatewayCredentialType, GatewayCreditsResponse,
+    GatewayEmbeddingModel, GatewayFetchMetadataResponse, GatewayGenerationInfo,
+    GatewayGenerationInfoParams, GatewayImageModel, GatewayLanguageModel,
+    GatewayLanguageModelEntry, GatewayLanguageModelPricing, GatewayLanguageModelSpecification,
+    GatewayModelType, GatewayProvider, GatewayProviderOptions, GatewayProviderOptionsSort,
+    GatewayProviderOptionsValidationError, GatewayProviderSettings, GatewayProviderTimeouts,
+    GatewayRerankingModel, GatewaySpendReportDatePart, GatewaySpendReportGroupBy,
+    GatewaySpendReportParams, GatewaySpendReportResponse, GatewaySpendReportRow, GatewayTransport,
+    GatewayTransportFuture, GatewayVideoModel, create_gateway, create_gateway_provider, gateway,
+    gateway_observability_headers, gateway_provider_options, get_gateway_auth_token,
+    try_gateway_provider_options,
+};
 
 pub use gateway_error::{
     GATEWAY_AUTH_METHOD_HEADER, GatewayAuthMethod, GatewayAuthenticationError, GatewayError,
