@@ -310,6 +310,45 @@ impl OpenAICompatibleProvider {
         .await
         .map(|response| response.value)
     }
+
+    /// Retrieves one model from an OpenAI-compatible `/models/{model}` endpoint.
+    pub async fn retrieve_model(
+        &self,
+        model_id: impl AsRef<str>,
+    ) -> Result<OpenAICompatibleModelEntry, HandledFetchError> {
+        let url = openai_compatible_retrieve_model_url(&self.settings, model_id.as_ref())
+            .map_err(openai_compatible_url_fetch_error)?;
+        let request_headers = openai_compatible_provider_headers(&self.settings)
+            .into_iter()
+            .map(|(name, value)| (name, Some(value)))
+            .collect::<BTreeMap<_, _>>();
+        let get_options = GetFromApiOptions::new(url)
+            .with_headers(request_headers)
+            .with_environment(RuntimeEnvironment::unknown());
+        let transport = Arc::clone(&self.transport);
+
+        get_from_api(
+            get_options,
+            move |request| (transport)(request),
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    openai_compatible_model_entry_response,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_json_error_response_handler(
+                    response.json_error_response_handler_options(request),
+                    clone_json_value,
+                    openai_compatible_error_message,
+                    |_, _| None,
+                ))
+            },
+        )
+        .await
+        .map(|response| response.value)
+    }
 }
 
 /// Creates an OpenAI-compatible provider.
@@ -1349,6 +1388,20 @@ fn openai_compatible_url(
             pairs.append_pair(name, value);
         }
     }
+
+    Ok(url.to_string())
+}
+
+fn openai_compatible_retrieve_model_url(
+    settings: &OpenAICompatibleProviderSettings,
+    model_id: &str,
+) -> Result<String, String> {
+    let mut url = Url::parse(&openai_compatible_url(settings, "/models")?)
+        .map_err(|error| format!("invalid OpenAI-compatible model URL: {error}"))?;
+
+    url.path_segments_mut()
+        .map_err(|_| "OpenAI-compatible model URL cannot be a base URL".to_string())?
+        .push(model_id);
 
     Ok(url.to_string())
 }
@@ -3732,6 +3785,12 @@ fn openai_compatible_model_list_response(
     serde_json::from_value(value.clone())
 }
 
+fn openai_compatible_model_entry_response(
+    value: &JsonValue,
+) -> Result<OpenAICompatibleModelEntry, serde_json::Error> {
+    serde_json::from_value(value.clone())
+}
+
 fn openai_compatible_url_fetch_error(message: String) -> HandledFetchError {
     HandledFetchError::Original {
         error: FetchErrorInfo::new(message),
@@ -4071,6 +4130,76 @@ mod tests {
                 .headers
                 .get("user-agent")
                 .is_some_and(|value| value.contains("ai-sdk/openai-compatible/0.1.0"))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_provider_retrieves_model_by_id() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "provider/chat-model",
+                        "object": "model",
+                        "created": 1711115037,
+                        "owned_by": "provider",
+                        "contextWindow": 128000
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from([(
+                    "x-request-id".to_string(),
+                    "model_req".to_string(),
+                )])))))
+            });
+        let provider = create_openai_compatible(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com/v1/")
+                .with_api_key("test-api-key")
+                .with_header("custom-header", "value")
+                .with_query_param("catalog", "current"),
+        )
+        .with_transport(transport);
+
+        let result = poll_ready(provider.retrieve_model("provider/chat-model"))
+            .expect("model retrieval succeeds");
+        assert_eq!(result.id, "provider/chat-model");
+        assert_eq!(result.object.as_deref(), Some("model"));
+        assert_eq!(result.created, Some(1711115037));
+        assert_eq!(result.owned_by.as_deref(), Some("provider"));
+        assert_eq!(
+            result
+                .metadata
+                .get("contextWindow")
+                .and_then(JsonValue::as_u64),
+            Some(128000)
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Get);
+        assert_eq!(
+            request.url,
+            "https://api.example.com/v1/models/provider%2Fchat-model?catalog=current"
+        );
+        assert!(request.body.is_none());
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
         );
     }
 

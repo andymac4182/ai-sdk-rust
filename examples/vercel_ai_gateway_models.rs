@@ -16,9 +16,16 @@ fn main() {
         .unwrap_or(20);
     let provider = VercelAiGatewayOpenAICompatibleProvider::new().with_api_key(api_key);
     let models = poll_ready(provider.list_models()).expect("Gateway model list request failed");
+    let first_model_id = models.data.first().map(|model| model.id.clone());
 
     for model in models.data.iter().take(limit) {
         println!("{}", model.id);
+    }
+
+    if let Some(model_id) = first_model_id {
+        let model = poll_ready(provider.retrieve_model(&model_id))
+            .expect("Gateway model retrieval request failed");
+        println!("retrieved {}", model.id);
     }
 }
 
