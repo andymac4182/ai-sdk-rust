@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::OffsetDateTime;
 
-use crate::file_data::FileData;
+use crate::file_data::{FileData, FileDataContent};
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue, NonNullJsonValue};
 use crate::language_model::{
@@ -74,6 +74,10 @@ pub struct OpenResponsesProviderSettings {
     /// User-agent suffix for wrappers built on the Open Responses transport.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent_suffix: Option<String>,
+
+    /// Deprecated file id prefixes recognized in prompt file data strings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_id_prefixes: Vec<String>,
 }
 
 impl OpenResponsesProviderSettings {
@@ -85,6 +89,7 @@ impl OpenResponsesProviderSettings {
             api_key: None,
             headers: Headers::new(),
             user_agent_suffix: None,
+            file_id_prefixes: Vec::new(),
         }
     }
 
@@ -103,6 +108,12 @@ impl OpenResponsesProviderSettings {
     /// Sets the request user-agent suffix for wrappers built on this provider.
     pub fn with_user_agent_suffix(mut self, user_agent_suffix: impl Into<String>) -> Self {
         self.user_agent_suffix = Some(user_agent_suffix.into());
+        self
+    }
+
+    /// Adds a deprecated file id prefix recognized in prompt file data strings.
+    pub fn with_file_id_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.file_id_prefixes.push(prefix.into());
         self
     }
 }
@@ -222,6 +233,7 @@ impl OpenResponsesLanguageModel {
         let (request_body, warnings) = match open_responses_request_body(
             &self.model_id,
             &self.config.provider_options_name,
+            &self.config.settings.file_id_prefixes,
             &options,
         ) {
             Ok(result) => result,
@@ -283,6 +295,7 @@ impl OpenResponsesLanguageModel {
         let (mut request_body, warnings) = match open_responses_request_body(
             &self.model_id,
             &self.config.provider_options_name,
+            &self.config.settings.file_id_prefixes,
             &options,
         ) {
             Ok(result) => result,
@@ -486,6 +499,7 @@ impl LanguageModel for OpenResponsesLanguageModel {
 fn open_responses_request_body(
     model_id: &str,
     provider_options_name: &str,
+    file_id_prefixes: &[String],
     options: &LanguageModelCallOptions,
 ) -> Result<(JsonValue, Vec<Warning>), String> {
     let mut warnings = Vec::new();
@@ -520,6 +534,7 @@ fn open_responses_request_body(
         store,
         has_conversation,
         pass_through_unsupported_files,
+        file_id_prefixes,
         provider_options_name,
         tool_name_mapping: &tool_name_mapping,
         has_local_shell_tool,
@@ -961,6 +976,7 @@ struct OpenResponsesPromptInputOptions<'a> {
     store: bool,
     has_conversation: bool,
     pass_through_unsupported_files: bool,
+    file_id_prefixes: &'a [String],
     provider_options_name: &'a str,
     tool_name_mapping: &'a ToolNameMapping,
     has_local_shell_tool: bool,
@@ -977,6 +993,7 @@ fn open_responses_input(
     let store = options.store;
     let has_conversation = options.has_conversation;
     let pass_through_unsupported_files = options.pass_through_unsupported_files;
+    let file_id_prefixes = options.file_id_prefixes;
     let provider_options_name = options.provider_options_name;
     let tool_name_mapping = options.tool_name_mapping;
     let has_local_shell_tool = options.has_local_shell_tool;
@@ -1012,6 +1029,7 @@ fn open_responses_input(
                                 OpenResponsesFilePartContext::Prompt {
                                     index,
                                     pass_through_unsupported_files,
+                                    file_id_prefixes,
                                 },
                             )?);
                         }
@@ -2081,10 +2099,11 @@ fn open_responses_is_execution_denied_output(output: &LanguageModelToolResultOut
 }
 
 #[derive(Clone, Copy)]
-enum OpenResponsesFilePartContext {
+enum OpenResponsesFilePartContext<'a> {
     Prompt {
         index: usize,
         pass_through_unsupported_files: bool,
+        file_id_prefixes: &'a [String],
     },
     ToolResult,
 }
@@ -2092,7 +2111,7 @@ enum OpenResponsesFilePartContext {
 fn open_responses_file_part(
     file: &LanguageModelFilePart,
     provider_options_name: &str,
-    context: OpenResponsesFilePartContext,
+    context: OpenResponsesFilePartContext<'_>,
 ) -> Result<JsonValue, String> {
     let top_level_media_type = get_top_level_media_type(&file.media_type);
 
@@ -2138,16 +2157,32 @@ fn open_responses_file_part(
             }
         }
         FileData::Data { data } => {
-            let full_media_type =
-                resolve_full_media_type(file).map_err(|error| error.message().to_string())?;
-            let data_uri = format!("data:{full_media_type};base64,{}", convert_to_base64(data));
+            let prompt_file_id = match context {
+                OpenResponsesFilePartContext::Prompt {
+                    file_id_prefixes, ..
+                } => open_responses_file_data_id(data, file_id_prefixes),
+                OpenResponsesFilePartContext::ToolResult => None,
+            };
 
             if top_level_media_type == "image" {
-                Ok(open_responses_image_file_part(
-                    data_uri,
-                    open_responses_image_detail(file, provider_options_name),
-                ))
+                if let Some(file_id) = prompt_file_id {
+                    Ok(open_responses_image_file_reference_part(
+                        file_id,
+                        open_responses_image_detail(file, provider_options_name),
+                    ))
+                } else {
+                    let full_media_type = resolve_full_media_type(file)
+                        .map_err(|error| error.message().to_string())?;
+                    let data_uri =
+                        format!("data:{full_media_type};base64,{}", convert_to_base64(data));
+                    Ok(open_responses_image_file_part(
+                        data_uri,
+                        open_responses_image_detail(file, provider_options_name),
+                    ))
+                }
             } else {
+                let full_media_type =
+                    resolve_full_media_type(file).map_err(|error| error.message().to_string())?;
                 if let OpenResponsesFilePartContext::Prompt {
                     pass_through_unsupported_files,
                     ..
@@ -2158,29 +2193,52 @@ fn open_responses_file_part(
                     return Err(format!("file part media type {full_media_type}"));
                 }
 
-                let filename = match context {
-                    OpenResponsesFilePartContext::Prompt { index, .. } => {
-                        file.filename.clone().unwrap_or_else(|| {
-                            if full_media_type == "application/pdf" {
-                                format!("part-{index}.pdf")
-                            } else {
-                                format!("part-{index}")
-                            }
-                        })
-                    }
-                    OpenResponsesFilePartContext::ToolResult => {
-                        file.filename.clone().unwrap_or_else(|| "data".to_string())
-                    }
-                };
+                if let Some(file_id) = prompt_file_id {
+                    Ok(json!({
+                        "type": "input_file",
+                        "file_id": file_id
+                    }))
+                } else {
+                    let filename = match context {
+                        OpenResponsesFilePartContext::Prompt { index, .. } => {
+                            file.filename.clone().unwrap_or_else(|| {
+                                if full_media_type == "application/pdf" {
+                                    format!("part-{index}.pdf")
+                                } else {
+                                    format!("part-{index}")
+                                }
+                            })
+                        }
+                        OpenResponsesFilePartContext::ToolResult => {
+                            file.filename.clone().unwrap_or_else(|| "data".to_string())
+                        }
+                    };
+                    let data_uri =
+                        format!("data:{full_media_type};base64,{}", convert_to_base64(data));
 
-                Ok(json!({
-                    "type": "input_file",
-                    "filename": filename,
-                    "file_data": data_uri
-                }))
+                    Ok(json!({
+                        "type": "input_file",
+                        "filename": filename,
+                        "file_data": data_uri
+                    }))
+                }
             }
         }
     }
+}
+
+fn open_responses_file_data_id<'a>(
+    data: &'a FileDataContent,
+    file_id_prefixes: &[String],
+) -> Option<&'a str> {
+    let FileDataContent::Base64(value) = data else {
+        return None;
+    };
+
+    file_id_prefixes
+        .iter()
+        .any(|prefix| value.starts_with(prefix))
+        .then_some(value.as_str())
 }
 
 fn open_responses_image_file_part(image_url: String, detail: Option<JsonValue>) -> JsonValue {
@@ -9587,6 +9645,103 @@ mod tests {
                             "type": "input_file",
                             "filename": "names.csv",
                             "file_data": "data:text/csv;base64,bmFtZSxyb2xlCkFkYSxlbmdpbmVlcgo="
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_maps_deprecated_file_id_prefixes() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_file_id_prefixes",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "File ids accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 5,
+                            "output_tokens": 4
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key")
+                .with_file_id_prefix("assistant-")
+                .with_file_id_prefix("file-"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Base64("assistant-img-abc123".to_string()),
+                    },
+                    "image/png",
+                )),
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Base64("file-pdf-xyz789".to_string()),
+                    },
+                    "application/pdf",
+                )),
+            ])),
+        ])));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "file_id": "assistant-img-abc123"
+                        },
+                        {
+                            "type": "input_file",
+                            "file_id": "file-pdf-xyz789"
                         }
                     ]
                 }
