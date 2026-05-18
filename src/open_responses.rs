@@ -17,16 +17,17 @@ use crate::language_model::{
     LanguageModelDocumentSource, LanguageModelErrorStreamPart, LanguageModelFilePart,
     LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelMessage,
     LanguageModelProviderTool, LanguageModelRawStreamPart, LanguageModelReasoning,
-    LanguageModelReasoningDelta, LanguageModelReasoningEnd, LanguageModelReasoningStart,
-    LanguageModelRequest, LanguageModelResponse, LanguageModelResponseFormat, LanguageModelSource,
-    LanguageModelStreamFinish, LanguageModelStreamPart, LanguageModelStreamResponseMetadata,
-    LanguageModelStreamResult, LanguageModelStreamResultResponse, LanguageModelStreamStart,
-    LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd,
-    LanguageModelTextStart, LanguageModelTool, LanguageModelToolApprovalRequest,
-    LanguageModelToolCall, LanguageModelToolChoice, LanguageModelToolContentPart,
-    LanguageModelToolInputDelta, LanguageModelToolInputEnd, LanguageModelToolInputStart,
-    LanguageModelToolResult, LanguageModelToolResultContentPart, LanguageModelToolResultOutput,
-    LanguageModelUrlSource, LanguageModelUsage, LanguageModelUserContentPart, OutputTokenUsage,
+    LanguageModelReasoningDelta, LanguageModelReasoningEffort, LanguageModelReasoningEnd,
+    LanguageModelReasoningStart, LanguageModelRequest, LanguageModelResponse,
+    LanguageModelResponseFormat, LanguageModelSource, LanguageModelStreamFinish,
+    LanguageModelStreamPart, LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
+    LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
+    LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
+    LanguageModelTool, LanguageModelToolApprovalRequest, LanguageModelToolCall,
+    LanguageModelToolChoice, LanguageModelToolContentPart, LanguageModelToolInputDelta,
+    LanguageModelToolInputEnd, LanguageModelToolInputStart, LanguageModelToolResult,
+    LanguageModelToolResultContentPart, LanguageModelToolResultOutput, LanguageModelUrlSource,
+    LanguageModelUsage, LanguageModelUserContentPart, OutputTokenUsage,
 };
 use crate::openai_compatible::{OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel};
 use crate::provider::{
@@ -36,10 +37,11 @@ use crate::provider::{
 use crate::provider_utils::{
     FetchErrorInfo, HandledFetchError, ParseJsonResult, PostJsonToApiOptions, ProviderApiRequest,
     ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
-    ProviderApiResponseHandlerError, RuntimeEnvironment, combine_headers, convert_to_base64,
-    create_event_source_response_handler, create_json_error_response_handler,
+    ProviderApiResponseHandlerError, ReasoningLevel, RuntimeEnvironment, combine_headers,
+    convert_to_base64, create_event_source_response_handler, create_json_error_response_handler,
     create_json_response_handler, create_tool_name_mapping, generate_id, get_top_level_media_type,
-    post_json_to_api, resolve_full_media_type, with_user_agent_suffix,
+    map_reasoning_to_provider_effort, post_json_to_api, resolve_full_media_type,
+    with_user_agent_suffix,
 };
 use crate::warning::Warning;
 
@@ -568,8 +570,84 @@ fn open_responses_request_body(
         &mut body,
         &mut warnings,
     );
+    apply_open_responses_reasoning_options(options.reasoning.as_ref(), &mut body, &mut warnings);
 
     Ok((JsonValue::Object(body), warnings))
+}
+
+fn apply_open_responses_reasoning_options(
+    reasoning: Option<&LanguageModelReasoningEffort>,
+    body: &mut JsonObject,
+    warnings: &mut Vec<Warning>,
+) {
+    let effort = open_responses_reasoning_effort(reasoning, warnings);
+    let summary = remove_open_responses_reasoning_summary(body);
+
+    if effort.is_none() && summary.is_none() {
+        return;
+    }
+
+    let mut reasoning_options = match body.remove("reasoning") {
+        Some(JsonValue::Object(options)) => options,
+        Some(value) => {
+            body.insert("reasoning".to_string(), value);
+            JsonObject::new()
+        }
+        None => JsonObject::new(),
+    };
+
+    if let Some(effort) = effort {
+        reasoning_options.insert("effort".to_string(), JsonValue::String(effort));
+    }
+
+    if let Some(summary) = summary {
+        reasoning_options.insert("summary".to_string(), JsonValue::String(summary));
+    }
+
+    body.insert(
+        "reasoning".to_string(),
+        JsonValue::Object(reasoning_options),
+    );
+}
+
+fn open_responses_reasoning_effort(
+    reasoning: Option<&LanguageModelReasoningEffort>,
+    warnings: &mut Vec<Warning>,
+) -> Option<String> {
+    match reasoning? {
+        LanguageModelReasoningEffort::ProviderDefault => None,
+        LanguageModelReasoningEffort::None => Some("none".to_string()),
+        effort => {
+            let reasoning_level = ReasoningLevel::try_from(effort.clone()).ok()?;
+            map_reasoning_to_provider_effort(
+                reasoning_level,
+                &BTreeMap::from([
+                    (ReasoningLevel::Minimal, "low".to_string()),
+                    (ReasoningLevel::Low, "low".to_string()),
+                    (ReasoningLevel::Medium, "medium".to_string()),
+                    (ReasoningLevel::High, "high".to_string()),
+                    (ReasoningLevel::Xhigh, "xhigh".to_string()),
+                ]),
+                warnings,
+            )
+        }
+    }
+}
+
+fn remove_open_responses_reasoning_summary(body: &mut JsonObject) -> Option<String> {
+    let mut summary = None;
+
+    for key in ["reasoningSummary", "reasoning_summary"] {
+        if let Some(value) = body.remove(key)
+            && summary.is_none()
+            && let Some(value) = value.as_str()
+            && matches!(value, "concise" | "detailed" | "auto")
+        {
+            summary = Some(value.to_string());
+        }
+    }
+
+    summary
 }
 
 fn merge_open_responses_provider_options(
@@ -4863,10 +4941,11 @@ mod tests {
         FinishReason, LanguageModel, LanguageModelAssistantContentPart,
         LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
         LanguageModelFilePart, LanguageModelMessage, LanguageModelProviderTool,
-        LanguageModelReasoningPart, LanguageModelSource, LanguageModelStreamPart,
-        LanguageModelTextPart, LanguageModelTool, LanguageModelToolApprovalRequestPart,
-        LanguageModelToolApprovalResponsePart, LanguageModelToolCallPart, LanguageModelToolChoice,
-        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultContentPart,
+        LanguageModelReasoningEffort, LanguageModelReasoningPart, LanguageModelSource,
+        LanguageModelStreamPart, LanguageModelTextPart, LanguageModelTool,
+        LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
+        LanguageModelToolCallPart, LanguageModelToolChoice, LanguageModelToolContentPart,
+        LanguageModelToolMessage, LanguageModelToolResultContentPart,
         LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUserContentPart,
         LanguageModelUserMessage,
     };
@@ -5466,6 +5545,132 @@ mod tests {
                 ]
             }))
         );
+    }
+
+    #[test]
+    fn open_responses_provider_maps_reasoning_effort_and_summary_options() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let captured_requests_for_transport = Arc::clone(&captured_requests);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                captured_requests_for_transport
+                    .lock()
+                    .expect("captured requests mutex is not poisoned")
+                    .push(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_reasoning",
+                        "created_at": 1711115037,
+                        "model": "gemma-7b-it",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Reasoning accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 5,
+                            "output_tokens": 3
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new(
+                "lmstudio",
+                "https://api.lmstudio.test/v1/responses",
+            )
+            .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gemma-7b-it");
+        let prompt = || {
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::Text(
+                    LanguageModelTextPart::new("Hello"),
+                )],
+            ))]
+        };
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "lmstudio": {
+                "reasoningSummary": "auto"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let minimal_result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(prompt())
+                    .with_reasoning(LanguageModelReasoningEffort::Minimal)
+                    .with_provider_options(provider_options),
+            ),
+        );
+        let none_result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(prompt())
+                    .with_reasoning(LanguageModelReasoningEffort::None),
+            ),
+        );
+        let default_result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(prompt())
+                    .with_reasoning(LanguageModelReasoningEffort::ProviderDefault),
+            ),
+        );
+
+        assert_eq!(minimal_result.warnings.len(), 1);
+        assert!(matches!(
+            minimal_result.warnings.first(),
+            Some(crate::warning::Warning::Compatibility { feature, details })
+                if feature == "reasoning"
+                    && details.as_deref() == Some(
+                        "reasoning \"minimal\" is not directly supported by this model. mapped to effort \"low\"."
+                    )
+        ));
+        assert!(none_result.warnings.is_empty());
+        assert!(default_result.warnings.is_empty());
+
+        let requests = captured_requests
+            .lock()
+            .expect("captured requests mutex is not poisoned");
+        assert_eq!(requests.len(), 3);
+        let bodies = requests
+            .iter()
+            .map(|request| {
+                request
+                    .body
+                    .as_ref()
+                    .and_then(ProviderApiRequestBody::as_text)
+                    .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+                    .expect("request body is JSON")
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            bodies[0]["reasoning"],
+            json!({
+                "effort": "low",
+                "summary": "auto"
+            })
+        );
+        assert!(bodies[0].get("reasoningSummary").is_none());
+        assert_eq!(
+            bodies[1]["reasoning"],
+            json!({
+                "effort": "none"
+            })
+        );
+        assert!(bodies[2].get("reasoning").is_none());
     }
 
     #[test]
