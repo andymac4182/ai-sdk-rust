@@ -24,8 +24,9 @@ use crate::language_model::{
     LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd,
     LanguageModelTextStart, LanguageModelTool, LanguageModelToolApprovalRequest,
     LanguageModelToolCall, LanguageModelToolChoice, LanguageModelToolContentPart,
-    LanguageModelToolResult, LanguageModelToolResultContentPart, LanguageModelToolResultOutput,
-    LanguageModelUrlSource, LanguageModelUsage, LanguageModelUserContentPart, OutputTokenUsage,
+    LanguageModelToolInputEnd, LanguageModelToolInputStart, LanguageModelToolResult,
+    LanguageModelToolResultContentPart, LanguageModelToolResultOutput, LanguageModelUrlSource,
+    LanguageModelUsage, LanguageModelUserContentPart, OutputTokenUsage,
 };
 use crate::openai_compatible::{OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel};
 use crate::provider::{
@@ -332,6 +333,7 @@ impl OpenResponsesLanguageModel {
                 request_body_for_response,
                 warnings,
                 include_raw_chunks,
+                &options.tools,
             ),
             Err(error) => self.stream_result_from_error(error, request_body_for_error),
         }
@@ -2157,6 +2159,19 @@ fn open_responses_push_tool_result(
     }
 }
 
+fn open_responses_push_stream_tool_result(
+    stream: &mut Vec<LanguageModelStreamPart>,
+    tool_call_id: &str,
+    tool_name: &str,
+    result: JsonValue,
+) {
+    if let Ok(result) = NonNullJsonValue::new(result) {
+        stream.push(LanguageModelStreamPart::ToolResult(
+            LanguageModelToolResult::new(tool_call_id, tool_name, result),
+        ));
+    }
+}
+
 fn map_open_responses_finish_reason(
     finish_reason: Option<&str>,
     has_tool_calls: bool,
@@ -2233,6 +2248,7 @@ fn open_responses_stream_result_from_response(
     request_body: JsonValue,
     warnings: Vec<Warning>,
     include_raw_chunks: bool,
+    tools: &Option<Vec<LanguageModelTool>>,
 ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
     let mut stream = vec![LanguageModelStreamPart::StreamStart(
         LanguageModelStreamStart::new(warnings),
@@ -2253,6 +2269,9 @@ fn open_responses_stream_result_from_response(
     let mut active_reasoning = BTreeSet::<String>::new();
     let mut ended_reasoning = BTreeSet::<String>::new();
     let mut pending_tool_calls = BTreeMap::<String, PendingOpenResponsesToolCall>::new();
+    let provider_tool_names = open_responses_provider_tool_names();
+    let tool_name_mapping = create_tool_name_mapping(tools.iter().flatten(), &provider_tool_names);
+    let web_search_tool_name = open_responses_web_search_response_tool_name(tools);
     let mut source_index = 0usize;
     let mut ongoing_annotations = Vec::<JsonValue>::new();
     let mut active_message_phase = None::<String>;
@@ -2495,6 +2514,61 @@ fn open_responses_stream_result_from_response(
                     Some("response.output_item.added") => {
                         if let Some(item) = value.get("item") {
                             match item.get("type").and_then(JsonValue::as_str) {
+                                Some("web_search_call") => {
+                                    let tool_call_id = item
+                                        .get("id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    let tool_name = tool_name_mapping
+                                        .to_custom_tool_name(&web_search_tool_name);
+                                    stream.push(LanguageModelStreamPart::ToolInputStart(
+                                        LanguageModelToolInputStart::new(tool_call_id, &tool_name)
+                                            .with_provider_executed(true),
+                                    ));
+                                    stream.push(LanguageModelStreamPart::ToolInputEnd(
+                                        LanguageModelToolInputEnd::new(tool_call_id),
+                                    ));
+                                    stream.push(LanguageModelStreamPart::ToolCall(
+                                        LanguageModelToolCall::new(tool_call_id, tool_name, "{}")
+                                            .with_provider_executed(true),
+                                    ));
+                                }
+                                Some("file_search_call") => {
+                                    let tool_call_id = item
+                                        .get("id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    let tool_name =
+                                        tool_name_mapping.to_custom_tool_name("file_search");
+                                    stream.push(LanguageModelStreamPart::ToolCall(
+                                        LanguageModelToolCall::new(tool_call_id, tool_name, "{}")
+                                            .with_provider_executed(true),
+                                    ));
+                                }
+                                Some("code_interpreter_call") => {
+                                    let tool_call_id = item
+                                        .get("id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    let tool_name =
+                                        tool_name_mapping.to_custom_tool_name("code_interpreter");
+                                    stream.push(LanguageModelStreamPart::ToolInputStart(
+                                        LanguageModelToolInputStart::new(tool_call_id, tool_name)
+                                            .with_provider_executed(true),
+                                    ));
+                                }
+                                Some("image_generation_call") => {
+                                    let tool_call_id = item
+                                        .get("id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    let tool_name =
+                                        tool_name_mapping.to_custom_tool_name("image_generation");
+                                    stream.push(LanguageModelStreamPart::ToolCall(
+                                        LanguageModelToolCall::new(tool_call_id, tool_name, "{}")
+                                            .with_provider_executed(true),
+                                    ));
+                                }
                                 Some("message") => {
                                     ongoing_annotations.clear();
                                     active_message_phase = item
@@ -2558,6 +2632,81 @@ fn open_responses_stream_result_from_response(
                     Some("response.output_item.done") => {
                         if let Some(item) = value.get("item") {
                             match item.get("type").and_then(JsonValue::as_str) {
+                                Some("web_search_call") => {
+                                    let tool_call_id = item
+                                        .get("id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    let tool_name = tool_name_mapping
+                                        .to_custom_tool_name(&web_search_tool_name);
+                                    open_responses_push_stream_tool_result(
+                                        &mut stream,
+                                        tool_call_id,
+                                        &tool_name,
+                                        open_responses_web_search_output(item.get("action")),
+                                    );
+                                }
+                                Some("file_search_call") => {
+                                    let tool_call_id = item
+                                        .get("id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    let tool_name =
+                                        tool_name_mapping.to_custom_tool_name("file_search");
+                                    open_responses_push_stream_tool_result(
+                                        &mut stream,
+                                        tool_call_id,
+                                        &tool_name,
+                                        open_responses_file_search_output(item),
+                                    );
+                                }
+                                Some("code_interpreter_call") => {
+                                    let tool_call_id = item
+                                        .get("id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    let tool_name =
+                                        tool_name_mapping.to_custom_tool_name("code_interpreter");
+                                    stream.push(LanguageModelStreamPart::ToolInputEnd(
+                                        LanguageModelToolInputEnd::new(tool_call_id),
+                                    ));
+                                    stream.push(LanguageModelStreamPart::ToolCall(
+                                        LanguageModelToolCall::new(
+                                            tool_call_id,
+                                            tool_name.clone(),
+                                            json!({
+                                                "code": item.get("code").cloned().unwrap_or(JsonValue::Null),
+                                                "containerId": item.get("container_id").cloned().unwrap_or(JsonValue::Null)
+                                            })
+                                            .to_string(),
+                                        )
+                                        .with_provider_executed(true),
+                                    ));
+                                    open_responses_push_stream_tool_result(
+                                        &mut stream,
+                                        tool_call_id,
+                                        &tool_name,
+                                        json!({
+                                            "outputs": item.get("outputs").cloned().unwrap_or(JsonValue::Null)
+                                        }),
+                                    );
+                                }
+                                Some("image_generation_call") => {
+                                    let tool_call_id = item
+                                        .get("id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    let tool_name =
+                                        tool_name_mapping.to_custom_tool_name("image_generation");
+                                    open_responses_push_stream_tool_result(
+                                        &mut stream,
+                                        tool_call_id,
+                                        &tool_name,
+                                        json!({
+                                            "result": item.get("result").cloned().unwrap_or(JsonValue::Null)
+                                        }),
+                                    );
+                                }
                                 Some("message") => {
                                     if let Some(id) = item.get("id").and_then(JsonValue::as_str) {
                                         let phase = item
@@ -5427,6 +5576,184 @@ mod tests {
                         .and_then(|metadata| metadata.get("encryptedContent"))
                         .and_then(JsonValue::as_str)
                         == Some("encrypted-context")))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_streams_hosted_tool_outputs() {
+        let transport: OpenResponsesTransport = Arc::new(
+            move |_request| -> OpenResponsesTransportFuture {
+                let sse = [
+                    r#"data: {"type":"response.created","response":{"id":"resp_stream_hosted_tools","created_at":1711115037,"model":"gpt-4.1-mini"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":0,"item":{"id":"ws_123","type":"web_search_call","status":"in_progress"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":0,"item":{"id":"ws_123","type":"web_search_call","status":"completed","action":{"type":"search","query":"AI SDK Rust","sources":[{"type":"url","url":"https://example.com"}]}}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":1,"item":{"id":"fs_123","type":"file_search_call","status":"in_progress"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":1,"item":{"id":"fs_123","type":"file_search_call","status":"completed","queries":["rust sdk"],"results":[{"attributes":{"kind":"docs"},"file_id":"file_123","filename":"guide.md","score":0.91,"text":"Guide text"}]}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":2,"item":{"id":"ci_123","type":"code_interpreter_call","status":"in_progress","container_id":"container_123"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":2,"item":{"id":"ci_123","type":"code_interpreter_call","status":"completed","code":"print(1)","container_id":"container_123","outputs":[{"type":"logs","logs":"1"}]}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":3,"item":{"id":"ig_123","type":"image_generation_call","status":"in_progress"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":3,"item":{"id":"ig_123","type":"image_generation_call","status":"completed","result":"base64-image"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","item_id":"message_1","output_index":4,"content_index":0,"delta":"Hosted tools streamed"}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.done","item_id":"message_1","output_index":4,"content_index":0,"text":"Hosted tools streamed"}"#,
+                    "",
+                    r#"data: {"type":"response.completed","response":{"id":"resp_stream_hosted_tools","created_at":1711115037,"model":"gpt-4.1-mini","usage":{"input_tokens":11,"output_tokens":7}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let result =
+            poll_ready(
+                model.do_stream(
+                    LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                        LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                            LanguageModelTextPart::new("Use hosted tools"),
+                        )]),
+                    )])
+                    .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                        "openai.web_search",
+                        "liveSearch",
+                        JsonObject::new(),
+                    )))
+                    .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                        "openai.file_search",
+                        "docSearch",
+                        JsonObject::new(),
+                    )))
+                    .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                        "openai.code_interpreter",
+                        "codeRunner",
+                        JsonObject::new(),
+                    )))
+                    .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                        "openai.image_generation",
+                        "imageMaker",
+                        JsonObject::new(),
+                    ))),
+                ),
+            );
+
+        let tool_calls = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let tool_results = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(tool_calls.len(), 4);
+        assert_eq!(tool_results.len(), 4);
+        assert!(
+            tool_calls
+                .iter()
+                .all(|tool_call| tool_call.provider_executed == Some(true))
+        );
+        assert_eq!(tool_calls[0].tool_name, "liveSearch");
+        assert_eq!(tool_results[0].tool_name, "liveSearch");
+        assert_eq!(
+            tool_results[0].result.as_value(),
+            &json!({
+                "action": {
+                    "type": "search",
+                    "query": "AI SDK Rust"
+                },
+                "sources": [
+                    {
+                        "type": "url",
+                        "url": "https://example.com"
+                    }
+                ]
+            })
+        );
+        assert_eq!(tool_calls[1].tool_name, "docSearch");
+        assert_eq!(
+            tool_results[1].result.as_value(),
+            &json!({
+                "queries": ["rust sdk"],
+                "results": [
+                    {
+                        "attributes": {
+                            "kind": "docs"
+                        },
+                        "fileId": "file_123",
+                        "filename": "guide.md",
+                        "score": 0.91,
+                        "text": "Guide text"
+                    }
+                ]
+            })
+        );
+        assert_eq!(tool_calls[2].tool_name, "codeRunner");
+        assert_eq!(
+            tool_calls[2].input,
+            json!({
+                "code": "print(1)",
+                "containerId": "container_123"
+            })
+            .to_string()
+        );
+        assert_eq!(
+            tool_results[2].result.as_value(),
+            &json!({
+                "outputs": [
+                    {
+                        "type": "logs",
+                        "logs": "1"
+                    }
+                ]
+            })
+        );
+        assert_eq!(tool_calls[3].tool_name, "imageMaker");
+        assert_eq!(
+            tool_results[3].result.as_value(),
+            &json!({
+                "result": "base64-image"
+            })
+        );
+        assert!(
+            result
+                .stream
+                .iter()
+                .any(|part| matches!(part, LanguageModelStreamPart::ToolInputStart(start) if start.id == "ws_123" && start.provider_executed == Some(true)))
+        );
+        assert_eq!(
+            result.stream.iter().find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => {
+                    Some(finish.finish_reason.unified.clone())
+                }
+                _ => None,
+            }),
+            Some(FinishReason::Stop)
         );
     }
 
