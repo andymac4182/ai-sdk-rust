@@ -576,7 +576,8 @@ fn apply_open_responses_reasoning_options(
     body: &mut JsonObject,
     warnings: &mut Vec<Warning>,
 ) {
-    let effort = open_responses_reasoning_effort(reasoning, warnings);
+    let provider_effort = remove_open_responses_reasoning_effort(body);
+    let effort = provider_effort.or_else(|| open_responses_reasoning_effort(reasoning, warnings));
     let summary = remove_open_responses_reasoning_summary(body);
 
     if effort.is_none() && summary.is_none() {
@@ -646,6 +647,18 @@ fn remove_open_responses_reasoning_summary(body: &mut JsonObject) -> Option<Stri
     summary
 }
 
+fn remove_open_responses_reasoning_effort(body: &mut JsonObject) -> Option<String> {
+    for key in ["reasoningEffort", "reasoning_effort"] {
+        if let Some(value) = body.remove(key)
+            && let Some(value) = value.as_str()
+        {
+            return Some(value.to_string());
+        }
+    }
+
+    None
+}
+
 fn merge_open_responses_provider_options(
     provider_options_name: &str,
     provider_options: Option<&ProviderOptions>,
@@ -703,7 +716,7 @@ fn merge_open_responses_provider_option_object(
     body: &mut JsonObject,
 ) {
     if passthrough_options {
-        body.extend(options.clone());
+        merge_open_responses_passthrough_provider_option_object(options, body);
         return;
     }
 
@@ -712,6 +725,154 @@ fn merge_open_responses_provider_option_object(
             body.insert(key.to_string(), value.clone());
             return;
         }
+    }
+}
+
+fn merge_open_responses_passthrough_provider_option_object(
+    options: &JsonObject,
+    body: &mut JsonObject,
+) {
+    for (key, value) in options {
+        match key.as_str() {
+            "allowedTools"
+            | "allowed_tools"
+            | "forceReasoning"
+            | "force_reasoning"
+            | "passThroughUnsupportedFiles"
+            | "pass_through_unsupported_files"
+            | "systemMessageMode"
+            | "system_message_mode" => {}
+            "contextManagement" | "context_management" => {
+                body.insert(
+                    "context_management".to_string(),
+                    open_responses_context_management_provider_option(value),
+                );
+            }
+            "conversation" | "include" | "instructions" | "metadata" | "store" | "truncation"
+            | "user" => {
+                body.insert(key.clone(), value.clone());
+            }
+            "logprobs" => {
+                if let Some(top_logprobs) = open_responses_logprobs_provider_option(value) {
+                    body.insert("top_logprobs".to_string(), top_logprobs);
+                    open_responses_add_include(body, "message.output_text.logprobs");
+                }
+            }
+            "maxToolCalls" | "max_tool_calls" => {
+                body.insert("max_tool_calls".to_string(), value.clone());
+            }
+            "parallelToolCalls" | "parallel_tool_calls" => {
+                body.insert("parallel_tool_calls".to_string(), value.clone());
+            }
+            "previousResponseId" | "previous_response_id" => {
+                body.insert("previous_response_id".to_string(), value.clone());
+            }
+            "promptCacheKey" | "prompt_cache_key" => {
+                body.insert("prompt_cache_key".to_string(), value.clone());
+            }
+            "promptCacheRetention" | "prompt_cache_retention" => {
+                body.insert("prompt_cache_retention".to_string(), value.clone());
+            }
+            "reasoningEffort" | "reasoning_effort" => {
+                body.insert("reasoningEffort".to_string(), value.clone());
+            }
+            "reasoningSummary" | "reasoning_summary" => {
+                body.insert("reasoningSummary".to_string(), value.clone());
+            }
+            "safetyIdentifier" | "safety_identifier" => {
+                body.insert("safety_identifier".to_string(), value.clone());
+            }
+            "serviceTier" | "service_tier" => {
+                body.insert("service_tier".to_string(), value.clone());
+            }
+            "strictJsonSchema" | "strict_json_schema" => {
+                open_responses_apply_strict_json_schema_provider_option(body, value);
+            }
+            "textVerbosity" | "text_verbosity" => {
+                open_responses_insert_text_provider_option(body, "verbosity", value.clone());
+            }
+            "topLogprobs" | "top_logprobs" => {
+                body.insert("top_logprobs".to_string(), value.clone());
+            }
+            _ => {
+                body.insert(key.clone(), value.clone());
+            }
+        }
+    }
+}
+
+fn open_responses_logprobs_provider_option(value: &JsonValue) -> Option<JsonValue> {
+    match value {
+        JsonValue::Bool(true) => Some(json!(20)),
+        JsonValue::Number(_) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn open_responses_add_include(body: &mut JsonObject, include: &str) {
+    match body.get_mut("include") {
+        Some(JsonValue::Array(values)) => {
+            if !values.iter().any(|value| value.as_str() == Some(include)) {
+                values.push(JsonValue::String(include.to_string()));
+            }
+        }
+        Some(_) => {}
+        None => {
+            body.insert(
+                "include".to_string(),
+                JsonValue::Array(vec![JsonValue::String(include.to_string())]),
+            );
+        }
+    }
+}
+
+fn open_responses_context_management_provider_option(value: &JsonValue) -> JsonValue {
+    let JsonValue::Array(items) = value else {
+        return value.clone();
+    };
+
+    JsonValue::Array(
+        items
+            .iter()
+            .map(|item| {
+                let JsonValue::Object(object) = item else {
+                    return item.clone();
+                };
+                let mut object = object.clone();
+                if let Some(compact_threshold) = object.remove("compactThreshold") {
+                    object.insert("compact_threshold".to_string(), compact_threshold);
+                }
+                JsonValue::Object(object)
+            })
+            .collect(),
+    )
+}
+
+fn open_responses_insert_text_provider_option(body: &mut JsonObject, key: &str, value: JsonValue) {
+    let text = body
+        .entry("text".to_string())
+        .or_insert_with(|| JsonValue::Object(JsonObject::new()));
+    if let JsonValue::Object(text) = text {
+        text.insert(key.to_string(), value);
+    }
+}
+
+fn open_responses_apply_strict_json_schema_provider_option(
+    body: &mut JsonObject,
+    value: &JsonValue,
+) {
+    let Some(strict) = value.as_bool() else {
+        return;
+    };
+
+    let Some(JsonValue::Object(text)) = body.get_mut("text") else {
+        return;
+    };
+    let Some(JsonValue::Object(format)) = text.get_mut("format") else {
+        return;
+    };
+    if format.get("type").and_then(JsonValue::as_str) == Some("json_schema") {
+        format.insert("strict".to_string(), JsonValue::Bool(strict));
     }
 }
 
@@ -4953,8 +5114,8 @@ mod tests {
         FinishReason, LanguageModel, LanguageModelAssistantContentPart,
         LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
         LanguageModelFilePart, LanguageModelMessage, LanguageModelProviderTool,
-        LanguageModelReasoningEffort, LanguageModelReasoningPart, LanguageModelSource,
-        LanguageModelStreamPart, LanguageModelTextPart, LanguageModelTool,
+        LanguageModelReasoningEffort, LanguageModelReasoningPart, LanguageModelResponseFormat,
+        LanguageModelSource, LanguageModelStreamPart, LanguageModelTextPart, LanguageModelTool,
         LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
         LanguageModelToolCallPart, LanguageModelToolChoice, LanguageModelToolContentPart,
         LanguageModelToolMessage, LanguageModelToolResultContentPart,
@@ -5680,6 +5841,185 @@ mod tests {
             })
         );
         assert!(bodies[2].get("reasoning").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_maps_openai_responses_provider_options_to_request_body() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_openai_options",
+                        "created_at": 1711115037,
+                        "model": "gpt-5.1",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "{\"answer\":\"mapped\"}"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 6,
+                            "output_tokens": 4
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-5.1");
+        let response_schema: JsonObject = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "answer": {
+                    "type": "string"
+                }
+            },
+            "required": ["answer"]
+        }))
+        .expect("schema deserializes");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "previousResponseId": "resp_prev",
+                "maxToolCalls": 3,
+                "parallelToolCalls": false,
+                "promptCacheKey": "cache-key",
+                "promptCacheRetention": "24h",
+                "safetyIdentifier": "safe-user",
+                "serviceTier": "priority",
+                "textVerbosity": "low",
+                "strictJsonSchema": false,
+                "reasoningEffort": "high",
+                "reasoningSummary": "detailed",
+                "contextManagement": [
+                    {
+                        "type": "compaction",
+                        "compactThreshold": 2048
+                    }
+                ],
+                "logprobs": true,
+                "passThroughUnsupportedFiles": true,
+                "systemMessageMode": "developer",
+                "forceReasoning": true,
+                "caching": "auto"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Return JSON"),
+                    )]),
+                )])
+                .with_response_format(
+                    LanguageModelResponseFormat::json()
+                        .with_schema(response_schema.clone())
+                        .with_name("response"),
+                )
+                .with_provider_options(provider_options)
+                .with_reasoning(LanguageModelReasoningEffort::Minimal),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(request_body["previous_response_id"], "resp_prev");
+        assert_eq!(request_body["max_tool_calls"], 3);
+        assert_eq!(request_body["parallel_tool_calls"], false);
+        assert_eq!(request_body["prompt_cache_key"], "cache-key");
+        assert_eq!(request_body["prompt_cache_retention"], "24h");
+        assert_eq!(request_body["safety_identifier"], "safe-user");
+        assert_eq!(request_body["service_tier"], "priority");
+        assert_eq!(
+            request_body["context_management"],
+            json!([
+                {
+                    "type": "compaction",
+                    "compact_threshold": 2048
+                }
+            ])
+        );
+        assert_eq!(request_body["top_logprobs"], 20);
+        assert_eq!(
+            request_body["include"],
+            json!(["message.output_text.logprobs"])
+        );
+        assert_eq!(
+            request_body["text"],
+            json!({
+                "format": {
+                    "type": "json_schema",
+                    "name": "response",
+                    "schema": response_schema,
+                    "strict": false
+                },
+                "verbosity": "low"
+            })
+        );
+        assert_eq!(
+            request_body["reasoning"],
+            json!({
+                "effort": "high",
+                "summary": "detailed"
+            })
+        );
+        assert_eq!(request_body["caching"], "auto");
+
+        for leaked_key in [
+            "previousResponseId",
+            "maxToolCalls",
+            "parallelToolCalls",
+            "promptCacheKey",
+            "promptCacheRetention",
+            "safetyIdentifier",
+            "serviceTier",
+            "textVerbosity",
+            "strictJsonSchema",
+            "reasoningEffort",
+            "reasoningSummary",
+            "contextManagement",
+            "logprobs",
+            "passThroughUnsupportedFiles",
+            "systemMessageMode",
+            "forceReasoning",
+        ] {
+            assert!(
+                request_body.get(leaked_key).is_none(),
+                "{leaked_key} should not leak into the Open Responses request body"
+            );
+        }
     }
 
     #[test]
