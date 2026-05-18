@@ -280,19 +280,24 @@ focused tests for each portable behavior before changing rows to `verified`.
    corresponding Rust crate, and package-owned API must be implemented,
    documented, and tested in that crate. The current `ai-sdk-rust` root crate is
    already merging multiple upstream packages into one Rust boundary. That is
-   the wrong long-term architecture and must not become the default pattern for
-   new parity work. Every additional package surface added to the root crate
-   increases extraction debt, makes the eventual split harder, and raises the
-   risk of breaking public API compatibility.
+   architectural debt being created today, not a neutral staging choice, and it
+   gets more expensive every time another TypeScript package is folded into the
+   root crate.
 
-   Future iterations should create or use the matching Rust crate before adding
-   new TypeScript package parity. Package-owned types, provider/options
-   surfaces, docs, and tests should land in that package crate first. Existing
-   package-owned surfaces that were merged into the root crate should be treated
-   as migration debt and moved behind their matching package crates before more
-   API is layered on top of them. New package-owned APIs should not be added to
-   the root crate unless the change is explicitly documented as temporary
-   staging with the destination crate named and a concrete follow-up extraction
-   path. The acceptance target is one Rust crate per upstream TypeScript
-   package, no crate owning APIs from multiple upstream packages, and the root
-   crate limited to aggregate re-exports plus compatibility shims.
+   Future parity work must stop treating the root crate as the implementation
+   home for package-owned surfaces. Before adding parity for an upstream
+   TypeScript package, create or use the matching Rust crate and put that
+   package's types, provider/options surfaces, docs, and tests there first. The
+   root crate should only aggregate re-exports and compatibility shims; it
+   should not own APIs from multiple upstream packages. Existing package-owned
+   surfaces already merged into the root crate are migration debt and should be
+   moved behind their matching package crates before more API is layered on top
+   of them.
+
+   New package-owned APIs must not be added to the root crate unless there is a
+   documented, temporary staging exception that names the destination crate,
+   explains why the matching crate cannot be introduced in the same slice, and
+   includes a concrete extraction path. The acceptance target is one Rust crate
+   per upstream TypeScript package, no crate owning APIs from multiple upstream
+   packages, and the root crate limited to aggregate re-exports plus
+   compatibility shims.
