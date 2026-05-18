@@ -269,11 +269,11 @@ mod tests {
     use crate::json::{JsonObject, JsonValue};
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelAssistantContentPart,
-        LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelFilePart,
-        LanguageModelMessage, LanguageModelReasoningPart, LanguageModelTextPart,
-        LanguageModelToolCallPart, LanguageModelToolChoice, LanguageModelToolContentPart,
-        LanguageModelToolMessage, LanguageModelToolResultOutput, LanguageModelToolResultPart,
-        LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelFileData,
+        LanguageModelFilePart, LanguageModelMessage, LanguageModelReasoningPart,
+        LanguageModelTextPart, LanguageModelToolCallPart, LanguageModelToolChoice,
+        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultOutput,
+        LanguageModelToolResultPart, LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
@@ -622,6 +622,239 @@ mod tests {
                     }
                 ]
             }))
+        );
+    }
+
+    #[test]
+    fn vercel_ai_gateway_openai_compatible_maps_chat_image_outputs_through_generate_text() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "chatcmpl-vercel-gateway-image-output",
+                        "created": 1711115037,
+                        "model": "google/gemini-2.5-flash-image-preview",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Here is an image.",
+                                    "images": [
+                                        {
+                                            "type": "image_url",
+                                            "image_url": {
+                                                "url": "data:image/png;base64,aW1hZ2UtZGF0YQ=="
+                                            }
+                                        }
+                                    ]
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 8,
+                            "completion_tokens": 12,
+                            "total_tokens": 20
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_vercel_ai_gateway_openai_compatible(
+            VercelAiGatewayOpenAICompatibleSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://ai-gateway.test/v1"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("google/gemini-2.5-flash-image-preview");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "vercelAiGateway": {
+                "modalities": ["text", "image"]
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(
+                &model,
+                Prompt::from_prompt("Generate one small image and describe it."),
+            )
+            .expect("prompt is valid")
+            .with_provider_options(provider_options),
+        ));
+
+        assert_eq!(result.text, "Here is an image.");
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].media_type(), "image/png");
+        assert_eq!(result.files[0].base64(), "aW1hZ2UtZGF0YQ==");
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body.get("modalities"),
+            Some(&json!(["text", "image"]))
+        );
+        assert_eq!(
+            request_body.get("model").and_then(JsonValue::as_str),
+            Some("google/gemini-2.5-flash-image-preview")
+        );
+    }
+
+    #[test]
+    fn vercel_ai_gateway_openai_compatible_streams_chat_image_outputs_through_stream_text() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    sse_body([
+                        json!({
+                            "id": "chatcmpl-vercel-gateway-stream-image-output",
+                            "created": 1711115037,
+                            "model": "google/gemini-2.5-flash-image-preview",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "role": "assistant",
+                                        "content": ""
+                                    },
+                                    "finish_reason": null
+                                }
+                            ]
+                        }),
+                        json!({
+                            "id": "chatcmpl-vercel-gateway-stream-image-output",
+                            "created": 1711115037,
+                            "model": "google/gemini-2.5-flash-image-preview",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "content": "Here is an image."
+                                    },
+                                    "finish_reason": null
+                                }
+                            ]
+                        }),
+                        json!({
+                            "id": "chatcmpl-vercel-gateway-stream-image-output",
+                            "created": 1711115037,
+                            "model": "google/gemini-2.5-flash-image-preview",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "images": [
+                                            {
+                                                "type": "image_url",
+                                                "image_url": {
+                                                    "url": "data:image/png;base64,c3RyZWFtLWltYWdl"
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    "finish_reason": null
+                                }
+                            ]
+                        }),
+                        json!({
+                            "id": "chatcmpl-vercel-gateway-stream-image-output",
+                            "created": 1711115037,
+                            "model": "google/gemini-2.5-flash-image-preview",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": "stop"
+                                }
+                            ],
+                            "usage": {
+                                "prompt_tokens": 8,
+                                "completion_tokens": 12
+                            }
+                        }),
+                    ]),
+                )
+                .with_headers(Headers::from([(
+                    "content-type".to_string(),
+                    "text/event-stream".to_string(),
+                )])))))
+            });
+        let provider = create_vercel_ai_gateway_openai_compatible(
+            VercelAiGatewayOpenAICompatibleSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://ai-gateway.test/v1"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("google/gemini-2.5-flash-image-preview");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "vercelAiGateway": {
+                "modalities": ["text", "image"]
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = poll_ready(stream_text(
+            StreamTextOptions::from_prompt(
+                &model,
+                Prompt::from_prompt("Stream one small image and describe it."),
+            )
+            .expect("prompt is valid")
+            .with_provider_options(provider_options),
+        ));
+
+        assert_eq!(result.text, "Here is an image.");
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].media_type, "image/png");
+        assert!(matches!(
+            &result.files[0].data,
+            LanguageModelFileData::Data { data }
+                if data == &FileDataContent::Base64("c3RyZWFtLWltYWdl".to_string())
+        ));
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body.get("modalities"),
+            Some(&json!(["text", "image"]))
+        );
+        assert_eq!(
+            request_body.get("stream").and_then(JsonValue::as_bool),
+            Some(true)
         );
     }
 
@@ -2183,6 +2416,55 @@ mod tests {
         assert!(
             !result.image.base64().is_empty(),
             "Gateway OpenAI-compatible image response was empty"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI-compatible chat image-output call"]
+    fn live_vercel_ai_gateway_openai_compatible_generate_text_with_image_output() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!(
+                "skipping live Gateway OpenAI-compatible chat image-output test because no API key is configured"
+            );
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_AI_GATEWAY_OPENAI_COMPATIBLE_IMAGE_CHAT_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_OPENAI_COMPATIBLE_IMAGE_CHAT_MODEL"))
+            .or_else(|_| env::var("AI_SDK_RUST_GATEWAY_IMAGE_CHAT_MODEL"))
+            .or_else(|_| env::var("AI_GATEWAY_IMAGE_CHAT_MODEL"))
+            .unwrap_or_else(|_| "google/gemini-2.5-flash-image".to_string());
+        let model = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key(api_key)
+            .language_model(model_id);
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "vercelAiGateway": {
+                "modalities": ["text", "image"]
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(
+                &model,
+                Prompt::from_prompt(
+                    "Generate a simple flat image of a blue square and describe it in one short sentence.",
+                ),
+            )
+            .expect("prompt is valid")
+            .with_provider_options(provider_options)
+            .with_max_output_tokens(80)
+            .with_temperature(0.0),
+        ));
+
+        assert!(
+            !result.files.is_empty(),
+            "Gateway OpenAI-compatible chat image-output response did not include files"
+        );
+        assert!(
+            result
+                .files
+                .iter()
+                .any(|file| file.media_type().starts_with("image/") && !file.base64().is_empty()),
+            "Gateway OpenAI-compatible chat image-output files were empty or non-image"
         );
     }
 
