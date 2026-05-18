@@ -332,10 +332,11 @@ mod tests {
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelAssistantContentPart,
         LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelFileData,
-        LanguageModelFilePart, LanguageModelMessage, LanguageModelReasoningPart,
-        LanguageModelTextPart, LanguageModelToolCallPart, LanguageModelToolChoice,
-        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultOutput,
-        LanguageModelToolResultPart, LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelFilePart, LanguageModelMessage, LanguageModelProviderTool,
+        LanguageModelReasoningPart, LanguageModelTextPart, LanguageModelTool,
+        LanguageModelToolCallPart, LanguageModelToolChoice, LanguageModelToolContentPart,
+        LanguageModelToolMessage, LanguageModelToolResultOutput, LanguageModelToolResultPart,
+        LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
@@ -2365,6 +2366,106 @@ mod tests {
     }
 
     #[test]
+    fn vercel_ai_gateway_openai_responses_prepares_openai_hosted_tools() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_gateway_hosted_tools",
+                        "created_at": 1711115037,
+                        "model": "openai/gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Gateway hosted tools prepared"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 6,
+                            "output_tokens": 4
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://ai-gateway.test/v1/")
+            .with_transport(transport);
+        let model = provider.responses("openai/gpt-4.1-mini");
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(&model, Prompt::from_prompt("Search Gateway docs"))
+                .expect("prompt is valid")
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.web_search",
+                    "gatewaySearch",
+                    json_object(json!({
+                        "externalWebAccess": false,
+                        "searchContextSize": "medium"
+                    })),
+                )))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.apply_patch",
+                    "apply_patch",
+                    JsonObject::new(),
+                )))
+                .with_tool_choice(LanguageModelToolChoice::Tool {
+                    tool_name: "gatewaySearch".to_string(),
+                }),
+        ));
+
+        assert_eq!(result.text, "Gateway hosted tools prepared");
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.url, "https://ai-gateway.test/v1/responses");
+
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+        assert_eq!(request_body["model"], "openai/gpt-4.1-mini");
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "web_search",
+                    "external_web_access": false,
+                    "search_context_size": "medium"
+                },
+                {
+                    "type": "apply_patch"
+                }
+            ])
+        );
+        assert_eq!(
+            request_body["tool_choice"],
+            json!({
+                "type": "web_search"
+            })
+        );
+    }
+
+    #[test]
     fn vercel_ai_gateway_openai_responses_streams_text() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -3814,6 +3915,10 @@ mod tests {
                 .iter()
                 .find_map(|(key, value)| (*key == name).then(|| (*value).to_string()))
         }
+    }
+
+    fn json_object(value: JsonValue) -> JsonObject {
+        serde_json::from_value(value).expect("value is a JSON object")
     }
 
     fn live_gateway_api_key() -> Option<String> {
