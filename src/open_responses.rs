@@ -2057,10 +2057,23 @@ fn open_responses_file_part(
     let top_level_media_type = get_top_level_media_type(&file.media_type);
 
     match &file.data {
-        FileData::Reference { .. } => Err(
-            "Open Responses file parts with provider references are not implemented yet."
-                .to_string(),
-        ),
+        FileData::Reference { reference } => {
+            let file_id = reference
+                .provider_id(provider_options_name)
+                .map_err(|error| error.message().to_string())?;
+
+            if top_level_media_type == "image" {
+                Ok(open_responses_image_file_reference_part(
+                    file_id,
+                    open_responses_image_detail(file, provider_options_name),
+                ))
+            } else {
+                Ok(json!({
+                    "type": "input_file",
+                    "file_id": file_id
+                }))
+            }
+        }
         FileData::Text { .. } => {
             Err("Open Responses text file parts are not implemented yet.".to_string())
         }
@@ -2105,6 +2118,22 @@ fn open_responses_image_file_part(image_url: String, detail: Option<JsonValue>) 
         JsonValue::String("input_image".to_string()),
     );
     part.insert("image_url".to_string(), JsonValue::String(image_url));
+    if let Some(detail) = detail {
+        part.insert("detail".to_string(), detail);
+    }
+    JsonValue::Object(part)
+}
+
+fn open_responses_image_file_reference_part(file_id: &str, detail: Option<JsonValue>) -> JsonValue {
+    let mut part = JsonObject::new();
+    part.insert(
+        "type".to_string(),
+        JsonValue::String("input_image".to_string()),
+    );
+    part.insert(
+        "file_id".to_string(),
+        JsonValue::String(file_id.to_string()),
+    );
     if let Some(detail) = detail {
         part.insert("detail".to_string(), detail);
     }
@@ -6027,7 +6056,7 @@ mod tests {
         OpenResponsesProvider, OpenResponsesProviderSettings, OpenResponsesTransport,
         OpenResponsesTransportFuture, create_open_responses, map_open_responses_finish_reason,
     };
-    use crate::file_data::{FileData, FileDataContent};
+    use crate::file_data::{FileData, FileDataContent, ProviderReference};
     use crate::generate_object::{GenerateObjectOptions, generate_object};
     use crate::generate_text::{GenerateTextInclude, GenerateTextOptions, generate_text};
     use crate::headers::Headers;
@@ -6052,6 +6081,7 @@ mod tests {
     };
     use crate::stream_text::{StreamTextOptions, TextStreamPart, stream_text};
     use serde_json::json;
+    use std::collections::BTreeMap;
     use std::future::Future;
     use std::future::ready;
     use std::pin::Pin;
@@ -9215,6 +9245,15 @@ mod tests {
         )
         .with_transport(transport);
         let model = provider.language_model("gpt-4.1-mini");
+        let provider_reference = |entries: &[(&str, &str)]| -> ProviderReference {
+            ProviderReference::try_from(
+                entries
+                    .iter()
+                    .map(|(provider, file_id)| (provider.to_string(), file_id.to_string()))
+                    .collect::<BTreeMap<_, _>>(),
+            )
+            .expect("provider reference is valid")
+        };
         let result = poll_ready(generate_text(
             GenerateTextOptions::from_prompt(
                 &model,
@@ -9236,6 +9275,15 @@ mod tests {
                             },
                             "image/jpeg",
                         )),
+                        LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                            FileData::Reference {
+                                reference: provider_reference(&[
+                                    ("openai", "file-img-abc123"),
+                                    ("anthropic", "img-xyz"),
+                                ]),
+                            },
+                            "image/png",
+                        )),
                         LanguageModelUserContentPart::File(
                             LanguageModelFilePart::new(
                                 FileData::Data {
@@ -9249,6 +9297,15 @@ mod tests {
                             FileData::Url {
                                 url: Url::parse("https://example.com/report.pdf")
                                     .expect("url parses"),
+                            },
+                            "application/pdf",
+                        )),
+                        LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                            FileData::Reference {
+                                reference: provider_reference(&[
+                                    ("openai", "file-pdf-xyz789"),
+                                    ("google", "doc-123"),
+                                ]),
                             },
                             "application/pdf",
                         )),
@@ -9291,6 +9348,10 @@ mod tests {
                                 "image_url": "https://example.com/photo.jpg"
                             },
                             {
+                                "type": "input_image",
+                                "file_id": "file-img-abc123"
+                            },
+                            {
                                 "type": "input_file",
                                 "filename": "report.pdf",
                                 "file_data": "data:application/pdf;base64,JVBERi0="
@@ -9298,6 +9359,10 @@ mod tests {
                             {
                                 "type": "input_file",
                                 "file_url": "https://example.com/report.pdf"
+                            },
+                            {
+                                "type": "input_file",
+                                "file_id": "file-pdf-xyz789"
                             }
                         ]
                     }
