@@ -102,28 +102,29 @@ blocker that needs human input.
    JavaScript-only concepts such as `AbortSignal`.
 3. Add focused serialization/deserialization and behavior tests for every new
    public contract.
-4. Enforce one-to-one crate/package boundaries now. This is a hard acceptance
-   gate for every future iteration, not cleanup for a later pass. Every
-   portable upstream `vercel/ai` TypeScript package that gains Rust API must
-   have exactly one matching Rust workspace crate, and that crate must own the
-   package's public types, options, implementation, docs, tests, and
-   provider/model surfaces. Do not merge multiple upstream packages into
-   `ai-sdk-rust` or any other single Rust crate.
+4. Enforce strict 1:1 crate/package ownership now. Every portable upstream
+   `vercel/ai` TypeScript package that gains Rust API must have exactly one
+   matching Rust workspace crate before that API lands, and no Rust crate may
+   own APIs from more than one upstream package. This is a merge-blocking
+   acceptance gate for every iteration, not cleanup for a later pass.
 5. Treat the current root-crate consolidation as active architecture debt. We
    are already merging multiple TypeScript packages into one Rust crate today,
    and every additional package folded into that crate makes the future split
-   harder and more breaking. New package-owned implementation must not be
-   staged in the root crate first; start in the matching crate.
-6. Treat the root crate as a facade, not a staging area. It may aggregate
-   re-exports and compatibility shims, and if it is the Rust equivalent of
-   `packages/ai`, it may own only that package's API. It must not also own
-   provider contracts, provider utilities, provider implementations, MCP,
-   workflow, telemetry, adapters, or other package-owned surfaces.
-7. Before adding API for any upstream TypeScript package, create or use its
-   matching Rust crate and put the package-owned types and implementation
-   there. A parity slice that ports a TypeScript package without creating or
-   using its matching Rust crate is blocked, incomplete, and not mergeable even
-   if the implementation itself works and has passing tests. A package row
+   harder, more coupled, and more breaking. New package-owned implementation
+   must not be staged in the root crate or any other consolidated crate. If the
+   matching crate does not exist yet, create it first.
+6. Treat the root crate as a facade, not an implementation home or staging
+   area. It may aggregate re-exports and compatibility shims, and if it is the
+   Rust equivalent of `packages/ai`, it may own only that package's API. It
+   must not also own provider contracts, provider utilities, provider
+   implementations, MCP, workflow, telemetry, adapters, or other
+   package-owned surfaces.
+7. Before adding or reviewing API for any upstream TypeScript package, create
+   or use its matching Rust crate and put the package-owned types and
+   implementation there. A parity slice that ports a TypeScript package without
+   creating or using its matching Rust crate is blocked, incomplete, and not
+   mergeable even if the implementation itself works and has passing tests.
+   Passing tests in the wrong crate prove behavior, not parity. A package row
    cannot be marked `verified` while its portable implementation is owned by
    the wrong crate.
 8. Do not use temporary staging exceptions for new package-owned
@@ -285,11 +286,12 @@ You are done only when:
 2. Every ledger item is `verified` or `js-only-documented`.
 3. The Rust crate/workspace has validated equivalents for all portable
    upstream surfaces.
-4. The Rust workspace has a one-to-one crate mapping for every portable
-   upstream TypeScript package, and no crate owns package-owned APIs from more
-   than one upstream package. Existing root-crate package debt must be
-   extracted before completion. Until then it must be tracked as incomplete and
-   cannot count as verified parity.
+4. The Rust workspace has a strict 1:1 crate mapping for every portable
+   upstream TypeScript package: one matching Rust crate per package, no Rust
+   crate owning APIs from multiple upstream packages, and the root crate limited
+   to the `packages/ai` facade plus aggregate re-exports and compatibility
+   shims. Existing root-crate package debt must be extracted before completion.
+   Until then it is incomplete and cannot count as verified parity.
 5. The full validation suite passes.
 6. The final complete slice is merged to `main` and pushed.
 

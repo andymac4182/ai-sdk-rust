@@ -6,24 +6,33 @@ portable parity with upstream [`vercel/ai`](https://github.com/vercel/ai).
 
 ## Crate Boundary Gate
 
-Full parity requires a one-to-one mapping between upstream TypeScript packages
-and Rust crates. This is not a future cleanup note: it is an acceptance gate for
-every iteration from now on. Each portable `packages/*` entry that has Rust API
-must have exactly one matching Rust workspace crate, and that crate must own the
-package's public API, options, implementation, docs, tests, and provider/model
-surfaces.
+Full parity requires a strict 1:1 mapping between upstream TypeScript packages
+and Rust crates: one Rust crate for each portable upstream package, and no Rust
+crate implementing APIs from more than one upstream package. This is not a
+future cleanup note; it is a merge-blocking acceptance gate for every iteration
+from now on. Crate ownership is part of parity, not packaging polish.
 
-The current root crate already merges multiple upstream packages into one Rust
-crate. That is active architecture debt created by today's porting choices. Any
-new package-owned implementation added to the root crate, or to any other crate
-that already owns a different upstream package, makes the eventual split harder
-and is not acceptable as verified parity. A slice that ports a package in the
-wrong crate is incomplete even if its behavior and tests pass.
+Each portable `packages/*` entry that has Rust API must have its matching Rust
+workspace crate before that API is added. That crate owns the package's public
+API, options, implementation, docs, tests, and provider/model surfaces. If the
+matching crate does not exist yet, creating it is the first step of the slice. A
+slice that implements package-owned behavior in the wrong crate is blocked,
+incomplete, and cannot count toward verified parity even if the behavior works
+and its tests pass.
+
+The current root crate already merges multiple upstream TypeScript packages into
+one Rust crate. That is active architecture debt being created by today's
+porting choices, and continuing to add package-owned code there makes the
+eventual split harder, more coupled, and more breaking for users. Existing
+package-owned code in the root is extraction debt. New package-owned code in the
+root, or in any crate that already owns a different upstream package, is a
+regression.
 
 The root crate may act only as the Rust equivalent of upstream `packages/ai`:
 facade APIs, aggregate re-exports, and compatibility shims. Provider contracts,
 provider utilities, provider packages, MCP, Workflow, telemetry, adapters, and
-other separately packaged upstream surfaces need their own matching crates.
+other separately packaged upstream surfaces must move to, or start in, their own
+matching crates.
 
 ## Inventory Rules
 
@@ -38,6 +47,9 @@ other separately packaged upstream surfaces need their own matching crates.
   implementation, docs, and tests are owned by the Rust crate that maps
   one-to-one to the upstream TypeScript package. Passing tests in the wrong
   crate are still package-boundary debt, not verified parity.
+- When updating a package row, record the matching Rust crate as the ownership
+  target. A root module or consolidated crate path is evidence of incomplete
+  extraction unless it is only a facade re-export or compatibility shim.
 - A row may be `js-only-documented` only when the behavior is truly not
   portable to Rust and the Rust-facing alternative is documented in the row.
 - Do not remove upstream items just because they are hard or large.
@@ -88,7 +100,7 @@ inventory.
 | `packages/bytedance` (`@ai-sdk/bytedance`) | provider package | in-progress | `crates/ai-sdk-bytedance` | `bytedance_video_model_generates_video_with_headers_body_and_metadata`; `bytedance_video_model_passes_unmapped_resolution_and_url_image`; `bytedance_video_model_maps_api_and_status_errors_to_metadata`; `bytedance_provider_reports_unsupported_model_families_and_trait_video`; `bytedance_provider_settings_serde_accepts_upstream_shape` | Initial provider-owned crate mirrors upstream `createByteDance` settings for default/custom base URL, `ARK_API_KEY`, bearer JSON headers, custom provider/request headers, `byteDance`/`createByteDance` via Rust `byte_dance`/`create_byte_dance`, `video`/`video_model`, provider-v4 trait integration, unsupported language/embedding/image lookups, task creation at `/contents/generations/tasks`, status polling, URL video results, response headers, task id and usage provider metadata, standard video prompt/image/aspect/duration/seed/resolution request shaping with upstream resolution mapping, unsupported `fps`/`n` warnings, ByteDance provider options for watermark/audio/camera/last-frame/service-tier/draft/reference media/poll timing, passthrough options, and API/status error metadata. Abort handling, exact thrown-error behavior, timeout edge tests, and live ByteDance validation remain unported. |
 | `packages/cerebras` (`@ai-sdk/cerebras`) | provider package | in-progress | `src/cerebras.rs`, `src/openai_compatible.rs` | `cerebras_provider_creates_chat_model_with_headers_base_url_and_structured_outputs`; `cerebras_provider_uses_default_base_url_and_function_alias`; `cerebras_provider_reports_unsupported_model_families`; `cerebras_provider_implements_provider_trait`; `cerebras_provider_settings_serde_accepts_upstream_base_url` | Initial provider foundation mirrors upstream `createCerebras` settings for default/custom base URL, `CEREBRAS_API_KEY`, custom headers, Cerebras user-agent suffix, callable-style `cerebras(...)`, `languageModel`/`chat`, provider-v4 trait integration, OpenAI-compatible `/chat/completions` with structured JSON schema output support, and unsupported embedding/image lookups. Cerebras-specific top-level error-structure mapping and broader provider package tests remain unported. |
 | `packages/cohere` (`@ai-sdk/cohere`) | provider package | not-started | none | none | Needs chat, embeddings, reranking, prompt conversion, and tool preparation. |
-| `packages/deepgram` (`@ai-sdk/deepgram`) | provider package | not-started | none | none | Needs speech, transcription, and error mapping. |
+| `packages/deepgram` (`@ai-sdk/deepgram`) | provider package | in-progress | `crates/ai-sdk-deepgram` | `deepgram_speech_model_sends_headers_body_query_options_and_metadata`; `deepgram_speech_model_maps_format_and_warnings`; `deepgram_transcription_model_sends_audio_query_headers_and_maps_response`; `deepgram_models_map_api_errors_to_metadata`; `deepgram_provider_reports_unsupported_model_families_and_traits`; `deepgram_provider_settings_serde_accepts_upstream_shape_and_default_factory` | Initial provider-owned crate mirrors upstream `createDeepgram` settings for `DEEPGRAM_API_KEY`, `authorization: Token ...`, custom headers, Deepgram user-agent suffix, callable-style default transcription factory, `speech`/`speech_model`, `transcription`/`transcription_model`, provider-v4 speech and transcription trait integration, unsupported language/embedding/text-embedding/image lookups with upstream messages, `/v1/speak` JSON TTS request body plus model/output-format/provider-option query mapping, unsupported voice/speed/language/instructions warnings, `/v1/listen` raw-audio transcription request with media-type header, default `diarize=true`, runtime-sent Deepgram transcription provider options with schema-only fields accepted but not sent, transcript text/word segments/language/duration mapping, response headers/body, and Deepgram error metadata. Workflow serialization hooks, abort handling, live Deepgram validation, exact thrown-error classes, full zod-equivalent validation/warning matrix, and broader option-combination fixture coverage remain unported. |
 | `packages/deepinfra` (`@ai-sdk/deepinfra`) | provider package | in-progress | `src/deepinfra.rs`, `src/openai_compatible.rs` | `deepinfra_provider_creates_chat_model_with_headers_and_base_url`; `deepinfra_chat_corrects_reasoning_usage_when_reasoning_exceeds_completion_tokens`; `deepinfra_chat_corrects_stream_finish_reasoning_usage`; `deepinfra_provider_creates_completion_model`; `deepinfra_provider_creates_embedding_model_aliases`; `deepinfra_provider_creates_image_model_and_generates_images`; `deepinfra_image_model_edits_with_files_mask_and_provider_options`; `deepinfra_image_model_maps_generation_api_error_to_metadata`; `deepinfra_image_model_maps_edit_api_error_to_metadata`; `deepinfra_provider_uses_default_base_url_and_function_alias`; `deepinfra_provider_implements_provider_trait`; `deepinfra_provider_settings_serde_accepts_upstream_base_url` | Initial provider foundation mirrors upstream `createDeepInfra` settings for default/custom base URL, `DEEPINFRA_API_KEY`, custom headers, DeepInfra user-agent suffix, callable-style `deepinfra(...)`, provider-v4 trait integration, OpenAI-compatible `/openai/chat/completions`, `/openai/completions`, and `/openai/embeddings` models with provider ids `deepinfra.chat`, `deepinfra.completion`, and `deepinfra.embedding`, plus upstream DeepInfra chat reasoning-token usage correction for non-streaming and streaming responses. DeepInfra image generation covers the custom `/inference/{modelId}` JSON request boundary, and image editing covers the derived `/openai/images/edits` multipart form-data boundary with repeated `image` fields, mask, provider options, base64 result mapping, response headers, and API error metadata. |
 | `packages/deepseek` (`@ai-sdk/deepseek`) | provider package | in-progress | `crates/ai-sdk-deepseek` | `deepseek_provider_creates_chat_model_with_headers_and_base_url`; `deepseek_provider_uses_default_base_url_and_function_aliases`; `deepseek_provider_reports_unsupported_model_families`; `deepseek_provider_implements_provider_trait`; `deepseek_provider_settings_serde_accepts_upstream_base_url` | Initial provider-owned crate mirrors upstream `createDeepSeek` settings for default/custom base URL, `DEEPSEEK_API_KEY`, custom headers, DeepSeek user-agent suffix, `deep_seek()`/deprecated `deepseek()` aliases, `language_model`/`chat`, provider-v4 trait integration, OpenAI-compatible `/chat/completions` request routing, and unsupported embedding/image lookups. DeepSeek-specific chat message conversion, reasoning/thinking options, tool preparation, usage/cache metadata, SSE stream parsing, and error schema mapping remain unported. |
 | `packages/elevenlabs` (`@ai-sdk/elevenlabs`) | provider package | not-started | none | none | Needs speech, transcription, and error mapping. |
@@ -222,7 +234,7 @@ inventory.
 | Vercel AI Gateway OpenAI-compatible object generation | verified | `src/vercel_ai_gateway.rs`, `src/openai_compatible.rs`, `src/generate_object.rs` | `vercel_ai_gateway_openai_compatible_generates_object_through_openai_chat`; ignored `live_vercel_ai_gateway_openai_compatible_generate_object` | Proves high-level `generate_object` reaches the Vercel AI Gateway OpenAI-compatible `/chat/completions` route, omits Gateway's unsupported `response_format` body field, injects JSON/schema prompt guidance, parses returned JSON text into an object, surfaces usage/response metadata, and passes against `.env.local` live Gateway credentials. |
 | Vercel AI Gateway OpenAI-compatible streamed object generation | verified | `src/vercel_ai_gateway.rs`, `src/openai_compatible.rs`, `src/stream_object.rs` | `vercel_ai_gateway_openai_compatible_streams_object_through_openai_chat`; ignored `live_vercel_ai_gateway_openai_compatible_stream_object` | Proves high-level `stream_object` reaches the Vercel AI Gateway OpenAI-compatible `/chat/completions` SSE route, omits Gateway's unsupported `response_format` body field, injects JSON/schema prompt guidance, collects JSON text deltas, parses the final object, surfaces usage/response metadata, and passes against `.env.local` live Gateway credentials. |
 | Vercel v0 provider package | in-progress | `src/vercel.rs`, `src/openai_compatible.rs` | `vercel_provider_creates_openai_compatible_chat_model`; `vercel_provider_uses_default_base_url_and_function_alias`; `vercel_provider_reports_unsupported_model_families`; `vercel_provider_implements_provider_trait` | Mirrors upstream `createVercel` construction around OpenAI-compatible chat models with default/custom base URLs, headers, `VERCEL_API_KEY`, provider id `vercel.chat`, Vercel-specific user-agent suffix, and unsupported embedding/image lookups. Live v0 API validation remains optional and unported because this goal currently only has AI Gateway credentials. |
-| Concrete provider packages | in-progress | `src/openai.rs`, `src/open_responses.rs`, `src/vercel.rs`, `src/vercel_ai_gateway.rs`, `src/deepinfra.rs`, `src/togetherai.rs`, `src/huggingface.rs`, `src/cerebras.rs`, `src/baseten.rs`, `src/voyage.rs`, `crates/ai-sdk-deepseek`, `crates/ai-sdk-lmnt`, `crates/ai-sdk-luma`, `crates/ai-sdk-moonshotai`, `crates/ai-sdk-perplexity`, `crates/ai-sdk-revai`, `crates/ai-sdk-assemblyai`, `crates/ai-sdk-azure`, `crates/ai-sdk-bytedance`, `crates/ai-sdk-mistral`, `crates/ai-sdk-black-forest-labs`, `crates/ai-sdk-hume` | OpenAI, Open Responses, Vercel, Vercel AI Gateway, DeepInfra, TogetherAI, Hugging Face, Cerebras, Baseten, Voyage, DeepSeek, LMNT, Luma, MoonshotAI, Perplexity, RevAI, AssemblyAI, Azure, ByteDance, Mistral, Black Forest Labs, and Hume provider-wrapper tests listed above | OpenAI, Open Responses, Vercel, Vercel AI Gateway, DeepInfra, TogetherAI, Hugging Face, Cerebras, Baseten, Voyage, DeepSeek, LMNT, Luma, MoonshotAI, Perplexity, RevAI, AssemblyAI, Azure, ByteDance, Mistral, Black Forest Labs, and Hume have initial Rust provider-wrapper slices. DeepSeek, LMNT, Luma, MoonshotAI, Perplexity, RevAI, AssemblyAI, Azure, ByteDance, Mistral, Black Forest Labs, and Hume are intentionally package-owned crates instead of new root modules, establishing the extraction direction required by the crate-splitting acceptance rule. Most concrete provider package rows above remain unported. |
+| Concrete provider packages | in-progress | `src/openai.rs`, `src/open_responses.rs`, `src/vercel.rs`, `src/vercel_ai_gateway.rs`, `src/deepinfra.rs`, `src/togetherai.rs`, `src/huggingface.rs`, `src/cerebras.rs`, `src/baseten.rs`, `src/voyage.rs`, `crates/ai-sdk-deepseek`, `crates/ai-sdk-lmnt`, `crates/ai-sdk-luma`, `crates/ai-sdk-moonshotai`, `crates/ai-sdk-perplexity`, `crates/ai-sdk-revai`, `crates/ai-sdk-assemblyai`, `crates/ai-sdk-azure`, `crates/ai-sdk-bytedance`, `crates/ai-sdk-mistral`, `crates/ai-sdk-black-forest-labs`, `crates/ai-sdk-hume`, `crates/ai-sdk-deepgram` | OpenAI, Open Responses, Vercel, Vercel AI Gateway, DeepInfra, TogetherAI, Hugging Face, Cerebras, Baseten, Voyage, DeepSeek, LMNT, Luma, MoonshotAI, Perplexity, RevAI, AssemblyAI, Azure, ByteDance, Mistral, Black Forest Labs, Hume, and Deepgram provider-wrapper tests listed above | OpenAI, Open Responses, Vercel, Vercel AI Gateway, DeepInfra, TogetherAI, Hugging Face, Cerebras, Baseten, Voyage, DeepSeek, LMNT, Luma, MoonshotAI, Perplexity, RevAI, AssemblyAI, Azure, ByteDance, Mistral, Black Forest Labs, Hume, and Deepgram have initial Rust provider-wrapper slices. DeepSeek, LMNT, Luma, MoonshotAI, Perplexity, RevAI, AssemblyAI, Azure, ByteDance, Mistral, Black Forest Labs, Hume, and Deepgram are intentionally package-owned crates instead of new root modules, establishing the extraction direction required by the crate-splitting acceptance rule. Most concrete provider package rows above remain unported. |
 
 ## Examples Inventory
 
@@ -264,7 +276,7 @@ focused tests for each portable behavior before changing rows to `verified`.
 | Upstream area | Test files scanned | Status | Notes |
 | --- | ---: | --- | --- |
 | `packages/ai` | 128 | in-progress | Many non-streaming high-level API tests are represented in Rust; stream, UI, agent, telemetry, compatibility, and public mock model tests remain. |
-| Provider package tests | 228 | in-progress | Gateway, Vercel AI Gateway OpenAI-compatible, Vercel v0, OpenAI foundation, Open Responses foundation, DeepInfra foundation, TogetherAI, Hugging Face, Cerebras, Baseten, Voyage, Luma, RevAI, AssemblyAI, Azure, ByteDance, Mistral, Black Forest Labs, and Hume provider tests now exist. Concrete provider package test files remain largely unported across OpenAI's broader Responses streaming/tools/files/speech/transcription surfaces, Hugging Face SSE/tool parity, Anthropic, Google, Bedrock, xAI, and the remaining provider packages. |
+| Provider package tests | 228 | in-progress | Gateway, Vercel AI Gateway OpenAI-compatible, Vercel v0, OpenAI foundation, Open Responses foundation, DeepInfra foundation, TogetherAI, Hugging Face, Cerebras, Baseten, Voyage, Luma, RevAI, AssemblyAI, Azure, ByteDance, Mistral, Black Forest Labs, Hume, and Deepgram provider tests now exist. Concrete provider package test files remain largely unported across OpenAI's broader Responses streaming/tools/files/speech/transcription surfaces, Hugging Face SSE/tool parity, Anthropic, Google, Bedrock, xAI, and the remaining provider packages. |
 | `packages/provider` | 1 | in-progress | Upstream provider contract test is partially covered by Rust provider/model module tests. |
 | `packages/provider-utils` | 77 | in-progress | Many provider support behaviors are represented, but stream/browser/fetch parity is incomplete. |
 | Framework adapter tests | 21 | js-only-documented | Angular, React, RSC, Svelte, and Vue bindings are JavaScript framework-specific; portable transport/message semantics are tracked separately. |
@@ -312,16 +324,18 @@ focused tests for each portable behavior before changing rows to `verified`.
    crate, and that crate owns the package's public types, provider/options
    surfaces, implementation, docs, and tests. No Rust crate may own APIs from
    more than one upstream package. A slice that violates this boundary must be
-   reworked before merge; it cannot be accepted as a temporary successful port.
+   reworked before merge; it is not a successful port and must not be accepted
+   as temporary progress.
 
    The current `ai-sdk-rust` root crate is already merging multiple upstream
    TypeScript packages into one Rust boundary. That is migration debt being
    created today, not a neutral staging choice. Every additional package folded
    into the root crate makes the eventual split harder, increases API coupling,
    and raises the risk of breaking users when the package boundary is finally
-   extracted. Future work must stop growing this debt now; adding another
-   package-owned implementation to the root crate is a regression even when the
-   behavior and tests are otherwise correct.
+   extracted. Future work must stop growing this debt now. Adding another
+   package-owned implementation to the root crate, or to any crate that already
+   owns a different upstream package, is a regression even when the behavior and
+   tests are otherwise correct.
 
    The root crate is a facade, not an implementation home for package-owned
    surfaces. If `ai-sdk-rust` is the Rust equivalent of upstream `packages/ai`,
@@ -335,11 +349,13 @@ focused tests for each portable behavior before changing rows to `verified`.
    `verified` until the crate ownership is correct.
 
    Before implementing or reviewing any parity slice, identify the upstream
-   TypeScript package and create or use the matching Rust crate first. A parity
-   slice that ports a TypeScript package without its matching Rust crate is
-   blocked and not mergeable, even if the API itself is otherwise implemented
-   correctly. A new root module for package-owned API is also blocked unless it
-   is only a re-export/compatibility shim.
+   TypeScript package and create or use the matching Rust crate first. If the
+   matching crate does not exist, crate creation is part of the slice, not a
+   follow-up. A parity slice that ports a TypeScript package without its
+   matching Rust crate is blocked and not mergeable, even if the API itself is
+   otherwise implemented correctly. Passing tests in the wrong crate prove
+   behavior, not parity. A new root module for package-owned API is also blocked
+   unless it is only a re-export/compatibility shim.
 
    Temporary staging exceptions must not introduce new package-owned
    implementation. They may only cover unavoidable transitional shims or the
