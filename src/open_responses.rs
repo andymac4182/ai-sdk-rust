@@ -16,8 +16,8 @@ use crate::language_model::{
     LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelMessage,
     LanguageModelRawStreamPart, LanguageModelReasoning, LanguageModelReasoningDelta,
     LanguageModelReasoningEnd, LanguageModelReasoningStart, LanguageModelRequest,
-    LanguageModelResponse, LanguageModelStreamFinish, LanguageModelStreamPart,
-    LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
+    LanguageModelResponse, LanguageModelResponseFormat, LanguageModelStreamFinish,
+    LanguageModelStreamPart, LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
     LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
     LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
     LanguageModelTool, LanguageModelToolCall, LanguageModelToolChoice,
@@ -550,6 +550,15 @@ fn open_responses_request_body(
         body.insert("tool_choice".to_string(), tool_choice);
     }
 
+    if let Some(text_format) = open_responses_text_format(&options.response_format) {
+        body.insert(
+            "text".to_string(),
+            json!({
+                "format": text_format
+            }),
+        );
+    }
+
     merge_open_responses_provider_options(
         provider_options_name,
         options.provider_options.as_ref(),
@@ -871,6 +880,42 @@ fn open_responses_prepare_tools(
     });
 
     (prepared_tools, prepared_tool_choice)
+}
+
+fn open_responses_text_format(
+    response_format: &Option<LanguageModelResponseFormat>,
+) -> Option<JsonValue> {
+    let Some(LanguageModelResponseFormat::Json {
+        schema,
+        name,
+        description,
+    }) = response_format
+    else {
+        return None;
+    };
+
+    let mut format = JsonObject::new();
+    format.insert(
+        "type".to_string(),
+        JsonValue::String("json_schema".to_string()),
+    );
+
+    if let Some(schema) = schema {
+        format.insert(
+            "name".to_string(),
+            JsonValue::String(name.clone().unwrap_or_else(|| "response".to_string())),
+        );
+        if let Some(description) = description {
+            format.insert(
+                "description".to_string(),
+                JsonValue::String(description.clone()),
+            );
+        }
+        format.insert("schema".to_string(), JsonValue::Object(schema.clone()));
+        format.insert("strict".to_string(), JsonValue::Bool(true));
+    }
+
+    Some(JsonValue::Object(format))
 }
 
 fn open_responses_content(response: &JsonValue) -> (Vec<LanguageModelContent>, bool) {
@@ -1863,6 +1908,7 @@ mod tests {
         OpenResponsesProvider, OpenResponsesProviderSettings, OpenResponsesTransport,
         OpenResponsesTransportFuture, create_open_responses, map_open_responses_finish_reason,
     };
+    use crate::generate_object::{GenerateObjectOptions, generate_object};
     use crate::generate_text::{GenerateTextOptions, generate_text};
     use crate::headers::Headers;
     use crate::json::{JsonObject, JsonValue};
@@ -1875,7 +1921,7 @@ mod tests {
     use crate::provider::{ModelType, Provider, ProviderMetadata, ProviderOptions};
     use crate::provider_utils::{
         ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
-        Tool,
+        Tool, json_schema,
     };
     use crate::stream_text::{StreamTextOptions, TextStreamPart, stream_text};
     use serde_json::json;
@@ -2031,6 +2077,117 @@ mod tests {
                     "trace": "responses-test"
                 }
             }))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_generates_object_with_json_schema_response_format() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_object",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "{\"answer\":\"Open Responses object\",\"count\":3}"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 8,
+                            "output_tokens": 6
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let object_schema: JsonObject = serde_json::from_value(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": {
+                "answer": {
+                    "type": "string"
+                },
+                "count": {
+                    "type": "integer"
+                }
+            },
+            "required": ["answer", "count"],
+            "additionalProperties": false
+        }))
+        .expect("schema deserializes");
+
+        let result = poll_ready(generate_object(
+            GenerateObjectOptions::from_prompt(
+                &model,
+                Prompt::from_prompt("Return a JSON object with answer and count."),
+            )
+            .expect("prompt is valid")
+            .with_schema(json_schema(object_schema.clone()))
+            .with_schema_name("answer_object")
+            .with_schema_description("An answer object.")
+            .with_max_output_tokens(32)
+            .with_temperature(0.0),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(
+            result.object,
+            json!({
+                "answer": "Open Responses object",
+                "count": 3
+            })
+        );
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(8));
+        assert_eq!(result.usage.output_tokens.total, Some(6));
+        assert!(result.warnings.as_ref().is_none_or(Vec::is_empty));
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+        assert_eq!(request_body["model"], "gpt-4.1-mini");
+        assert_eq!(request_body["max_output_tokens"], 32);
+        assert_eq!(request_body["temperature"], 0.0);
+        assert_eq!(
+            request_body["text"]["format"],
+            json!({
+                "type": "json_schema",
+                "name": "answer_object",
+                "description": "An answer object.",
+                "schema": object_schema,
+                "strict": true
+            })
         );
     }
 
