@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::future::{Future, Ready, ready};
 use std::pin::Pin;
@@ -14,8 +14,12 @@ use crate::language_model::{
     FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
     LanguageModelCallOptions, LanguageModelContent, LanguageModelErrorStreamPart,
     LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelMessage,
-    LanguageModelReasoning, LanguageModelRequest, LanguageModelResponse, LanguageModelStreamPart,
-    LanguageModelStreamResult, LanguageModelSupportedUrls, LanguageModelText,
+    LanguageModelRawStreamPart, LanguageModelReasoning, LanguageModelReasoningDelta,
+    LanguageModelReasoningEnd, LanguageModelReasoningStart, LanguageModelRequest,
+    LanguageModelResponse, LanguageModelStreamFinish, LanguageModelStreamPart,
+    LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
+    LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
+    LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
     LanguageModelToolCall, LanguageModelUsage, LanguageModelUserContentPart, OutputTokenUsage,
 };
 use crate::openai_compatible::{OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel};
@@ -23,11 +27,11 @@ use crate::provider::{
     ModelType, NoSuchModelError, Provider, ProviderMetadata, ProviderOptions, SpecificationVersion,
 };
 use crate::provider_utils::{
-    FetchErrorInfo, HandledFetchError, PostJsonToApiOptions, ProviderApiRequest,
+    FetchErrorInfo, HandledFetchError, ParseJsonResult, PostJsonToApiOptions, ProviderApiRequest,
     ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     ProviderApiResponseHandlerError, RuntimeEnvironment, combine_headers,
-    create_json_error_response_handler, create_json_response_handler, post_json_to_api,
-    with_user_agent_suffix,
+    create_event_source_response_handler, create_json_error_response_handler,
+    create_json_response_handler, post_json_to_api, with_user_agent_suffix,
 };
 use crate::warning::Warning;
 
@@ -264,23 +268,67 @@ impl OpenResponsesLanguageModel {
         &self,
         options: LanguageModelCallOptions,
     ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
-        let request_body = open_responses_request_body(
+        let include_raw_chunks = options.include_raw_chunks.unwrap_or(false);
+        let (mut request_body, warnings) = match open_responses_request_body(
             &self.model_id,
             &self.config.provider_options_name,
             &options,
-        )
-        .map(|(body, _)| body)
-        .unwrap_or_else(|message| {
-            json!({
-                "model": self.model_id,
-                "error": message
-            })
-        });
+        ) {
+            Ok(result) => result,
+            Err(message) => {
+                return open_responses_error_stream_result(
+                    message,
+                    json!({ "model": self.model_id }),
+                    None,
+                    None,
+                );
+            }
+        };
 
-        open_responses_error_stream_result(
-            "Open Responses streaming is not implemented yet.",
-            request_body,
+        if let JsonValue::Object(body) = &mut request_body {
+            body.insert("stream".to_string(), JsonValue::Bool(true));
+        }
+
+        let request_body_for_error = request_body.clone();
+        let request_body_for_response = request_body.clone();
+        let request_headers = self.request_headers(options.headers.as_ref());
+        let post_options =
+            PostJsonToApiOptions::new(self.config.settings.url.clone(), request_body)
+                .with_headers(request_headers)
+                .with_environment(RuntimeEnvironment::unknown());
+        let transport = Arc::clone(&self.config.transport);
+
+        match post_json_to_api(
+            post_options,
+            move |request| (transport)(request),
+            |_request, response| {
+                create_event_source_response_handler(
+                    response.event_source_response_handler_options(),
+                    |value| Ok::<JsonValue, Infallible>(value.clone()),
+                )
+                .map_err(|error| ProviderApiResponseHandlerError::other(error.to_string()))
+            },
+            |request, response| {
+                Ok(create_json_error_response_handler(
+                    response.json_error_response_handler_options(request),
+                    |value| Ok::<JsonValue, Infallible>(value.clone()),
+                    open_responses_error_message,
+                    |_, _| None,
+                ))
+            },
         )
+        .await
+        {
+            Ok(response) => open_responses_stream_result_from_response(
+                &self.config.provider_options_name,
+                response.value,
+                response.response_headers,
+                request_body_for_response,
+                warnings,
+                include_raw_chunks,
+            ),
+            Err(error) => self.stream_result_from_error(error, request_body_for_error),
+        }
     }
 
     fn request_headers(&self, call_headers: Option<&Headers>) -> BTreeMap<String, Option<String>> {
@@ -368,6 +416,23 @@ impl OpenResponsesLanguageModel {
             message,
             request_body,
         )
+    }
+
+    fn stream_result_from_error(
+        &self,
+        error: HandledFetchError,
+        request_body: JsonValue,
+    ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
+        let (message, headers, body) = match error {
+            HandledFetchError::Original { error } => (error.message().to_string(), None, None),
+            HandledFetchError::ApiCall { error } => (
+                error.message().to_string(),
+                error.response_headers().cloned(),
+                error.response_body().map(String::from),
+            ),
+        };
+
+        open_responses_error_stream_result(message, request_body, headers, body.as_deref())
     }
 }
 
@@ -740,7 +805,7 @@ fn map_open_responses_finish_reason(
                 FinishReason::Stop
             }
         }
-        Some("max_output_tokens") => FinishReason::Length,
+        Some("max_output_tokens" | "max_tokens") => FinishReason::Length,
         Some("content_filter") => FinishReason::ContentFilter,
         Some(_) => {
             if has_tool_calls {
@@ -795,6 +860,567 @@ fn open_responses_usage(usage: Option<&JsonValue>) -> LanguageModelUsage {
         },
         raw: usage.and_then(JsonValue::as_object).cloned(),
     }
+}
+
+fn open_responses_stream_result_from_response(
+    provider_name: &str,
+    events: Vec<ParseJsonResult<JsonValue>>,
+    response_headers: Option<Headers>,
+    request_body: JsonValue,
+    warnings: Vec<Warning>,
+    include_raw_chunks: bool,
+) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
+    let mut stream = vec![LanguageModelStreamPart::StreamStart(
+        LanguageModelStreamStart::new(warnings),
+    )];
+    let mut finish_reason = LanguageModelFinishReason {
+        unified: FinishReason::Other,
+        raw: None,
+    };
+    let mut usage = LanguageModelUsage::default();
+    let mut response_id = None::<String>;
+    let mut emitted_response_metadata = false;
+    let mut has_tool_calls = false;
+    let mut emitted_tool_calls = BTreeSet::<String>::new();
+    let mut text_buffers = BTreeMap::<String, String>::new();
+    let mut active_text = BTreeSet::<String>::new();
+    let mut ended_text = BTreeSet::<String>::new();
+    let mut reasoning_buffers = BTreeMap::<String, String>::new();
+    let mut active_reasoning = BTreeSet::<String>::new();
+    let mut ended_reasoning = BTreeSet::<String>::new();
+
+    for event in events {
+        match event {
+            ParseJsonResult::Success { value, raw_value } => {
+                if include_raw_chunks {
+                    stream.push(LanguageModelStreamPart::Raw(
+                        LanguageModelRawStreamPart::new(raw_value.clone()),
+                    ));
+                }
+
+                let event_type = value.get("type").and_then(JsonValue::as_str);
+                if value.get("error").is_some() || matches!(event_type, Some("error")) {
+                    finish_reason = LanguageModelFinishReason {
+                        unified: FinishReason::Error,
+                        raw: Some("open-responses-error".to_string()),
+                    };
+                    stream.push(open_responses_stream_error(
+                        open_responses_error_message(&value),
+                        Some(&raw_value.to_string()),
+                    ));
+                    continue;
+                }
+
+                if let Some(response) = open_responses_event_response(&value) {
+                    open_responses_push_response_metadata(
+                        &mut stream,
+                        &mut response_id,
+                        &mut emitted_response_metadata,
+                        response,
+                    );
+                }
+
+                match event_type {
+                    Some("response.output_text.delta") => {
+                        if let Some(delta) = value.get("delta").and_then(JsonValue::as_str)
+                            && !delta.is_empty()
+                        {
+                            let id = open_responses_stream_block_id("txt", &value);
+                            open_responses_push_text_delta(
+                                &mut stream,
+                                &mut text_buffers,
+                                &mut active_text,
+                                &ended_text,
+                                &id,
+                                delta,
+                            );
+                        }
+                    }
+                    Some("response.output_text.done") => {
+                        let id = open_responses_stream_block_id("txt", &value);
+                        let text = value.get("text").and_then(JsonValue::as_str);
+                        open_responses_finish_text_block(
+                            &mut stream,
+                            &mut text_buffers,
+                            &mut active_text,
+                            &mut ended_text,
+                            &id,
+                            text,
+                        );
+                    }
+                    Some("response.reasoning_summary_text.delta")
+                    | Some("response.reasoning_text.delta") => {
+                        if let Some(delta) = value.get("delta").and_then(JsonValue::as_str)
+                            && !delta.is_empty()
+                        {
+                            let id = open_responses_stream_block_id("reasoning", &value);
+                            open_responses_push_reasoning_delta(
+                                &mut stream,
+                                &mut reasoning_buffers,
+                                &mut active_reasoning,
+                                &ended_reasoning,
+                                &id,
+                                delta,
+                            );
+                        }
+                    }
+                    Some("response.reasoning_summary_text.done")
+                    | Some("response.reasoning_text.done") => {
+                        let id = open_responses_stream_block_id("reasoning", &value);
+                        let text = value.get("text").and_then(JsonValue::as_str);
+                        open_responses_finish_reasoning_block(
+                            &mut stream,
+                            &mut reasoning_buffers,
+                            &mut active_reasoning,
+                            &mut ended_reasoning,
+                            &id,
+                            text,
+                        );
+                    }
+                    Some("response.content_part.done") => {
+                        let part = value.get("part");
+                        let part_type = part
+                            .and_then(|part| part.get("type"))
+                            .and_then(JsonValue::as_str);
+                        let text = part
+                            .and_then(|part| part.get("text"))
+                            .and_then(JsonValue::as_str);
+
+                        if matches!(part_type, Some("output_text")) {
+                            let id = open_responses_stream_block_id("txt", &value);
+                            open_responses_finish_text_block(
+                                &mut stream,
+                                &mut text_buffers,
+                                &mut active_text,
+                                &mut ended_text,
+                                &id,
+                                text,
+                            );
+                        } else if open_responses_is_reasoning_text_part(part_type) {
+                            let id = open_responses_stream_block_id("reasoning", &value);
+                            open_responses_finish_reasoning_block(
+                                &mut stream,
+                                &mut reasoning_buffers,
+                                &mut active_reasoning,
+                                &mut ended_reasoning,
+                                &id,
+                                text,
+                            );
+                        }
+                    }
+                    Some("response.output_item.done") => {
+                        if let Some(item) = value.get("item")
+                            && open_responses_push_tool_call_from_item(
+                                &mut stream,
+                                &mut emitted_tool_calls,
+                                item,
+                            )
+                        {
+                            has_tool_calls = true;
+                        }
+                    }
+                    Some("response.completed") => {
+                        if let Some(response) = open_responses_event_response(&value) {
+                            usage = open_responses_usage(response.get("usage"));
+                            has_tool_calls |= open_responses_push_tool_calls_from_response(
+                                &mut stream,
+                                &mut emitted_tool_calls,
+                                response,
+                            );
+                            finish_reason = map_open_responses_finish_reason(
+                                response
+                                    .get("incomplete_details")
+                                    .and_then(|details| details.get("reason"))
+                                    .and_then(JsonValue::as_str),
+                                has_tool_calls,
+                            );
+                        }
+                    }
+                    Some("response.incomplete") => {
+                        if let Some(response) = open_responses_event_response(&value) {
+                            usage = open_responses_usage(response.get("usage"));
+                            has_tool_calls |= open_responses_response_has_tool_calls(response);
+                            finish_reason = map_open_responses_finish_reason(
+                                response
+                                    .get("incomplete_details")
+                                    .and_then(|details| details.get("reason"))
+                                    .and_then(JsonValue::as_str),
+                                has_tool_calls,
+                            );
+                        }
+                    }
+                    Some("response.failed") => {
+                        finish_reason = LanguageModelFinishReason {
+                            unified: FinishReason::Error,
+                            raw: Some("open-responses-error".to_string()),
+                        };
+                        stream.push(open_responses_stream_error(
+                            open_responses_event_response(&value)
+                                .map(open_responses_error_message)
+                                .unwrap_or_else(|| open_responses_error_message(&value)),
+                            Some(&raw_value.to_string()),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            ParseJsonResult::Failure { error, raw_value } => {
+                finish_reason = LanguageModelFinishReason {
+                    unified: FinishReason::Error,
+                    raw: Some("open-responses-parse-error".to_string()),
+                };
+                stream.push(open_responses_stream_error(
+                    error.to_string(),
+                    raw_value.as_ref().map(JsonValue::to_string).as_deref(),
+                ));
+            }
+        }
+    }
+
+    for id in active_reasoning.clone() {
+        stream.push(LanguageModelStreamPart::ReasoningEnd(
+            LanguageModelReasoningEnd::new(id),
+        ));
+    }
+
+    for id in active_text.clone() {
+        stream.push(LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new(
+            id,
+        )));
+    }
+
+    let mut finish = LanguageModelStreamFinish::new(usage, finish_reason);
+    if let Some(response_id) = response_id {
+        finish = finish.with_provider_metadata(open_responses_provider_metadata(
+            provider_name,
+            &response_id,
+        ));
+    }
+    stream.push(LanguageModelStreamPart::Finish(finish));
+
+    let mut result = LanguageModelStreamResult::new(stream)
+        .with_request(LanguageModelRequest::new().with_body(request_body));
+
+    if let Some(headers) = response_headers {
+        result = result.with_response(open_responses_stream_response_with_headers(headers));
+    }
+
+    result
+}
+
+fn open_responses_event_response(value: &JsonValue) -> Option<&JsonValue> {
+    value
+        .get("response")
+        .or_else(|| value.get("id").and_then(JsonValue::as_str).map(|_| value))
+}
+
+fn open_responses_push_response_metadata(
+    stream: &mut Vec<LanguageModelStreamPart>,
+    response_id: &mut Option<String>,
+    emitted_response_metadata: &mut bool,
+    response: &JsonValue,
+) {
+    if let Some(id) = response.get("id").and_then(JsonValue::as_str) {
+        *response_id = Some(id.to_string());
+    }
+
+    if *emitted_response_metadata {
+        return;
+    }
+
+    if let Some(metadata) = open_responses_stream_response_metadata(response) {
+        stream.push(LanguageModelStreamPart::ResponseMetadata(metadata));
+        *emitted_response_metadata = true;
+    }
+}
+
+fn open_responses_stream_response_metadata(
+    response: &JsonValue,
+) -> Option<LanguageModelStreamResponseMetadata> {
+    let mut metadata = LanguageModelStreamResponseMetadata::new();
+    let mut has_metadata = false;
+
+    if let Some(id) = response.get("id").and_then(JsonValue::as_str) {
+        metadata = metadata.with_id(id);
+        has_metadata = true;
+    }
+
+    if let Some(timestamp) = response
+        .get("created_at")
+        .and_then(JsonValue::as_i64)
+        .and_then(|seconds| OffsetDateTime::from_unix_timestamp(seconds).ok())
+    {
+        metadata = metadata.with_timestamp(timestamp);
+        has_metadata = true;
+    }
+
+    if let Some(model_id) = response.get("model").and_then(JsonValue::as_str) {
+        metadata = metadata.with_model_id(model_id);
+        has_metadata = true;
+    }
+
+    has_metadata.then_some(metadata)
+}
+
+fn open_responses_stream_block_id(prefix: &str, value: &JsonValue) -> String {
+    let mut parts = vec![prefix.to_string()];
+
+    if let Some(item_id) = value
+        .get("item_id")
+        .or_else(|| value.get("item").and_then(|item| item.get("id")))
+        .and_then(JsonValue::as_str)
+    {
+        parts.push(item_id.to_string());
+    }
+
+    if let Some(output_index) = open_responses_json_index(value.get("output_index")) {
+        parts.push(output_index);
+    }
+
+    if let Some(content_index) = open_responses_json_index(value.get("content_index")) {
+        parts.push(content_index);
+    }
+
+    if parts.len() == 1 {
+        parts.push("0".to_string());
+    }
+
+    parts.join("-")
+}
+
+fn open_responses_json_index(value: Option<&JsonValue>) -> Option<String> {
+    value
+        .and_then(JsonValue::as_u64)
+        .map(|value| value.to_string())
+        .or_else(|| {
+            value
+                .and_then(JsonValue::as_i64)
+                .map(|value| value.to_string())
+        })
+}
+
+fn open_responses_push_text_delta(
+    stream: &mut Vec<LanguageModelStreamPart>,
+    text_buffers: &mut BTreeMap<String, String>,
+    active_text: &mut BTreeSet<String>,
+    ended_text: &BTreeSet<String>,
+    id: &str,
+    delta: &str,
+) {
+    if ended_text.contains(id) {
+        return;
+    }
+
+    if active_text.insert(id.to_string()) {
+        stream.push(LanguageModelStreamPart::TextStart(
+            LanguageModelTextStart::new(id),
+        ));
+    }
+
+    text_buffers
+        .entry(id.to_string())
+        .or_default()
+        .push_str(delta);
+    stream.push(LanguageModelStreamPart::TextDelta(
+        LanguageModelTextDelta::new(id, delta),
+    ));
+}
+
+fn open_responses_finish_text_block(
+    stream: &mut Vec<LanguageModelStreamPart>,
+    text_buffers: &mut BTreeMap<String, String>,
+    active_text: &mut BTreeSet<String>,
+    ended_text: &mut BTreeSet<String>,
+    id: &str,
+    final_text: Option<&str>,
+) {
+    if ended_text.contains(id) {
+        return;
+    }
+
+    let buffered = text_buffers.remove(id).unwrap_or_default();
+    let emitted_final_text = buffered.is_empty() && final_text.is_some_and(|text| !text.is_empty());
+    if emitted_final_text && let Some(text) = final_text {
+        open_responses_push_text_delta(stream, text_buffers, active_text, ended_text, id, text);
+        text_buffers.remove(id);
+    }
+
+    if active_text.remove(id) || !buffered.is_empty() || emitted_final_text {
+        stream.push(LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new(
+            id,
+        )));
+        ended_text.insert(id.to_string());
+    }
+}
+
+fn open_responses_push_reasoning_delta(
+    stream: &mut Vec<LanguageModelStreamPart>,
+    reasoning_buffers: &mut BTreeMap<String, String>,
+    active_reasoning: &mut BTreeSet<String>,
+    ended_reasoning: &BTreeSet<String>,
+    id: &str,
+    delta: &str,
+) {
+    if ended_reasoning.contains(id) {
+        return;
+    }
+
+    if active_reasoning.insert(id.to_string()) {
+        stream.push(LanguageModelStreamPart::ReasoningStart(
+            LanguageModelReasoningStart::new(id),
+        ));
+    }
+
+    reasoning_buffers
+        .entry(id.to_string())
+        .or_default()
+        .push_str(delta);
+    stream.push(LanguageModelStreamPart::ReasoningDelta(
+        LanguageModelReasoningDelta::new(id, delta),
+    ));
+}
+
+fn open_responses_finish_reasoning_block(
+    stream: &mut Vec<LanguageModelStreamPart>,
+    reasoning_buffers: &mut BTreeMap<String, String>,
+    active_reasoning: &mut BTreeSet<String>,
+    ended_reasoning: &mut BTreeSet<String>,
+    id: &str,
+    final_text: Option<&str>,
+) {
+    if ended_reasoning.contains(id) {
+        return;
+    }
+
+    let buffered = reasoning_buffers.remove(id).unwrap_or_default();
+    let emitted_final_text = buffered.is_empty() && final_text.is_some_and(|text| !text.is_empty());
+    if emitted_final_text && let Some(text) = final_text {
+        open_responses_push_reasoning_delta(
+            stream,
+            reasoning_buffers,
+            active_reasoning,
+            ended_reasoning,
+            id,
+            text,
+        );
+        reasoning_buffers.remove(id);
+    }
+
+    if active_reasoning.remove(id) || !buffered.is_empty() || emitted_final_text {
+        stream.push(LanguageModelStreamPart::ReasoningEnd(
+            LanguageModelReasoningEnd::new(id),
+        ));
+        ended_reasoning.insert(id.to_string());
+    }
+}
+
+fn open_responses_is_reasoning_text_part(part_type: Option<&str>) -> bool {
+    part_type.is_some_and(|part_type| {
+        matches!(
+            part_type,
+            "reasoning_text" | "reasoning_summary_text" | "summary_text"
+        ) || (part_type.contains("reasoning") && part_type.contains("text"))
+    })
+}
+
+fn open_responses_push_tool_calls_from_response(
+    stream: &mut Vec<LanguageModelStreamPart>,
+    emitted_tool_calls: &mut BTreeSet<String>,
+    response: &JsonValue,
+) -> bool {
+    let mut has_tool_calls = false;
+
+    for item in response
+        .get("output")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+    {
+        has_tool_calls |= open_responses_push_tool_call_from_item(stream, emitted_tool_calls, item);
+    }
+
+    has_tool_calls
+}
+
+fn open_responses_response_has_tool_calls(response: &JsonValue) -> bool {
+    response
+        .get("output")
+        .and_then(JsonValue::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                matches!(
+                    item.get("type").and_then(JsonValue::as_str),
+                    Some("function_call")
+                )
+            })
+        })
+}
+
+fn open_responses_push_tool_call_from_item(
+    stream: &mut Vec<LanguageModelStreamPart>,
+    emitted_tool_calls: &mut BTreeSet<String>,
+    item: &JsonValue,
+) -> bool {
+    if !matches!(
+        item.get("type").and_then(JsonValue::as_str),
+        Some("function_call")
+    ) {
+        return false;
+    }
+
+    let tool_call_id = item
+        .get("call_id")
+        .or_else(|| item.get("id"))
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let tool_name = item
+        .get("name")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default();
+    let input = item
+        .get("arguments")
+        .and_then(JsonValue::as_str)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "{}".to_string());
+    let dedupe_key = if tool_call_id.is_empty() {
+        format!("{tool_name}:{input}")
+    } else {
+        tool_call_id.clone()
+    };
+
+    if !emitted_tool_calls.insert(dedupe_key) {
+        return true;
+    }
+
+    stream.push(LanguageModelStreamPart::ToolCall(
+        LanguageModelToolCall::new(tool_call_id, tool_name, input),
+    ));
+    true
+}
+
+fn open_responses_stream_error(
+    message: impl Into<String>,
+    raw_body: Option<&str>,
+) -> LanguageModelStreamPart {
+    let mut error = JsonObject::new();
+    error.insert("message".to_string(), JsonValue::String(message.into()));
+
+    if let Some(raw_body) = raw_body {
+        error.insert("body".to_string(), JsonValue::String(raw_body.to_string()));
+    }
+
+    LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(JsonValue::Object(error)))
+}
+
+fn open_responses_stream_response_with_headers(
+    headers: Headers,
+) -> LanguageModelStreamResultResponse {
+    let mut response = LanguageModelStreamResultResponse::new();
+    for (name, value) in headers {
+        response = response.with_header(name, value);
+    }
+    response
 }
 
 fn open_responses_provider_headers(settings: &OpenResponsesProviderSettings) -> Headers {
@@ -857,13 +1483,18 @@ fn open_responses_error_generate_result(
 fn open_responses_error_stream_result(
     message: impl Into<String>,
     request_body: JsonValue,
+    response_headers: Option<Headers>,
+    raw_body: Option<&str>,
 ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
-    let mut error = JsonObject::new();
-    error.insert("message".to_string(), JsonValue::String(message.into()));
-    LanguageModelStreamResult::new(vec![LanguageModelStreamPart::Error(
-        LanguageModelErrorStreamPart::new(JsonValue::Object(error)),
-    )])
-    .with_request(LanguageModelRequest::new().with_body(request_body))
+    let mut result =
+        LanguageModelStreamResult::new(vec![open_responses_stream_error(message, raw_body)])
+            .with_request(LanguageModelRequest::new().with_body(request_body));
+
+    if let Some(headers) = response_headers {
+        result = result.with_response(open_responses_stream_response_with_headers(headers));
+    }
+
+    result
 }
 
 fn open_responses_provider_metadata(provider_name: &str, response_id: &str) -> ProviderMetadata {
@@ -972,12 +1603,13 @@ mod tests {
     use crate::generate_text::{GenerateTextOptions, generate_text};
     use crate::headers::Headers;
     use crate::json::JsonValue;
-    use crate::language_model::{FinishReason, LanguageModel, LanguageModelStreamPart};
+    use crate::language_model::FinishReason;
     use crate::prompt::Prompt;
     use crate::provider::{ModelType, Provider, ProviderMetadata, ProviderOptions};
     use crate::provider_utils::{
         ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     };
+    use crate::stream_text::{StreamTextOptions, TextStreamPart, stream_text};
     use serde_json::json;
     use std::future::Future;
     use std::future::ready;
@@ -1171,6 +1803,10 @@ mod tests {
             FinishReason::Length
         );
         assert_eq!(
+            map_open_responses_finish_reason(Some("max_tokens"), false).unified,
+            FinishReason::Length
+        );
+        assert_eq!(
             map_open_responses_finish_reason(Some("content_filter"), false).unified,
             FinishReason::ContentFilter
         );
@@ -1185,33 +1821,123 @@ mod tests {
     }
 
     #[test]
-    fn open_responses_stream_returns_error_until_sse_is_ported() {
-        let provider = OpenResponsesProvider::from_settings(OpenResponsesProviderSettings::new(
-            "openai",
-            "https://api.openai.test/v1/responses",
-        ));
-        let model = provider.language_model("gpt-4.1-mini");
-        let stream_result = poll_ready(model.do_stream(
-            crate::language_model::LanguageModelCallOptions::new(vec![
-                crate::language_model::LanguageModelMessage::User(
-                    crate::language_model::LanguageModelUserMessage::new(vec![
-                        crate::language_model::LanguageModelUserContentPart::Text(
-                            crate::language_model::LanguageModelTextPart::new("Say hello"),
+    fn open_responses_provider_streams_text_with_request_and_response_metadata() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport = Arc::new(
+            move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                let sse = [
+                    r#"data: {"type":"response.created","response":{"id":"resp_stream","created_at":1711115037,"model":"gpt-4.1-mini"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"Hello"}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":" from Responses"}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.done","item_id":"msg_1","output_index":0,"content_index":0,"text":"Hello from Responses"}"#,
+                    "",
+                    r#"data: {"type":"response.completed","response":{"id":"resp_stream","created_at":1711115037,"model":"gpt-4.1-mini","usage":{"input_tokens":5,"output_tokens":4}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse)
+                    .with_headers(Headers::from([
+                        ("content-type".to_string(), "text/event-stream".to_string()),
+                        (
+                            "x-request-id".to_string(),
+                            "req_open_responses_stream".to_string(),
                         ),
-                    ]),
-                ),
-            ]),
+                    ])))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let result = poll_ready(stream_text(
+            StreamTextOptions::from_prompt(&model, Prompt::from_prompt("Say hello"))
+                .expect("prompt is valid")
+                .with_max_output_tokens(16)
+                .with_temperature(0.0)
+                .with_include_raw_chunks(true),
         ));
 
-        match stream_result.stream.as_slice() {
-            [LanguageModelStreamPart::Error(error)] => {
-                assert_eq!(
-                    error.error.get("message").and_then(JsonValue::as_str),
-                    Some("Open Responses streaming is not implemented yet.")
-                );
-            }
-            parts => panic!("expected one error stream part, got {parts:?}"),
-        }
+        assert_eq!(result.text, "Hello from Responses");
+        assert_eq!(result.text_stream, vec!["Hello", " from Responses"]);
+        assert_eq!(result.usage.input_tokens.total, Some(5));
+        assert_eq!(result.usage.output_tokens.total, Some(4));
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.response.id.as_deref(), Some("resp_stream"));
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("req_open_responses_stream")
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .unwrap_or(&ProviderMetadata::new())
+                .get("openai")
+                .and_then(|metadata| metadata.get("responseId"))
+                .and_then(JsonValue::as_str),
+            Some("resp_stream")
+        );
+        assert!(
+            result
+                .parts
+                .iter()
+                .any(|part| matches!(part, TextStreamPart::Raw(_)))
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://api.openai.test/v1/responses");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "gpt-4.1-mini",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Say hello"
+                            }
+                        ]
+                    }
+                ],
+                "max_output_tokens": 16,
+                "temperature": 0.0,
+                "stream": true
+            }))
+        );
     }
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
