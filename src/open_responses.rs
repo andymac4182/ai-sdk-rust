@@ -3798,14 +3798,13 @@ fn open_responses_stream_result_from_response(
                         }
                     }
                     Some("response.failed") => {
-                        finish_reason = LanguageModelFinishReason {
-                            unified: FinishReason::Error,
-                            raw: Some("open-responses-error".to_string()),
-                        };
-                        stream.push(open_responses_stream_event_error(
-                            &value,
-                            Some(&raw_value.to_string()),
-                        ));
+                        if let Some(response) = open_responses_event_response(&value) {
+                            usage = open_responses_usage(response.get("usage"));
+                            finish_reason = LanguageModelFinishReason {
+                                unified: FinishReason::Error,
+                                raw: open_responses_failed_raw_finish_reason(response),
+                            };
+                        }
                     }
                     _ => {}
                 }
@@ -3858,6 +3857,15 @@ fn open_responses_event_response(value: &JsonValue) -> Option<&JsonValue> {
     value
         .get("response")
         .or_else(|| value.get("id").and_then(JsonValue::as_str).map(|_| value))
+}
+
+fn open_responses_failed_raw_finish_reason(response: &JsonValue) -> Option<String> {
+    response
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(JsonValue::as_str)
+        .or_else(|| response.get("status").and_then(JsonValue::as_str))
+        .map(ToString::to_string)
 }
 
 fn open_responses_push_response_metadata(
@@ -7427,6 +7435,66 @@ mod tests {
                 .and_then(JsonValue::as_str),
             Some("response failed")
         );
+    }
+
+    #[test]
+    fn open_responses_provider_stream_failed_response_sets_raw_reason_and_usage() {
+        let transport: OpenResponsesTransport = Arc::new(
+            move |_request| -> OpenResponsesTransportFuture {
+                let sse = [
+                    r#"data: {"type":"response.created","response":{"id":"resp_stream_failed","created_at":1711115037,"model":"gpt-4.1-mini"}}"#,
+                    "",
+                    r#"data: {"type":"response.failed","response":{"id":"resp_stream_failed","created_at":1711115037,"model":"gpt-4.1-mini","status":"failed","error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"rate limited","param":null},"usage":{"input_tokens":6,"input_tokens_details":{"cached_tokens":2},"output_tokens":4,"output_tokens_details":{"reasoning_tokens":1}}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse)
+                    .with_headers(Headers::from([(
+                        "content-type".to_string(),
+                        "text/event-stream".to_string(),
+                    )])))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Say hello")),
+            ])),
+        ])));
+
+        assert!(
+            !result
+                .stream
+                .iter()
+                .any(|part| matches!(part, LanguageModelStreamPart::Error(_)))
+        );
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish part");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Error);
+        assert_eq!(
+            finish.finish_reason.raw.as_deref(),
+            Some("rate_limit_exceeded")
+        );
+        assert_eq!(finish.usage.input_tokens.total, Some(6));
+        assert_eq!(finish.usage.input_tokens.no_cache, Some(4));
+        assert_eq!(finish.usage.input_tokens.cache_read, Some(2));
+        assert_eq!(finish.usage.output_tokens.total, Some(4));
+        assert_eq!(finish.usage.output_tokens.text, Some(3));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(1));
     }
 
     #[test]
