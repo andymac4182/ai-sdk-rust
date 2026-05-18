@@ -2272,6 +2272,8 @@ fn open_responses_stream_result_from_response(
     let provider_tool_names = open_responses_provider_tool_names();
     let tool_name_mapping = create_tool_name_mapping(tools.iter().flatten(), &provider_tool_names);
     let web_search_tool_name = open_responses_web_search_response_tool_name(tools);
+    let shell_provider_executed = open_responses_shell_provider_executed(tools);
+    let mut hosted_tool_search_call_ids = VecDeque::<String>::new();
     let mut source_index = 0usize;
     let mut ongoing_annotations = Vec::<JsonValue>::new();
     let mut active_message_phase = None::<String>;
@@ -2704,6 +2706,224 @@ fn open_responses_stream_result_from_response(
                                         &tool_name,
                                         json!({
                                             "result": item.get("result").cloned().unwrap_or(JsonValue::Null)
+                                        }),
+                                    );
+                                }
+                                Some("custom_tool_call") => {
+                                    has_tool_calls = true;
+                                    let tool_call_id = item
+                                        .get("call_id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    let tool_name = item
+                                        .get("name")
+                                        .and_then(JsonValue::as_str)
+                                        .map(|name| tool_name_mapping.to_custom_tool_name(name))
+                                        .unwrap_or_default();
+                                    let input = open_responses_stringified_json(
+                                        item.get("input").cloned().unwrap_or(JsonValue::Null),
+                                    );
+                                    stream.push(LanguageModelStreamPart::ToolCall(
+                                        LanguageModelToolCall::new(tool_call_id, tool_name, input),
+                                    ));
+                                }
+                                Some("tool_search_call") => {
+                                    let tool_call_id = open_responses_tool_search_call_id(item);
+                                    let hosted = matches!(
+                                        item.get("execution").and_then(JsonValue::as_str),
+                                        Some("server")
+                                    );
+
+                                    if hosted {
+                                        hosted_tool_search_call_ids.push_back(tool_call_id.clone());
+                                    }
+
+                                    let mut tool_call = LanguageModelToolCall::new(
+                                        tool_call_id,
+                                        tool_name_mapping.to_custom_tool_name("tool_search"),
+                                        open_responses_tool_search_input(item),
+                                    );
+
+                                    if hosted {
+                                        tool_call = tool_call.with_provider_executed(true);
+                                    }
+
+                                    stream.push(LanguageModelStreamPart::ToolCall(tool_call));
+                                }
+                                Some("tool_search_output") => {
+                                    let tool_call_id = item
+                                        .get("call_id")
+                                        .and_then(JsonValue::as_str)
+                                        .map(ToString::to_string)
+                                        .or_else(|| hosted_tool_search_call_ids.pop_front())
+                                        .or_else(|| {
+                                            item.get("id")
+                                                .and_then(JsonValue::as_str)
+                                                .map(ToString::to_string)
+                                        })
+                                        .unwrap_or_default();
+                                    open_responses_push_stream_tool_result(
+                                        &mut stream,
+                                        &tool_call_id,
+                                        &tool_name_mapping.to_custom_tool_name("tool_search"),
+                                        json!({
+                                            "tools": item.get("tools").cloned().unwrap_or_else(|| JsonValue::Array(Vec::new()))
+                                        }),
+                                    );
+                                }
+                                Some("local_shell_call") => {
+                                    let tool_call_id = item
+                                        .get("call_id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+
+                                    stream.push(LanguageModelStreamPart::ToolCall(
+                                        LanguageModelToolCall::new(
+                                            tool_call_id,
+                                            tool_name_mapping.to_custom_tool_name("local_shell"),
+                                            json!({
+                                                "action": item.get("action").cloned().unwrap_or(JsonValue::Null)
+                                            })
+                                            .to_string(),
+                                        ),
+                                    ));
+                                }
+                                Some("shell_call") => {
+                                    let tool_call_id = item
+                                        .get("call_id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    let mut tool_call = LanguageModelToolCall::new(
+                                        tool_call_id,
+                                        tool_name_mapping.to_custom_tool_name("shell"),
+                                        open_responses_shell_call_input(item),
+                                    );
+
+                                    if shell_provider_executed {
+                                        tool_call = tool_call.with_provider_executed(true);
+                                    }
+
+                                    stream.push(LanguageModelStreamPart::ToolCall(tool_call));
+                                }
+                                Some("shell_call_output") => {
+                                    let tool_call_id = item
+                                        .get("call_id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    open_responses_push_stream_tool_result(
+                                        &mut stream,
+                                        tool_call_id,
+                                        &tool_name_mapping.to_custom_tool_name("shell"),
+                                        open_responses_shell_call_output(item),
+                                    );
+                                }
+                                Some("apply_patch_call") => {
+                                    let tool_call_id = item
+                                        .get("call_id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+
+                                    stream.push(LanguageModelStreamPart::ToolCall(
+                                        LanguageModelToolCall::new(
+                                            tool_call_id,
+                                            tool_name_mapping.to_custom_tool_name("apply_patch"),
+                                            json!({
+                                                "callId": item.get("call_id").cloned().unwrap_or(JsonValue::Null),
+                                                "operation": item.get("operation").cloned().unwrap_or(JsonValue::Null)
+                                            })
+                                            .to_string(),
+                                        ),
+                                    ));
+                                }
+                                Some("mcp_call") => {
+                                    let tool_call_id = item
+                                        .get("id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    let tool_name = item
+                                        .get("name")
+                                        .and_then(JsonValue::as_str)
+                                        .map(|name| format!("mcp.{name}"))
+                                        .unwrap_or_else(|| "mcp".to_string());
+                                    let input = item
+                                        .get("arguments")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or("{}");
+
+                                    stream.push(LanguageModelStreamPart::ToolCall(
+                                        LanguageModelToolCall::new(
+                                            tool_call_id,
+                                            tool_name.clone(),
+                                            input,
+                                        )
+                                        .with_provider_executed(true)
+                                        .with_dynamic(true),
+                                    ));
+                                    stream.push(LanguageModelStreamPart::ToolResult(
+                                        open_responses_mcp_tool_result(
+                                            item,
+                                            tool_call_id,
+                                            &tool_name,
+                                        ),
+                                    ));
+                                }
+                                Some("mcp_approval_request") => {
+                                    let tool_call_id = item
+                                        .get("id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    let approval_id = item
+                                        .get("approval_request_id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or(tool_call_id);
+                                    let tool_name = item
+                                        .get("name")
+                                        .and_then(JsonValue::as_str)
+                                        .map(|name| format!("mcp.{name}"))
+                                        .unwrap_or_else(|| "mcp".to_string());
+                                    let input = item
+                                        .get("arguments")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or("{}");
+
+                                    stream.push(LanguageModelStreamPart::ToolCall(
+                                        LanguageModelToolCall::new(tool_call_id, tool_name, input)
+                                            .with_provider_executed(true)
+                                            .with_dynamic(true),
+                                    ));
+                                    stream.push(LanguageModelStreamPart::ToolApprovalRequest(
+                                        LanguageModelToolApprovalRequest::new(
+                                            approval_id,
+                                            tool_call_id,
+                                        ),
+                                    ));
+                                }
+                                Some("computer_call") => {
+                                    let tool_call_id = item
+                                        .get("id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    let tool_name =
+                                        tool_name_mapping.to_custom_tool_name("computer_use");
+
+                                    stream.push(LanguageModelStreamPart::ToolCall(
+                                        LanguageModelToolCall::new(
+                                            tool_call_id,
+                                            tool_name.clone(),
+                                            "",
+                                        )
+                                        .with_provider_executed(true),
+                                    ));
+                                    open_responses_push_stream_tool_result(
+                                        &mut stream,
+                                        tool_call_id,
+                                        &tool_name,
+                                        json!({
+                                            "type": "computer_use_tool_result",
+                                            "status": item
+                                                .get("status")
+                                                .cloned()
+                                                .unwrap_or_else(|| JsonValue::String("completed".to_string()))
                                         }),
                                     );
                                 }
@@ -5754,6 +5974,173 @@ mod tests {
                 _ => None,
             }),
             Some(FinishReason::Stop)
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_streams_additional_tool_items() {
+        let transport: OpenResponsesTransport = Arc::new(
+            move |_request| -> OpenResponsesTransportFuture {
+                let sse = [
+                    r#"data: {"type":"response.created","response":{"id":"resp_stream_extra_tools","created_at":1711115037,"model":"gpt-4.1-mini"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":0,"item":{"id":"custom_item","type":"custom_tool_call","call_id":"custom_1","name":"write_sql","input":"select 1"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":1,"item":{"id":"tsc_1","type":"tool_search_call","execution":"server","call_id":null,"status":"completed","arguments":{"goal":"Find a weather tool"}}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":2,"item":{"id":"tso_1","type":"tool_search_output","execution":"server","call_id":null,"status":"completed","tools":[{"type":"function","name":"get_weather"}]}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":3,"item":{"id":"local_1","type":"local_shell_call","call_id":"local_call_1","action":{"type":"exec","command":"pwd","timeout_ms":1000}}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":4,"item":{"id":"shell_1","type":"shell_call","call_id":"shell_call_1","action":{"commands":["echo hi"]}}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":5,"item":{"id":"shell_out_1","type":"shell_call_output","call_id":"shell_call_1","output":[{"stdout":"hi\n","stderr":"","outcome":{"type":"exit","exit_code":0}}]}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":6,"item":{"id":"patch_1","type":"apply_patch_call","call_id":"patch_call_1","operation":{"type":"update_file","path":"README.md","diff":"@@\n"}}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":7,"item":{"id":"mcp_1","type":"mcp_call","server_label":"server","name":"lookup","arguments":"{\"query\":\"rust\"}","output":{"ok":true}}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":8,"item":{"id":"mcp_approval_1","type":"mcp_approval_request","approval_request_id":"approval_1","name":"approve","arguments":"{}"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":9,"item":{"id":"computer_1","type":"computer_call","status":"completed"}}"#,
+                    "",
+                    r#"data: {"type":"response.completed","response":{"id":"resp_stream_extra_tools","created_at":1711115037,"model":"gpt-4.1-mini","usage":{"input_tokens":13,"output_tokens":8}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Use additional tools"),
+                    )]),
+                )])
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.tool_search",
+                    "toolSearch",
+                    JsonObject::new(),
+                )))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.local_shell",
+                    "localShell",
+                    JsonObject::new(),
+                )))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.shell",
+                    "hostShell",
+                    json_object(json!({
+                        "environment": {
+                            "type": "containerAuto"
+                        }
+                    })),
+                )))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.apply_patch",
+                    "patchTool",
+                    JsonObject::new(),
+                )))
+                .with_tool(LanguageModelTool::Provider(
+                    LanguageModelProviderTool::new("openai.mcp", "mcpTool", JsonObject::new()),
+                )),
+            ),
+        );
+
+        let tool_calls = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let tool_results = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(tool_calls.len(), 8);
+        assert_eq!(tool_results.len(), 4);
+        assert_eq!(tool_calls[0].tool_call_id, "custom_1");
+        assert_eq!(tool_calls[0].tool_name, "write_sql");
+        assert_eq!(tool_calls[0].input, "\"select 1\"");
+        assert_eq!(tool_calls[1].tool_name, "toolSearch");
+        assert_eq!(tool_calls[1].provider_executed, Some(true));
+        assert_eq!(tool_results[0].tool_call_id, "tsc_1");
+        assert_eq!(
+            tool_results[0].result.as_value(),
+            &json!({
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "get_weather"
+                    }
+                ]
+            })
+        );
+        assert_eq!(tool_calls[2].tool_name, "localShell");
+        assert_eq!(tool_calls[3].tool_name, "hostShell");
+        assert_eq!(tool_calls[3].provider_executed, Some(true));
+        assert_eq!(
+            tool_results[1].result.as_value(),
+            &json!({
+                "output": [
+                    {
+                        "stdout": "hi\n",
+                        "stderr": "",
+                        "outcome": {
+                            "type": "exit",
+                            "exitCode": 0
+                        }
+                    }
+                ]
+            })
+        );
+        assert_eq!(tool_calls[4].tool_name, "patchTool");
+        assert_eq!(tool_calls[5].tool_name, "mcp.lookup");
+        assert_eq!(tool_calls[5].provider_executed, Some(true));
+        assert_eq!(tool_calls[5].dynamic, Some(true));
+        assert_eq!(tool_results[2].tool_name, "mcp.lookup");
+        assert_eq!(tool_results[2].dynamic, Some(true));
+        assert_eq!(tool_calls[6].tool_name, "mcp.approve");
+        assert!(
+            result
+                .stream
+                .iter()
+                .any(|part| matches!(part, LanguageModelStreamPart::ToolApprovalRequest(approval) if approval.approval_id == "approval_1" && approval.tool_call_id == "mcp_approval_1"))
+        );
+        assert_eq!(tool_calls[7].tool_name, "computer_use");
+        assert_eq!(
+            tool_results[3].result.as_value(),
+            &json!({
+                "type": "computer_use_tool_result",
+                "status": "completed"
+            })
+        );
+        assert_eq!(
+            result.stream.iter().find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => {
+                    Some(finish.finish_reason.unified.clone())
+                }
+                _ => None,
+            }),
+            Some(FinishReason::ToolCalls)
         );
     }
 
