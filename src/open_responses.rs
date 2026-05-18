@@ -496,6 +496,8 @@ fn open_responses_request_body(
     let has_local_shell_tool =
         open_responses_has_provider_tool(&options.tools, "openai.local_shell");
     let has_shell_tool = open_responses_has_provider_tool(&options.tools, "openai.shell");
+    let has_apply_patch_tool =
+        open_responses_has_provider_tool(&options.tools, "openai.apply_patch");
     let store = open_responses_store_enabled(provider_options_name, provider_options);
     let has_conversation =
         open_responses_conversation_enabled(provider_options_name, provider_options);
@@ -516,6 +518,7 @@ fn open_responses_request_body(
         tool_name_mapping: &tool_name_mapping,
         has_local_shell_tool,
         has_shell_tool,
+        has_apply_patch_tool,
     };
     let (input, instructions) =
         open_responses_input(&options.prompt, &prompt_input_options, &mut warnings)?;
@@ -954,6 +957,7 @@ struct OpenResponsesPromptInputOptions<'a> {
     tool_name_mapping: &'a ToolNameMapping,
     has_local_shell_tool: bool,
     has_shell_tool: bool,
+    has_apply_patch_tool: bool,
 }
 
 fn open_responses_input(
@@ -967,6 +971,7 @@ fn open_responses_input(
     let tool_name_mapping = options.tool_name_mapping;
     let has_local_shell_tool = options.has_local_shell_tool;
     let has_shell_tool = options.has_shell_tool;
+    let has_apply_patch_tool = options.has_apply_patch_tool;
     let mut input = Vec::new();
     let mut system_messages = Vec::new();
     let mut processed_approval_ids = BTreeSet::new();
@@ -1123,6 +1128,12 @@ fn open_responses_input(
                                 continue;
                             }
 
+                            if has_apply_patch_tool && resolved_tool_name == "apply_patch" {
+                                assistant_items
+                                    .push(open_responses_apply_patch_call_item(tool_call, item_id));
+                                continue;
+                            }
+
                             assistant_items.push(json!({
                                 "type": "function_call",
                                 "call_id": tool_call.tool_call_id,
@@ -1254,6 +1265,17 @@ fn open_responses_input(
                                 && let Some(output) = open_responses_tool_result_json(&part.output)
                             {
                                 input.push(open_responses_shell_call_output_item(
+                                    &part.tool_call_id,
+                                    output,
+                                ));
+                                continue;
+                            }
+
+                            if has_apply_patch_tool
+                                && resolved_tool_name == "apply_patch"
+                                && let Some(output) = open_responses_tool_result_json(&part.output)
+                            {
+                                input.push(open_responses_apply_patch_call_output_item(
                                     &part.tool_call_id,
                                     output,
                                 ));
@@ -1508,6 +1530,39 @@ fn open_responses_shell_call_output_item(call_id: &str, output: &JsonValue) -> J
                 )
             })
             .unwrap_or_else(|| JsonValue::Array(Vec::new()))
+    })
+}
+
+fn open_responses_apply_patch_call_item(
+    tool_call: &LanguageModelToolCallPart,
+    item_id: Option<&str>,
+) -> JsonValue {
+    let parsed_input = open_responses_prompt_json_object_input(&tool_call.input);
+
+    json!({
+        "type": "apply_patch_call",
+        "call_id": parsed_input
+            .get("callId")
+            .cloned()
+            .unwrap_or_else(|| JsonValue::String(tool_call.tool_call_id.clone())),
+        "id": item_id.unwrap_or(tool_call.tool_call_id.as_str()),
+        "status": "completed",
+        "operation": parsed_input
+            .get("operation")
+            .cloned()
+            .unwrap_or(JsonValue::Null)
+    })
+}
+
+fn open_responses_apply_patch_call_output_item(call_id: &str, output: &JsonValue) -> JsonValue {
+    json!({
+        "type": "apply_patch_call_output",
+        "call_id": call_id,
+        "status": output
+            .get("status")
+            .cloned()
+            .unwrap_or_else(|| JsonValue::String("completed".to_string())),
+        "output": output.get("output").cloned().unwrap_or(JsonValue::Null)
     })
 }
 
@@ -5628,6 +5683,14 @@ mod tests {
         ))
     }
 
+    fn open_responses_test_apply_patch_tool() -> LanguageModelTool {
+        LanguageModelTool::Provider(LanguageModelProviderTool::new(
+            "openai.apply_patch",
+            "apply_patch",
+            JsonObject::new(),
+        ))
+    }
+
     #[test]
     fn open_responses_provider_generates_text_with_request_and_response_metadata() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
@@ -7070,6 +7133,249 @@ mod tests {
                             }
                         }
                     ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_reconstructs_apply_patch_history_with_store_false() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_apply_patch_history",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Apply patch history accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 11,
+                            "output_tokens": 4
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let item_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "itemId": "apply_patch_item_1"
+            }
+        }))
+        .expect("provider options deserialize");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "store": false
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![
+                    LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                        LanguageModelAssistantContentPart::ToolCall(
+                            LanguageModelToolCallPart::new(
+                                "call_apply_patch_1",
+                                "apply_patch",
+                                json!({
+                                    "callId": "call_apply_patch_1",
+                                    "operation": {
+                                        "type": "create_file",
+                                        "path": "index.html",
+                                        "diff": "+<!doctype html>\n+<html></html>"
+                                    }
+                                }),
+                            )
+                            .with_provider_options(item_options),
+                        ),
+                    ])),
+                    LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                        LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                            "call_apply_patch_1",
+                            "apply_patch",
+                            LanguageModelToolResultOutput::json(json!({
+                                "status": "completed",
+                                "output": "Created index.html"
+                            })),
+                        )),
+                    ])),
+                ])
+                .with_tool(open_responses_test_apply_patch_tool())
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "apply_patch_call",
+                    "call_id": "call_apply_patch_1",
+                    "id": "apply_patch_item_1",
+                    "status": "completed",
+                    "operation": {
+                        "type": "create_file",
+                        "path": "index.html",
+                        "diff": "+<!doctype html>\n+<html></html>"
+                    }
+                },
+                {
+                    "type": "apply_patch_call_output",
+                    "call_id": "call_apply_patch_1",
+                    "status": "completed",
+                    "output": "Created index.html"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_reconstructs_stored_apply_patch_outputs() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_stored_apply_patch_history",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Stored apply patch history accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 9,
+                            "output_tokens": 3
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let item_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "itemId": "apply_patch_item_2"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![
+                    LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                        LanguageModelAssistantContentPart::ToolCall(
+                            LanguageModelToolCallPart::new(
+                                "call_apply_patch_2",
+                                "apply_patch",
+                                json!({
+                                    "callId": "call_apply_patch_2",
+                                    "operation": {
+                                        "type": "delete_file",
+                                        "path": "temp.txt"
+                                    }
+                                }),
+                            )
+                            .with_provider_options(item_options),
+                        ),
+                    ])),
+                    LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                        LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                            "call_apply_patch_2",
+                            "apply_patch",
+                            LanguageModelToolResultOutput::json(json!({
+                                "status": "incomplete",
+                                "output": "Deletion denied"
+                            })),
+                        )),
+                    ])),
+                ])
+                .with_tool(open_responses_test_apply_patch_tool()),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "item_reference",
+                    "id": "apply_patch_item_2"
+                },
+                {
+                    "type": "apply_patch_call_output",
+                    "call_id": "call_apply_patch_2",
+                    "status": "incomplete",
+                    "output": "Deletion denied"
                 }
             ])
         );
