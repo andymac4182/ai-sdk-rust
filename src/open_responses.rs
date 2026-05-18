@@ -10494,6 +10494,146 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_prepares_code_interpreter_and_image_generation_options() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_hosted_tool_options",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Hosted tool options prepared"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 8,
+                            "output_tokens": 2
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Use hosted tool options"),
+                    )]),
+                )])
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.code_interpreter",
+                    "codeRunner",
+                    JsonObject::new(),
+                )))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.code_interpreter",
+                    "existingContainer",
+                    json_object(json!({
+                        "container": "container-123"
+                    })),
+                )))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.image_generation",
+                    "imageMaker",
+                    json_object(json!({
+                        "background": "opaque",
+                        "inputFidelity": "high",
+                        "inputImageMask": {
+                            "fileId": "file-mask",
+                            "imageUrl": "https://example.com/mask.png"
+                        },
+                        "model": "gpt-image-1",
+                        "moderation": "auto",
+                        "partialImages": 3,
+                        "quality": "high",
+                        "outputCompression": 100,
+                        "outputFormat": "png",
+                        "size": "1536x1024"
+                    })),
+                )))
+                .with_tool_choice(LanguageModelToolChoice::Tool {
+                    tool_name: "imageMaker".to_string(),
+                }),
+            ),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "code_interpreter",
+                    "container": {
+                        "type": "auto"
+                    }
+                },
+                {
+                    "type": "code_interpreter",
+                    "container": "container-123"
+                },
+                {
+                    "type": "image_generation",
+                    "background": "opaque",
+                    "input_fidelity": "high",
+                    "input_image_mask": {
+                        "file_id": "file-mask",
+                        "image_url": "https://example.com/mask.png"
+                    },
+                    "model": "gpt-image-1",
+                    "moderation": "auto",
+                    "partial_images": 3,
+                    "quality": "high",
+                    "output_compression": 100,
+                    "output_format": "png",
+                    "size": "1536x1024"
+                }
+            ])
+        );
+        assert_eq!(
+            request_body["tool_choice"],
+            json!({
+                "type": "image_generation"
+            })
+        );
+    }
+
+    #[test]
     fn open_responses_provider_prepares_apply_patch_and_tool_search_tools() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
