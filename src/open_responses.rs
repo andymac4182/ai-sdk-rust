@@ -1009,14 +1009,14 @@ fn open_responses_tool_result_output(
                             "text": text.text
                         }));
                     }
-                    LanguageModelToolResultContentPart::File(_) => {
-                        warnings.push(Warning::Unsupported {
-                            feature: "toolResultFileContent".to_string(),
-                            details: Some(
-                                "Open Responses tool result file content is not implemented yet."
-                                    .to_string(),
-                            ),
-                        });
+                    LanguageModelToolResultContentPart::File(file) => {
+                        match open_responses_file_part(file) {
+                            Ok(file_part) => content.push(file_part),
+                            Err(message) => warnings.push(Warning::Unsupported {
+                                feature: "toolResultFileContent".to_string(),
+                                details: Some(message),
+                            }),
+                        }
                     }
                     LanguageModelToolResultContentPart::Custom(_) => {
                         warnings.push(Warning::Unsupported {
@@ -4857,8 +4857,9 @@ mod tests {
         LanguageModelReasoningPart, LanguageModelSource, LanguageModelStreamPart,
         LanguageModelTextPart, LanguageModelTool, LanguageModelToolApprovalRequestPart,
         LanguageModelToolApprovalResponsePart, LanguageModelToolCallPart, LanguageModelToolChoice,
-        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultOutput,
-        LanguageModelToolResultPart, LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultContentPart,
+        LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUserContentPart,
+        LanguageModelUserMessage,
     };
     use crate::prompt::Prompt;
     use crate::provider::{ModelType, Provider, ProviderMetadata, ProviderOptions};
@@ -5461,6 +5462,140 @@ mod tests {
                             {
                                 "type": "input_text",
                                 "text": "Summarize these inputs"
+                            },
+                            {
+                                "type": "input_image",
+                                "image_url": "data:image/png;base64,AAECAw=="
+                            },
+                            {
+                                "type": "input_image",
+                                "image_url": "https://example.com/photo.jpg"
+                            },
+                            {
+                                "type": "input_file",
+                                "filename": "report.pdf",
+                                "file_data": "data:application/pdf;base64,JVBERi0="
+                            },
+                            {
+                                "type": "input_file",
+                                "file_url": "https://example.com/report.pdf"
+                            }
+                        ]
+                    }
+                ]
+            }))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_tool_result_file_content_outputs() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_tool_files",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Tool output accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 7,
+                            "output_tokens": 4
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call_files",
+                    "render_report",
+                    LanguageModelToolResultOutput::content(vec![
+                        LanguageModelToolResultContentPart::Text(LanguageModelTextPart::new(
+                            "First result",
+                        )),
+                        LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                            FileData::Data {
+                                data: FileDataContent::Bytes(vec![0, 1, 2, 3]),
+                            },
+                            "image/png",
+                        )),
+                        LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                            FileData::Url {
+                                url: Url::parse("https://example.com/photo.jpg")
+                                    .expect("url parses"),
+                            },
+                            "image/jpeg",
+                        )),
+                        LanguageModelToolResultContentPart::File(
+                            LanguageModelFilePart::new(
+                                FileData::Data {
+                                    data: FileDataContent::Base64("JVBERi0=".to_string()),
+                                },
+                                "application/pdf",
+                            )
+                            .with_filename("report.pdf"),
+                        ),
+                        LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                            FileData::Url {
+                                url: Url::parse("https://example.com/report.pdf")
+                                    .expect("url parses"),
+                            },
+                            "application/pdf",
+                        )),
+                    ]),
+                )),
+            ])),
+        ])));
+
+        assert!(result.warnings.is_empty());
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "gpt-4.1-mini",
+                "input": [
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_files",
+                        "output": [
+                            {
+                                "type": "input_text",
+                                "text": "First result"
                             },
                             {
                                 "type": "input_image",
