@@ -3505,6 +3505,7 @@ mod tests {
     use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions};
     use crate::file_data::{FileData, FileDataContent};
     use crate::generate_image::{GenerateImageOptions, generate_image};
+    use crate::generate_object::{GenerateObjectOptions, generate_object};
     use crate::generate_text::{GenerateTextContentPart, GenerateTextOptions, generate_text};
     use crate::generate_video::{GenerateVideoOptions, generate_video};
     use crate::headers::Headers;
@@ -3523,12 +3524,13 @@ mod tests {
     };
     use crate::provider_utils::{
         FetchErrorInfo, ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod,
-        ProviderApiResponse, Tool,
+        ProviderApiResponse, Tool, json_schema,
     };
     use crate::rerank::{RerankDocuments, RerankOptions, rerank};
     use crate::reranking_model::{
         RerankingModel, RerankingModelCallOptions, RerankingModelDocuments,
     };
+    use crate::stream_object::{StreamObjectOptions, stream_object};
     use crate::stream_text::{StreamTextOptions, TextStreamPart, stream_text};
     use crate::video_model::{VideoModel, VideoModelCallOptions, VideoModelFile};
     use crate::warning::Warning;
@@ -4056,6 +4058,120 @@ mod tests {
                 .get("ai-o11y-request-id")
                 .map(String::as_str),
             Some("req_gateway_context")
+        );
+    }
+
+    #[test]
+    fn gateway_model_generates_object_through_generate_object() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "id": "test-object-id",
+                    "created": 1711115037,
+                    "model": "openai/gpt-4.1-mini",
+                    "content": {
+                        "type": "text",
+                        "text": "{\"answer\":\"Gateway object\",\"count\":2}"
+                    },
+                    "finish_reason": "stop",
+                    "usage": {
+                        "prompt_tokens": 8,
+                        "completion_tokens": 6
+                    }
+                })
+                .to_string(),
+            )
+            .with_headers(Headers::from([(
+                "x-request-id".to_string(),
+                "req_gateway_object".to_string(),
+            )])))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .language_model("openai/gpt-4.1-mini");
+        let object_schema = json_object(json!({
+            "type": "object",
+            "properties": {
+                "answer": {
+                    "type": "string"
+                },
+                "count": {
+                    "type": "integer"
+                }
+            },
+            "required": ["answer", "count"],
+            "additionalProperties": false
+        }));
+        let result = poll_ready(generate_object(
+            GenerateObjectOptions::from_prompt(
+                &model,
+                Prompt::from_prompt("Return a JSON object with answer and count."),
+            )
+            .expect("prompt is valid")
+            .with_schema(json_schema(object_schema.clone()))
+            .with_max_output_tokens(32)
+            .with_temperature(0.0),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(result.object["answer"], "Gateway object");
+        assert_eq!(result.object["count"], 2);
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(8));
+        assert_eq!(result.usage.output_tokens.total, Some(6));
+        assert_eq!(
+            result.response.headers.as_ref().and_then(|headers| {
+                headers.get("x-request-id").map(std::string::String::as_str)
+            }),
+            Some("req_gateway_object")
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://api.test.com/language-model");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+        assert_eq!(
+            request_body.get("responseFormat"),
+            Some(&json!({
+                "type": "json",
+                "schema": object_schema
+            }))
+        );
+        assert_eq!(request_body.get("maxOutputTokens"), Some(&json!(32)));
+        assert_eq!(
+            request_body
+                .get("prompt")
+                .and_then(JsonValue::as_array)
+                .and_then(|prompt| prompt.first())
+                .and_then(|message| message.get("content")),
+            Some(&json!([
+                {
+                    "type": "text",
+                    "text": "Return a JSON object with answer and count."
+                }
+            ]))
         );
     }
 
@@ -4763,6 +4879,146 @@ mod tests {
                 .and_then(|body| body.get("maxOutputTokens").cloned()),
             Some(json!(12))
         );
+    }
+
+    #[test]
+    fn gateway_model_streams_object_through_stream_object() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                gateway_sse_body([
+                    json!({
+                        "type": "stream-start",
+                        "warnings": []
+                    }),
+                    json!({
+                        "type": "response-metadata",
+                        "id": "resp_gateway_object",
+                        "timestamp": "2024-01-02T03:04:05Z",
+                        "modelId": "openai/gpt-4.1-mini"
+                    }),
+                    json!({
+                        "type": "text-start",
+                        "id": "0"
+                    }),
+                    json!({
+                        "type": "text-delta",
+                        "id": "0",
+                        "delta": "{\"answer\":\"Gateway "
+                    }),
+                    json!({
+                        "type": "text-delta",
+                        "id": "0",
+                        "delta": "stream object\",\"count\":3}"
+                    }),
+                    json!({
+                        "type": "text-end",
+                        "id": "0"
+                    }),
+                    json!({
+                        "type": "finish",
+                        "finishReason": {
+                            "unified": "stop",
+                            "raw": "stop"
+                        },
+                        "usage": {
+                            "inputTokens": {
+                                "total": 9
+                            },
+                            "outputTokens": {
+                                "total": 7
+                            }
+                        }
+                    }),
+                ]),
+            )
+            .with_headers(Headers::from([(
+                "content-type".to_string(),
+                "text/event-stream".to_string(),
+            )])))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .language_model("openai/gpt-4.1-mini");
+        let object_schema = json_object(json!({
+            "type": "object",
+            "properties": {
+                "answer": {
+                    "type": "string"
+                },
+                "count": {
+                    "type": "integer"
+                }
+            },
+            "required": ["answer", "count"],
+            "additionalProperties": false
+        }));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::from_prompt(
+                &model,
+                Prompt::from_prompt("Stream a JSON object with answer and count."),
+            )
+            .expect("prompt is valid")
+            .with_schema(json_schema(object_schema.clone()))
+            .with_max_output_tokens(40)
+            .with_temperature(0.0),
+        ));
+
+        assert_eq!(
+            result.text,
+            "{\"answer\":\"Gateway stream object\",\"count\":3}"
+        );
+        assert_eq!(
+            result.object,
+            Some(json!({
+                "answer": "Gateway stream object",
+                "count": 3
+            }))
+        );
+        assert_eq!(result.error, None);
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(9));
+        assert_eq!(result.usage.output_tokens.total, Some(7));
+        assert_eq!(result.response.id.as_deref(), Some("resp_gateway_object"));
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request
+                .headers
+                .get("ai-language-model-streaming")
+                .map(String::as_str),
+            Some("true")
+        );
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+        assert_eq!(
+            request_body.get("responseFormat"),
+            Some(&json!({
+                "type": "json",
+                "schema": object_schema
+            }))
+        );
+        assert_eq!(request_body.get("includeRawChunks"), Some(&json!(false)));
     }
 
     #[test]
@@ -7736,6 +7992,56 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI object call"]
+    fn live_gateway_openai_generate_object() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!("skipping live Gateway object test because no API key is configured");
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_GATEWAY_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_MODEL"))
+            .unwrap_or_else(|_| "openai/gpt-4.1-mini".to_string());
+        let model = GatewayProvider::new()
+            .with_api_key(api_key)
+            .language_model(model_id);
+        let object_schema = json_object(json!({
+            "type": "object",
+            "properties": {
+                "marker": {
+                    "type": "string"
+                },
+                "count": {
+                    "type": "integer"
+                }
+            },
+            "required": ["marker", "count"],
+            "additionalProperties": false
+        }));
+        let result = poll_ready(generate_object(
+            GenerateObjectOptions::from_prompt(
+                &model,
+                Prompt::from_prompt(
+                    "Return only a JSON object with marker exactly \"rust-gateway-object-ok\" and count exactly 7.",
+                ),
+            )
+            .expect("prompt is valid")
+            .with_schema(json_schema(object_schema))
+            .with_max_output_tokens(64)
+            .with_temperature(0.0),
+        ))
+        .expect("gateway object generation succeeds");
+
+        assert_eq!(
+            result.object.get("marker").and_then(JsonValue::as_str),
+            Some("rust-gateway-object-ok")
+        );
+        assert_eq!(
+            result.object.get("count").and_then(JsonValue::as_i64),
+            Some(7)
+        );
+    }
+
+    #[test]
     #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI model stream call"]
     fn live_gateway_openai_stream_text() {
         let Some(api_key) = live_gateway_api_key() else {
@@ -7765,6 +8071,54 @@ mod tests {
                 .contains("rust-gateway-stream-ok"),
             "gateway stream response did not contain expected marker"
         );
+    }
+
+    #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI stream object call"]
+    fn live_gateway_openai_stream_object() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!("skipping live Gateway stream object test because no API key is configured");
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_GATEWAY_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_MODEL"))
+            .unwrap_or_else(|_| "openai/gpt-4.1-mini".to_string());
+        let model = GatewayProvider::new()
+            .with_api_key(api_key)
+            .language_model(model_id);
+        let object_schema = json_object(json!({
+            "type": "object",
+            "properties": {
+                "marker": {
+                    "type": "string"
+                },
+                "count": {
+                    "type": "integer"
+                }
+            },
+            "required": ["marker", "count"],
+            "additionalProperties": false
+        }));
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::from_prompt(
+                &model,
+                Prompt::from_prompt(
+                    "Return only a JSON object with marker exactly \"rust-gateway-stream-object-ok\" and count exactly 8.",
+                ),
+            )
+            .expect("prompt is valid")
+            .with_schema(json_schema(object_schema))
+            .with_max_output_tokens(64)
+            .with_temperature(0.0),
+        ));
+
+        assert_eq!(result.error, None);
+        let object = result.object.expect("gateway stream object is generated");
+        assert_eq!(
+            object.get("marker").and_then(JsonValue::as_str),
+            Some("rust-gateway-stream-object-ok")
+        );
+        assert_eq!(object.get("count").and_then(JsonValue::as_i64), Some(8));
     }
 
     #[test]
