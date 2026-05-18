@@ -138,6 +138,7 @@ inventory.
 | Open Responses generic provider option filtering | verified | `src/open_responses.rs` | `open_responses_provider_maps_reasoning_effort_and_summary_options`; `vercel_ai_gateway_openai_responses_passes_gateway_provider_options` | Generic Open Responses providers now mirror upstream by accepting only `reasoningSummary` from provider options; broader request-body passthrough remains scoped to OpenAI, Azure, and Gateway wrapper routes that own those Responses API options. |
 | Open Responses OpenAI wrapper request option mapping | verified | `src/open_responses.rs` | `open_responses_provider_maps_openai_responses_provider_options_to_request_body`; `vercel_ai_gateway_openai_responses_passes_gateway_provider_options` | OpenAI/Gateway wrapper provider options now map upstream camelCase fields such as `previousResponseId`, `maxToolCalls`, `parallelToolCalls`, `promptCacheKey`, `promptCacheRetention`, `safetyIdentifier`, `serviceTier`, `textVerbosity`, `strictJsonSchema`, `reasoningEffort`, `reasoningSummary`, `contextManagement`, and `logprobs` to Responses request keys or nested fields, preserve wrapper-owned passthrough fields such as Gateway `caching`, and prevent SDK-only flags from leaking into the request body. |
 | Open Responses allowed tools request option | verified | `src/open_responses.rs` | `open_responses_provider_maps_allowed_tools_to_tool_choice` | OpenAI/Gateway wrapper provider `allowedTools` now mirrors upstream by keeping the full `tools` array for prompt caching while overriding request-level `toolChoice` with Responses `tool_choice: { type: "allowed_tools", mode, tools }`, defaulting mode to `auto`, mapping tool names through provider-tool aliases, and preventing the SDK-only provider option from leaking into the request body. |
+| Open Responses web-search-preview and local-shell request tools | verified | `src/open_responses.rs` | `open_responses_provider_prepares_web_search_preview_and_local_shell_tools` | Open Responses provider-tool request preparation now mirrors upstream `openai.web_search_preview` option mapping for `searchContextSize` and `userLocation`, emits `openai.local_shell` as `{ "type": "local_shell" }`, and resolves hosted `tool_choice` to `{ "type": "web_search_preview" }`. |
 | Open Responses code-interpreter and image-generation request tools | verified | `src/open_responses.rs` | `open_responses_provider_prepares_code_interpreter_and_image_generation_options` | Open Responses hosted-tool request preparation now mirrors upstream code-interpreter defaults and container-id passthrough, plus image-generation option mapping for background, input fidelity, input image masks, model, moderation, partial images, quality, output compression/format, size, and hosted `tool_choice` resolution. |
 | Open Responses custom provider-tool request formats | verified | `src/open_responses.rs` | `open_responses_provider_prepares_custom_tool_formats_and_choice` | Open Responses custom provider-tool request preparation now mirrors upstream grammar-tool shaping for regex and Lark formats and resolves `tool_choice` to `{ type: "custom", name }` when the selected tool name belongs to an `openai.custom` provider tool. |
 | Open Responses apply-patch and tool-search request tools | verified | `src/open_responses.rs` | `open_responses_provider_prepares_apply_patch_and_tool_search_tools` | Open Responses request preparation now mirrors upstream provider-tool handling for `openai.apply_patch` and `openai.tool_search`: apply-patch emits `{ "type": "apply_patch" }` and resolves hosted tool choice to that type, while tool-search emits `tool_search` with optional `execution`, `description`, and `parameters`; function tools alongside tool-search preserve OpenAI `deferLoading` as `defer_loading`. |
@@ -251,11 +252,12 @@ focused tests for each portable behavior before changing rows to `verified`.
    continuation, conversation history filtering, assistant text metadata,
    assistant reasoning, compaction, `tool_search` request/history, assistant
    execution-denied tool-result filtering, function-call argument defaults,
-   function tool strict modes, code-interpreter and image-generation request
-   options, user file provider references, prompt file defaults/unsupported-file
-   handling, deprecated file id prefixes, `allowedTools` tool-choice override,
-   local-shell, shell request/history, apply-patch request/history, and custom
-   provider-tool request/prompt reconstruction are represented.
+   function tool strict modes, web-search-preview/local-shell request tools,
+   code-interpreter and image-generation request options, user file provider
+   references, prompt file defaults/unsupported-file handling, deprecated file
+   id prefixes, `allowedTools` tool-choice override, shell request/history,
+   apply-patch request/history, and custom provider-tool request/prompt
+   reconstruction are represented.
 2. Keep the next slices Gateway-first: close broader `packages/gateway`
    provider-package test gaps and remaining Vercel AI Gateway OpenAI-compatible
    endpoint coverage before expanding to unrelated providers.
