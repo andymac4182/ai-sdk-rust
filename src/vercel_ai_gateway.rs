@@ -4,6 +4,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::headers::Headers;
+use crate::open_responses::{
+    OpenResponsesLanguageModel, OpenResponsesProvider, OpenResponsesProviderSettings,
+};
 use crate::openai_compatible::{
     OpenAICompatibleChatLanguageModel, OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel,
     OpenAICompatibleModelEntry, OpenAICompatibleModelListResponse, OpenAICompatibleProvider,
@@ -115,6 +118,11 @@ impl VercelAiGatewayOpenAICompatibleProvider {
         self.language_model(model_id)
     }
 
+    /// Creates a Gateway OpenAI Responses API language model.
+    pub fn responses(&self, model_id: impl Into<String>) -> OpenResponsesLanguageModel {
+        self.open_responses_provider().language_model(model_id)
+    }
+
     /// Creates a Gateway OpenAI-compatible embedding model.
     pub fn embedding_model(&self, model_id: impl Into<String>) -> OpenAICompatibleEmbeddingModel {
         self.openai_compatible_provider().embedding_model(model_id)
@@ -186,6 +194,36 @@ impl VercelAiGatewayOpenAICompatibleProvider {
             provider
         }
     }
+
+    fn open_responses_provider(&self) -> OpenResponsesProvider {
+        let mut settings = OpenResponsesProviderSettings::new(
+            VERCEL_AI_GATEWAY_OPENAI_COMPATIBLE_PROVIDER_NAME,
+            format!(
+                "{}/responses",
+                self.settings
+                    .base_url
+                    .as_deref()
+                    .unwrap_or(VERCEL_AI_GATEWAY_OPENAI_COMPATIBLE_BASE_URL)
+                    .trim_end_matches('/')
+            ),
+        );
+
+        if let Some(api_key) = vercel_ai_gateway_api_key(self.settings.api_key.as_ref()) {
+            settings = settings.with_api_key(api_key);
+        }
+
+        for (name, value) in &self.settings.headers {
+            settings = settings.with_header(name.clone(), value.clone());
+        }
+
+        let provider = OpenResponsesProvider::from_settings(settings);
+
+        if let Some(transport) = &self.transport {
+            provider.with_transport(Arc::clone(transport))
+        } else {
+            provider
+        }
+    }
 }
 
 impl Default for VercelAiGatewayOpenAICompatibleProvider {
@@ -232,6 +270,13 @@ pub fn vercel_ai_gateway_openai_compatible(
     VercelAiGatewayOpenAICompatibleProvider::new().language_model(model_id)
 }
 
+/// Creates a Vercel AI Gateway OpenAI Responses API language model.
+pub fn vercel_ai_gateway_openai_responses(
+    model_id: impl Into<String>,
+) -> OpenResponsesLanguageModel {
+    VercelAiGatewayOpenAICompatibleProvider::new().responses(model_id)
+}
+
 /// Creates a Vercel AI Gateway OpenAI-compatible embedding model.
 pub fn vercel_ai_gateway_openai_compatible_embedding(
     model_id: impl Into<String>,
@@ -266,7 +311,7 @@ mod tests {
         VERCEL_AI_GATEWAY_OPENAI_COMPATIBLE_BASE_URL, VercelAiGatewayOpenAICompatibleProvider,
         VercelAiGatewayOpenAICompatibleSettings, create_vercel_ai_gateway_openai_compatible,
         vercel_ai_gateway_openai_compatible, vercel_ai_gateway_openai_compatible_embedding,
-        vercel_ai_gateway_openai_compatible_image,
+        vercel_ai_gateway_openai_compatible_image, vercel_ai_gateway_openai_responses,
     };
     use crate::embed::{EmbedManyOptions, EmbedOptions, embed, embed_many};
     use crate::embedding_model::EmbeddingModel;
@@ -287,7 +332,7 @@ mod tests {
     };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
-    use crate::provider::{Provider, ProviderOptions};
+    use crate::provider::{Provider, ProviderMetadata, ProviderOptions};
     use crate::provider_utils::{
         ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
         Tool, json_schema,
@@ -1621,6 +1666,132 @@ mod tests {
     }
 
     #[test]
+    fn vercel_ai_gateway_openai_responses_generates_text() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_gateway",
+                        "created_at": 1711115037,
+                        "model": "openai/gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Hello from Gateway Responses"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 5,
+                            "output_tokens": 4
+                        }
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from([(
+                    "x-request-id".to_string(),
+                    "gateway_responses_req".to_string(),
+                )])))))
+            });
+        let provider = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://ai-gateway.test/v1/")
+            .with_header("custom-header", "value")
+            .with_transport(transport);
+        let model = provider.responses("openai/gpt-4.1-mini");
+        let alias_model = vercel_ai_gateway_openai_responses("openai/gpt-4.1-mini");
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(&model, Prompt::from_prompt("Say hello"))
+                .expect("prompt is valid")
+                .with_max_output_tokens(16)
+                .with_temperature(0.0),
+        ));
+
+        assert_eq!(model.provider(), "vercel-ai-gateway.responses");
+        assert_eq!(model.model_id(), "openai/gpt-4.1-mini");
+        assert_eq!(alias_model.provider(), "vercel-ai-gateway.responses");
+        assert_eq!(result.text, "Hello from Gateway Responses");
+        assert_eq!(result.usage.input_tokens.total, Some(5));
+        assert_eq!(result.usage.output_tokens.total, Some(4));
+        assert_eq!(
+            result
+                .response
+                .as_ref()
+                .and_then(|response| response.id.as_deref()),
+            Some("resp_gateway")
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .unwrap_or(&ProviderMetadata::new())
+                .get("vercel-ai-gateway")
+                .and_then(|metadata| metadata.get("responseId"))
+                .and_then(JsonValue::as_str),
+            Some("resp_gateway")
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://ai-gateway.test/v1/responses");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+        assert!(
+            request
+                .headers
+                .get("user-agent")
+                .is_some_and(|value| value.contains("ai-sdk/open-responses/0.1.0"))
+        );
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "openai/gpt-4.1-mini",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Say hello"
+                            }
+                        ]
+                    }
+                ],
+                "max_output_tokens": 16,
+                "temperature": 0.0
+            }))
+        );
+    }
+
+    #[test]
     fn vercel_ai_gateway_openai_compatible_streams_text_through_openai_chat() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -2213,6 +2384,42 @@ mod tests {
                 .to_lowercase()
                 .contains("rust-vercel-ai-gateway-openai-ok"),
             "Gateway OpenAI-compatible response did not contain expected marker"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI Responses API call"]
+    fn live_vercel_ai_gateway_openai_responses_generate_text() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!(
+                "skipping live Gateway OpenAI Responses test because no API key is configured"
+            );
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_AI_GATEWAY_OPENAI_RESPONSES_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_OPENAI_RESPONSES_MODEL"))
+            .or_else(|_| env::var("AI_SDK_RUST_GATEWAY_RESPONSES_MODEL"))
+            .or_else(|_| env::var("AI_GATEWAY_RESPONSES_MODEL"))
+            .unwrap_or_else(|_| "openai/gpt-4.1-mini".to_string());
+        let model = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key(api_key)
+            .responses(model_id);
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(
+                &model,
+                Prompt::from_prompt("Reply exactly with: gateway responses ok"),
+            )
+            .expect("prompt is valid")
+            .with_max_output_tokens(20)
+            .with_temperature(0.0),
+        ));
+
+        assert!(
+            result
+                .text
+                .to_ascii_lowercase()
+                .contains("gateway responses ok"),
+            "Gateway OpenAI Responses output did not contain expected marker"
         );
     }
 
