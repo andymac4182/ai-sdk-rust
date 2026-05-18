@@ -2055,6 +2055,113 @@ mod tests {
     }
 
     #[test]
+    fn vercel_ai_gateway_openai_responses_streams_text() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    openai_responses_stream_body(),
+                )
+                .with_headers(Headers::from([
+                    ("content-type".to_string(), "text/event-stream".to_string()),
+                    (
+                        "x-request-id".to_string(),
+                        "req_vercel_ai_gateway_responses_stream".to_string(),
+                    ),
+                ])))))
+            });
+        let provider = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://ai-gateway.test/v1/")
+            .with_header("custom-header", "value")
+            .with_transport(transport);
+        let model = provider.responses("openai/gpt-4.1-mini");
+        let result = poll_ready(stream_text(
+            StreamTextOptions::from_prompt(&model, Prompt::from_prompt("Stream with Responses"))
+                .expect("prompt is valid")
+                .with_max_output_tokens(16)
+                .with_temperature(0.0),
+        ));
+
+        assert_eq!(result.text, "Hello Gateway Responses stream");
+        assert_eq!(
+            result.text_stream,
+            vec!["Hello ", "Gateway Responses stream"]
+        );
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(5));
+        assert_eq!(result.usage.output_tokens.total, Some(4));
+        assert_eq!(result.response.id.as_deref(), Some("resp_gateway_stream"));
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("req_vercel_ai_gateway_responses_stream")
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .unwrap_or(&ProviderMetadata::new())
+                .get("vercel-ai-gateway")
+                .and_then(|metadata| metadata.get("responseId"))
+                .and_then(JsonValue::as_str),
+            Some("resp_gateway_stream")
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://ai-gateway.test/v1/responses");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "openai/gpt-4.1-mini",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Stream with Responses"
+                            }
+                        ]
+                    }
+                ],
+                "max_output_tokens": 16,
+                "temperature": 0.0,
+                "stream": true
+            }))
+        );
+    }
+
+    #[test]
     fn vercel_ai_gateway_openai_compatible_streams_text_through_openai_chat() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -2687,6 +2794,42 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI Responses stream call"]
+    fn live_vercel_ai_gateway_openai_responses_stream_text() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!(
+                "skipping live Gateway OpenAI Responses stream test because no API key is configured"
+            );
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_AI_GATEWAY_OPENAI_RESPONSES_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_OPENAI_RESPONSES_MODEL"))
+            .or_else(|_| env::var("AI_SDK_RUST_GATEWAY_RESPONSES_MODEL"))
+            .or_else(|_| env::var("AI_GATEWAY_RESPONSES_MODEL"))
+            .unwrap_or_else(|_| "openai/gpt-4.1-mini".to_string());
+        let model = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key(api_key)
+            .responses(model_id);
+        let result = poll_ready(stream_text(
+            StreamTextOptions::from_prompt(
+                &model,
+                Prompt::from_prompt("Reply exactly with: gateway responses stream ok"),
+            )
+            .expect("prompt is valid")
+            .with_max_output_tokens(24)
+            .with_temperature(0.0),
+        ));
+
+        assert!(
+            result
+                .text
+                .to_ascii_lowercase()
+                .contains("gateway responses stream ok"),
+            "Gateway OpenAI Responses stream output did not contain expected marker"
+        );
+    }
+
+    #[test]
     #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI-compatible tool-loop model call"]
     fn live_vercel_ai_gateway_openai_compatible_generate_text_tool_loop() {
         let Some(api_key) = live_gateway_api_key() else {
@@ -3127,6 +3270,52 @@ mod tests {
                 "usage": {
                     "prompt_tokens": 4,
                     "completion_tokens": 5
+                }
+            }),
+        ])
+    }
+
+    fn openai_responses_stream_body() -> String {
+        sse_body([
+            json!({
+                "type": "response.created",
+                "response": {
+                    "id": "resp_gateway_stream",
+                    "created_at": 1711115037,
+                    "model": "openai/gpt-4.1-mini"
+                }
+            }),
+            json!({
+                "type": "response.output_text.delta",
+                "item_id": "msg_1",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": "Hello "
+            }),
+            json!({
+                "type": "response.output_text.delta",
+                "item_id": "msg_1",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": "Gateway Responses stream"
+            }),
+            json!({
+                "type": "response.output_text.done",
+                "item_id": "msg_1",
+                "output_index": 0,
+                "content_index": 0,
+                "text": "Hello Gateway Responses stream"
+            }),
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_gateway_stream",
+                    "created_at": 1711115037,
+                    "model": "openai/gpt-4.1-mini",
+                    "usage": {
+                        "input_tokens": 5,
+                        "output_tokens": 4
+                    }
                 }
             }),
         ])
