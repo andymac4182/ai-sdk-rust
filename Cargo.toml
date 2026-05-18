@@ -6,6 +6,7 @@ members = [
     "crates/ai-sdk-black-forest-labs",
     "crates/ai-sdk-bytedance",
     "crates/ai-sdk-deepseek",
+    "crates/ai-sdk-hume",
     "crates/ai-sdk-lmnt",
     "crates/ai-sdk-luma",
     "crates/ai-sdk-mistral",
