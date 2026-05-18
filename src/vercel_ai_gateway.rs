@@ -1961,6 +1961,100 @@ mod tests {
     }
 
     #[test]
+    fn vercel_ai_gateway_openai_responses_passes_gateway_provider_options() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_gateway_options",
+                        "created_at": 1711115037,
+                        "model": "openai/gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Gateway Responses options accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 5,
+                            "output_tokens": 4
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://ai-gateway.test/v1/")
+            .with_transport(transport);
+        let model = provider.responses("openai/gpt-4.1-mini");
+        let mut provider_options = GatewayProviderOptions::new()
+            .with_order(["openai", "anthropic"])
+            .with_models(["anthropic/claude-sonnet-4.6"])
+            .with_provider_timeouts(
+                GatewayProviderTimeouts::new().with_byok_timeout("anthropic", 3000),
+            )
+            .into_provider_options();
+        provider_options.insert(
+            "vercelAiGateway".to_string(),
+            serde_json::from_value(json!({
+                "caching": "auto"
+            }))
+            .expect("provider options deserialize"),
+        );
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(&model, Prompt::from_prompt("Use Gateway routing"))
+                .expect("prompt is valid")
+                .with_provider_options(provider_options),
+        ));
+
+        assert_eq!(result.text, "Gateway Responses options accepted");
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(request_body["caching"], "auto");
+        assert_eq!(
+            request_body["providerOptions"],
+            json!({
+                "gateway": {
+                    "order": ["openai", "anthropic"],
+                    "models": ["anthropic/claude-sonnet-4.6"],
+                    "providerTimeouts": {
+                        "byok": {
+                            "anthropic": 3000
+                        }
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
     fn vercel_ai_gateway_openai_compatible_streams_text_through_openai_chat() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);

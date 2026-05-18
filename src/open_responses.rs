@@ -20,7 +20,7 @@ use crate::language_model::{
 };
 use crate::openai_compatible::{OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel};
 use crate::provider::{
-    ModelType, NoSuchModelError, Provider, ProviderMetadata, SpecificationVersion,
+    ModelType, NoSuchModelError, Provider, ProviderMetadata, ProviderOptions, SpecificationVersion,
 };
 use crate::provider_utils::{
     FetchErrorInfo, HandledFetchError, PostJsonToApiOptions, ProviderApiRequest,
@@ -419,7 +419,7 @@ impl LanguageModel for OpenResponsesLanguageModel {
 
 fn open_responses_request_body(
     model_id: &str,
-    _provider_options_name: &str,
+    provider_options_name: &str,
     options: &LanguageModelCallOptions,
 ) -> Result<(JsonValue, Vec<Warning>), String> {
     let mut warnings = Vec::new();
@@ -473,7 +473,101 @@ fn open_responses_request_body(
         });
     }
 
+    merge_open_responses_provider_options(
+        provider_options_name,
+        options.provider_options.as_ref(),
+        &mut body,
+        &mut warnings,
+    );
+
     Ok((JsonValue::Object(body), warnings))
+}
+
+fn merge_open_responses_provider_options(
+    provider_options_name: &str,
+    provider_options: Option<&ProviderOptions>,
+    body: &mut JsonObject,
+    warnings: &mut Vec<Warning>,
+) {
+    let Some(provider_options) = provider_options else {
+        return;
+    };
+
+    let raw_provider_options_name = provider_options_name
+        .split('.')
+        .next()
+        .unwrap_or(provider_options_name)
+        .trim();
+    let camel_provider_options_name =
+        open_responses_camel_case_provider_options_key(raw_provider_options_name);
+
+    if let Some(options) = provider_options.get(raw_provider_options_name) {
+        if camel_provider_options_name != raw_provider_options_name {
+            warnings.push(Warning::Deprecated {
+                setting: format!("providerOptions key '{raw_provider_options_name}'"),
+                message: format!("Use '{camel_provider_options_name}' instead."),
+            });
+        }
+
+        body.extend(options.clone());
+    }
+
+    if camel_provider_options_name != raw_provider_options_name
+        && let Some(options) = provider_options.get(&camel_provider_options_name)
+    {
+        body.extend(options.clone());
+    }
+
+    merge_vercel_ai_gateway_open_responses_provider_options(
+        raw_provider_options_name,
+        provider_options,
+        body,
+    );
+}
+
+fn merge_vercel_ai_gateway_open_responses_provider_options(
+    provider_options_name: &str,
+    provider_options: &ProviderOptions,
+    body: &mut JsonObject,
+) {
+    if provider_options_name != "vercel-ai-gateway" {
+        return;
+    }
+
+    let Some(gateway_options) = provider_options.get("gateway") else {
+        return;
+    };
+
+    let request_provider_options = body
+        .entry("providerOptions".to_string())
+        .or_insert_with(|| JsonValue::Object(JsonObject::new()));
+
+    if let JsonValue::Object(request_provider_options) = request_provider_options {
+        request_provider_options
+            .entry("gateway".to_string())
+            .or_insert_with(|| JsonValue::Object(gateway_options.clone()));
+    }
+}
+
+fn open_responses_camel_case_provider_options_key(value: &str) -> String {
+    let mut output = String::new();
+    let mut uppercase_next = false;
+
+    for character in value.chars() {
+        if matches!(character, '-' | '_') {
+            uppercase_next = true;
+            continue;
+        }
+
+        if uppercase_next {
+            output.extend(character.to_uppercase());
+            uppercase_next = false;
+        } else {
+            output.push(character);
+        }
+    }
+
+    output
 }
 
 fn open_responses_input(
@@ -880,7 +974,7 @@ mod tests {
     use crate::json::JsonValue;
     use crate::language_model::{FinishReason, LanguageModel, LanguageModelStreamPart};
     use crate::prompt::Prompt;
-    use crate::provider::{ModelType, Provider, ProviderMetadata};
+    use crate::provider::{ModelType, Provider, ProviderMetadata, ProviderOptions};
     use crate::provider_utils::{
         ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     };
@@ -945,11 +1039,21 @@ mod tests {
         )
         .with_transport(transport);
         let model = provider.language_model("gpt-4.1-mini");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "store": false,
+                "metadata": {
+                    "trace": "responses-test"
+                }
+            }
+        }))
+        .expect("provider options deserialize");
         let result = poll_ready(generate_text(
             GenerateTextOptions::from_prompt(&model, Prompt::from_prompt("Say hello"))
                 .expect("prompt is valid")
                 .with_max_output_tokens(16)
-                .with_temperature(0.0),
+                .with_temperature(0.0)
+                .with_provider_options(provider_options),
         ));
 
         assert_eq!(model.provider(), "openai.responses");
@@ -1021,7 +1125,11 @@ mod tests {
                     }
                 ],
                 "max_output_tokens": 16,
-                "temperature": 0.0
+                "temperature": 0.0,
+                "store": false,
+                "metadata": {
+                    "trace": "responses-test"
+                }
             }))
         );
     }
