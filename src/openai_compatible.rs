@@ -22,15 +22,16 @@ use crate::json::{JsonArray, JsonObject, JsonValue};
 use crate::language_model::{
     FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
     LanguageModelCallOptions, LanguageModelContent, LanguageModelErrorStreamPart,
-    LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelMessage,
-    LanguageModelRawStreamPart, LanguageModelReasoning, LanguageModelReasoningDelta,
-    LanguageModelReasoningEffort, LanguageModelReasoningEnd, LanguageModelReasoningStart,
-    LanguageModelRequest, LanguageModelResponse, LanguageModelResponseFormat,
-    LanguageModelStreamFinish, LanguageModelStreamPart, LanguageModelStreamResponseMetadata,
-    LanguageModelStreamResult, LanguageModelStreamResultResponse, LanguageModelStreamStart,
-    LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd,
-    LanguageModelTextStart, LanguageModelTool, LanguageModelToolCall, LanguageModelToolChoice,
-    LanguageModelUsage, OutputTokenUsage,
+    LanguageModelFile, LanguageModelFileData, LanguageModelFinishReason,
+    LanguageModelGenerateResult, LanguageModelMessage, LanguageModelRawStreamPart,
+    LanguageModelReasoning, LanguageModelReasoningDelta, LanguageModelReasoningEffort,
+    LanguageModelReasoningEnd, LanguageModelReasoningStart, LanguageModelRequest,
+    LanguageModelResponse, LanguageModelResponseFormat, LanguageModelStreamFinish,
+    LanguageModelStreamPart, LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
+    LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
+    LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
+    LanguageModelTool, LanguageModelToolCall, LanguageModelToolChoice, LanguageModelUsage,
+    OutputTokenUsage,
 };
 use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
 use crate::provider_utils::{
@@ -2728,6 +2729,10 @@ fn openai_compatible_response_content(
         ));
     }
 
+    for file in openai_compatible_image_files(message.get("images")) {
+        content.push(LanguageModelContent::File(file));
+    }
+
     if let Some(tool_calls) = message.get("tool_calls").and_then(JsonValue::as_array) {
         for (index, tool_call) in tool_calls.iter().enumerate() {
             let Some(function) = tool_call.get("function") else {
@@ -2765,6 +2770,55 @@ fn openai_compatible_response_content(
     }
 
     content
+}
+
+fn openai_compatible_image_files(value: Option<&JsonValue>) -> Vec<LanguageModelFile> {
+    value
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(openai_compatible_image_file)
+        .collect()
+}
+
+fn openai_compatible_image_file(value: &JsonValue) -> Option<LanguageModelFile> {
+    if value.get("type").and_then(JsonValue::as_str) != Some("image_url") {
+        return None;
+    }
+
+    let url = value
+        .get("image_url")
+        .and_then(|image_url| image_url.get("url"))
+        .and_then(JsonValue::as_str)?;
+
+    Some(openai_compatible_image_url_file(url))
+}
+
+fn openai_compatible_image_url_file(url: &str) -> LanguageModelFile {
+    if let Some((header, base64)) = url.split_once(',')
+        && let Some(media_type) = header
+            .strip_prefix("data:")
+            .and_then(|header| header.split(';').next())
+            .filter(|media_type| !media_type.is_empty())
+    {
+        return LanguageModelFile::new(
+            media_type,
+            LanguageModelFileData::Data {
+                data: FileDataContent::Base64(base64.to_string()),
+            },
+        );
+    }
+
+    if let Ok(url) = Url::parse(url) {
+        return LanguageModelFile::new("image/*", LanguageModelFileData::Url { url });
+    }
+
+    LanguageModelFile::new(
+        "image/*",
+        LanguageModelFileData::Data {
+            data: FileDataContent::Base64(url.to_string()),
+        },
+    )
 }
 
 fn openai_compatible_finish_reason(value: Option<&JsonValue>) -> LanguageModelFinishReason {
@@ -3083,6 +3137,27 @@ fn openai_compatible_stream_result_from_response(
                     stream.push(LanguageModelStreamPart::TextDelta(
                         LanguageModelTextDelta::new("txt-0", text),
                     ));
+                }
+
+                let files = openai_compatible_image_files(delta.get("images"));
+                if !files.is_empty() {
+                    if is_active_reasoning {
+                        stream.push(LanguageModelStreamPart::ReasoningEnd(
+                            LanguageModelReasoningEnd::new("reasoning-0"),
+                        ));
+                        is_active_reasoning = false;
+                    }
+
+                    if is_active_text {
+                        stream.push(LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new(
+                            "txt-0",
+                        )));
+                        is_active_text = false;
+                    }
+
+                    for file in files {
+                        stream.push(LanguageModelStreamPart::File(file));
+                    }
                 }
 
                 if let Some(tool_calls) = delta.get("tool_calls").and_then(JsonValue::as_array) {
