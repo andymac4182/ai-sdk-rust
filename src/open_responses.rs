@@ -13,19 +13,19 @@ use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue, NonNullJsonValue};
 use crate::language_model::{
     FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
-    LanguageModelCallOptions, LanguageModelContent, LanguageModelErrorStreamPart,
-    LanguageModelFilePart, LanguageModelFinishReason, LanguageModelGenerateResult,
-    LanguageModelMessage, LanguageModelProviderTool, LanguageModelRawStreamPart,
-    LanguageModelReasoning, LanguageModelReasoningDelta, LanguageModelReasoningEnd,
-    LanguageModelReasoningStart, LanguageModelRequest, LanguageModelResponse,
-    LanguageModelResponseFormat, LanguageModelStreamFinish, LanguageModelStreamPart,
-    LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
-    LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
-    LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
-    LanguageModelTool, LanguageModelToolApprovalRequest, LanguageModelToolCall,
-    LanguageModelToolChoice, LanguageModelToolContentPart, LanguageModelToolResult,
-    LanguageModelToolResultContentPart, LanguageModelToolResultOutput, LanguageModelUsage,
-    LanguageModelUserContentPart, OutputTokenUsage,
+    LanguageModelCallOptions, LanguageModelContent, LanguageModelCustomContent,
+    LanguageModelDocumentSource, LanguageModelErrorStreamPart, LanguageModelFilePart,
+    LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelMessage,
+    LanguageModelProviderTool, LanguageModelRawStreamPart, LanguageModelReasoning,
+    LanguageModelReasoningDelta, LanguageModelReasoningEnd, LanguageModelReasoningStart,
+    LanguageModelRequest, LanguageModelResponse, LanguageModelResponseFormat, LanguageModelSource,
+    LanguageModelStreamFinish, LanguageModelStreamPart, LanguageModelStreamResponseMetadata,
+    LanguageModelStreamResult, LanguageModelStreamResultResponse, LanguageModelStreamStart,
+    LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd,
+    LanguageModelTextStart, LanguageModelTool, LanguageModelToolApprovalRequest,
+    LanguageModelToolCall, LanguageModelToolChoice, LanguageModelToolContentPart,
+    LanguageModelToolResult, LanguageModelToolResultContentPart, LanguageModelToolResultOutput,
+    LanguageModelUrlSource, LanguageModelUsage, LanguageModelUserContentPart, OutputTokenUsage,
 };
 use crate::openai_compatible::{OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel};
 use crate::provider::{
@@ -363,7 +363,8 @@ impl OpenResponsesLanguageModel {
         tools: &Option<Vec<LanguageModelTool>>,
         warnings: Vec<Warning>,
     ) -> LanguageModelGenerateResult {
-        let (content, has_tool_calls) = open_responses_content(&response, tools);
+        let (content, has_tool_calls) =
+            open_responses_content(&response, tools, &self.config.provider_options_name);
         let usage = open_responses_usage(response.get("usage"));
         let finish_reason = map_open_responses_finish_reason(
             response
@@ -1373,9 +1374,11 @@ fn open_responses_text_format(
 fn open_responses_content(
     response: &JsonValue,
     tools: &Option<Vec<LanguageModelTool>>,
+    provider_options_name: &str,
 ) -> (Vec<LanguageModelContent>, bool) {
     let mut content = Vec::new();
     let mut has_tool_calls = false;
+    let mut source_index = 0usize;
     let provider_tool_names = open_responses_provider_tool_names();
     let tool_name_mapping = create_tool_name_mapping(tools.iter().flatten(), &provider_tool_names);
     let web_search_tool_name = open_responses_web_search_response_tool_name(tools);
@@ -1401,22 +1404,47 @@ fn open_responses_content(
                         Some("output_text")
                     ) && let Some(text) = content_part.get("text").and_then(JsonValue::as_str)
                     {
-                        content.push(LanguageModelContent::Text(LanguageModelText::new(text)));
+                        let mut text_part = LanguageModelText::new(text);
+                        if let Some(metadata) =
+                            open_responses_text_metadata(provider_options_name, part, content_part)
+                        {
+                            text_part = text_part.with_provider_metadata(metadata);
+                        }
+
+                        content.push(LanguageModelContent::Text(text_part));
+                        open_responses_push_annotation_sources(
+                            &mut content,
+                            provider_options_name,
+                            content_part,
+                            &mut source_index,
+                        );
                     }
                 }
             }
             Some("reasoning") => {
-                for content_part in part
+                let mut reasoning_parts = part
                     .get("content")
                     .or_else(|| part.get("summary"))
                     .and_then(JsonValue::as_array)
                     .into_iter()
                     .flatten()
-                {
-                    if let Some(text) = content_part.get("text").and_then(JsonValue::as_str) {
-                        content.push(LanguageModelContent::Reasoning(
-                            LanguageModelReasoning::new(text),
-                        ));
+                    .peekable();
+
+                if reasoning_parts.peek().is_none() {
+                    content.push(LanguageModelContent::Reasoning(
+                        LanguageModelReasoning::new("").with_provider_metadata(
+                            open_responses_reasoning_metadata(provider_options_name, part),
+                        ),
+                    ));
+                } else {
+                    for content_part in reasoning_parts {
+                        if let Some(text) = content_part.get("text").and_then(JsonValue::as_str) {
+                            content.push(LanguageModelContent::Reasoning(
+                                LanguageModelReasoning::new(text).with_provider_metadata(
+                                    open_responses_reasoning_metadata(provider_options_name, part),
+                                ),
+                            ));
+                        }
                     }
                 }
             }
@@ -1641,6 +1669,13 @@ fn open_responses_content(
                     }),
                 );
             }
+            Some("compaction") => {
+                content.push(LanguageModelContent::Custom(
+                    LanguageModelCustomContent::new("openai.compaction").with_provider_metadata(
+                        open_responses_compaction_metadata(provider_options_name, part),
+                    ),
+                ));
+            }
             Some("web_search_call") => {
                 let tool_call_id = part
                     .get("id")
@@ -1727,6 +1762,188 @@ fn open_responses_content(
     }
 
     (content, has_tool_calls)
+}
+
+fn open_responses_metadata(provider_name: &str, provider: JsonObject) -> ProviderMetadata {
+    let mut metadata = ProviderMetadata::new();
+    metadata.insert(provider_name.to_string(), provider);
+    metadata
+}
+
+fn open_responses_text_metadata(
+    provider_name: &str,
+    item: &JsonValue,
+    content_part: &JsonValue,
+) -> Option<ProviderMetadata> {
+    let mut metadata = JsonObject::new();
+
+    if let Some(item_id) = item.get("id").filter(|value| !value.is_null()) {
+        metadata.insert("itemId".to_string(), item_id.clone());
+    }
+
+    if let Some(phase) = item.get("phase").filter(|value| !value.is_null()) {
+        metadata.insert("phase".to_string(), phase.clone());
+    }
+
+    if let Some(annotations) = content_part
+        .get("annotations")
+        .and_then(JsonValue::as_array)
+        .filter(|annotations| !annotations.is_empty())
+    {
+        metadata.insert(
+            "annotations".to_string(),
+            JsonValue::Array(annotations.clone()),
+        );
+    }
+
+    (!metadata.is_empty()).then(|| open_responses_metadata(provider_name, metadata))
+}
+
+fn open_responses_reasoning_metadata(provider_name: &str, item: &JsonValue) -> ProviderMetadata {
+    let mut metadata = JsonObject::new();
+    metadata.insert(
+        "itemId".to_string(),
+        item.get("id").cloned().unwrap_or(JsonValue::Null),
+    );
+    metadata.insert(
+        "reasoningEncryptedContent".to_string(),
+        item.get("encrypted_content")
+            .cloned()
+            .unwrap_or(JsonValue::Null),
+    );
+    open_responses_metadata(provider_name, metadata)
+}
+
+fn open_responses_compaction_metadata(provider_name: &str, item: &JsonValue) -> ProviderMetadata {
+    let mut metadata = JsonObject::new();
+    metadata.insert(
+        "type".to_string(),
+        JsonValue::String("compaction".to_string()),
+    );
+    metadata.insert(
+        "itemId".to_string(),
+        item.get("id").cloned().unwrap_or(JsonValue::Null),
+    );
+    metadata.insert(
+        "encryptedContent".to_string(),
+        item.get("encrypted_content")
+            .cloned()
+            .unwrap_or(JsonValue::Null),
+    );
+    open_responses_metadata(provider_name, metadata)
+}
+
+fn open_responses_push_annotation_sources(
+    content: &mut Vec<LanguageModelContent>,
+    provider_name: &str,
+    content_part: &JsonValue,
+    source_index: &mut usize,
+) {
+    for annotation in content_part
+        .get("annotations")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+    {
+        match annotation.get("type").and_then(JsonValue::as_str) {
+            Some("url_citation") => {
+                let Some(url) = annotation.get("url").and_then(JsonValue::as_str) else {
+                    continue;
+                };
+
+                let mut source =
+                    LanguageModelUrlSource::new(open_responses_next_source_id(source_index), url);
+                if let Some(title) = annotation.get("title").and_then(JsonValue::as_str) {
+                    source = source.with_title(title);
+                }
+                content.push(LanguageModelContent::Source(LanguageModelSource::Url(
+                    source,
+                )));
+            }
+            Some("file_citation") => {
+                let source_id = open_responses_next_source_id(source_index);
+                let filename = annotation
+                    .get("filename")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default();
+                let source = LanguageModelDocumentSource::new(source_id, "text/plain", filename)
+                    .with_filename(filename)
+                    .with_provider_metadata(open_responses_annotation_metadata(
+                        provider_name,
+                        annotation,
+                        &[("type", "type"), ("file_id", "fileId"), ("index", "index")],
+                    ));
+                content.push(LanguageModelContent::Source(LanguageModelSource::Document(
+                    source,
+                )));
+            }
+            Some("container_file_citation") => {
+                let source_id = open_responses_next_source_id(source_index);
+                let filename = annotation
+                    .get("filename")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default();
+                let source = LanguageModelDocumentSource::new(source_id, "text/plain", filename)
+                    .with_filename(filename)
+                    .with_provider_metadata(open_responses_annotation_metadata(
+                        provider_name,
+                        annotation,
+                        &[
+                            ("type", "type"),
+                            ("file_id", "fileId"),
+                            ("container_id", "containerId"),
+                        ],
+                    ));
+                content.push(LanguageModelContent::Source(LanguageModelSource::Document(
+                    source,
+                )));
+            }
+            Some("file_path") => {
+                let source_id = open_responses_next_source_id(source_index);
+                let file_id = annotation
+                    .get("file_id")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default();
+                let source = LanguageModelDocumentSource::new(
+                    source_id,
+                    "application/octet-stream",
+                    file_id,
+                )
+                .with_filename(file_id)
+                .with_provider_metadata(open_responses_annotation_metadata(
+                    provider_name,
+                    annotation,
+                    &[("type", "type"), ("file_id", "fileId"), ("index", "index")],
+                ));
+                content.push(LanguageModelContent::Source(LanguageModelSource::Document(
+                    source,
+                )));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn open_responses_next_source_id(source_index: &mut usize) -> String {
+    let source_id = format!("source-{}", *source_index);
+    *source_index += 1;
+    source_id
+}
+
+fn open_responses_annotation_metadata(
+    provider_name: &str,
+    annotation: &JsonValue,
+    fields: &[(&str, &str)],
+) -> ProviderMetadata {
+    let mut metadata = JsonObject::new();
+
+    for (source_key, target_key) in fields {
+        if let Some(value) = annotation.get(*source_key).filter(|value| !value.is_null()) {
+            metadata.insert((*target_key).to_string(), value.clone());
+        }
+    }
+
+    open_responses_metadata(provider_name, metadata)
 }
 
 fn open_responses_web_search_response_tool_name(tools: &Option<Vec<LanguageModelTool>>) -> String {
@@ -3022,8 +3239,8 @@ mod tests {
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
         LanguageModelFilePart, LanguageModelMessage, LanguageModelProviderTool,
-        LanguageModelStreamPart, LanguageModelTextPart, LanguageModelTool, LanguageModelToolChoice,
-        LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelSource, LanguageModelStreamPart, LanguageModelTextPart, LanguageModelTool,
+        LanguageModelToolChoice, LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::prompt::Prompt;
     use crate::provider::{ModelType, Provider, ProviderMetadata, ProviderOptions};
@@ -4149,6 +4366,208 @@ mod tests {
                 "status": "completed"
             })
         );
+    }
+
+    #[test]
+    fn open_responses_provider_maps_text_sources_and_compaction_metadata() {
+        let transport: OpenResponsesTransport =
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_metadata_items",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "id": "reasoning_1",
+                                "type": "reasoning",
+                                "encrypted_content": "encrypted-reasoning",
+                                "summary": []
+                            },
+                            {
+                                "id": "message_1",
+                                "type": "message",
+                                "phase": "final",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Cited answer",
+                                        "annotations": [
+                                            {
+                                                "type": "url_citation",
+                                                "url": "https://example.com/article",
+                                                "title": "Example Article"
+                                            },
+                                            {
+                                                "type": "file_citation",
+                                                "file_id": "file_123",
+                                                "filename": "guide.md",
+                                                "index": 7
+                                            },
+                                            {
+                                                "type": "container_file_citation",
+                                                "container_id": "container_123",
+                                                "file_id": "cfile_123",
+                                                "filename": "results.csv"
+                                            },
+                                            {
+                                                "type": "file_path",
+                                                "file_id": "path_file_123",
+                                                "index": 3
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "id": "compaction_1",
+                                "type": "compaction",
+                                "encrypted_content": "encrypted-context"
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 9,
+                            "output_tokens": 4
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Use sources")),
+            ])),
+        ])));
+
+        assert_eq!(&result.finish_reason.unified, &FinishReason::Stop);
+        assert!(matches!(
+            &result.content[0],
+            LanguageModelContent::Reasoning(reasoning)
+                if reasoning.text.is_empty()
+                    && reasoning
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("openai"))
+                        .and_then(|metadata| metadata.get("itemId"))
+                        .and_then(JsonValue::as_str)
+                        == Some("reasoning_1")
+                    && reasoning
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("openai"))
+                        .and_then(|metadata| metadata.get("reasoningEncryptedContent"))
+                        .and_then(JsonValue::as_str)
+                        == Some("encrypted-reasoning")
+        ));
+        assert!(matches!(
+            &result.content[1],
+            LanguageModelContent::Text(text)
+                if text.text == "Cited answer"
+                    && text
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("openai"))
+                        .and_then(|metadata| metadata.get("itemId"))
+                        .and_then(JsonValue::as_str)
+                        == Some("message_1")
+                    && text
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("openai"))
+                        .and_then(|metadata| metadata.get("phase"))
+                        .and_then(JsonValue::as_str)
+                        == Some("final")
+                    && text
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("openai"))
+                        .and_then(|metadata| metadata.get("annotations"))
+                        .and_then(JsonValue::as_array)
+                        .is_some_and(|annotations| annotations.len() == 4)
+        ));
+
+        let sources = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::Source(source) => Some(source),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sources.len(), 4);
+        assert!(matches!(
+            sources[0],
+            LanguageModelSource::Url(source)
+                if source.id == "source-0"
+                    && source.url == "https://example.com/article"
+                    && source.title.as_deref() == Some("Example Article")
+        ));
+        assert!(matches!(
+            sources[1],
+            LanguageModelSource::Document(source)
+                if source.id == "source-1"
+                    && source.media_type == "text/plain"
+                    && source.title == "guide.md"
+                    && source.filename.as_deref() == Some("guide.md")
+                    && source
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("openai"))
+                        .and_then(|metadata| metadata.get("fileId"))
+                        .and_then(JsonValue::as_str)
+                        == Some("file_123")
+        ));
+        assert!(matches!(
+            sources[2],
+            LanguageModelSource::Document(source)
+                if source.id == "source-2"
+                    && source.media_type == "text/plain"
+                    && source.title == "results.csv"
+                    && source
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("openai"))
+                        .and_then(|metadata| metadata.get("containerId"))
+                        .and_then(JsonValue::as_str)
+                        == Some("container_123")
+        ));
+        assert!(matches!(
+            sources[3],
+            LanguageModelSource::Document(source)
+                if source.id == "source-3"
+                    && source.media_type == "application/octet-stream"
+                    && source.title == "path_file_123"
+                    && source.filename.as_deref() == Some("path_file_123")
+        ));
+        assert!(matches!(
+            result.content.last(),
+            Some(LanguageModelContent::Custom(custom))
+                if custom.kind == "openai.compaction"
+                    && custom
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("openai"))
+                        .and_then(|metadata| metadata.get("type"))
+                        .and_then(JsonValue::as_str)
+                        == Some("compaction")
+                    && custom
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("openai"))
+                        .and_then(|metadata| metadata.get("encryptedContent"))
+                        .and_then(JsonValue::as_str)
+                        == Some("encrypted-context")
+        ));
     }
 
     #[test]
