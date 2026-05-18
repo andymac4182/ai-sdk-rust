@@ -463,9 +463,12 @@ mod tests {
         create_moonshotai, moonshotai,
     };
     use ai_sdk_rust::{
-        GenerateTextOptions, Headers, JsonValue, ModelType, OpenAICompatibleTransport,
-        OpenAICompatibleTransportFuture, Prompt, Provider, ProviderApiRequest,
-        ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse, generate_text,
+        FinishReason, GenerateTextOptions, Headers, JsonValue, LanguageModel,
+        LanguageModelCallOptions, LanguageModelMessage, LanguageModelStreamPart,
+        LanguageModelTextPart, LanguageModelUserContentPart, LanguageModelUserMessage, ModelType,
+        OpenAICompatibleTransport, OpenAICompatibleTransportFuture, Prompt, Provider,
+        ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+        generate_text,
     };
     use serde_json::json;
     use std::future::Future;
@@ -612,6 +615,143 @@ mod tests {
                     "budget_tokens": 2048
                 },
                 "reasoning_history": "interleaved"
+            }))
+        );
+    }
+
+    #[test]
+    fn moonshotai_provider_streams_chat_with_options_and_usage() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                let events = [
+                    json!({
+                        "id": "moonshot-stream",
+                        "created": 1711115037,
+                        "model": "kimi-k2-thinking",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {
+                                    "role": "assistant",
+                                    "content": "Hello"
+                                }
+                            }
+                        ]
+                    }),
+                    json!({
+                        "id": "moonshot-stream",
+                        "created": 1711115037,
+                        "model": "kimi-k2-thinking",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {
+                                    "content": " from MoonshotAI"
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 42,
+                            "completion_tokens": 20,
+                            "cached_tokens": 12,
+                            "completion_tokens_details": {
+                                "reasoning_tokens": 5
+                            }
+                        }
+                    }),
+                ];
+                let body = events
+                    .iter()
+                    .map(|event| format!("data: {event}\n\n"))
+                    .chain(["data: [DONE]\n\n".to_string()])
+                    .collect::<String>();
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", body))))
+            });
+        let provider = create_moonshotai(
+            MoonshotAIProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.moonshot.test/v1/"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("kimi-k2-thinking");
+        let provider_options = MoonshotAILanguageModelOptions::new()
+            .with_thinking(
+                MoonshotAIThinkingOptions::new()
+                    .with_type("enabled")
+                    .with_budget_tokens(4096),
+            )
+            .with_reasoning_history("preserved")
+            .into_provider_options();
+        let result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Stream a greeting"),
+                    )]),
+                )])
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(
+            result
+                .stream
+                .iter()
+                .filter_map(|part| match part {
+                    LanguageModelStreamPart::TextDelta(delta) => Some(delta.delta.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["Hello", " from MoonshotAI"]
+        );
+        assert!(matches!(
+            result.stream.last(),
+            Some(LanguageModelStreamPart::Finish(finish))
+                if finish.finish_reason.unified == FinishReason::Stop
+                    && finish.usage.input_tokens.total == Some(42)
+                    && finish.usage.input_tokens.no_cache == Some(30)
+                    && finish.usage.input_tokens.cache_read == Some(12)
+                    && finish.usage.output_tokens.total == Some(20)
+                    && finish.usage.output_tokens.text == Some(15)
+                    && finish.usage.output_tokens.reasoning == Some(5)
+        ));
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "kimi-k2-thinking",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Stream a greeting"
+                    }
+                ],
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": 4096
+                },
+                "reasoning_history": "preserved",
+                "stream": true,
+                "stream_options": {
+                    "include_usage": true
+                }
             }))
         );
     }
