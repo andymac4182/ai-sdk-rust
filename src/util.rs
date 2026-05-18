@@ -297,6 +297,26 @@ pub fn parse_partial_json(json_text: Option<&str>) -> ParsePartialJsonResult {
     ParsePartialJsonResult::failed_parse()
 }
 
+/// Finds where `searched_text` is already present or could begin at the end of `text`.
+///
+/// This mirrors upstream `packages/ai` `getPotentialStartIndex`: a complete
+/// match returns its first byte offset, otherwise the function returns the byte
+/// offset for the largest suffix of `text` that matches a prefix of
+/// `searched_text`. Empty search text and no match return `None`.
+pub fn get_potential_start_index(text: &str, searched_text: &str) -> Option<usize> {
+    if searched_text.is_empty() {
+        return None;
+    }
+
+    if let Some(index) = text.find(searched_text) {
+        return Some(index);
+    }
+
+    text.char_indices()
+        .rev()
+        .find_map(|(index, _)| searched_text.starts_with(&text[index..]).then_some(index))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PartialJsonState {
     Root,
@@ -316,7 +336,12 @@ enum PartialJsonState {
     InsideArrayAfterComma,
 }
 
-fn fix_json(input: &str) -> String {
+/// Repairs a partial JSON prefix into the closest complete JSON text.
+///
+/// This mirrors upstream `packages/ai` `fixJson`. It is intended for incomplete
+/// JSON prefixes produced during streaming; invalid complete JSON is still left
+/// to the normal JSON parser.
+pub fn fix_json(input: &str) -> String {
     use PartialJsonState::{
         Finish, InsideArrayAfterComma, InsideArrayAfterValue, InsideArrayStart, InsideLiteral,
         InsideNumber, InsideObjectAfterComma, InsideObjectAfterKey, InsideObjectAfterValue,
@@ -693,8 +718,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        DataUrlTextError, InvalidArgumentError, cosine_similarity, get_text_from_data_url,
-        is_deep_equal_data, merge_objects, parse_partial_json, split_array,
+        DataUrlTextError, InvalidArgumentError, cosine_similarity, fix_json,
+        get_potential_start_index, get_text_from_data_url, is_deep_equal_data, merge_objects,
+        parse_partial_json, split_array,
     };
 
     fn assert_close(actual: f64, expected: f64) {
@@ -859,6 +885,52 @@ mod tests {
         assert_eq!(
             split_array(&[1, 2, 3], -1).unwrap_err().to_string(),
             "chunkSize must be greater than 0"
+        );
+    }
+
+    #[test]
+    fn get_potential_start_index_matches_complete_or_partial_prefixes() {
+        assert_eq!(get_potential_start_index("1234567890", ""), None);
+        assert_eq!(get_potential_start_index("1234567890", "a"), None);
+        assert_eq!(
+            get_potential_start_index("1234567890", "1234567890"),
+            Some(0)
+        );
+        assert_eq!(get_potential_start_index("1234567890", "0123"), Some(9));
+        assert_eq!(get_potential_start_index("1234567890", "90123"), Some(8));
+        assert_eq!(get_potential_start_index("1234567890", "890123"), Some(7));
+    }
+
+    #[test]
+    fn fix_json_repairs_incomplete_literals_numbers_and_strings() {
+        assert_eq!(fix_json(""), "");
+        assert_eq!(fix_json("nul"), "null");
+        assert_eq!(fix_json("t"), "true");
+        assert_eq!(fix_json("fals"), "false");
+        assert_eq!(fix_json("12."), "12");
+        assert_eq!(fix_json("2.5e-"), "2.5");
+        assert_eq!(fix_json("2.5E3"), "2.5E3");
+        assert_eq!(fix_json("-"), "");
+        assert_eq!(fix_json(r#""abc"#), r#""abc""#);
+        assert_eq!(fix_json(r#""value with \"#), r#""value with ""#);
+    }
+
+    #[test]
+    fn fix_json_repairs_incomplete_arrays_and_objects() {
+        assert_eq!(fix_json("["), "[]");
+        assert_eq!(fix_json("[[1], [2"), "[[1], [2]]");
+        assert_eq!(fix_json("[[false], [nu"), "[[false], [null]]");
+        assert_eq!(fix_json("[1, "), "[1]");
+        assert_eq!(fix_json(r#"{"key":"#), "{}");
+        assert_eq!(fix_json(r#"{"k1": 1, "k2"#), r#"{"k1": 1}"#);
+        assert_eq!(fix_json(r#"{"key": "value"  "#), r#"{"key": "value"}"#);
+        assert_eq!(
+            fix_json(r#"{"a": {"b": ["c", {"d": "e","#),
+            r#"{"a": {"b": ["c", {"d": "e"}]}}"#
+        );
+        assert_eq!(
+            fix_json(r#"{"type":"div","children":[{"type":"Card","props":{}"#),
+            r#"{"type":"div","children":[{"type":"Card","props":{}}]}"#
         );
     }
 
