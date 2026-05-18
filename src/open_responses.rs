@@ -388,10 +388,6 @@ impl OpenResponsesLanguageModel {
 
         if let Some(id) = response.get("id").and_then(JsonValue::as_str) {
             response_metadata = response_metadata.with_id(id);
-            result = result.with_provider_metadata(open_responses_provider_metadata(
-                &self.config.provider_options_name,
-                id,
-            ));
         }
 
         if let Some(timestamp) = response
@@ -2669,7 +2665,6 @@ fn open_responses_stream_result_from_response(
         raw: None,
     };
     let mut usage = LanguageModelUsage::default();
-    let mut response_id = None::<String>;
     let mut emitted_response_metadata = false;
     let mut has_tool_calls = false;
     let mut emitted_tool_calls = BTreeSet::<String>::new();
@@ -2728,7 +2723,6 @@ fn open_responses_stream_result_from_response(
                 if let Some(response) = open_responses_event_response(&value) {
                     open_responses_push_response_metadata(
                         &mut stream,
-                        &mut response_id,
                         &mut emitted_response_metadata,
                         response,
                     );
@@ -3834,14 +3828,9 @@ fn open_responses_stream_result_from_response(
         )));
     }
 
-    let mut finish = LanguageModelStreamFinish::new(usage, finish_reason);
-    if let Some(response_id) = response_id {
-        finish = finish.with_provider_metadata(open_responses_provider_metadata(
-            provider_name,
-            &response_id,
-        ));
-    }
-    stream.push(LanguageModelStreamPart::Finish(finish));
+    stream.push(LanguageModelStreamPart::Finish(
+        LanguageModelStreamFinish::new(usage, finish_reason),
+    ));
 
     let mut result = LanguageModelStreamResult::new(stream)
         .with_request(LanguageModelRequest::new().with_body(request_body));
@@ -3870,14 +3859,9 @@ fn open_responses_failed_raw_finish_reason(response: &JsonValue) -> Option<Strin
 
 fn open_responses_push_response_metadata(
     stream: &mut Vec<LanguageModelStreamPart>,
-    response_id: &mut Option<String>,
     emitted_response_metadata: &mut bool,
     response: &JsonValue,
 ) {
-    if let Some(id) = response.get("id").and_then(JsonValue::as_str) {
-        *response_id = Some(id.to_string());
-    }
-
     if *emitted_response_metadata {
         return;
     }
@@ -4796,17 +4780,6 @@ fn open_responses_error_stream_result(
     result
 }
 
-fn open_responses_provider_metadata(provider_name: &str, response_id: &str) -> ProviderMetadata {
-    let mut metadata = ProviderMetadata::new();
-    let mut provider = JsonObject::new();
-    provider.insert(
-        "responseId".to_string(),
-        JsonValue::String(response_id.to_string()),
-    );
-    metadata.insert(provider_name.to_string(), provider);
-    metadata
-}
-
 fn open_responses_error_metadata(
     provider_name: &str,
     context: &OpenResponsesErrorContext,
@@ -5069,16 +5042,7 @@ mod tests {
                 .and_then(|response| response.id.as_deref()),
             Some("resp_open")
         );
-        assert_eq!(
-            result
-                .provider_metadata
-                .as_ref()
-                .unwrap_or(&ProviderMetadata::new())
-                .get("openai")
-                .and_then(|metadata| metadata.get("responseId"))
-                .and_then(JsonValue::as_str),
-            Some("resp_open")
-        );
+        assert!(result.provider_metadata.is_none());
 
         let request = captured_request
             .lock()
@@ -7315,16 +7279,7 @@ mod tests {
                 .map(String::as_str),
             Some("req_open_responses_stream")
         );
-        assert_eq!(
-            result
-                .provider_metadata
-                .as_ref()
-                .unwrap_or(&ProviderMetadata::new())
-                .get("openai")
-                .and_then(|metadata| metadata.get("responseId"))
-                .and_then(JsonValue::as_str),
-            Some("resp_stream")
-        );
+        assert!(result.provider_metadata.is_none());
         assert!(
             result
                 .parts
@@ -7403,15 +7358,8 @@ mod tests {
         ));
 
         assert_eq!(result.finish_reason, FinishReason::Error);
-        assert_eq!(
-            result
-                .provider_metadata
-                .as_ref()
-                .and_then(|metadata| metadata.get("openai"))
-                .and_then(|metadata| metadata.get("responseId"))
-                .and_then(JsonValue::as_str),
-            Some("resp_stream_error")
-        );
+        assert_eq!(result.response.id.as_deref(), Some("resp_stream_error"));
+        assert!(result.provider_metadata.is_none());
         let error = result.errors.first().expect("stream error is captured");
         assert_eq!(error.get("type").and_then(JsonValue::as_str), Some("error"));
         assert_eq!(

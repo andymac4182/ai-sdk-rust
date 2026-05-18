@@ -340,7 +340,7 @@ mod tests {
     };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
-    use crate::provider::{Provider, ProviderMetadata, ProviderOptions};
+    use crate::provider::{Provider, ProviderOptions};
     use crate::provider_utils::{
         ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
         Tool, json_schema,
@@ -1903,16 +1903,7 @@ mod tests {
                 .and_then(|response| response.id.as_deref()),
             Some("resp_gateway")
         );
-        assert_eq!(
-            result
-                .provider_metadata
-                .as_ref()
-                .unwrap_or(&ProviderMetadata::new())
-                .get("vercel-ai-gateway")
-                .and_then(|metadata| metadata.get("responseId"))
-                .and_then(JsonValue::as_str),
-            Some("resp_gateway")
-        );
+        assert!(result.provider_metadata.is_none());
 
         let request = captured_request
             .lock()
@@ -2519,16 +2510,7 @@ mod tests {
                 .map(String::as_str),
             Some("req_vercel_ai_gateway_responses_stream")
         );
-        assert_eq!(
-            result
-                .provider_metadata
-                .as_ref()
-                .unwrap_or(&ProviderMetadata::new())
-                .get("vercel-ai-gateway")
-                .and_then(|metadata| metadata.get("responseId"))
-                .and_then(JsonValue::as_str),
-            Some("resp_gateway_stream")
-        );
+        assert!(result.provider_metadata.is_none());
 
         let request = captured_request
             .lock()
