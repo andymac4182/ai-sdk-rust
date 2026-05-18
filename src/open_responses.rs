@@ -4854,11 +4854,11 @@ mod tests {
         FinishReason, LanguageModel, LanguageModelAssistantContentPart,
         LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
         LanguageModelFilePart, LanguageModelMessage, LanguageModelProviderTool,
-        LanguageModelSource, LanguageModelStreamPart, LanguageModelTextPart, LanguageModelTool,
-        LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
-        LanguageModelToolCallPart, LanguageModelToolChoice, LanguageModelToolContentPart,
-        LanguageModelToolMessage, LanguageModelToolResultOutput, LanguageModelToolResultPart,
-        LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelReasoningPart, LanguageModelSource, LanguageModelStreamPart,
+        LanguageModelTextPart, LanguageModelTool, LanguageModelToolApprovalRequestPart,
+        LanguageModelToolApprovalResponsePart, LanguageModelToolCallPart, LanguageModelToolChoice,
+        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultOutput,
+        LanguageModelToolResultPart, LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::prompt::Prompt;
     use crate::provider::{ModelType, Provider, ProviderMetadata, ProviderOptions};
@@ -5288,6 +5288,10 @@ mod tests {
                     LanguageModelTextPart::new("stored text")
                         .with_provider_options(item_options("message_item")),
                 ),
+                LanguageModelAssistantContentPart::Reasoning(
+                    LanguageModelReasoningPart::new("stored reasoning")
+                        .with_provider_options(item_options("reasoning_item")),
+                ),
                 LanguageModelAssistantContentPart::ToolCall(
                     LanguageModelToolCallPart::new(
                         "provider_call_1",
@@ -5330,6 +5334,10 @@ mod tests {
                     {
                         "type": "item_reference",
                         "id": "message_item"
+                    },
+                    {
+                        "type": "item_reference",
+                        "id": "reasoning_item"
                     },
                     {
                         "type": "item_reference",
