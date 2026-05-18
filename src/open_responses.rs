@@ -10360,6 +10360,169 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_prepares_apply_patch_and_tool_search_tools() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_prepared_tools",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Tools prepared"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 8,
+                            "output_tokens": 2
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let defer_loading_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "deferLoading": true
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Use prepared tools"),
+                    )]),
+                )])
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.tool_search",
+                    "toolSearch",
+                    json_object(json!({
+                        "execution": "client",
+                        "description": "Find available tools",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "goal": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": ["goal"],
+                            "additionalProperties": false
+                        }
+                    })),
+                )))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.apply_patch",
+                    "apply_patch",
+                    JsonObject::new(),
+                )))
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "get_weather",
+                        json_object(json!({
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": ["location"],
+                            "additionalProperties": false
+                        })),
+                    )
+                    .with_description("Get the current weather")
+                    .with_provider_options(defer_loading_options),
+                ))
+                .with_tool_choice(LanguageModelToolChoice::Tool {
+                    tool_name: "apply_patch".to_string(),
+                }),
+            ),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "tool_search",
+                    "execution": "client",
+                    "description": "Find available tools",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "goal": {
+                                "type": "string"
+                            }
+                        },
+                        "required": ["goal"],
+                        "additionalProperties": false
+                    }
+                },
+                {
+                    "type": "apply_patch"
+                },
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "description": "Get the current weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {
+                                "type": "string"
+                            }
+                        },
+                        "required": ["location"],
+                        "additionalProperties": false
+                    },
+                    "defer_loading": true
+                }
+            ])
+        );
+        assert_eq!(
+            request_body["tool_choice"],
+            json!({
+                "type": "apply_patch"
+            })
+        );
+    }
+
+    #[test]
     fn open_responses_provider_maps_allowed_tools_to_tool_choice() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
