@@ -150,15 +150,16 @@ blocker that needs human input.
    exceptions only when mirroring upstream package names.
 13. Do not churn dependencies, CI, or unrelated modules unless the next SDK
     slice genuinely requires it.
-14. Work in this order: finish all common/core SDK packages and Vercel AI
-    Gateway provider coverage first, then return to the remaining standalone
-    providers. The first phase includes `packages/ai`, `packages/provider`,
+14. Work in this order as a hard gate: finish ALL common/core SDK packages and
+    Vercel AI Gateway provider coverage first, then return to the remaining
+    standalone providers. The first phase includes `packages/ai`, `packages/provider`,
     `packages/provider-utils`, `packages/openai-compatible`,
     `packages/open-responses`, `packages/gateway`, the Vercel AI Gateway
     OpenAI-compatible and Open Responses routes, and portable non-provider
     package rows such as MCP, OTel, Workflow, telemetry, logger, UI transport,
-    chat/completion transport, and test-server support. Do not pick another
-    unrelated standalone provider slice while those rows remain unverified.
+    chat/completion transport, and test-server support. Standalone provider
+    slices are blocked while any of those rows are not yet verified or
+    explicitly documented as intentionally non-portable.
 15. Port every upstream provider package in its matching crate. Prefer
     contract-first typed provider crates with fake/deterministic tests, then add
     HTTP/gateway-backed integration tests where credentials are available. Do
