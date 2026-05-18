@@ -399,10 +399,11 @@ pub use transcription_model::{
     TranscriptionModelResult, TranscriptionModelSegment,
 };
 pub use ui_message_stream::{
-    UI_MESSAGE_STREAM_CONTENT_TYPE, UI_MESSAGE_STREAM_VERSION, UI_MESSAGE_STREAM_VERSION_HEADER,
-    UiMessageChunk, UiMessageStreamResponse, UiMessageStreamResponseInit,
-    UiMessageStreamResponseOptions, UiMessageStreamResponseWriter,
-    create_ui_message_stream_response, pipe_ui_message_stream_to_response,
+    ResponseUiMessageId, UI_MESSAGE_STREAM_CONTENT_TYPE, UI_MESSAGE_STREAM_VERSION,
+    UI_MESSAGE_STREAM_VERSION_HEADER, UiMessage, UiMessageChunk, UiMessageRole,
+    UiMessageStreamResponse, UiMessageStreamResponseInit, UiMessageStreamResponseOptions,
+    UiMessageStreamResponseWriter, create_ui_message_stream_response, get_response_ui_message_id,
+    pipe_ui_message_stream_to_response,
 };
 pub use upload_file::{UploadFileData, UploadFileOptions, UploadFileResult, upload_file};
 pub use upload_skill::{

@@ -1,4 +1,5 @@
 use crate::headers::Headers;
+use crate::json::JsonValue;
 use crate::provider::ProviderMetadata;
 use crate::provider_utils::normalize_headers;
 
@@ -57,6 +58,111 @@ pub enum UiMessageChunk {
         /// Error text visible to the client.
         error_text: String,
     },
+}
+
+/// Role of an upstream UI message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UiMessageRole {
+    /// System message.
+    System,
+
+    /// User message.
+    User,
+
+    /// Assistant response message.
+    Assistant,
+}
+
+/// Minimal portable shape of an upstream UI message.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiMessage {
+    /// Message identifier.
+    pub id: String,
+
+    /// Message role.
+    pub role: UiMessageRole,
+
+    /// Optional message metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<JsonValue>,
+
+    /// UI message parts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<JsonValue>,
+}
+
+impl UiMessage {
+    /// Creates a UI message with no metadata or parts.
+    pub fn new(id: impl Into<String>, role: UiMessageRole) -> Self {
+        Self {
+            id: id.into(),
+            role,
+            metadata: None,
+            parts: Vec::new(),
+        }
+    }
+
+    /// Adds metadata to this UI message.
+    pub fn with_metadata(mut self, metadata: impl Into<JsonValue>) -> Self {
+        self.metadata = Some(metadata.into());
+        self
+    }
+
+    /// Adds one UI message part.
+    pub fn with_part(mut self, part: impl Into<JsonValue>) -> Self {
+        self.parts.push(part.into());
+        self
+    }
+}
+
+/// Response message id source accepted by [`get_response_ui_message_id`].
+pub enum ResponseUiMessageId {
+    /// Use this fixed response id.
+    Id(String),
+
+    /// Generate a new response id when the response is not a continuation.
+    Generate(Box<dyn FnOnce() -> String>),
+}
+
+impl ResponseUiMessageId {
+    /// Creates a fixed response message id.
+    pub fn id(id: impl Into<String>) -> Self {
+        Self::Id(id.into())
+    }
+
+    /// Creates a response message id generator.
+    pub fn generate<F>(generate: F) -> Self
+    where
+        F: FnOnce() -> String + 'static,
+    {
+        Self::Generate(Box::new(generate))
+    }
+}
+
+/// Determines the response UI message id for persistence-aware streams.
+///
+/// This mirrors upstream `getResponseUIMessageId`: if there are no original
+/// messages, id generation is left to the client and `None` is returned. If the
+/// last original message is an assistant message, its id is reused for
+/// continuation. Otherwise the supplied id or id generator is used.
+pub fn get_response_ui_message_id(
+    original_messages: Option<&[UiMessage]>,
+    response_message_id: ResponseUiMessageId,
+) -> Option<String> {
+    let original_messages = original_messages?;
+
+    if let Some(last_message) = original_messages.last() {
+        if last_message.role == UiMessageRole::Assistant {
+            return Some(last_message.id.clone());
+        }
+    }
+
+    match response_message_id {
+        ResponseUiMessageId::Id(id) => Some(id),
+        ResponseUiMessageId::Generate(generate) => Some(generate()),
+    }
 }
 
 impl UiMessageChunk {
@@ -346,9 +452,12 @@ fn encode_ui_message_sse_stream(stream: Vec<UiMessageChunk>) -> Vec<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::convert::Infallible;
+    use std::rc::Rc;
 
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn create_ui_message_stream_response_sets_sse_headers_and_encoded_chunks() {
@@ -478,6 +587,100 @@ mod tests {
             ]
         );
         assert!(response.ended);
+    }
+
+    #[test]
+    fn get_response_ui_message_id_returns_none_without_original_messages() {
+        let called = Rc::new(Cell::new(false));
+        let called_in_generator = Rc::clone(&called);
+
+        let result = get_response_ui_message_id(
+            None,
+            ResponseUiMessageId::generate(move || {
+                called_in_generator.set(true);
+                "new-id".to_string()
+            }),
+        );
+
+        assert_eq!(result, None);
+        assert!(!called.get());
+    }
+
+    #[test]
+    fn get_response_ui_message_id_reuses_last_assistant_message_id() {
+        let called = Rc::new(Cell::new(false));
+        let called_in_generator = Rc::clone(&called);
+        let original_messages = vec![
+            UiMessage::new("user-id", UiMessageRole::User),
+            UiMessage::new("assistant-id", UiMessageRole::Assistant),
+        ];
+
+        let result = get_response_ui_message_id(
+            Some(&original_messages),
+            ResponseUiMessageId::generate(move || {
+                called_in_generator.set(true);
+                "new-id".to_string()
+            }),
+        );
+
+        assert_eq!(result.as_deref(), Some("assistant-id"));
+        assert!(!called.get());
+    }
+
+    #[test]
+    fn get_response_ui_message_id_generates_when_last_message_is_not_assistant() {
+        let original_messages = vec![
+            UiMessage::new("assistant-id", UiMessageRole::Assistant),
+            UiMessage::new("user-id", UiMessageRole::User),
+        ];
+
+        let result = get_response_ui_message_id(
+            Some(&original_messages),
+            ResponseUiMessageId::generate(|| "new-id".to_string()),
+        );
+
+        assert_eq!(result.as_deref(), Some("new-id"));
+    }
+
+    #[test]
+    fn get_response_ui_message_id_uses_generator_for_empty_messages() {
+        let original_messages = Vec::new();
+
+        let result = get_response_ui_message_id(
+            Some(&original_messages),
+            ResponseUiMessageId::generate(|| "new-id".to_string()),
+        );
+
+        assert_eq!(result.as_deref(), Some("new-id"));
+    }
+
+    #[test]
+    fn get_response_ui_message_id_uses_fixed_response_id() {
+        let original_messages = vec![UiMessage::new("user-id", UiMessageRole::User)];
+
+        let result = get_response_ui_message_id(
+            Some(&original_messages),
+            ResponseUiMessageId::id("fixed-id"),
+        );
+
+        assert_eq!(result.as_deref(), Some("fixed-id"));
+    }
+
+    #[test]
+    fn ui_message_serializes_upstream_minimal_shape() {
+        let message = UiMessage::new("message-id", UiMessageRole::Assistant)
+            .with_metadata(json!({ "traceId": "trace-1" }))
+            .with_part(json!({ "type": "text", "text": "hello" }));
+
+        assert_eq!(
+            serde_json::to_value(message).expect("message serializes"),
+            json!({
+                "id": "message-id",
+                "role": "assistant",
+                "metadata": { "traceId": "trace-1" },
+                "parts": [{ "type": "text", "text": "hello" }]
+            })
+        );
     }
 
     #[derive(Default)]
