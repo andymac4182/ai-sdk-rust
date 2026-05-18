@@ -24,10 +24,10 @@ use crate::language_model::{
     LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
     LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
     LanguageModelTool, LanguageModelToolApprovalRequest, LanguageModelToolCall,
-    LanguageModelToolChoice, LanguageModelToolContentPart, LanguageModelToolInputDelta,
-    LanguageModelToolInputEnd, LanguageModelToolInputStart, LanguageModelToolResult,
-    LanguageModelToolResultContentPart, LanguageModelToolResultOutput, LanguageModelUrlSource,
-    LanguageModelUsage, LanguageModelUserContentPart, OutputTokenUsage,
+    LanguageModelToolCallPart, LanguageModelToolChoice, LanguageModelToolContentPart,
+    LanguageModelToolInputDelta, LanguageModelToolInputEnd, LanguageModelToolInputStart,
+    LanguageModelToolResult, LanguageModelToolResultContentPart, LanguageModelToolResultOutput,
+    LanguageModelUrlSource, LanguageModelUsage, LanguageModelUserContentPart, OutputTokenUsage,
 };
 use crate::openai_compatible::{OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel};
 use crate::provider::{
@@ -37,11 +37,11 @@ use crate::provider::{
 use crate::provider_utils::{
     FetchErrorInfo, HandledFetchError, ParseJsonResult, PostJsonToApiOptions, ProviderApiRequest,
     ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
-    ProviderApiResponseHandlerError, ReasoningLevel, RuntimeEnvironment, combine_headers,
-    convert_to_base64, create_event_source_response_handler, create_json_error_response_handler,
-    create_json_response_handler, create_tool_name_mapping, generate_id, get_top_level_media_type,
-    map_reasoning_to_provider_effort, post_json_to_api, resolve_full_media_type,
-    with_user_agent_suffix,
+    ProviderApiResponseHandlerError, ReasoningLevel, RuntimeEnvironment, ToolNameMapping,
+    combine_headers, convert_to_base64, create_event_source_response_handler,
+    create_json_error_response_handler, create_json_response_handler, create_tool_name_mapping,
+    generate_id, get_top_level_media_type, map_reasoning_to_provider_effort, post_json_to_api,
+    resolve_full_media_type, with_user_agent_suffix,
 };
 use crate::warning::Warning;
 
@@ -490,6 +490,9 @@ fn open_responses_request_body(
 ) -> Result<(JsonValue, Vec<Warning>), String> {
     let mut warnings = Vec::new();
     let provider_options = options.provider_options.as_ref();
+    let provider_tool_names = open_responses_provider_tool_names();
+    let tool_name_mapping =
+        create_tool_name_mapping(options.tools.iter().flatten(), &provider_tool_names);
     let store = open_responses_store_enabled(provider_options_name, provider_options);
     let has_conversation =
         open_responses_conversation_enabled(provider_options_name, provider_options);
@@ -508,6 +511,7 @@ fn open_responses_request_body(
         store,
         has_conversation,
         provider_options_name,
+        &tool_name_mapping,
         &mut warnings,
     )?;
     let mut body = JsonObject::new();
@@ -943,6 +947,7 @@ fn open_responses_input(
     store: bool,
     has_conversation: bool,
     provider_options_name: &str,
+    tool_name_mapping: &ToolNameMapping,
     warnings: &mut Vec<Warning>,
 ) -> Result<(Vec<JsonValue>, Option<String>), String> {
     let mut input = Vec::new();
@@ -1055,6 +1060,22 @@ fn open_responses_input(
                                 continue;
                             }
 
+                            let resolved_tool_name =
+                                tool_name_mapping.to_provider_tool_name(&tool_call.tool_name);
+                            if resolved_tool_name == "tool_search" {
+                                if store && let Some(item_id) = item_id {
+                                    assistant_items.push(json!({
+                                        "type": "item_reference",
+                                        "id": item_id
+                                    }));
+                                } else {
+                                    assistant_items.push(open_responses_tool_search_call_item(
+                                        tool_call, item_id,
+                                    ));
+                                }
+                                continue;
+                            }
+
                             if tool_call.provider_executed == Some(true) {
                                 if store && let Some(item_id) = item_id {
                                     assistant_items.push(json!({
@@ -1096,6 +1117,33 @@ fn open_responses_input(
                                 continue;
                             }
 
+                            let resolved_tool_name =
+                                tool_name_mapping.to_provider_tool_name(&part.tool_name);
+                            if resolved_tool_name == "tool_search" {
+                                let item_id = open_responses_prompt_item_id(
+                                    part.provider_options.as_ref(),
+                                    provider_options_name,
+                                )
+                                .unwrap_or(part.tool_call_id.as_str());
+
+                                if store {
+                                    assistant_items.push(json!({
+                                        "type": "item_reference",
+                                        "id": item_id
+                                    }));
+                                } else if let Some(output) =
+                                    open_responses_tool_result_json(&part.output)
+                                {
+                                    assistant_items.push(open_responses_tool_search_output_item(
+                                        Some(item_id),
+                                        JsonValue::Null,
+                                        "server",
+                                        output,
+                                    ));
+                                }
+                                continue;
+                            }
+
                             if store {
                                 let item_id = open_responses_prompt_item_id(
                                     part.provider_options.as_ref(),
@@ -1107,10 +1155,12 @@ fn open_responses_input(
                                     "id": item_id
                                 }));
                             } else {
-                                return Err(
-                                    "Open Responses assistant prompt part is not implemented yet."
-                                        .to_string(),
-                                );
+                                warnings.push(Warning::Other {
+                                    message: format!(
+                                        "Results for OpenAI tool {} are not sent to the API when store is false",
+                                        part.tool_name
+                                    ),
+                                });
                             }
                         }
                         LanguageModelAssistantContentPart::ToolApprovalRequest(_) => {}
@@ -1131,6 +1181,20 @@ fn open_responses_input(
                     match part {
                         LanguageModelToolContentPart::ToolResult(part) => {
                             if open_responses_execution_denied_approval_id(&part.output).is_some() {
+                                continue;
+                            }
+
+                            let resolved_tool_name =
+                                tool_name_mapping.to_provider_tool_name(&part.tool_name);
+                            if resolved_tool_name == "tool_search"
+                                && let Some(output) = open_responses_tool_result_json(&part.output)
+                            {
+                                input.push(open_responses_tool_search_output_item(
+                                    None,
+                                    JsonValue::String(part.tool_call_id.clone()),
+                                    "client",
+                                    output,
+                                ));
                                 continue;
                             }
 
@@ -1192,6 +1256,84 @@ fn open_responses_function_call_arguments(input: &JsonValue) -> String {
         .as_str()
         .map(str::to_string)
         .unwrap_or_else(|| input.to_string())
+}
+
+fn open_responses_tool_search_call_item(
+    tool_call: &LanguageModelToolCallPart,
+    item_id: Option<&str>,
+) -> JsonValue {
+    let parsed_input = open_responses_tool_search_prompt_input(&tool_call.input);
+    let call_id = parsed_input
+        .get("call_id")
+        .cloned()
+        .unwrap_or(JsonValue::Null);
+    let execution = if call_id.is_null() {
+        "server"
+    } else {
+        "client"
+    };
+
+    json!({
+        "type": "tool_search_call",
+        "id": item_id.unwrap_or(tool_call.tool_call_id.as_str()),
+        "execution": execution,
+        "call_id": call_id,
+        "status": "completed",
+        "arguments": parsed_input
+            .get("arguments")
+            .cloned()
+            .unwrap_or(JsonValue::Null)
+    })
+}
+
+fn open_responses_tool_search_prompt_input(input: &JsonValue) -> JsonObject {
+    let parsed_input = input
+        .as_str()
+        .and_then(|input| serde_json::from_str::<JsonValue>(input).ok())
+        .unwrap_or_else(|| input.clone());
+
+    parsed_input.as_object().cloned().unwrap_or_default()
+}
+
+fn open_responses_tool_result_json(output: &LanguageModelToolResultOutput) -> Option<&JsonValue> {
+    match output {
+        LanguageModelToolResultOutput::Json { value, .. }
+        | LanguageModelToolResultOutput::ErrorJson { value, .. } => Some(value),
+        _ => None,
+    }
+}
+
+fn open_responses_tool_search_output_item(
+    id: Option<&str>,
+    call_id: JsonValue,
+    execution: &str,
+    output: &JsonValue,
+) -> JsonValue {
+    let mut item = JsonObject::new();
+    item.insert(
+        "type".to_string(),
+        JsonValue::String("tool_search_output".to_string()),
+    );
+    if let Some(id) = id {
+        item.insert("id".to_string(), JsonValue::String(id.to_string()));
+    }
+    item.insert(
+        "execution".to_string(),
+        JsonValue::String(execution.to_string()),
+    );
+    item.insert("call_id".to_string(), call_id);
+    item.insert(
+        "status".to_string(),
+        JsonValue::String("completed".to_string()),
+    );
+    item.insert(
+        "tools".to_string(),
+        output
+            .get("tools")
+            .cloned()
+            .unwrap_or_else(|| JsonValue::Array(Vec::new())),
+    );
+    JsonValue::Object(item)
 }
 
 fn open_responses_store_enabled(
@@ -5853,6 +5995,448 @@ mod tests {
                     "type": "function_call_output",
                     "call_id": "call_weather",
                     "output": "{\"temp\":72}"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_reconstructs_hosted_tool_search_history_with_store_false() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_tool_search_history",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Tool search accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 9,
+                            "output_tokens": 3
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let item_options = |item_id: &str| -> ProviderOptions {
+            serde_json::from_value(json!({
+                "openai": {
+                    "itemId": item_id
+                }
+            }))
+            .expect("provider options deserialize")
+        };
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "store": false
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                    LanguageModelAssistantMessage::new(vec![
+                        LanguageModelAssistantContentPart::ToolCall(
+                            LanguageModelToolCallPart::new(
+                                "tsc_hosted_123",
+                                "tool_search",
+                                JsonValue::String(
+                                    json!({
+                                        "arguments": {
+                                            "paths": ["get_weather"]
+                                        },
+                                        "call_id": null
+                                    })
+                                    .to_string(),
+                                ),
+                            )
+                            .with_provider_executed(true)
+                            .with_provider_options(item_options("tsc_hosted_123")),
+                        ),
+                        LanguageModelAssistantContentPart::ToolResult(
+                            LanguageModelToolResultPart::new(
+                                "tsc_hosted_123",
+                                "tool_search",
+                                LanguageModelToolResultOutput::json(json!({
+                                    "tools": [
+                                        {
+                                            "type": "function",
+                                            "name": "get_weather",
+                                            "defer_loading": true
+                                        }
+                                    ]
+                                })),
+                            )
+                            .with_provider_options(item_options("tso_hosted_456")),
+                        ),
+                    ]),
+                )])
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "tool_search_call",
+                    "id": "tsc_hosted_123",
+                    "execution": "server",
+                    "call_id": null,
+                    "status": "completed",
+                    "arguments": {
+                        "paths": ["get_weather"]
+                    }
+                },
+                {
+                    "type": "tool_search_output",
+                    "id": "tso_hosted_456",
+                    "execution": "server",
+                    "call_id": null,
+                    "status": "completed",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "get_weather",
+                            "defer_loading": true
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_reconstructs_client_tool_search_output_with_store_false() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_client_tool_search_history",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Client tool search accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 11,
+                            "output_tokens": 4
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let item_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "itemId": "tsc_client_1"
+            }
+        }))
+        .expect("provider options deserialize");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "store": false
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![
+                    LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                        LanguageModelAssistantContentPart::ToolCall(
+                            LanguageModelToolCallPart::new(
+                                "call_abc123",
+                                "tool_search",
+                                JsonValue::String(
+                                    json!({
+                                        "arguments": {
+                                            "goal": "Find weather tools"
+                                        },
+                                        "call_id": "call_abc123"
+                                    })
+                                    .to_string(),
+                                ),
+                            )
+                            .with_provider_options(item_options),
+                        ),
+                    ])),
+                    LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                        LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                            "call_abc123",
+                            "tool_search",
+                            LanguageModelToolResultOutput::json(json!({
+                                "tools": [
+                                    {
+                                        "type": "function",
+                                        "name": "get_weather",
+                                        "description": "Get weather",
+                                        "defer_loading": true,
+                                        "parameters": {
+                                            "type": "object",
+                                            "properties": {
+                                                "location": {
+                                                    "type": "string"
+                                                }
+                                            },
+                                            "required": ["location"]
+                                        }
+                                    }
+                                ]
+                            })),
+                        )),
+                    ])),
+                ])
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "tool_search_call",
+                    "id": "tsc_client_1",
+                    "execution": "client",
+                    "call_id": "call_abc123",
+                    "status": "completed",
+                    "arguments": {
+                        "goal": "Find weather tools"
+                    }
+                },
+                {
+                    "type": "tool_search_output",
+                    "execution": "client",
+                    "call_id": "call_abc123",
+                    "status": "completed",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "get_weather",
+                            "description": "Get weather",
+                            "defer_loading": true,
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "location": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["location"]
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_warns_for_unstored_hosted_tool_results() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_web_search_history",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Hosted history accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 8,
+                            "output_tokens": 3
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "store": false
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                    LanguageModelAssistantMessage::new(vec![
+                        LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                            "Let me search.",
+                        )),
+                        LanguageModelAssistantContentPart::ToolCall(
+                            LanguageModelToolCallPart::new(
+                                "ws_123",
+                                "web_search",
+                                json!({
+                                    "query": "Rust AI SDK"
+                                }),
+                            )
+                            .with_provider_executed(true),
+                        ),
+                        LanguageModelAssistantContentPart::ToolResult(
+                            LanguageModelToolResultPart::new(
+                                "ws_123",
+                                "web_search",
+                                LanguageModelToolResultOutput::json(json!({
+                                    "sources": [
+                                        {
+                                            "type": "url",
+                                            "url": "https://example.test"
+                                        }
+                                    ]
+                                })),
+                            ),
+                        ),
+                        LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                            "Search complete.",
+                        )),
+                    ]),
+                )])
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(
+            result.warnings,
+            vec![crate::warning::Warning::Other {
+                message:
+                    "Results for OpenAI tool web_search are not sent to the API when store is false"
+                        .to_string()
+            }]
+        );
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Let me search."
+                        }
+                    ]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Search complete."
+                        }
+                    ]
                 }
             ])
         );
