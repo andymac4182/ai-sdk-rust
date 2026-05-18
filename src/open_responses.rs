@@ -1021,6 +1021,10 @@ fn open_responses_input(
                                 text.provider_options.as_ref(),
                                 provider_options_name,
                             );
+                            let phase = open_responses_prompt_phase(
+                                text.provider_options.as_ref(),
+                                provider_options_name,
+                            );
                             if has_conversation && item_id.is_some() {
                                 open_responses_flush_assistant_content(
                                     &mut assistant_items,
@@ -1038,6 +1042,17 @@ fn open_responses_input(
                                     "type": "item_reference",
                                     "id": item_id
                                 }));
+                                continue;
+                            }
+
+                            if item_id.is_some() || phase.is_some() {
+                                open_responses_flush_assistant_content(
+                                    &mut assistant_items,
+                                    &mut content,
+                                );
+                                assistant_items.push(open_responses_assistant_text_message(
+                                    &text.text, item_id, phase,
+                                ));
                                 continue;
                             }
 
@@ -1456,6 +1471,33 @@ fn open_responses_flush_assistant_items(
 ) {
     open_responses_flush_assistant_content(assistant_items, content);
     input.append(assistant_items);
+}
+
+fn open_responses_assistant_text_message(
+    text: &str,
+    item_id: Option<&str>,
+    phase: Option<&str>,
+) -> JsonValue {
+    let mut message = JsonObject::new();
+    message.insert("type".to_string(), JsonValue::String("message".to_string()));
+    message.insert(
+        "role".to_string(),
+        JsonValue::String("assistant".to_string()),
+    );
+    message.insert(
+        "content".to_string(),
+        JsonValue::Array(vec![json!({
+            "type": "output_text",
+            "text": text
+        })]),
+    );
+    if let Some(item_id) = item_id {
+        message.insert("id".to_string(), JsonValue::String(item_id.to_string()));
+    }
+    if let Some(phase) = phase {
+        message.insert("phase".to_string(), JsonValue::String(phase.to_string()));
+    }
+    JsonValue::Object(message)
 }
 
 fn open_responses_push_reasoning_item(
@@ -3087,6 +3129,15 @@ fn open_responses_prompt_item_id<'a>(
 ) -> Option<&'a str> {
     open_responses_prompt_provider_options(provider_options, provider_name)
         .and_then(|metadata| metadata.get("itemId"))
+        .and_then(JsonValue::as_str)
+}
+
+fn open_responses_prompt_phase<'a>(
+    provider_options: Option<&'a ProviderOptions>,
+    provider_name: &str,
+) -> Option<&'a str> {
+    open_responses_prompt_provider_options(provider_options, provider_name)
+        .and_then(|metadata| metadata.get("phase"))
         .and_then(JsonValue::as_str)
 }
 
@@ -6794,6 +6845,148 @@ mod tests {
                                 "text": "Visible after compaction"
                             }
                         ]
+                    }
+                ],
+                "store": false
+            }))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_reconstructs_text_item_id_and_phase_with_store_false() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_text_phase",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Text history accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 4,
+                            "output_tokens": 2
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let text_options = |item_id: &str, phase: Option<&str>| -> ProviderOptions {
+            let mut openai = JsonObject::new();
+            openai.insert("itemId".to_string(), JsonValue::String(item_id.to_string()));
+            if let Some(phase) = phase {
+                openai.insert("phase".to_string(), JsonValue::String(phase.to_string()));
+            }
+
+            let mut options = ProviderOptions::new();
+            options.insert("openai".to_string(), openai);
+            options
+        };
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "store": false
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                    LanguageModelAssistantMessage::new(vec![
+                        LanguageModelAssistantContentPart::Text(
+                            LanguageModelTextPart::new("I will search for that")
+                                .with_provider_options(text_options("msg_001", Some("commentary"))),
+                        ),
+                        LanguageModelAssistantContentPart::Text(
+                            LanguageModelTextPart::new("The capital of France is Paris.")
+                                .with_provider_options(text_options(
+                                    "msg_002",
+                                    Some("final_answer"),
+                                )),
+                        ),
+                        LanguageModelAssistantContentPart::Text(
+                            LanguageModelTextPart::new("No phase")
+                                .with_provider_options(text_options("msg_003", None)),
+                        ),
+                    ]),
+                )])
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "gpt-4.1-mini",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "I will search for that"
+                            }
+                        ],
+                        "id": "msg_001",
+                        "phase": "commentary"
+                    },
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "The capital of France is Paris."
+                            }
+                        ],
+                        "id": "msg_002",
+                        "phase": "final_answer"
+                    },
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "No phase"
+                            }
+                        ],
+                        "id": "msg_003"
                     }
                 ],
                 "store": false
