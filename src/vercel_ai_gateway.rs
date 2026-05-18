@@ -1961,6 +1961,116 @@ mod tests {
     }
 
     #[test]
+    fn vercel_ai_gateway_openai_responses_converts_file_prompt_parts() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_gateway_files",
+                        "created_at": 1711115037,
+                        "model": "openai/gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Gateway file prompt accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 9,
+                            "output_tokens": 4
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://ai-gateway.test/v1/")
+            .with_transport(transport);
+        let model = provider.responses("openai/gpt-4.1-mini");
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(
+                &model,
+                Prompt::from_messages(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![
+                        LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
+                            "Summarize these inputs",
+                        )),
+                        LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                            FileData::Data {
+                                data: FileDataContent::Bytes(vec![0, 1, 2, 3]),
+                            },
+                            "image/png",
+                        )),
+                        LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                            FileData::Url {
+                                url: Url::parse("https://example.com/report.pdf")
+                                    .expect("url parses"),
+                            },
+                            "application/pdf",
+                        )),
+                    ]),
+                )]),
+            )
+            .expect("prompt is valid"),
+        ));
+
+        assert_eq!(result.text, "Gateway file prompt accepted");
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://ai-gateway.test/v1/responses");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "openai/gpt-4.1-mini",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Summarize these inputs"
+                            },
+                            {
+                                "type": "input_image",
+                                "image_url": "data:image/png;base64,AAECAw=="
+                            },
+                            {
+                                "type": "input_file",
+                                "file_url": "https://example.com/report.pdf"
+                            }
+                        ]
+                    }
+                ]
+            }))
+        );
+    }
+
+    #[test]
     fn vercel_ai_gateway_openai_responses_generates_object() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
