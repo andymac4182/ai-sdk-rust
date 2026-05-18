@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::OffsetDateTime;
 
-use crate::file_data::{FileData, FileDataContent};
+use crate::file_data::{FileData, FileDataContent, ProviderReference};
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue, NonNullJsonValue};
 use crate::language_model::{
@@ -603,7 +603,7 @@ fn open_responses_request_body(
         &options.tool_choice,
         allowed_tools,
         &mut warnings,
-    );
+    )?;
     if let Some(tools) = tools {
         body.insert("tools".to_string(), JsonValue::Array(tools));
     }
@@ -2356,15 +2356,16 @@ fn open_responses_prepare_tools(
     tool_choice: &Option<LanguageModelToolChoice>,
     allowed_tools: Option<&JsonValue>,
     warnings: &mut Vec<Warning>,
-) -> (Option<Vec<JsonValue>>, Option<JsonValue>) {
+) -> Result<(Option<Vec<JsonValue>>, Option<JsonValue>), String> {
     let provider_tool_names = open_responses_provider_tool_names();
     let tool_name_mapping = create_tool_name_mapping(tools.iter().flatten(), &provider_tool_names);
     let mut custom_provider_tool_names = BTreeSet::new();
 
-    let prepared_tools = tools.as_ref().and_then(|tools| {
-        let prepared_tools = tools
-            .iter()
-            .filter_map(|tool| match tool {
+    let prepared_tools = if let Some(tools) = tools.as_ref() {
+        let mut prepared_tools = Vec::new();
+
+        for tool in tools {
+            match tool {
                 LanguageModelTool::Function(tool) => {
                     let mut function = JsonObject::new();
                     function.insert(
@@ -2395,18 +2396,24 @@ fn open_responses_prepare_tools(
                         function.insert("defer_loading".to_string(), defer_loading);
                     }
 
-                    Some(JsonValue::Object(function))
+                    prepared_tools.push(JsonValue::Object(function));
                 }
-                LanguageModelTool::Provider(tool) => open_responses_prepare_provider_tool(
-                    tool,
-                    warnings,
-                    &mut custom_provider_tool_names,
-                ),
-            })
-            .collect::<Vec<_>>();
+                LanguageModelTool::Provider(tool) => {
+                    if let Some(tool) = open_responses_prepare_provider_tool(
+                        tool,
+                        warnings,
+                        &mut custom_provider_tool_names,
+                    )? {
+                        prepared_tools.push(tool);
+                    }
+                }
+            }
+        }
 
         (!prepared_tools.is_empty()).then_some(prepared_tools)
-    });
+    } else {
+        None
+    };
 
     let prepared_tool_choice =
         open_responses_allowed_tools_choice(allowed_tools, &tool_name_mapping).or_else(|| {
@@ -2434,7 +2441,7 @@ fn open_responses_prepare_tools(
             })
         });
 
-    (prepared_tools, prepared_tool_choice)
+    Ok((prepared_tools, prepared_tool_choice))
 }
 
 fn open_responses_allowed_tools_choice(
@@ -2511,11 +2518,11 @@ fn open_responses_prepare_provider_tool(
     tool: &LanguageModelProviderTool,
     warnings: &mut Vec<Warning>,
     custom_provider_tool_names: &mut BTreeSet<String>,
-) -> Option<JsonValue> {
+) -> Result<Option<JsonValue>, String> {
     let prepared = match tool.id.as_str() {
         "openai.file_search" => open_responses_file_search_tool(&tool.args),
         "openai.local_shell" => open_responses_tool_with_type("local_shell"),
-        "openai.shell" => open_responses_shell_tool(&tool.args),
+        "openai.shell" => open_responses_shell_tool(&tool.args)?,
         "openai.apply_patch" => open_responses_tool_with_type("apply_patch"),
         "openai.web_search_preview" => open_responses_web_search_preview_tool(&tool.args),
         "openai.web_search" => open_responses_web_search_tool(&tool.args),
@@ -2532,11 +2539,11 @@ fn open_responses_prepare_provider_tool(
                 feature: format!("provider-defined tool {}", tool.id),
                 details: None,
             });
-            return None;
+            return Ok(None);
         }
     };
 
-    Some(JsonValue::Object(prepared))
+    Ok(Some(JsonValue::Object(prepared)))
 }
 
 fn open_responses_tool_with_type(tool_type: &str) -> JsonObject {
@@ -2715,21 +2722,21 @@ fn open_responses_custom_tool(tool: &LanguageModelProviderTool) -> JsonObject {
     prepared
 }
 
-fn open_responses_shell_tool(args: &JsonObject) -> JsonObject {
+fn open_responses_shell_tool(args: &JsonObject) -> Result<JsonObject, String> {
     let mut tool = open_responses_tool_with_type("shell");
 
     if let Some(environment) = args.get("environment").and_then(JsonValue::as_object) {
-        let mapped_environment = open_responses_shell_environment(environment);
+        let mapped_environment = open_responses_shell_environment(environment)?;
         tool.insert(
             "environment".to_string(),
             JsonValue::Object(mapped_environment),
         );
     }
 
-    tool
+    Ok(tool)
 }
 
-fn open_responses_shell_environment(environment: &JsonObject) -> JsonObject {
+fn open_responses_shell_environment(environment: &JsonObject) -> Result<JsonObject, String> {
     match environment.get("type").and_then(JsonValue::as_str) {
         Some("containerReference") => {
             let mut mapped_environment = open_responses_tool_with_type("container_reference");
@@ -2739,7 +2746,7 @@ fn open_responses_shell_environment(environment: &JsonObject) -> JsonObject {
                 environment,
                 "containerId",
             );
-            mapped_environment
+            Ok(mapped_environment)
         }
         Some("containerAuto") => {
             let mut mapped_environment = open_responses_tool_with_type("container_auto");
@@ -2762,24 +2769,21 @@ fn open_responses_shell_environment(environment: &JsonObject) -> JsonObject {
             }
 
             if let Some(skills) = environment.get("skills").and_then(JsonValue::as_array) {
-                mapped_environment.insert(
-                    "skills".to_string(),
-                    JsonValue::Array(
-                        skills
-                            .iter()
-                            .filter_map(open_responses_shell_skill)
-                            .map(JsonValue::Object)
-                            .collect(),
-                    ),
-                );
+                let mut mapped_skills = Vec::new();
+                for skill in skills {
+                    if let Some(skill) = open_responses_shell_skill(skill)? {
+                        mapped_skills.push(JsonValue::Object(skill));
+                    }
+                }
+                mapped_environment.insert("skills".to_string(), JsonValue::Array(mapped_skills));
             }
 
-            mapped_environment
+            Ok(mapped_environment)
         }
         _ => {
             let mut mapped_environment = open_responses_tool_with_type("local");
             open_responses_insert_arg(&mut mapped_environment, "skills", environment, "skills");
-            mapped_environment
+            Ok(mapped_environment)
         }
     }
 }
@@ -2808,30 +2812,24 @@ fn open_responses_shell_network_policy(network_policy: &JsonObject) -> JsonObjec
     mapped_policy
 }
 
-fn open_responses_shell_skill(skill: &JsonValue) -> Option<JsonObject> {
-    let skill = skill.as_object()?;
+fn open_responses_shell_skill(skill: &JsonValue) -> Result<Option<JsonObject>, String> {
+    let Some(skill) = skill.as_object() else {
+        return Ok(None);
+    };
 
     if matches!(
         skill.get("type").and_then(JsonValue::as_str),
         Some("skillReference")
     ) {
         let mut mapped_skill = open_responses_tool_with_type("skill_reference");
-        let skill_id = skill
-            .get("providerReference")
-            .and_then(JsonValue::as_object)
-            .and_then(|reference| reference.get("openai"))
-            .and_then(JsonValue::as_str)
-            .unwrap_or_default();
-        mapped_skill.insert(
-            "skill_id".to_string(),
-            JsonValue::String(skill_id.to_string()),
-        );
+        let skill_id = open_responses_shell_skill_reference_id(skill)?;
+        mapped_skill.insert("skill_id".to_string(), JsonValue::String(skill_id));
         mapped_skill.insert(
             "version".to_string(),
             open_responses_arg(skill, "version")
                 .unwrap_or_else(|| JsonValue::String("latest".to_string())),
         );
-        return Some(mapped_skill);
+        return Ok(Some(mapped_skill));
     }
 
     let mut mapped_skill = open_responses_tool_with_type("inline");
@@ -2845,7 +2843,20 @@ fn open_responses_shell_skill(skill: &JsonValue) -> Option<JsonObject> {
         mapped_skill.insert("source".to_string(), JsonValue::Object(mapped_source));
     }
 
-    Some(mapped_skill)
+    Ok(Some(mapped_skill))
+}
+
+fn open_responses_shell_skill_reference_id(skill: &JsonObject) -> Result<String, String> {
+    let Some(reference) = skill.get("providerReference") else {
+        return Err("Open Responses shell skillReference requires providerReference".to_string());
+    };
+    let reference = serde_json::from_value::<ProviderReference>(reference.clone())
+        .map_err(|error| format!("invalid Open Responses shell providerReference: {error}"))?;
+
+    reference
+        .provider_id("openai")
+        .map(str::to_string)
+        .map_err(|error| error.to_string())
 }
 
 fn open_responses_tool_search_tool(args: &JsonObject) -> JsonObject {
@@ -10519,6 +10530,227 @@ mod tests {
             json!({
                 "type": "apply_patch"
             })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_shell_tool_environment_skills() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_shell_tools",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Shell prepared"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 8,
+                            "output_tokens": 2
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Use shell"),
+                    )]),
+                )])
+                .with_tool(LanguageModelTool::Provider(
+                    LanguageModelProviderTool::new(
+                        "openai.shell",
+                        "shell",
+                        json_object(json!({
+                            "environment": {
+                                "type": "containerAuto",
+                                "fileIds": ["file-1", "file-2"],
+                                "memoryLimit": "16g",
+                                "networkPolicy": {
+                                    "type": "allowlist",
+                                    "allowedDomains": ["example.com", "api.test.org"],
+                                    "domainSecrets": [
+                                        {
+                                            "domain": "api.test.org",
+                                            "name": "API_KEY",
+                                            "value": "secret123"
+                                        }
+                                    ]
+                                },
+                                "skills": [
+                                    {
+                                        "type": "skillReference",
+                                        "providerReference": {
+                                            "openai": "skill_abc"
+                                        },
+                                        "version": "1.0.0"
+                                    },
+                                    {
+                                        "type": "skillReference",
+                                        "providerReference": {
+                                            "openai": "skill_latest"
+                                        }
+                                    },
+                                    {
+                                        "type": "inline",
+                                        "name": "my-skill",
+                                        "description": "A test skill",
+                                        "source": {
+                                            "type": "base64",
+                                            "mediaType": "application/zip",
+                                            "data": "dGVzdA=="
+                                        }
+                                    }
+                                ]
+                            }
+                        })),
+                    ),
+                )),
+            ),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "shell",
+                    "environment": {
+                        "type": "container_auto",
+                        "file_ids": ["file-1", "file-2"],
+                        "memory_limit": "16g",
+                        "network_policy": {
+                            "type": "allowlist",
+                            "allowed_domains": ["example.com", "api.test.org"],
+                            "domain_secrets": [
+                                {
+                                    "domain": "api.test.org",
+                                    "name": "API_KEY",
+                                    "value": "secret123"
+                                }
+                            ]
+                        },
+                        "skills": [
+                            {
+                                "type": "skill_reference",
+                                "skill_id": "skill_abc",
+                                "version": "1.0.0"
+                            },
+                            {
+                                "type": "skill_reference",
+                                "skill_id": "skill_latest",
+                                "version": "latest"
+                            },
+                            {
+                                "type": "inline",
+                                "name": "my-skill",
+                                "description": "A test skill",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "application/zip",
+                                    "data": "dGVzdA=="
+                                }
+                            }
+                        ]
+                    }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_rejects_unresolved_shell_skill_reference() {
+        let transport: OpenResponsesTransport = Arc::new(|_| -> OpenResponsesTransportFuture {
+            panic!("transport should not be used")
+        });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Use shell"),
+                    )]),
+                )])
+                .with_tool(LanguageModelTool::Provider(
+                    LanguageModelProviderTool::new(
+                        "openai.shell",
+                        "shell",
+                        json_object(json!({
+                            "environment": {
+                                "type": "containerAuto",
+                                "skills": [
+                                    {
+                                        "type": "skillReference",
+                                        "providerReference": {
+                                            "anthropic": "skill_abc"
+                                        }
+                                    }
+                                ]
+                            }
+                        })),
+                    ),
+                )),
+            ),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Error);
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "errorMessage"),
+            Some(&json!(
+                "No provider reference found for provider 'openai'. Available providers: anthropic"
+            ))
+        );
+        assert_eq!(
+            result
+                .request
+                .as_ref()
+                .and_then(|request| request.body.as_ref()),
+            Some(&json!({ "model": "gpt-4.1-mini" }))
         );
     }
 
