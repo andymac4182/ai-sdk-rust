@@ -19,6 +19,7 @@ cargo test --all-features
 
 ```sh
 cargo run --example kitchen_sink
+cargo run --example vercel_ai_gateway_text
 ```
 
 ## Codex `/goal` Runner

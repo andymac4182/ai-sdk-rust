@@ -168,6 +168,7 @@ inventory.
 | Upstream example | Status | Rust path | Evidence | Notes |
 | --- | --- | --- | --- | --- |
 | Rust kitchen sink equivalent | verified | `examples/kitchen_sink.rs` | `cargo run --example kitchen_sink` is part of validation target when run manually | Rust-only example currently demonstrates deterministic `generate_text` with a tool loop. |
+| Rust Vercel AI Gateway text example | verified | `examples/vercel_ai_gateway_text.rs` | `cargo run --example vercel_ai_gateway_text` | Rust-only Gateway example loads `AI_GATEWAY_API_KEY` or `AI_SDK_RUST_AI_GATEWAY_API_KEY` from the environment or `.env.local`, uses an `openai/...` Gateway model, and calls high-level `generate_text` end to end without printing credentials. |
 | `examples/ai-e2e-next` | not-started | none | none | Needs portable API coverage before Rust equivalent can be planned. |
 | `examples/ai-functions` | not-started | none | none | Needs Rust equivalent for AI functions patterns. |
 | `examples/angular` | js-only-documented | none | This row | Angular adapter example is JavaScript framework-specific. |
