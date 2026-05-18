@@ -1,4 +1,4 @@
-use crate::json::JsonValue;
+use crate::json::{JsonObject, JsonValue};
 use crate::provider_utils::{ParseJsonResult, convert_base64_to_bytes, safe_parse_json};
 
 /// Error returned when text cannot be extracted from a data URL.
@@ -21,6 +21,18 @@ impl std::fmt::Display for DataUrlTextError {
 }
 
 impl std::error::Error for DataUrlTextError {}
+
+/// Error returned when an array chunk size is invalid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SplitArrayError;
+
+impl std::fmt::Display for SplitArrayError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("chunkSize must be greater than 0")
+    }
+}
+
+impl std::error::Error for SplitArrayError {}
 
 /// Error returned when a high-level AI SDK utility receives an invalid argument.
 #[derive(Clone, Debug, PartialEq)]
@@ -158,6 +170,69 @@ impl ParsePartialJsonResult {
 /// not apply to [`JsonValue`].
 pub fn is_deep_equal_data(left: &JsonValue, right: &JsonValue) -> bool {
     left == right
+}
+
+/// Deeply merges two JSON object values.
+///
+/// This mirrors upstream `packages/ai` `mergeObjects` for Rust's JSON boundary:
+/// override fields replace base fields, nested objects are merged recursively,
+/// arrays and scalar values are replaced, and prototype-pollution keys from
+/// override objects are ignored. JavaScript-only `undefined`, `Date`, and
+/// `RegExp` values do not apply to [`JsonValue`].
+pub fn merge_objects(base: Option<&JsonValue>, overrides: Option<&JsonValue>) -> Option<JsonValue> {
+    match (base, overrides) {
+        (None, None) => None,
+        (Some(base), None) => Some(base.clone()),
+        (None, Some(overrides)) => Some(overrides.clone()),
+        (Some(JsonValue::Object(base)), Some(JsonValue::Object(overrides))) => {
+            Some(JsonValue::Object(merge_json_object_maps(base, overrides)))
+        }
+        (_, Some(overrides)) => Some(overrides.clone()),
+    }
+}
+
+fn merge_json_object_maps(base: &JsonObject, overrides: &JsonObject) -> JsonObject {
+    let mut result = base.clone();
+
+    for (key, override_value) in overrides {
+        if is_prototype_pollution_key(key) {
+            continue;
+        }
+
+        let merged_value = match (result.get(key), override_value) {
+            (Some(JsonValue::Object(base_object)), JsonValue::Object(override_object)) => {
+                JsonValue::Object(merge_json_object_maps(base_object, override_object))
+            }
+            _ => override_value.clone(),
+        };
+
+        result.insert(key.clone(), merged_value);
+    }
+
+    result
+}
+
+fn is_prototype_pollution_key(key: &str) -> bool {
+    matches!(key, "__proto__" | "constructor" | "prototype")
+}
+
+/// Splits a slice into cloned chunks of the supplied size.
+///
+/// This mirrors upstream `packages/ai` `splitArray`: chunk sizes must be
+/// greater than zero, an empty input returns an empty chunk list, and the final
+/// chunk may be shorter than the requested chunk size.
+pub fn split_array<T: Clone>(
+    array: &[T],
+    chunk_size: isize,
+) -> Result<Vec<Vec<T>>, SplitArrayError> {
+    if chunk_size <= 0 {
+        return Err(SplitArrayError);
+    }
+
+    Ok(array
+        .chunks(chunk_size as usize)
+        .map(<[T]>::to_vec)
+        .collect())
 }
 
 /// Calculates the cosine similarity between two vectors.
@@ -619,7 +694,7 @@ mod tests {
 
     use super::{
         DataUrlTextError, InvalidArgumentError, cosine_similarity, get_text_from_data_url,
-        is_deep_equal_data, parse_partial_json,
+        is_deep_equal_data, merge_objects, parse_partial_json, split_array,
     };
 
     fn assert_close(actual: f64, expected: f64) {
@@ -665,6 +740,126 @@ mod tests {
             &json!({ "0": "one", "1": "two", "length": 2 }),
             &json!(["one", "two"])
         ));
+    }
+
+    #[test]
+    fn merge_objects_deeply_merges_json_objects() {
+        let base = json!({
+            "a": 1,
+            "b": {
+                "c": [1, 2, 3],
+                "d": {
+                    "e": 4,
+                    "f": 5,
+                },
+            },
+        });
+        let overrides = json!({
+            "b": {
+                "c": [4, 5],
+                "d": {
+                    "f": 6,
+                    "g": 7,
+                },
+            },
+            "h": 8,
+        });
+
+        assert_eq!(
+            merge_objects(Some(&base), Some(&overrides)),
+            Some(json!({
+                "a": 1,
+                "b": {
+                    "c": [4, 5],
+                    "d": {
+                        "e": 4,
+                        "f": 6,
+                        "g": 7,
+                    },
+                },
+                "h": 8,
+            }))
+        );
+        assert_eq!(base["b"]["c"], json!([1, 2, 3]));
+        assert_eq!(overrides["b"]["c"], json!([4, 5]));
+    }
+
+    #[test]
+    fn merge_objects_handles_missing_inputs_and_replacements() {
+        let base = json!({ "a": 1, "b": null, "c": [1, 2, 3] });
+        let overrides = json!({ "a": null, "b": 2, "c": [4, 5] });
+
+        assert_eq!(merge_objects(None, None), None);
+        assert_eq!(merge_objects(Some(&base), None), Some(base.clone()));
+        assert_eq!(
+            merge_objects(None, Some(&overrides)),
+            Some(overrides.clone())
+        );
+        assert_eq!(
+            merge_objects(Some(&base), Some(&overrides)),
+            Some(json!({ "a": null, "b": 2, "c": [4, 5] }))
+        );
+    }
+
+    #[test]
+    fn merge_objects_ignores_dangerous_override_keys() {
+        let base = json!({
+            "existing": "ok",
+            "metadata": { "user": "alice" },
+        });
+        let malicious = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "__proto__": { "a": 1 },
+                "constructor": { "prototype": { "b": 2 } },
+                "prototype": { "c": 3 },
+                "safe": "value",
+                "metadata": {
+                    "__proto__": { "polluted": true },
+                    "role": "admin"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            merge_objects(Some(&base), Some(&malicious)),
+            Some(json!({
+                "existing": "ok",
+                "safe": "value",
+                "metadata": {
+                    "user": "alice",
+                    "role": "admin",
+                },
+            }))
+        );
+    }
+
+    #[test]
+    fn split_array_chunks_values_like_upstream() {
+        assert_eq!(
+            split_array(&[1, 2, 3, 4, 5], 2).unwrap(),
+            vec![vec![1, 2], vec![3, 4], vec![5]]
+        );
+        assert_eq!(split_array(&[1, 2, 3], 5).unwrap(), vec![vec![1, 2, 3]]);
+        assert_eq!(
+            split_array(&[1, 2, 3], 1).unwrap(),
+            vec![vec![1], vec![2], vec![3]]
+        );
+
+        let empty: Vec<Vec<i32>> = split_array(&[], 2).unwrap();
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn split_array_rejects_zero_and_negative_chunk_sizes() {
+        assert_eq!(
+            split_array(&[1, 2, 3], 0).unwrap_err(),
+            super::SplitArrayError
+        );
+        assert_eq!(
+            split_array(&[1, 2, 3], -1).unwrap_err().to_string(),
+            "chunkSize must be greater than 0"
+        );
     }
 
     #[test]

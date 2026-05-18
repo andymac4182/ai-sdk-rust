@@ -410,8 +410,8 @@ pub use upload_skill::{
 };
 pub use util::{
     DataUrlTextError, InvalidArgumentError as AiInvalidArgumentError, ParsePartialJsonResult,
-    ParsePartialJsonState, cosine_similarity, get_text_from_data_url, is_deep_equal_data,
-    parse_partial_json,
+    ParsePartialJsonState, SplitArrayError, cosine_similarity, get_text_from_data_url,
+    is_deep_equal_data, merge_objects, parse_partial_json, split_array,
 };
 pub use vercel::{
     DEFAULT_VERCEL_BASE_URL, VercelProvider, VercelProviderSettings, create_vercel, vercel,
