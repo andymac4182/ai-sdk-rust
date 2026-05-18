@@ -6366,6 +6366,61 @@ mod tests {
     }
 
     #[test]
+    fn gateway_image_model_preserves_warning_variants() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "images": ["iVBORw0KGgo="],
+                    "warnings": [
+                        {
+                            "type": "unsupported",
+                            "feature": "size"
+                        },
+                        {
+                            "type": "compatibility",
+                            "feature": "seed",
+                            "details": "Seed support is approximate."
+                        },
+                        {
+                            "type": "other",
+                            "message": "Gateway routed request"
+                        }
+                    ]
+                })
+                .to_string(),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .image_model("openai/gpt-image-1");
+        let result =
+            poll_ready(model.do_generate(ImageModelCallOptions::new(1).with_prompt("Warnings")));
+
+        assert_eq!(
+            result.warnings,
+            vec![
+                Warning::Unsupported {
+                    feature: "size".to_string(),
+                    details: None,
+                },
+                Warning::Compatibility {
+                    feature: "seed".to_string(),
+                    details: Some("Seed support is approximate.".to_string()),
+                },
+                Warning::Other {
+                    message: "Gateway routed request".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn gateway_reranking_model_reranks_through_rerank() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -6937,6 +6992,70 @@ mod tests {
         assert!(request_body.get("duration").is_none());
         assert!(request_body.get("fps").is_none());
         assert!(request_body.get("seed").is_none());
+    }
+
+    #[test]
+    fn gateway_video_model_preserves_warning_variants() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                format!(
+                    "data: {}\n\n",
+                    json!({
+                        "type": "result",
+                        "videos": [
+                            {
+                                "type": "base64",
+                                "data": "AAAAIGZ0eXBtcDQy",
+                                "mediaType": "video/mp4"
+                            }
+                        ],
+                        "warnings": [
+                            {
+                                "type": "unsupported",
+                                "feature": "resolution"
+                            },
+                            {
+                                "type": "compatibility",
+                                "feature": "seed",
+                                "details": "Seed support is approximate."
+                            },
+                            {
+                                "type": "other",
+                                "message": "Gateway routed request"
+                            }
+                        ]
+                    })
+                ),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .video_model("google/veo-2.0-generate-001");
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("Warnings")));
+
+        assert_eq!(
+            result.warnings,
+            vec![
+                Warning::Unsupported {
+                    feature: "resolution".to_string(),
+                    details: None,
+                },
+                Warning::Compatibility {
+                    feature: "seed".to_string(),
+                    details: Some("Seed support is approximate.".to_string()),
+                },
+                Warning::Other {
+                    message: "Gateway routed request".to_string(),
+                },
+            ]
+        );
     }
 
     #[test]
