@@ -20,7 +20,10 @@ use crate::language_model::{
     LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
     LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
     LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
-    LanguageModelToolCall, LanguageModelUsage, LanguageModelUserContentPart, OutputTokenUsage,
+    LanguageModelTool, LanguageModelToolCall, LanguageModelToolChoice,
+    LanguageModelToolContentPart, LanguageModelToolResultContentPart,
+    LanguageModelToolResultOutput, LanguageModelUsage, LanguageModelUserContentPart,
+    OutputTokenUsage,
 };
 use crate::openai_compatible::{OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel};
 use crate::provider::{
@@ -488,7 +491,7 @@ fn open_responses_request_body(
     options: &LanguageModelCallOptions,
 ) -> Result<(JsonValue, Vec<Warning>), String> {
     let mut warnings = Vec::new();
-    let (input, instructions) = open_responses_input(&options.prompt)?;
+    let (input, instructions) = open_responses_input(&options.prompt, &mut warnings)?;
     let mut body = JsonObject::new();
     body.insert("model".to_string(), JsonValue::String(model_id.to_string()));
     body.insert("input".to_string(), JsonValue::Array(input));
@@ -536,6 +539,15 @@ fn open_responses_request_body(
             feature: "seed".to_string(),
             details: None,
         });
+    }
+
+    let (tools, tool_choice) =
+        open_responses_prepare_tools(&options.tools, &options.tool_choice, &mut warnings);
+    if let Some(tools) = tools {
+        body.insert("tools".to_string(), JsonValue::Array(tools));
+    }
+    if let Some(tool_choice) = tool_choice {
+        body.insert("tool_choice".to_string(), tool_choice);
     }
 
     merge_open_responses_provider_options(
@@ -637,6 +649,7 @@ fn open_responses_camel_case_provider_options_key(value: &str) -> String {
 
 fn open_responses_input(
     prompt: &[LanguageModelMessage],
+    warnings: &mut Vec<Warning>,
 ) -> Result<(Vec<JsonValue>, Option<String>), String> {
     let mut input = Vec::new();
     let mut system_messages = Vec::new();
@@ -711,10 +724,30 @@ fn open_responses_input(
 
                 input.extend(tool_calls);
             }
-            LanguageModelMessage::Tool(_) => {
-                return Err(
-                    "Open Responses tool prompt messages are not implemented yet.".to_string(),
-                );
+            LanguageModelMessage::Tool(message) => {
+                for part in &message.content {
+                    match part {
+                        LanguageModelToolContentPart::ToolResult(part) => {
+                            input.push(json!({
+                                "type": "function_call_output",
+                                "call_id": part.tool_call_id,
+                                "output": open_responses_tool_result_output(
+                                    &part.output,
+                                    warnings
+                                )
+                            }));
+                        }
+                        LanguageModelToolContentPart::ToolApprovalResponse(_) => {
+                            warnings.push(Warning::Unsupported {
+                                feature: "toolApprovalResponse".to_string(),
+                                details: Some(
+                                    "Open Responses tool approval responses are not implemented yet."
+                                        .to_string(),
+                                ),
+                            });
+                        }
+                    }
+                }
             }
         }
     }
@@ -722,6 +755,122 @@ fn open_responses_input(
     let instructions = (!system_messages.is_empty()).then(|| system_messages.join("\n"));
 
     Ok((input, instructions))
+}
+
+fn open_responses_tool_result_output(
+    output: &LanguageModelToolResultOutput,
+    warnings: &mut Vec<Warning>,
+) -> JsonValue {
+    match output {
+        LanguageModelToolResultOutput::Text { value, .. }
+        | LanguageModelToolResultOutput::ErrorText { value, .. } => {
+            JsonValue::String(value.clone())
+        }
+        LanguageModelToolResultOutput::Json { value, .. }
+        | LanguageModelToolResultOutput::ErrorJson { value, .. } => {
+            JsonValue::String(value.to_string())
+        }
+        LanguageModelToolResultOutput::ExecutionDenied { reason, .. } => JsonValue::String(
+            reason
+                .clone()
+                .unwrap_or_else(|| "Tool call execution denied.".to_string()),
+        ),
+        LanguageModelToolResultOutput::Content { value } => {
+            let mut content = Vec::new();
+
+            for part in value {
+                match part {
+                    LanguageModelToolResultContentPart::Text(text) => {
+                        content.push(json!({
+                            "type": "input_text",
+                            "text": text.text
+                        }));
+                    }
+                    LanguageModelToolResultContentPart::File(_) => {
+                        warnings.push(Warning::Unsupported {
+                            feature: "toolResultFileContent".to_string(),
+                            details: Some(
+                                "Open Responses tool result file content is not implemented yet."
+                                    .to_string(),
+                            ),
+                        });
+                    }
+                    LanguageModelToolResultContentPart::Custom(_) => {
+                        warnings.push(Warning::Unsupported {
+                            feature: "toolResultCustomContent".to_string(),
+                            details: Some(
+                                "Open Responses tool result custom content is not implemented yet."
+                                    .to_string(),
+                            ),
+                        });
+                    }
+                }
+            }
+
+            JsonValue::Array(content)
+        }
+    }
+}
+
+fn open_responses_prepare_tools(
+    tools: &Option<Vec<LanguageModelTool>>,
+    tool_choice: &Option<LanguageModelToolChoice>,
+    warnings: &mut Vec<Warning>,
+) -> (Option<Vec<JsonValue>>, Option<JsonValue>) {
+    let prepared_tools = tools.as_ref().and_then(|tools| {
+        let prepared_tools = tools
+            .iter()
+            .filter_map(|tool| match tool {
+                LanguageModelTool::Function(tool) => {
+                    let mut function = JsonObject::new();
+                    function.insert(
+                        "type".to_string(),
+                        JsonValue::String("function".to_string()),
+                    );
+                    function.insert("name".to_string(), JsonValue::String(tool.name.clone()));
+
+                    if let Some(description) = &tool.description {
+                        function.insert(
+                            "description".to_string(),
+                            JsonValue::String(description.clone()),
+                        );
+                    }
+
+                    function.insert(
+                        "parameters".to_string(),
+                        JsonValue::Object(tool.input_schema.clone()),
+                    );
+
+                    if let Some(strict) = tool.strict {
+                        function.insert("strict".to_string(), JsonValue::Bool(strict));
+                    }
+
+                    Some(JsonValue::Object(function))
+                }
+                LanguageModelTool::Provider(tool) => {
+                    warnings.push(Warning::Unsupported {
+                        feature: format!("provider-defined tool {}", tool.id),
+                        details: None,
+                    });
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        (!prepared_tools.is_empty()).then_some(prepared_tools)
+    });
+
+    let prepared_tool_choice = tool_choice.as_ref().map(|choice| match choice {
+        LanguageModelToolChoice::Auto => JsonValue::String("auto".to_string()),
+        LanguageModelToolChoice::None => JsonValue::String("none".to_string()),
+        LanguageModelToolChoice::Required => JsonValue::String("required".to_string()),
+        LanguageModelToolChoice::Tool { tool_name } => json!({
+            "type": "function",
+            "name": tool_name
+        }),
+    });
+
+    (prepared_tools, prepared_tool_choice)
 }
 
 fn open_responses_content(response: &JsonValue) -> (Vec<LanguageModelContent>, bool) {
@@ -888,6 +1037,7 @@ fn open_responses_stream_result_from_response(
     let mut reasoning_buffers = BTreeMap::<String, String>::new();
     let mut active_reasoning = BTreeSet::<String>::new();
     let mut ended_reasoning = BTreeSet::<String>::new();
+    let mut pending_tool_calls = BTreeMap::<String, PendingOpenResponsesToolCall>::new();
 
     for event in events {
         match event {
@@ -1008,11 +1158,29 @@ fn open_responses_stream_result_from_response(
                             );
                         }
                     }
+                    Some("response.output_item.added") => {
+                        if let Some(item) = value.get("item") {
+                            open_responses_record_pending_tool_call(&mut pending_tool_calls, item);
+                        }
+                    }
+                    Some("response.function_call_arguments.delta") => {
+                        open_responses_append_pending_tool_call_arguments(
+                            &mut pending_tool_calls,
+                            &value,
+                        );
+                    }
+                    Some("response.function_call_arguments.done") => {
+                        open_responses_finish_pending_tool_call_arguments(
+                            &mut pending_tool_calls,
+                            &value,
+                        );
+                    }
                     Some("response.output_item.done") => {
                         if let Some(item) = value.get("item")
                             && open_responses_push_tool_call_from_item(
                                 &mut stream,
                                 &mut emitted_tool_calls,
+                                &mut pending_tool_calls,
                                 item,
                             )
                         {
@@ -1025,6 +1193,7 @@ fn open_responses_stream_result_from_response(
                             has_tool_calls |= open_responses_push_tool_calls_from_response(
                                 &mut stream,
                                 &mut emitted_tool_calls,
+                                &mut pending_tool_calls,
                                 response,
                             );
                             finish_reason = map_open_responses_finish_reason(
@@ -1326,6 +1495,7 @@ fn open_responses_is_reasoning_text_part(part_type: Option<&str>) -> bool {
 fn open_responses_push_tool_calls_from_response(
     stream: &mut Vec<LanguageModelStreamPart>,
     emitted_tool_calls: &mut BTreeSet<String>,
+    pending_tool_calls: &mut BTreeMap<String, PendingOpenResponsesToolCall>,
     response: &JsonValue,
 ) -> bool {
     let mut has_tool_calls = false;
@@ -1336,7 +1506,12 @@ fn open_responses_push_tool_calls_from_response(
         .into_iter()
         .flatten()
     {
-        has_tool_calls |= open_responses_push_tool_call_from_item(stream, emitted_tool_calls, item);
+        has_tool_calls |= open_responses_push_tool_call_from_item(
+            stream,
+            emitted_tool_calls,
+            pending_tool_calls,
+            item,
+        );
     }
 
     has_tool_calls
@@ -1359,6 +1534,7 @@ fn open_responses_response_has_tool_calls(response: &JsonValue) -> bool {
 fn open_responses_push_tool_call_from_item(
     stream: &mut Vec<LanguageModelStreamPart>,
     emitted_tool_calls: &mut BTreeSet<String>,
+    pending_tool_calls: &mut BTreeMap<String, PendingOpenResponsesToolCall>,
     item: &JsonValue,
 ) -> bool {
     if !matches!(
@@ -1368,23 +1544,38 @@ fn open_responses_push_tool_call_from_item(
         return false;
     }
 
+    let item_id = item.get("id").and_then(JsonValue::as_str);
+    let pending = item_id.and_then(|item_id| pending_tool_calls.remove(item_id));
     let tool_call_id = item
         .get("call_id")
-        .or_else(|| item.get("id"))
         .and_then(JsonValue::as_str)
-        .unwrap_or_default()
-        .to_string();
+        .map(ToString::to_string)
+        .or_else(|| {
+            pending
+                .as_ref()
+                .and_then(|pending| pending.tool_call_id.clone())
+        })
+        .or_else(|| item_id.map(ToString::to_string))
+        .unwrap_or_default();
     let tool_name = item
         .get("name")
         .and_then(JsonValue::as_str)
+        .map(ToString::to_string)
+        .or_else(|| {
+            pending
+                .as_ref()
+                .and_then(|pending| pending.tool_name.clone())
+        })
         .unwrap_or_default();
     let input = item
         .get("arguments")
         .and_then(JsonValue::as_str)
+        .filter(|arguments| !arguments.is_empty())
         .map(ToString::to_string)
+        .or_else(|| pending.and_then(|pending| pending.arguments))
         .unwrap_or_else(|| "{}".to_string());
     let dedupe_key = if tool_call_id.is_empty() {
-        format!("{tool_name}:{input}")
+        format!("{}:{input}", tool_name)
     } else {
         tool_call_id.clone()
     };
@@ -1397,6 +1588,78 @@ fn open_responses_push_tool_call_from_item(
         LanguageModelToolCall::new(tool_call_id, tool_name, input),
     ));
     true
+}
+
+#[derive(Clone, Debug, Default)]
+struct PendingOpenResponsesToolCall {
+    tool_name: Option<String>,
+    tool_call_id: Option<String>,
+    arguments: Option<String>,
+}
+
+fn open_responses_record_pending_tool_call(
+    pending_tool_calls: &mut BTreeMap<String, PendingOpenResponsesToolCall>,
+    item: &JsonValue,
+) {
+    if !matches!(
+        item.get("type").and_then(JsonValue::as_str),
+        Some("function_call")
+    ) {
+        return;
+    }
+
+    let Some(item_id) = item.get("id").and_then(JsonValue::as_str) else {
+        return;
+    };
+
+    let pending = pending_tool_calls.entry(item_id.to_string()).or_default();
+    if let Some(tool_name) = item.get("name").and_then(JsonValue::as_str) {
+        pending.tool_name = Some(tool_name.to_string());
+    }
+    if let Some(tool_call_id) = item.get("call_id").and_then(JsonValue::as_str) {
+        pending.tool_call_id = Some(tool_call_id.to_string());
+    }
+    if let Some(arguments) = item.get("arguments").and_then(JsonValue::as_str)
+        && !arguments.is_empty()
+    {
+        pending.arguments = Some(arguments.to_string());
+    }
+}
+
+fn open_responses_append_pending_tool_call_arguments(
+    pending_tool_calls: &mut BTreeMap<String, PendingOpenResponsesToolCall>,
+    value: &JsonValue,
+) {
+    let Some(item_id) = value.get("item_id").and_then(JsonValue::as_str) else {
+        return;
+    };
+    let Some(delta) = value.get("delta").and_then(JsonValue::as_str) else {
+        return;
+    };
+
+    pending_tool_calls
+        .entry(item_id.to_string())
+        .or_default()
+        .arguments
+        .get_or_insert_with(String::new)
+        .push_str(delta);
+}
+
+fn open_responses_finish_pending_tool_call_arguments(
+    pending_tool_calls: &mut BTreeMap<String, PendingOpenResponsesToolCall>,
+    value: &JsonValue,
+) {
+    let Some(item_id) = value.get("item_id").and_then(JsonValue::as_str) else {
+        return;
+    };
+    let Some(arguments) = value.get("arguments").and_then(JsonValue::as_str) else {
+        return;
+    };
+
+    pending_tool_calls
+        .entry(item_id.to_string())
+        .or_default()
+        .arguments = Some(arguments.to_string());
 }
 
 fn open_responses_stream_error(
@@ -1602,12 +1865,17 @@ mod tests {
     };
     use crate::generate_text::{GenerateTextOptions, generate_text};
     use crate::headers::Headers;
-    use crate::json::JsonValue;
-    use crate::language_model::FinishReason;
+    use crate::json::{JsonObject, JsonValue};
+    use crate::language_model::{
+        FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelMessage,
+        LanguageModelStreamPart, LanguageModelTextPart, LanguageModelToolChoice,
+        LanguageModelUserContentPart, LanguageModelUserMessage,
+    };
     use crate::prompt::Prompt;
     use crate::provider::{ModelType, Provider, ProviderMetadata, ProviderOptions};
     use crate::provider_utils::{
         ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+        Tool,
     };
     use crate::stream_text::{StreamTextOptions, TextStreamPart, stream_text};
     use serde_json::json;
@@ -1938,6 +2206,229 @@ mod tests {
                 "stream": true
             }))
         );
+    }
+
+    #[test]
+    fn open_responses_streams_function_call_argument_deltas() {
+        let transport: OpenResponsesTransport = Arc::new(
+            move |_request| -> OpenResponsesTransportFuture {
+                let sse = [
+                    r#"data: {"type":"response.created","response":{"id":"resp_stream_tool","created_at":1711115037,"model":"gpt-4.1-mini"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_weather","name":"weather","arguments":""}}"#,
+                    "",
+                    r#"data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"{\"location\""}"#,
+                    "",
+                    r#"data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":":\"Brisbane\"}"}"#,
+                    "",
+                    r#"data: {"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":0,"arguments":"{\"location\":\"Brisbane\"}"}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_weather","name":"weather","arguments":""}}"#,
+                    "",
+                    r#"data: {"type":"response.completed","response":{"id":"resp_stream_tool","created_at":1711115037,"model":"gpt-4.1-mini","output":[{"id":"fc_1","type":"function_call","call_id":"call_weather","name":"weather","arguments":"{\"location\":\"Brisbane\"}"}],"usage":{"input_tokens":6,"output_tokens":3}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let stream_result = poll_ready(model.do_stream(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Weather?")),
+            ])),
+        ])));
+
+        let tool_call = stream_result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .expect("stream includes a tool call");
+        assert_eq!(tool_call.tool_call_id, "call_weather");
+        assert_eq!(tool_call.tool_name, "weather");
+        assert_eq!(tool_call.input, r#"{"location":"Brisbane"}"#);
+        assert_eq!(
+            stream_result.stream.iter().find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => {
+                    Some(finish.finish_reason.unified.clone())
+                }
+                _ => None,
+            }),
+            Some(FinishReason::ToolCalls)
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_runs_generate_text_tool_loop_end_to_end() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let captured_requests_for_transport = Arc::clone(&captured_requests);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                let call_number = {
+                    let mut requests = captured_requests_for_transport
+                        .lock()
+                        .expect("captured requests mutex is not poisoned");
+                    requests.push(request.clone());
+                    requests.len()
+                };
+
+                let body = if call_number == 1 {
+                    json!({
+                        "id": "resp_tool_call",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "id": "fc_weather",
+                                "type": "function_call",
+                                "call_id": "call_weather",
+                                "name": "weather",
+                                "arguments": "{\"location\":\"Brisbane\"}"
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 9,
+                            "output_tokens": 3
+                        }
+                    })
+                } else {
+                    json!({
+                        "id": "resp_tool_final",
+                        "created_at": 1711115038,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Brisbane is sunny."
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 12,
+                            "output_tokens": 4
+                        }
+                    })
+                };
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    body.to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let input_schema: JsonObject = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "location": {
+                    "type": "string"
+                }
+            },
+            "required": ["location"]
+        }))
+        .expect("schema deserializes");
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(&model, Prompt::from_prompt("Weather in Brisbane?"))
+                .expect("prompt is valid")
+                .with_tool(
+                    Tool::new("weather", input_schema.clone())
+                        .with_description("Get weather for a location")
+                        .with_execute(|input, options| async move {
+                            Ok(json!({
+                                "location": input
+                                    .get("location")
+                                    .and_then(JsonValue::as_str)
+                                    .unwrap_or("Brisbane"),
+                                "forecast": "sunny",
+                                "toolCallId": options.tool_call_id
+                            }))
+                        }),
+                )
+                .with_tool_choice(LanguageModelToolChoice::Tool {
+                    tool_name: "weather".to_string(),
+                })
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(result.text, "Brisbane is sunny.");
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_results.len(), 1);
+
+        let requests = captured_requests
+            .lock()
+            .expect("captured requests mutex is not poisoned")
+            .clone();
+        assert_eq!(requests.len(), 2);
+
+        let first_body = requests[0]
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("first request body is JSON");
+        assert_eq!(
+            first_body.get("tools"),
+            Some(&json!([
+                {
+                    "type": "function",
+                    "name": "weather",
+                    "description": "Get weather for a location",
+                    "parameters": input_schema
+                }
+            ]))
+        );
+        assert_eq!(
+            first_body.get("tool_choice"),
+            Some(&json!({
+                "type": "function",
+                "name": "weather"
+            }))
+        );
+
+        let second_body = requests[1]
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("second request body is JSON");
+        let second_input = second_body
+            .get("input")
+            .and_then(JsonValue::as_array)
+            .expect("second request input is an array");
+        assert!(second_input.iter().any(|item| {
+            item.get("type").and_then(JsonValue::as_str) == Some("function_call")
+                && item.get("call_id").and_then(JsonValue::as_str) == Some("call_weather")
+        }));
+        assert!(second_input.iter().any(|item| {
+            item.get("type").and_then(JsonValue::as_str) == Some("function_call_output")
+                && item.get("call_id").and_then(JsonValue::as_str) == Some("call_weather")
+                && item
+                    .get("output")
+                    .and_then(JsonValue::as_str)
+                    .is_some_and(|output| output.contains("\"forecast\":\"sunny\""))
+        }));
     }
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
