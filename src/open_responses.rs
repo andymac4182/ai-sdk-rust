@@ -10494,6 +10494,123 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_prepares_web_search_preview_and_local_shell_tools() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_preview_shell_tools",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Preview search and local shell prepared"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 8,
+                            "output_tokens": 2
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Use preview search and local shell"),
+                    )]),
+                )])
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.web_search_preview",
+                    "previewSearch",
+                    json_object(json!({
+                        "searchContextSize": "medium",
+                        "userLocation": {
+                            "type": "approximate",
+                            "country": "US",
+                            "city": "Seattle",
+                            "region": "Washington",
+                            "timezone": "America/Los_Angeles"
+                        }
+                    })),
+                )))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.local_shell",
+                    "localShell",
+                    JsonObject::new(),
+                )))
+                .with_tool_choice(LanguageModelToolChoice::Tool {
+                    tool_name: "previewSearch".to_string(),
+                }),
+            ),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert!(result.warnings.is_empty());
+
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "web_search_preview",
+                    "search_context_size": "medium",
+                    "user_location": {
+                        "type": "approximate",
+                        "country": "US",
+                        "city": "Seattle",
+                        "region": "Washington",
+                        "timezone": "America/Los_Angeles"
+                    }
+                },
+                {
+                    "type": "local_shell"
+                }
+            ])
+        );
+        assert_eq!(
+            request_body["tool_choice"],
+            json!({
+                "type": "web_search_preview"
+            })
+        );
+    }
+
+    #[test]
     fn open_responses_provider_prepares_code_interpreter_and_image_generation_options() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
