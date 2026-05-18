@@ -137,7 +137,8 @@ impl VercelAiGatewayOpenAICompatibleProvider {
                 .base_url
                 .as_deref()
                 .unwrap_or(VERCEL_AI_GATEWAY_OPENAI_COMPATIBLE_BASE_URL),
-        );
+        )
+        .with_supports_json_object_response_format(false);
 
         if let Some(api_key) = vercel_ai_gateway_api_key(self.settings.api_key.as_ref()) {
             settings = settings.with_api_key(api_key);
@@ -891,26 +892,32 @@ mod tests {
             request.headers.get("custom-header").map(String::as_str),
             Some("value")
         );
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+        assert_eq!(request_body["model"], "openai/gpt-4.1-mini");
+        assert_eq!(request_body["max_tokens"], 32);
+        assert_eq!(request_body["temperature"], 0.0);
+        assert!(
+            request_body.get("response_format").is_none(),
+            "Gateway OpenAI-compatible requests omit unsupported response_format"
+        );
+        let messages = request_body["messages"]
+            .as_array()
+            .expect("messages are sent");
+        assert_eq!(messages[0]["role"], "system");
+        assert!(
+            messages[0]["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("JSON schema:"))
+        );
+        assert_eq!(messages[1]["role"], "user");
         assert_eq!(
-            request
-                .body
-                .as_ref()
-                .and_then(ProviderApiRequestBody::as_text)
-                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
-            Some(json!({
-                "model": "openai/gpt-4.1-mini",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "Return a JSON object with answer and count."
-                    }
-                ],
-                "max_tokens": 32,
-                "temperature": 0.0,
-                "response_format": {
-                    "type": "json_object"
-                }
-            }))
+            messages[1]["content"],
+            "Return a JSON object with answer and count."
         );
     }
 
@@ -1080,27 +1087,33 @@ mod tests {
             request.headers.get("custom-header").map(String::as_str),
             Some("value")
         );
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+        assert_eq!(request_body["model"], "openai/gpt-4.1-mini");
+        assert_eq!(request_body["max_tokens"], 40);
+        assert_eq!(request_body["temperature"], 0.0);
+        assert_eq!(request_body["stream"], true);
+        assert!(
+            request_body.get("response_format").is_none(),
+            "Gateway OpenAI-compatible stream requests omit unsupported response_format"
+        );
+        let messages = request_body["messages"]
+            .as_array()
+            .expect("messages are sent");
+        assert_eq!(messages[0]["role"], "system");
+        assert!(
+            messages[0]["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("JSON schema:"))
+        );
+        assert_eq!(messages[1]["role"], "user");
         assert_eq!(
-            request
-                .body
-                .as_ref()
-                .and_then(ProviderApiRequestBody::as_text)
-                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
-            Some(json!({
-                "model": "openai/gpt-4.1-mini",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "Stream a JSON object with answer and count."
-                    }
-                ],
-                "max_tokens": 40,
-                "temperature": 0.0,
-                "stream": true,
-                "response_format": {
-                    "type": "json_object"
-                }
-            }))
+            messages[1]["content"],
+            "Stream a JSON object with answer and count."
         );
     }
 
@@ -1718,6 +1731,117 @@ mod tests {
                 .contains("rust-vercel-ai-gateway-stream-ok"),
             "Gateway OpenAI-compatible stream response did not contain expected marker"
         );
+    }
+
+    #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI-compatible object call"]
+    fn live_vercel_ai_gateway_openai_compatible_generate_object() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!(
+                "skipping live Gateway OpenAI-compatible object test because no API key is configured"
+            );
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_AI_GATEWAY_OPENAI_COMPATIBLE_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_OPENAI_COMPATIBLE_MODEL"))
+            .or_else(|_| env::var("AI_SDK_RUST_GATEWAY_MODEL"))
+            .or_else(|_| env::var("AI_GATEWAY_MODEL"))
+            .unwrap_or_else(|_| "openai/gpt-4.1-mini".to_string());
+        let model = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key(api_key)
+            .language_model(model_id);
+        let object_schema: JsonObject = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "marker": {
+                    "type": "string"
+                },
+                "count": {
+                    "type": "integer"
+                }
+            },
+            "required": ["marker", "count"],
+            "additionalProperties": false
+        }))
+        .expect("schema deserializes");
+
+        let result = poll_ready(generate_object(
+            GenerateObjectOptions::from_prompt(
+                &model,
+                Prompt::from_prompt(
+                    "Return a JSON object with marker exactly \"rust-vercel-ai-gateway-object-ok\" and count exactly 7.",
+                ),
+            )
+            .expect("prompt is valid")
+            .with_schema(json_schema(object_schema))
+            .with_max_output_tokens(80)
+            .with_temperature(0.0),
+        ))
+        .expect("Gateway OpenAI-compatible object generation succeeds");
+
+        assert_eq!(
+            result.object.get("marker").and_then(JsonValue::as_str),
+            Some("rust-vercel-ai-gateway-object-ok")
+        );
+        assert_eq!(
+            result.object.get("count").and_then(JsonValue::as_i64),
+            Some(7)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI-compatible stream object call"]
+    fn live_vercel_ai_gateway_openai_compatible_stream_object() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!(
+                "skipping live Gateway OpenAI-compatible stream object test because no API key is configured"
+            );
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_AI_GATEWAY_OPENAI_COMPATIBLE_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_OPENAI_COMPATIBLE_MODEL"))
+            .or_else(|_| env::var("AI_SDK_RUST_GATEWAY_MODEL"))
+            .or_else(|_| env::var("AI_GATEWAY_MODEL"))
+            .unwrap_or_else(|_| "openai/gpt-4.1-mini".to_string());
+        let model = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key(api_key)
+            .language_model(model_id);
+        let object_schema: JsonObject = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "marker": {
+                    "type": "string"
+                },
+                "count": {
+                    "type": "integer"
+                }
+            },
+            "required": ["marker", "count"],
+            "additionalProperties": false
+        }))
+        .expect("schema deserializes");
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::from_prompt(
+                &model,
+                Prompt::from_prompt(
+                    "Return a JSON object with marker exactly \"rust-vercel-ai-gateway-stream-object-ok\" and count exactly 8.",
+                ),
+            )
+            .expect("prompt is valid")
+            .with_schema(json_schema(object_schema))
+            .with_max_output_tokens(80)
+            .with_temperature(0.0),
+        ));
+        let object = result
+            .object
+            .expect("Gateway OpenAI-compatible stream object is generated");
+
+        assert_eq!(
+            object.get("marker").and_then(JsonValue::as_str),
+            Some("rust-vercel-ai-gateway-stream-object-ok")
+        );
+        assert_eq!(object.get("count").and_then(JsonValue::as_i64), Some(8));
     }
 
     #[test]
