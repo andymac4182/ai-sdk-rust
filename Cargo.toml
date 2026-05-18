@@ -1,5 +1,10 @@
 [workspace]
-members = [".", "crates/ai-sdk-deepseek", "crates/ai-sdk-lmnt"]
+members = [
+    ".",
+    "crates/ai-sdk-deepseek",
+    "crates/ai-sdk-lmnt",
+    "crates/ai-sdk-perplexity",
+]
 resolver = "3"
 
 [package]
