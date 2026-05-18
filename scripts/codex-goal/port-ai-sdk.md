@@ -96,20 +96,22 @@ blocker that needs human input.
 
 ## Required Work Order
 
-The implementation order is a hard gate:
+The implementation order is a hard two-phase gate:
 
-1. Finish ALL common/core SDK packages.
-2. Finish Vercel AI Gateway provider coverage, including Gateway's
-   OpenAI-compatible and Open Responses routes.
-3. Only then resume unrelated standalone provider packages.
+1. Finish ALL common/core SDK packages together with Vercel AI Gateway provider
+   coverage, including Gateway's OpenAI-compatible and Open Responses routes.
+2. Only then resume unrelated standalone provider packages.
 
 The first phase includes `packages/ai`, `packages/provider`,
 `packages/provider-utils`, `packages/openai-compatible`,
-`packages/open-responses`, `packages/gateway`, and portable non-provider rows
-such as MCP, OTel, Workflow, telemetry, logger, UI transport, chat/completion
-transport, and test-server support. Do not pick another standalone provider
-slice while any first-phase row is still `not-started` or `in-progress`, unless
-that row is explicitly documented as intentionally non-portable.
+`packages/open-responses`, `packages/gateway`, Vercel AI Gateway's
+OpenAI-compatible and Open Responses routes, and portable non-provider rows such
+as MCP, OTel, Workflow, telemetry, logger, UI transport, chat/completion
+transport, and test-server support. Treat Vercel AI Gateway as part of this
+first phase, not as one of the later standalone provider packages. Do not pick
+another standalone provider slice while any first-phase row is still
+`not-started` or `in-progress`, unless that row is explicitly documented as
+intentionally non-portable.
 
 ## Priorities
 
@@ -167,10 +169,10 @@ that row is explicitly documented as intentionally non-portable.
    exceptions only when mirroring upstream package names.
 13. Do not churn dependencies, CI, or unrelated modules unless the next SDK
     slice genuinely requires it.
-14. Work in this order as a hard gate: finish ALL common/core SDK packages and
-    Vercel AI Gateway provider coverage first, then return to the remaining
-    standalone providers. The first phase includes `packages/ai`, `packages/provider`,
-    `packages/provider-utils`, `packages/openai-compatible`,
+14. Work in this order as a hard gate: finish ALL common/core SDK packages
+    together with Vercel AI Gateway provider coverage first, then return to the
+    remaining standalone providers. The first phase includes `packages/ai`,
+    `packages/provider`, `packages/provider-utils`, `packages/openai-compatible`,
     `packages/open-responses`, `packages/gateway`, the Vercel AI Gateway
     OpenAI-compatible and Open Responses routes, and portable non-provider
     package rows such as MCP, OTel, Workflow, telemetry, logger, UI transport,
@@ -224,8 +226,9 @@ Repeat this loop until the goal is complete or you hit a real blocker:
 1. Pull the latest `main` into your worktree branch.
 2. Re-scan or consult `docs/upstream-parity.md`.
 3. Pick the highest-value unported or unverified upstream package/API/provider,
-   respecting the required ordering: common/core SDK packages and Vercel AI
-   Gateway first, unrelated standalone providers after those rows are closed.
+   respecting the required ordering: common/core SDK packages together with
+   Vercel AI Gateway first, unrelated standalone providers after those rows are
+   closed.
 4. Implement it with tests and docs/examples where useful.
 5. Update `docs/upstream-parity.md` with status, evidence, and next queue.
 6. Run validation.

@@ -38,7 +38,8 @@ matching crates.
 
 The queue is two-phase and gated:
 
-1. Finish ALL common/core SDK packages and Vercel AI Gateway provider coverage.
+1. Finish ALL common/core SDK packages together with Vercel AI Gateway provider
+   coverage.
 2. Resume unrelated standalone provider packages only after that first phase is
    verified or intentionally documented as non-portable.
 
@@ -47,8 +48,9 @@ The first phase includes `packages/ai`, `packages/provider`,
 `packages/open-responses`, `packages/gateway`, the Vercel AI Gateway
 OpenAI-compatible and Open Responses routes, and portable non-provider rows such
 as MCP, OTel, Workflow, telemetry, logger, UI transport, chat/completion
-transport, and test-server support. A standalone provider slice is blocked
-while any first-phase row is `not-started` or `in-progress`.
+transport, and test-server support. Treat Vercel AI Gateway as part of the
+first phase, not as one of the later standalone providers. A standalone provider
+slice is blocked while any first-phase row is `not-started` or `in-progress`.
 
 ## Inventory Rules
 
@@ -303,14 +305,16 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ## Next Unported Work Queue
 
-1. Finish ALL common/core SDK packages and Vercel AI Gateway coverage before
-   returning to unrelated standalone providers. This ordering is a hard gate,
-   not a preference, and it covers
+1. Finish ALL common/core SDK packages together with Vercel AI Gateway coverage
+   before returning to unrelated standalone providers. This ordering is a hard
+   gate, not a preference, and it covers
    `packages/ai`, `packages/provider`, `packages/provider-utils`,
    `packages/openai-compatible`, `packages/open-responses`, `packages/gateway`,
    the Vercel AI Gateway OpenAI-compatible and Open Responses routes, and the
    portable non-provider package rows such as MCP, OTel, Workflow, telemetry,
-   UI transport, chat/completion transport, and test-server support.
+   UI transport, chat/completion transport, and test-server support. Vercel AI
+   Gateway belongs to this first phase and must not be deferred with the other
+   standalone providers.
    Standalone provider slices are blocked while any of these rows are not yet
    verified or explicitly documented as intentionally non-portable.
 2. Close the remaining Open Responses structured output/tools matrix, especially
