@@ -10190,6 +10190,129 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_prepares_function_tool_strict_modes() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_strict_tools",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Strict tools prepared"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 7,
+                            "output_tokens": 2
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let empty_object_schema = || {
+            json_object(json!({
+                "type": "object",
+                "properties": {}
+            }))
+        };
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Use strict tools"),
+                    )]),
+                )])
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new("strict_tool", empty_object_schema())
+                        .with_description("A strict tool")
+                        .with_strict(true),
+                ))
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new("non_strict_tool", empty_object_schema())
+                        .with_description("A non-strict tool")
+                        .with_strict(false),
+                ))
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new("default_tool", empty_object_schema())
+                        .with_description("A default tool"),
+                )),
+            ),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "function",
+                    "name": "strict_tool",
+                    "description": "A strict tool",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    },
+                    "strict": true
+                },
+                {
+                    "type": "function",
+                    "name": "non_strict_tool",
+                    "description": "A non-strict tool",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    },
+                    "strict": false
+                },
+                {
+                    "type": "function",
+                    "name": "default_tool",
+                    "description": "A default tool",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn open_responses_provider_prepares_openai_hosted_tools() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
