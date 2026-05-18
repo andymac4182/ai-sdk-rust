@@ -493,6 +493,8 @@ fn open_responses_request_body(
     let provider_tool_names = open_responses_provider_tool_names();
     let tool_name_mapping =
         create_tool_name_mapping(options.tools.iter().flatten(), &provider_tool_names);
+    let has_local_shell_tool =
+        open_responses_has_provider_tool(&options.tools, "openai.local_shell");
     let has_shell_tool = open_responses_has_provider_tool(&options.tools, "openai.shell");
     let store = open_responses_store_enabled(provider_options_name, provider_options);
     let has_conversation =
@@ -507,15 +509,16 @@ fn open_responses_request_body(
             ),
         });
     }
-    let (input, instructions) = open_responses_input(
-        &options.prompt,
+    let prompt_input_options = OpenResponsesPromptInputOptions {
         store,
         has_conversation,
         provider_options_name,
-        &tool_name_mapping,
+        tool_name_mapping: &tool_name_mapping,
+        has_local_shell_tool,
         has_shell_tool,
-        &mut warnings,
-    )?;
+    };
+    let (input, instructions) =
+        open_responses_input(&options.prompt, &prompt_input_options, &mut warnings)?;
     let mut body = JsonObject::new();
     body.insert("model".to_string(), JsonValue::String(model_id.to_string()));
     body.insert("input".to_string(), JsonValue::Array(input));
@@ -944,15 +947,26 @@ fn open_responses_camel_case_provider_options_key(value: &str) -> String {
     output
 }
 
-fn open_responses_input(
-    prompt: &[LanguageModelMessage],
+struct OpenResponsesPromptInputOptions<'a> {
     store: bool,
     has_conversation: bool,
-    provider_options_name: &str,
-    tool_name_mapping: &ToolNameMapping,
+    provider_options_name: &'a str,
+    tool_name_mapping: &'a ToolNameMapping,
+    has_local_shell_tool: bool,
     has_shell_tool: bool,
+}
+
+fn open_responses_input(
+    prompt: &[LanguageModelMessage],
+    options: &OpenResponsesPromptInputOptions<'_>,
     warnings: &mut Vec<Warning>,
 ) -> Result<(Vec<JsonValue>, Option<String>), String> {
+    let store = options.store;
+    let has_conversation = options.has_conversation;
+    let provider_options_name = options.provider_options_name;
+    let tool_name_mapping = options.tool_name_mapping;
+    let has_local_shell_tool = options.has_local_shell_tool;
+    let has_shell_tool = options.has_shell_tool;
     let mut input = Vec::new();
     let mut system_messages = Vec::new();
     let mut processed_approval_ids = BTreeSet::new();
@@ -1097,6 +1111,12 @@ fn open_responses_input(
                                 continue;
                             }
 
+                            if has_local_shell_tool && resolved_tool_name == "local_shell" {
+                                assistant_items
+                                    .push(open_responses_local_shell_call_item(tool_call, item_id));
+                                continue;
+                            }
+
                             if has_shell_tool && resolved_tool_name == "shell" {
                                 assistant_items
                                     .push(open_responses_shell_call_item(tool_call, item_id));
@@ -1213,6 +1233,17 @@ fn open_responses_input(
                                     None,
                                     JsonValue::String(part.tool_call_id.clone()),
                                     "client",
+                                    output,
+                                ));
+                                continue;
+                            }
+
+                            if has_local_shell_tool
+                                && resolved_tool_name == "local_shell"
+                                && let Some(output) = open_responses_tool_result_json(&part.output)
+                            {
+                                input.push(open_responses_local_shell_call_output_item(
+                                    &part.tool_call_id,
                                     output,
                                 ));
                                 continue;
@@ -1365,6 +1396,63 @@ fn open_responses_tool_search_output_item(
             .unwrap_or_else(|| JsonValue::Array(Vec::new())),
     );
     JsonValue::Object(item)
+}
+
+fn open_responses_local_shell_call_item(
+    tool_call: &LanguageModelToolCallPart,
+    item_id: Option<&str>,
+) -> JsonValue {
+    let parsed_input = open_responses_prompt_json_object_input(&tool_call.input);
+    let action = parsed_input
+        .get("action")
+        .and_then(JsonValue::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut request_action = JsonObject::new();
+    request_action.insert(
+        "type".to_string(),
+        action
+            .get("type")
+            .cloned()
+            .unwrap_or_else(|| JsonValue::String("exec".to_string())),
+    );
+    request_action.insert(
+        "command".to_string(),
+        action
+            .get("command")
+            .cloned()
+            .unwrap_or_else(|| JsonValue::Array(Vec::new())),
+    );
+    if let Some(timeout_ms) = action.get("timeoutMs").filter(|value| !value.is_null()) {
+        request_action.insert("timeout_ms".to_string(), timeout_ms.clone());
+    }
+    if let Some(user) = action.get("user").filter(|value| !value.is_null()) {
+        request_action.insert("user".to_string(), user.clone());
+    }
+    if let Some(working_directory) = action
+        .get("workingDirectory")
+        .filter(|value| !value.is_null())
+    {
+        request_action.insert("working_directory".to_string(), working_directory.clone());
+    }
+    if let Some(environment) = action.get("env").filter(|value| !value.is_null()) {
+        request_action.insert("env".to_string(), environment.clone());
+    }
+
+    json!({
+        "type": "local_shell_call",
+        "call_id": tool_call.tool_call_id,
+        "id": item_id.unwrap_or(tool_call.tool_call_id.as_str()),
+        "action": request_action
+    })
+}
+
+fn open_responses_local_shell_call_output_item(call_id: &str, output: &JsonValue) -> JsonValue {
+    json!({
+        "type": "local_shell_call_output",
+        "call_id": call_id,
+        "output": output.get("output").cloned().unwrap_or(JsonValue::Null)
+    })
 }
 
 fn open_responses_shell_call_item(
@@ -5532,6 +5620,14 @@ mod tests {
         ))
     }
 
+    fn open_responses_test_local_shell_tool() -> LanguageModelTool {
+        LanguageModelTool::Provider(LanguageModelProviderTool::new(
+            "openai.local_shell",
+            "local_shell",
+            JsonObject::new(),
+        ))
+    }
+
     #[test]
     fn open_responses_provider_generates_text_with_request_and_response_metadata() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
@@ -6584,6 +6680,141 @@ mod tests {
                             "text": "Search complete."
                         }
                     ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_reconstructs_local_shell_history_with_store_false() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_local_shell_history",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Local shell history accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 10,
+                            "output_tokens": 3
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let item_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "itemId": "local_shell_item_1"
+            }
+        }))
+        .expect("provider options deserialize");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "store": false
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![
+                    LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                        LanguageModelAssistantContentPart::ToolCall(
+                            LanguageModelToolCallPart::new(
+                                "call_local_shell_1",
+                                "local_shell",
+                                json!({
+                                    "action": {
+                                        "type": "exec",
+                                        "command": ["ls"],
+                                        "timeoutMs": 1000,
+                                        "user": "builder",
+                                        "workingDirectory": "/tmp/work",
+                                        "env": {
+                                            "RUST_LOG": "debug"
+                                        }
+                                    }
+                                }),
+                            )
+                            .with_provider_options(item_options),
+                        ),
+                    ])),
+                    LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                        LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                            "call_local_shell_1",
+                            "local_shell",
+                            LanguageModelToolResultOutput::json(json!({
+                                "output": "example output"
+                            })),
+                        )),
+                    ])),
+                ])
+                .with_tool(open_responses_test_local_shell_tool())
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "local_shell_call",
+                    "call_id": "call_local_shell_1",
+                    "id": "local_shell_item_1",
+                    "action": {
+                        "type": "exec",
+                        "command": ["ls"],
+                        "timeout_ms": 1000,
+                        "user": "builder",
+                        "working_directory": "/tmp/work",
+                        "env": {
+                            "RUST_LOG": "debug"
+                        }
+                    }
+                },
+                {
+                    "type": "local_shell_call_output",
+                    "call_id": "call_local_shell_1",
+                    "output": "example output"
                 }
             ])
         );
