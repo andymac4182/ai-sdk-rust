@@ -10634,6 +10634,132 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_prepares_custom_tool_formats_and_choice() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_custom_tools",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Custom tools prepared"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 8,
+                            "output_tokens": 2
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Use custom tools"),
+                    )]),
+                )])
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.custom",
+                    "write_sql",
+                    json_object(json!({
+                        "description": "Write a SQL SELECT query.",
+                        "format": {
+                            "type": "grammar",
+                            "syntax": "regex",
+                            "definition": "SELECT .+"
+                        }
+                    })),
+                )))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.custom",
+                    "generate_json",
+                    json_object(json!({
+                        "format": {
+                            "type": "grammar",
+                            "syntax": "lark",
+                            "definition": "start: \"{\" \"}\""
+                        }
+                    })),
+                )))
+                .with_tool_choice(LanguageModelToolChoice::Tool {
+                    tool_name: "write_sql".to_string(),
+                }),
+            ),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "custom",
+                    "name": "write_sql",
+                    "description": "Write a SQL SELECT query.",
+                    "format": {
+                        "type": "grammar",
+                        "syntax": "regex",
+                        "definition": "SELECT .+"
+                    }
+                },
+                {
+                    "type": "custom",
+                    "name": "generate_json",
+                    "format": {
+                        "type": "grammar",
+                        "syntax": "lark",
+                        "definition": "start: \"{\" \"}\""
+                    }
+                }
+            ])
+        );
+        assert_eq!(
+            request_body["tool_choice"],
+            json!({
+                "type": "custom",
+                "name": "write_sql"
+            })
+        );
+    }
+
+    #[test]
     fn open_responses_provider_prepares_apply_patch_and_tool_search_tools() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
