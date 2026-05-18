@@ -489,10 +489,27 @@ fn open_responses_request_body(
     options: &LanguageModelCallOptions,
 ) -> Result<(JsonValue, Vec<Warning>), String> {
     let mut warnings = Vec::new();
-    let store =
-        open_responses_store_enabled(provider_options_name, options.provider_options.as_ref());
-    let (input, instructions) =
-        open_responses_input(&options.prompt, store, provider_options_name, &mut warnings)?;
+    let provider_options = options.provider_options.as_ref();
+    let store = open_responses_store_enabled(provider_options_name, provider_options);
+    let has_conversation =
+        open_responses_conversation_enabled(provider_options_name, provider_options);
+    if has_conversation
+        && open_responses_previous_response_id_enabled(provider_options_name, provider_options)
+    {
+        warnings.push(Warning::Unsupported {
+            feature: "conversation".to_string(),
+            details: Some(
+                "conversation and previousResponseId cannot be used together".to_string(),
+            ),
+        });
+    }
+    let (input, instructions) = open_responses_input(
+        &options.prompt,
+        store,
+        has_conversation,
+        provider_options_name,
+        &mut warnings,
+    )?;
     let mut body = JsonObject::new();
     body.insert("model".to_string(), JsonValue::String(model_id.to_string()));
     body.insert("input".to_string(), JsonValue::Array(input));
@@ -924,6 +941,7 @@ fn open_responses_camel_case_provider_options_key(value: &str) -> String {
 fn open_responses_input(
     prompt: &[LanguageModelMessage],
     store: bool,
+    has_conversation: bool,
     provider_options_name: &str,
     warnings: &mut Vec<Warning>,
 ) -> Result<(Vec<JsonValue>, Option<String>), String> {
@@ -966,12 +984,19 @@ fn open_responses_input(
                 for part in &message.content {
                     match part {
                         LanguageModelAssistantContentPart::Text(text) => {
-                            if store
-                                && let Some(item_id) = open_responses_prompt_item_id(
-                                    text.provider_options.as_ref(),
-                                    provider_options_name,
-                                )
-                            {
+                            let item_id = open_responses_prompt_item_id(
+                                text.provider_options.as_ref(),
+                                provider_options_name,
+                            );
+                            if has_conversation && item_id.is_some() {
+                                open_responses_flush_assistant_content(
+                                    &mut assistant_items,
+                                    &mut content,
+                                );
+                                continue;
+                            }
+
+                            if store && let Some(item_id) = item_id {
                                 open_responses_flush_assistant_content(
                                     &mut assistant_items,
                                     &mut content,
@@ -989,12 +1014,19 @@ fn open_responses_input(
                             }));
                         }
                         LanguageModelAssistantContentPart::Reasoning(reasoning) => {
-                            if store
-                                && let Some(item_id) = open_responses_prompt_item_id(
-                                    reasoning.provider_options.as_ref(),
-                                    provider_options_name,
-                                )
-                            {
+                            let item_id = open_responses_prompt_item_id(
+                                reasoning.provider_options.as_ref(),
+                                provider_options_name,
+                            );
+                            if has_conversation && item_id.is_some() {
+                                open_responses_flush_assistant_content(
+                                    &mut assistant_items,
+                                    &mut content,
+                                );
+                                continue;
+                            }
+
+                            if store && let Some(item_id) = item_id {
                                 open_responses_flush_assistant_content(
                                     &mut assistant_items,
                                     &mut content,
@@ -1015,13 +1047,16 @@ fn open_responses_input(
                                 &mut assistant_items,
                                 &mut content,
                             );
+                            let item_id = open_responses_prompt_item_id(
+                                tool_call.provider_options.as_ref(),
+                                provider_options_name,
+                            );
+                            if has_conversation && item_id.is_some() {
+                                continue;
+                            }
+
                             if tool_call.provider_executed == Some(true) {
-                                if store
-                                    && let Some(item_id) = open_responses_prompt_item_id(
-                                        tool_call.provider_options.as_ref(),
-                                        provider_options_name,
-                                    )
-                                {
+                                if store && let Some(item_id) = item_id {
                                     assistant_items.push(json!({
                                         "type": "item_reference",
                                         "id": item_id
@@ -1030,12 +1065,7 @@ fn open_responses_input(
                                 continue;
                             }
 
-                            if store
-                                && let Some(item_id) = open_responses_prompt_item_id(
-                                    tool_call.provider_options.as_ref(),
-                                    provider_options_name,
-                                )
-                            {
+                            if store && let Some(item_id) = item_id {
                                 assistant_items.push(json!({
                                     "type": "item_reference",
                                     "id": item_id
@@ -1059,6 +1089,10 @@ fn open_responses_input(
                             );
 
                             if open_responses_execution_denied_approval_id(&part.output).is_some() {
+                                continue;
+                            }
+
+                            if has_conversation {
                                 continue;
                             }
 
@@ -1193,6 +1227,68 @@ fn open_responses_store_enabled(
     }
 
     store.unwrap_or(true)
+}
+
+fn open_responses_conversation_enabled(
+    provider_options_name: &str,
+    provider_options: Option<&ProviderOptions>,
+) -> bool {
+    open_responses_provider_option_value(provider_options_name, provider_options, &["conversation"])
+        .is_some()
+}
+
+fn open_responses_previous_response_id_enabled(
+    provider_options_name: &str,
+    provider_options: Option<&ProviderOptions>,
+) -> bool {
+    open_responses_provider_option_value(
+        provider_options_name,
+        provider_options,
+        &["previousResponseId", "previous_response_id"],
+    )
+    .is_some()
+}
+
+fn open_responses_provider_option_value<'a>(
+    provider_options_name: &str,
+    provider_options: Option<&'a ProviderOptions>,
+    keys: &[&str],
+) -> Option<&'a JsonValue> {
+    let provider_options = provider_options?;
+    let raw_provider_options_name = provider_options_name
+        .split('.')
+        .next()
+        .unwrap_or(provider_options_name)
+        .trim();
+    if !open_responses_provider_option_passthrough_enabled(raw_provider_options_name) {
+        return None;
+    }
+
+    if let Some(value) = provider_options
+        .get(raw_provider_options_name)
+        .and_then(|options| open_responses_option_value(options, keys))
+    {
+        return Some(value);
+    }
+
+    let camel_provider_options_name =
+        open_responses_camel_case_provider_options_key(raw_provider_options_name);
+    if camel_provider_options_name != raw_provider_options_name {
+        return provider_options
+            .get(&camel_provider_options_name)
+            .and_then(|options| open_responses_option_value(options, keys));
+    }
+
+    None
+}
+
+fn open_responses_option_value<'a>(
+    options: &'a JsonObject,
+    keys: &[&str],
+) -> Option<&'a JsonValue> {
+    keys.iter()
+        .filter_map(|key| options.get(*key))
+        .find(|value| !value.is_null())
 }
 
 fn open_responses_execution_denied_approval_id(
@@ -5602,6 +5698,163 @@ mod tests {
                     }
                 ]
             }))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_skips_conversation_history_items() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_conversation",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Conversation accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 7,
+                            "output_tokens": 3
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let item_options = |item_id: &str| -> ProviderOptions {
+            serde_json::from_value(json!({
+                "openai": {
+                    "itemId": item_id
+                }
+            }))
+            .expect("provider options deserialize")
+        };
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "conversation": "conv_123",
+                "previousResponseId": "resp_previous"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![
+                    LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                        LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
+                    ])),
+                    LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                        LanguageModelAssistantContentPart::Text(
+                            LanguageModelTextPart::new("Stored text")
+                                .with_provider_options(item_options("message_existing")),
+                        ),
+                        LanguageModelAssistantContentPart::Reasoning(
+                            LanguageModelReasoningPart::new("Stored reasoning")
+                                .with_provider_options(item_options("reasoning_existing")),
+                        ),
+                        LanguageModelAssistantContentPart::ToolCall(
+                            LanguageModelToolCallPart::new(
+                                "call_weather",
+                                "get_weather",
+                                json!({
+                                    "location": "San Francisco"
+                                }),
+                            )
+                            .with_provider_options(item_options("call_existing")),
+                        ),
+                        LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                            "Fresh assistant text",
+                        )),
+                    ])),
+                    LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                        LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                            "call_weather",
+                            "get_weather",
+                            LanguageModelToolResultOutput::json(json!({
+                                "temp": 72
+                            })),
+                        )),
+                    ])),
+                ])
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(result.warnings.len(), 1);
+        assert!(matches!(
+            result.warnings.first(),
+            Some(crate::warning::Warning::Unsupported { feature, details })
+                if feature == "conversation"
+                    && details.as_deref()
+                        == Some("conversation and previousResponseId cannot be used together")
+        ));
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(request_body["conversation"], "conv_123");
+        assert_eq!(request_body["previous_response_id"], "resp_previous");
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Hello"
+                        }
+                    ]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Fresh assistant text"
+                        }
+                    ]
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_weather",
+                    "output": "{\"temp\":72}"
+                }
+            ])
         );
     }
 
