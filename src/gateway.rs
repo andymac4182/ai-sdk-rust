@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::env;
+use std::fmt;
 use std::future::{Future, Ready, ready};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -65,6 +66,7 @@ const DEFAULT_METADATA_CACHE_REFRESH_MILLIS: u64 = 1000 * 60 * 5;
 const VERCEL_OIDC_TOKEN_ENV: &str = "VERCEL_OIDC_TOKEN";
 const VERCEL_REQUEST_ID_ENV: &str = "VERCEL_REQUEST_ID";
 const X_VERCEL_ID_ENV: &str = "X_VERCEL_ID";
+const MIN_GATEWAY_BYOK_TIMEOUT_MILLIS: u64 = 1000;
 
 /// Future returned by an injected Gateway HTTP transport.
 pub type GatewayTransportFuture =
@@ -671,6 +673,30 @@ impl GatewayProviderTimeouts {
         self.byok.insert(provider.into(), timeout_millis);
         self
     }
+
+    /// Adds a BYOK provider timeout after validating the upstream minimum.
+    pub fn try_with_byok_timeout(
+        mut self,
+        provider: impl Into<String>,
+        timeout_millis: u64,
+    ) -> Result<Self, GatewayProviderOptionsValidationError> {
+        validate_gateway_byok_timeout(timeout_millis)?;
+        self.byok.insert(provider.into(), timeout_millis);
+        Ok(self)
+    }
+
+    /// Validates this timeout configuration against the upstream Gateway schema.
+    pub fn validate(&self) -> Result<(), GatewayProviderOptionsValidationError> {
+        for (provider, timeout_millis) in &self.byok {
+            if *timeout_millis < MIN_GATEWAY_BYOK_TIMEOUT_MILLIS {
+                return Err(GatewayProviderOptionsValidationError::new(format!(
+                    "Gateway providerTimeouts.byok.{provider} must be at least {MIN_GATEWAY_BYOK_TIMEOUT_MILLIS} milliseconds"
+                )));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Request-scoped Gateway provider options.
@@ -824,6 +850,24 @@ impl GatewayProviderOptions {
         self
     }
 
+    /// Validates these options against the upstream Gateway provider-options schema.
+    pub fn validate(&self) -> Result<(), GatewayProviderOptionsValidationError> {
+        if let Some(provider_timeouts) = &self.provider_timeouts {
+            provider_timeouts.validate()?;
+        }
+
+        Ok(())
+    }
+
+    /// Converts validated options into the provider-options map expected by
+    /// language and model call options.
+    pub fn try_into_provider_options(
+        self,
+    ) -> Result<ProviderOptions, GatewayProviderOptionsValidationError> {
+        self.validate()?;
+        Ok(gateway_provider_options(self))
+    }
+
     /// Converts these options into the provider-options map expected by
     /// language and model call options.
     pub fn into_provider_options(self) -> ProviderOptions {
@@ -845,6 +889,52 @@ pub fn gateway_provider_options(options: GatewayProviderOptions) -> ProviderOpti
         .unwrap_or_default();
 
     ProviderOptions::from([(GATEWAY_PROVIDER_ID.to_string(), gateway_options)])
+}
+
+/// Validates and wraps request-scoped Gateway options in a provider-options map.
+pub fn try_gateway_provider_options(
+    options: GatewayProviderOptions,
+) -> Result<ProviderOptions, GatewayProviderOptionsValidationError> {
+    options.try_into_provider_options()
+}
+
+/// Error returned when Gateway provider options fail upstream schema validation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GatewayProviderOptionsValidationError {
+    message: String,
+}
+
+impl GatewayProviderOptionsValidationError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    /// Returns the validation message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for GatewayProviderOptionsValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for GatewayProviderOptionsValidationError {}
+
+fn validate_gateway_byok_timeout(
+    timeout_millis: u64,
+) -> Result<(), GatewayProviderOptionsValidationError> {
+    if timeout_millis < MIN_GATEWAY_BYOK_TIMEOUT_MILLIS {
+        return Err(GatewayProviderOptionsValidationError::new(format!(
+            "Gateway providerTimeouts.byok values must be at least {MIN_GATEWAY_BYOK_TIMEOUT_MILLIS} milliseconds"
+        )));
+    }
+
+    Ok(())
 }
 
 /// Authentication token selected for an AI Gateway request.
@@ -3500,6 +3590,7 @@ mod tests {
         GatewayTransportFuture, gateway, gateway_observability_headers_with_env,
         gateway_provider_headers_with_env, gateway_provider_options,
         get_gateway_auth_token_with_env, metadata_cache_refresh_duration,
+        try_gateway_provider_options,
     };
     use crate::embed::{EmbedOptions, embed};
     use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions};
@@ -3784,6 +3875,54 @@ mod tests {
             gateway_provider_options(options).get("gateway"),
             expected.as_object()
         );
+    }
+
+    #[test]
+    fn gateway_provider_options_validation_matches_timeout_schema() {
+        let valid_timeouts = GatewayProviderTimeouts::new()
+            .try_with_byok_timeout("openai", 1000)
+            .expect("minimum timeout is valid")
+            .try_with_byok_timeout("anthropic", 2000)
+            .expect("larger timeout is valid");
+        let valid_options =
+            GatewayProviderOptions::new().with_provider_timeouts(valid_timeouts.clone());
+
+        valid_timeouts.validate().expect("valid timeout map passes");
+        valid_options.validate().expect("valid options pass");
+        assert_eq!(
+            try_gateway_provider_options(valid_options)
+                .expect("validated provider options convert")
+                .get("gateway")
+                .and_then(|options| options.get("providerTimeouts"))
+                .and_then(|timeouts| timeouts.get("byok"))
+                .and_then(|byok| byok.get("openai"))
+                .and_then(JsonValue::as_u64),
+            Some(1000)
+        );
+
+        let direct_error = GatewayProviderTimeouts::new()
+            .try_with_byok_timeout("openai", 999)
+            .expect_err("timeout below the upstream minimum is rejected");
+        assert!(
+            direct_error
+                .message()
+                .contains("at least 1000 milliseconds")
+        );
+
+        let invalid_options = GatewayProviderOptions::new().with_provider_timeouts(
+            GatewayProviderTimeouts::new().with_byok_timeout("openai", 999),
+        );
+        let validation_error = invalid_options
+            .validate()
+            .expect_err("invalid timeout map is rejected");
+        assert_eq!(
+            validation_error.to_string(),
+            "Gateway providerTimeouts.byok.openai must be at least 1000 milliseconds"
+        );
+
+        let conversion_error = try_gateway_provider_options(invalid_options)
+            .expect_err("invalid provider options do not convert through the checked helper");
+        assert_eq!(conversion_error, validation_error);
     }
 
     #[test]

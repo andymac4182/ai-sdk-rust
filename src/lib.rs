@@ -96,11 +96,12 @@ pub use gateway::{
     GatewayGenerationInfoParams, GatewayImageModel, GatewayLanguageModel,
     GatewayLanguageModelEntry, GatewayLanguageModelPricing, GatewayLanguageModelSpecification,
     GatewayModelType, GatewayProvider, GatewayProviderOptions, GatewayProviderOptionsSort,
-    GatewayProviderSettings, GatewayProviderTimeouts, GatewayRerankingModel,
-    GatewaySpendReportDatePart, GatewaySpendReportGroupBy, GatewaySpendReportParams,
-    GatewaySpendReportResponse, GatewaySpendReportRow, GatewayTransport, GatewayTransportFuture,
-    GatewayVideoModel, create_gateway, create_gateway_provider, gateway,
+    GatewayProviderOptionsValidationError, GatewayProviderSettings, GatewayProviderTimeouts,
+    GatewayRerankingModel, GatewaySpendReportDatePart, GatewaySpendReportGroupBy,
+    GatewaySpendReportParams, GatewaySpendReportResponse, GatewaySpendReportRow, GatewayTransport,
+    GatewayTransportFuture, GatewayVideoModel, create_gateway, create_gateway_provider, gateway,
     gateway_observability_headers, gateway_provider_options, get_gateway_auth_token,
+    try_gateway_provider_options,
 };
 pub use gateway_error::{
     GATEWAY_AUTH_METHOD_HEADER, GatewayAuthMethod, GatewayAuthenticationError, GatewayError,
