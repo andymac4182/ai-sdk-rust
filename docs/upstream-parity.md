@@ -133,6 +133,7 @@ inventory.
 | Open Responses compaction prompt history reconstruction | verified | `src/open_responses.rs` | `open_responses_provider_reconstructs_compaction_history_with_store_false`; `open_responses_provider_uses_item_references_for_stored_assistant_history` | Open Responses prompt conversion now maps assistant `openai.compaction` custom prompt history to `compaction` items with encrypted content when `store` is disabled and to stored `item_reference` entries when the compaction item is persisted. |
 | Open Responses multipart tool-result file outputs | verified | `src/open_responses.rs` | `open_responses_provider_converts_tool_result_file_content_outputs` | Multipart tool-result `content` outputs now convert text plus image/file URL and data parts into Responses `function_call_output` arrays using `input_text`, `input_image`, and `input_file`, forwards OpenAI `imageDetail` provider options on image outputs, and keeps unsupported file data forms and custom parts warning-backed. |
 | Open Responses assistant function-call prompt arguments | verified | `src/open_responses.rs` | `open_responses_provider_stringifies_assistant_function_call_arguments` | Assistant prompt tool-call conversion now sends Open Responses `function_call.arguments` as a string, stringifying JSON object inputs, passing through already-string inputs, and converting Rust null inputs to `{}` as the equivalent of upstream missing tool input. |
+| Open Responses function tool strict modes | verified | `src/open_responses.rs` | `open_responses_provider_prepares_function_tool_strict_modes` | Open Responses function-tool request preparation now mirrors upstream strict-mode passthrough: `strict: true` and `strict: false` are preserved on the tool definition, while omitted strict mode leaves the request field absent. |
 | Open Responses reasoning request options | verified | `src/open_responses.rs` | `open_responses_provider_maps_reasoning_effort_and_summary_options` | Top-level reasoning now maps to Responses `reasoning.effort`, including upstream `minimal` to `low` compatibility warnings and `none` passthrough, while provider `reasoningSummary` maps to `reasoning.summary` without leaking the provider-option field into the request body. |
 | Open Responses generic provider option filtering | verified | `src/open_responses.rs` | `open_responses_provider_maps_reasoning_effort_and_summary_options`; `vercel_ai_gateway_openai_responses_passes_gateway_provider_options` | Generic Open Responses providers now mirror upstream by accepting only `reasoningSummary` from provider options; broader request-body passthrough remains scoped to OpenAI, Azure, and Gateway wrapper routes that own those Responses API options. |
 | Open Responses OpenAI wrapper request option mapping | verified | `src/open_responses.rs` | `open_responses_provider_maps_openai_responses_provider_options_to_request_body`; `vercel_ai_gateway_openai_responses_passes_gateway_provider_options` | OpenAI/Gateway wrapper provider options now map upstream camelCase fields such as `previousResponseId`, `maxToolCalls`, `parallelToolCalls`, `promptCacheKey`, `promptCacheRetention`, `safetyIdentifier`, `serviceTier`, `textVerbosity`, `strictJsonSchema`, `reasoningEffort`, `reasoningSummary`, `contextManagement`, and `logprobs` to Responses request keys or nested fields, preserve wrapper-owned passthrough fields such as Gateway `caching`, and prevent SDK-only flags from leaking into the request body. |
@@ -248,10 +249,11 @@ focused tests for each portable behavior before changing rows to `verified`.
    continuation, conversation history filtering, assistant text metadata,
    assistant reasoning, compaction, `tool_search` request/history, assistant
    execution-denied tool-result filtering, function-call argument defaults,
-   user file provider references, prompt file defaults/unsupported-file
-   handling, deprecated file id prefixes, `allowedTools` tool-choice override,
-   local-shell, shell request/history, apply-patch request/history, and custom
-   provider-tool prompt reconstruction are represented.
+   function tool strict modes, user file provider references, prompt file
+   defaults/unsupported-file handling, deprecated file id prefixes,
+   `allowedTools` tool-choice override, local-shell, shell request/history,
+   apply-patch request/history, and custom provider-tool prompt reconstruction
+   are represented.
 2. Keep the next slices Gateway-first: close broader `packages/gateway`
    provider-package test gaps and remaining Vercel AI Gateway OpenAI-compatible
    endpoint coverage before expanding to unrelated providers.
