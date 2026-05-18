@@ -24,9 +24,9 @@ use crate::language_model::{
     LanguageModelSupportedUrls, LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd,
     LanguageModelTextStart, LanguageModelTool, LanguageModelToolApprovalRequest,
     LanguageModelToolCall, LanguageModelToolChoice, LanguageModelToolContentPart,
-    LanguageModelToolInputEnd, LanguageModelToolInputStart, LanguageModelToolResult,
-    LanguageModelToolResultContentPart, LanguageModelToolResultOutput, LanguageModelUrlSource,
-    LanguageModelUsage, LanguageModelUserContentPart, OutputTokenUsage,
+    LanguageModelToolInputDelta, LanguageModelToolInputEnd, LanguageModelToolInputStart,
+    LanguageModelToolResult, LanguageModelToolResultContentPart, LanguageModelToolResultOutput,
+    LanguageModelUrlSource, LanguageModelUsage, LanguageModelUserContentPart, OutputTokenUsage,
 };
 use crate::openai_compatible::{OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel};
 use crate::provider::{
@@ -2269,6 +2269,7 @@ fn open_responses_stream_result_from_response(
     let mut active_reasoning = BTreeSet::<String>::new();
     let mut ended_reasoning = BTreeSet::<String>::new();
     let mut pending_tool_calls = BTreeMap::<String, PendingOpenResponsesToolCall>::new();
+    let mut ongoing_tool_calls = BTreeMap::<String, OngoingOpenResponsesToolCall>::new();
     let provider_tool_names = open_responses_provider_tool_names();
     let tool_name_mapping = create_tool_name_mapping(tools.iter().flatten(), &provider_tool_names);
     let web_search_tool_name = open_responses_web_search_response_tool_name(tools);
@@ -2516,6 +2517,57 @@ fn open_responses_stream_result_from_response(
                     Some("response.output_item.added") => {
                         if let Some(item) = value.get("item") {
                             match item.get("type").and_then(JsonValue::as_str) {
+                                Some("function_call") => {
+                                    let tool_call_id = item
+                                        .get("call_id")
+                                        .and_then(JsonValue::as_str)
+                                        .or_else(|| item.get("id").and_then(JsonValue::as_str))
+                                        .unwrap_or_default();
+                                    let tool_name = item
+                                        .get("name")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    if let Some(output_index) =
+                                        open_responses_stream_output_index(&value)
+                                    {
+                                        ongoing_tool_calls.insert(
+                                            output_index,
+                                            OngoingOpenResponsesToolCall::new(
+                                                tool_call_id,
+                                                tool_name,
+                                            ),
+                                        );
+                                    }
+                                    stream.push(LanguageModelStreamPart::ToolInputStart(
+                                        LanguageModelToolInputStart::new(tool_call_id, tool_name),
+                                    ));
+                                }
+                                Some("custom_tool_call") => {
+                                    let tool_call_id = item
+                                        .get("call_id")
+                                        .and_then(JsonValue::as_str)
+                                        .or_else(|| item.get("id").and_then(JsonValue::as_str))
+                                        .unwrap_or_default();
+                                    let tool_name = item
+                                        .get("name")
+                                        .and_then(JsonValue::as_str)
+                                        .map(|name| tool_name_mapping.to_custom_tool_name(name))
+                                        .unwrap_or_default();
+                                    if let Some(output_index) =
+                                        open_responses_stream_output_index(&value)
+                                    {
+                                        ongoing_tool_calls.insert(
+                                            output_index,
+                                            OngoingOpenResponsesToolCall::new(
+                                                tool_call_id,
+                                                tool_name.clone(),
+                                            ),
+                                        );
+                                    }
+                                    stream.push(LanguageModelStreamPart::ToolInputStart(
+                                        LanguageModelToolInputStart::new(tool_call_id, tool_name),
+                                    ));
+                                }
                                 Some("web_search_call") => {
                                     let tool_call_id = item
                                         .get("id")
@@ -2554,9 +2606,34 @@ fn open_responses_stream_result_from_response(
                                         .unwrap_or_default();
                                     let tool_name =
                                         tool_name_mapping.to_custom_tool_name("code_interpreter");
+                                    let container_id = item
+                                        .get("container_id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    if let Some(output_index) =
+                                        open_responses_stream_output_index(&value)
+                                    {
+                                        ongoing_tool_calls.insert(
+                                            output_index,
+                                            OngoingOpenResponsesToolCall::code_interpreter(
+                                                tool_call_id,
+                                                tool_name.clone(),
+                                                container_id,
+                                            ),
+                                        );
+                                    }
                                     stream.push(LanguageModelStreamPart::ToolInputStart(
-                                        LanguageModelToolInputStart::new(tool_call_id, tool_name)
+                                        LanguageModelToolInputStart::new(tool_call_id, &tool_name)
                                             .with_provider_executed(true),
+                                    ));
+                                    stream.push(LanguageModelStreamPart::ToolInputDelta(
+                                        LanguageModelToolInputDelta::new(
+                                            tool_call_id,
+                                            format!(
+                                                "{{\"containerId\":\"{}\",\"code\":\"",
+                                                open_responses_escape_json_delta(container_id)
+                                            ),
+                                        ),
                                     ));
                                 }
                                 Some("image_generation_call") => {
@@ -2614,6 +2691,62 @@ fn open_responses_stream_result_from_response(
                                         );
                                     }
                                 }
+                                Some("apply_patch_call") => {
+                                    let tool_call_id = item
+                                        .get("call_id")
+                                        .and_then(JsonValue::as_str)
+                                        .unwrap_or_default();
+                                    let tool_name =
+                                        tool_name_mapping.to_custom_tool_name("apply_patch");
+                                    let operation = item.get("operation");
+                                    let delete_file = operation
+                                        .and_then(|operation| operation.get("type"))
+                                        .and_then(JsonValue::as_str)
+                                        == Some("delete_file");
+
+                                    if let Some(output_index) =
+                                        open_responses_stream_output_index(&value)
+                                    {
+                                        ongoing_tool_calls.insert(
+                                            output_index,
+                                            OngoingOpenResponsesToolCall::apply_patch(
+                                                tool_call_id,
+                                                tool_name.clone(),
+                                                delete_file,
+                                            ),
+                                        );
+                                    }
+
+                                    stream.push(LanguageModelStreamPart::ToolInputStart(
+                                        LanguageModelToolInputStart::new(tool_call_id, &tool_name),
+                                    ));
+
+                                    if delete_file {
+                                        stream.push(LanguageModelStreamPart::ToolInputDelta(
+                                            LanguageModelToolInputDelta::new(
+                                                tool_call_id,
+                                                json!({
+                                                    "callId": item.get("call_id").cloned().unwrap_or(JsonValue::Null),
+                                                    "operation": operation.cloned().unwrap_or(JsonValue::Null)
+                                                })
+                                                .to_string(),
+                                            ),
+                                        ));
+                                        stream.push(LanguageModelStreamPart::ToolInputEnd(
+                                            LanguageModelToolInputEnd::new(tool_call_id),
+                                        ));
+                                    } else {
+                                        stream.push(LanguageModelStreamPart::ToolInputDelta(
+                                            LanguageModelToolInputDelta::new(
+                                                tool_call_id,
+                                                open_responses_apply_patch_input_prefix(
+                                                    tool_call_id,
+                                                    operation,
+                                                ),
+                                            ),
+                                        ));
+                                    }
+                                }
                                 _ => {}
                             }
                             open_responses_record_pending_tool_call(&mut pending_tool_calls, item);
@@ -2624,6 +2757,14 @@ fn open_responses_stream_result_from_response(
                             &mut pending_tool_calls,
                             &value,
                         );
+                        if let Some(delta) = value.get("delta").and_then(JsonValue::as_str) {
+                            open_responses_push_ongoing_tool_input_delta(
+                                &mut stream,
+                                &ongoing_tool_calls,
+                                &value,
+                                delta,
+                            );
+                        }
                     }
                     Some("response.function_call_arguments.done") => {
                         open_responses_finish_pending_tool_call_arguments(
@@ -2631,9 +2772,113 @@ fn open_responses_stream_result_from_response(
                             &value,
                         );
                     }
+                    Some("response.custom_tool_call_input.delta") => {
+                        if let Some(delta) = value.get("delta").and_then(JsonValue::as_str) {
+                            open_responses_push_ongoing_tool_input_delta(
+                                &mut stream,
+                                &ongoing_tool_calls,
+                                &value,
+                                delta,
+                            );
+                        }
+                    }
+                    Some("response.apply_patch_call_operation_diff.delta") => {
+                        if let Some(output_index) = open_responses_stream_output_index(&value)
+                            && let Some(tool_call) = ongoing_tool_calls.get_mut(&output_index)
+                            && let Some(apply_patch) = tool_call.apply_patch.as_mut()
+                            && let Some(delta) = value.get("delta").and_then(JsonValue::as_str)
+                        {
+                            stream.push(LanguageModelStreamPart::ToolInputDelta(
+                                LanguageModelToolInputDelta::new(
+                                    &tool_call.tool_call_id,
+                                    open_responses_escape_json_delta(delta),
+                                ),
+                            ));
+                            apply_patch.has_diff = true;
+                        }
+                    }
+                    Some("response.apply_patch_call_operation_diff.done") => {
+                        if let Some(output_index) = open_responses_stream_output_index(&value)
+                            && let Some(tool_call) = ongoing_tool_calls.get_mut(&output_index)
+                        {
+                            open_responses_finish_apply_patch_tool_input(
+                                &mut stream,
+                                tool_call,
+                                value.get("diff"),
+                            );
+                        }
+                    }
+                    Some("response.image_generation_call.partial_image") => {
+                        let tool_call_id = value
+                            .get("item_id")
+                            .and_then(JsonValue::as_str)
+                            .unwrap_or_default();
+                        let result = json!({
+                            "result": value
+                                .get("partial_image_b64")
+                                .cloned()
+                                .unwrap_or(JsonValue::Null)
+                        });
+                        if let Ok(result) = NonNullJsonValue::new(result) {
+                            stream.push(LanguageModelStreamPart::ToolResult(
+                                LanguageModelToolResult::new(
+                                    tool_call_id,
+                                    tool_name_mapping.to_custom_tool_name("image_generation"),
+                                    result,
+                                )
+                                .with_preliminary(true),
+                            ));
+                        }
+                    }
+                    Some("response.code_interpreter_call_code.delta") => {
+                        if let Some(output_index) = open_responses_stream_output_index(&value)
+                            && let Some(tool_call) = ongoing_tool_calls.get_mut(&output_index)
+                            && let Some(code) = tool_call.code_interpreter.as_mut()
+                            && let Some(delta) = value.get("delta").and_then(JsonValue::as_str)
+                        {
+                            stream.push(LanguageModelStreamPart::ToolInputDelta(
+                                LanguageModelToolInputDelta::new(
+                                    &tool_call.tool_call_id,
+                                    open_responses_escape_json_delta(delta),
+                                ),
+                            ));
+                            code.has_code_delta = true;
+                        }
+                    }
+                    Some("response.code_interpreter_call_code.done") => {
+                        if let Some(output_index) = open_responses_stream_output_index(&value)
+                            && let Some(tool_call) = ongoing_tool_calls.get_mut(&output_index)
+                        {
+                            open_responses_finish_code_interpreter_tool_input(
+                                &mut stream,
+                                tool_call,
+                                value.get("code"),
+                                None,
+                            );
+                        }
+                    }
                     Some("response.output_item.done") => {
                         if let Some(item) = value.get("item") {
                             match item.get("type").and_then(JsonValue::as_str) {
+                                Some("function_call") => {
+                                    if let Some(output_index) =
+                                        open_responses_stream_output_index(&value)
+                                        && let Some(tool_call) =
+                                            ongoing_tool_calls.remove(&output_index)
+                                    {
+                                        stream.push(LanguageModelStreamPart::ToolInputEnd(
+                                            LanguageModelToolInputEnd::new(tool_call.tool_call_id),
+                                        ));
+                                    }
+                                    if open_responses_push_tool_call_from_item(
+                                        &mut stream,
+                                        &mut emitted_tool_calls,
+                                        &mut pending_tool_calls,
+                                        item,
+                                    ) {
+                                        has_tool_calls = true;
+                                    }
+                                }
                                 Some("web_search_call") => {
                                     let tool_call_id = item
                                         .get("id")
@@ -2669,21 +2914,36 @@ fn open_responses_stream_result_from_response(
                                         .unwrap_or_default();
                                     let tool_name =
                                         tool_name_mapping.to_custom_tool_name("code_interpreter");
-                                    stream.push(LanguageModelStreamPart::ToolInputEnd(
-                                        LanguageModelToolInputEnd::new(tool_call_id),
-                                    ));
-                                    stream.push(LanguageModelStreamPart::ToolCall(
-                                        LanguageModelToolCall::new(
-                                            tool_call_id,
-                                            tool_name.clone(),
-                                            json!({
-                                                "code": item.get("code").cloned().unwrap_or(JsonValue::Null),
-                                                "containerId": item.get("container_id").cloned().unwrap_or(JsonValue::Null)
+                                    let emitted_tool_call =
+                                        open_responses_stream_output_index(&value)
+                                            .and_then(|output_index| {
+                                                ongoing_tool_calls.remove(&output_index)
                                             })
-                                            .to_string(),
-                                        )
-                                        .with_provider_executed(true),
-                                    ));
+                                            .is_some_and(|mut tool_call| {
+                                                open_responses_finish_code_interpreter_tool_input(
+                                                    &mut stream,
+                                                    &mut tool_call,
+                                                    item.get("code"),
+                                                    item.get("container_id"),
+                                                )
+                                            });
+                                    if !emitted_tool_call {
+                                        stream.push(LanguageModelStreamPart::ToolInputEnd(
+                                            LanguageModelToolInputEnd::new(tool_call_id),
+                                        ));
+                                        stream.push(LanguageModelStreamPart::ToolCall(
+                                            LanguageModelToolCall::new(
+                                                tool_call_id,
+                                                tool_name.clone(),
+                                                json!({
+                                                    "code": item.get("code").cloned().unwrap_or(JsonValue::Null),
+                                                    "containerId": item.get("container_id").cloned().unwrap_or(JsonValue::Null)
+                                                })
+                                                .to_string(),
+                                            )
+                                            .with_provider_executed(true),
+                                        ));
+                                    }
                                     open_responses_push_stream_tool_result(
                                         &mut stream,
                                         tool_call_id,
@@ -2711,6 +2971,15 @@ fn open_responses_stream_result_from_response(
                                 }
                                 Some("custom_tool_call") => {
                                     has_tool_calls = true;
+                                    if let Some(output_index) =
+                                        open_responses_stream_output_index(&value)
+                                        && let Some(tool_call) =
+                                            ongoing_tool_calls.remove(&output_index)
+                                    {
+                                        stream.push(LanguageModelStreamPart::ToolInputEnd(
+                                            LanguageModelToolInputEnd::new(tool_call.tool_call_id),
+                                        ));
+                                    }
                                     let tool_call_id = item
                                         .get("call_id")
                                         .and_then(JsonValue::as_str)
@@ -2822,18 +3091,35 @@ fn open_responses_stream_result_from_response(
                                         .get("call_id")
                                         .and_then(JsonValue::as_str)
                                         .unwrap_or_default();
+                                    if let Some(output_index) =
+                                        open_responses_stream_output_index(&value)
+                                        && let Some(mut tool_call) =
+                                            ongoing_tool_calls.remove(&output_index)
+                                    {
+                                        open_responses_finish_apply_patch_tool_input(
+                                            &mut stream,
+                                            &mut tool_call,
+                                            item.get("operation")
+                                                .and_then(|operation| operation.get("diff")),
+                                        );
+                                    }
 
-                                    stream.push(LanguageModelStreamPart::ToolCall(
-                                        LanguageModelToolCall::new(
-                                            tool_call_id,
-                                            tool_name_mapping.to_custom_tool_name("apply_patch"),
-                                            json!({
-                                                "callId": item.get("call_id").cloned().unwrap_or(JsonValue::Null),
-                                                "operation": item.get("operation").cloned().unwrap_or(JsonValue::Null)
-                                            })
-                                            .to_string(),
-                                        ),
-                                    ));
+                                    if item.get("status").and_then(JsonValue::as_str)
+                                        == Some("completed")
+                                    {
+                                        stream.push(LanguageModelStreamPart::ToolCall(
+                                            LanguageModelToolCall::new(
+                                                tool_call_id,
+                                                tool_name_mapping
+                                                    .to_custom_tool_name("apply_patch"),
+                                                json!({
+                                                    "callId": item.get("call_id").cloned().unwrap_or(JsonValue::Null),
+                                                    "operation": item.get("operation").cloned().unwrap_or(JsonValue::Null)
+                                                })
+                                                .to_string(),
+                                            ),
+                                        ));
+                                    }
                                 }
                                 Some("mcp_call") => {
                                     let tool_call_id = item
@@ -3540,6 +3826,220 @@ struct PendingOpenResponsesToolCall {
     tool_name: Option<String>,
     tool_call_id: Option<String>,
     arguments: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct OngoingOpenResponsesToolCall {
+    tool_call_id: String,
+    tool_name: String,
+    code_interpreter: Option<OngoingOpenResponsesCodeInterpreter>,
+    apply_patch: Option<OngoingOpenResponsesApplyPatch>,
+}
+
+impl OngoingOpenResponsesToolCall {
+    fn new(tool_call_id: impl Into<String>, tool_name: impl Into<String>) -> Self {
+        Self {
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            code_interpreter: None,
+            apply_patch: None,
+        }
+    }
+
+    fn code_interpreter(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        container_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            code_interpreter: Some(OngoingOpenResponsesCodeInterpreter {
+                container_id: Some(container_id.into()),
+                has_code_delta: false,
+                end_emitted: false,
+                tool_call_emitted: false,
+            }),
+            apply_patch: None,
+        }
+    }
+
+    fn apply_patch(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        delete_file: bool,
+    ) -> Self {
+        Self {
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            code_interpreter: None,
+            apply_patch: Some(OngoingOpenResponsesApplyPatch {
+                has_diff: delete_file,
+                end_emitted: delete_file,
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct OngoingOpenResponsesCodeInterpreter {
+    container_id: Option<String>,
+    has_code_delta: bool,
+    end_emitted: bool,
+    tool_call_emitted: bool,
+}
+
+#[derive(Clone, Debug)]
+struct OngoingOpenResponsesApplyPatch {
+    has_diff: bool,
+    end_emitted: bool,
+}
+
+fn open_responses_stream_output_index(value: &JsonValue) -> Option<String> {
+    value
+        .get("output_index")
+        .and_then(|output_index| match output_index {
+            JsonValue::Number(number) => Some(number.to_string()),
+            JsonValue::String(output_index) => Some(output_index.clone()),
+            _ => None,
+        })
+}
+
+fn open_responses_push_ongoing_tool_input_delta(
+    stream: &mut Vec<LanguageModelStreamPart>,
+    ongoing_tool_calls: &BTreeMap<String, OngoingOpenResponsesToolCall>,
+    value: &JsonValue,
+    delta: &str,
+) {
+    if let Some(output_index) = open_responses_stream_output_index(value)
+        && let Some(tool_call) = ongoing_tool_calls.get(&output_index)
+    {
+        stream.push(LanguageModelStreamPart::ToolInputDelta(
+            LanguageModelToolInputDelta::new(&tool_call.tool_call_id, delta),
+        ));
+    }
+}
+
+fn open_responses_escape_json_delta(delta: &str) -> String {
+    let encoded = serde_json::to_string(delta).expect("string JSON serialization cannot fail");
+    encoded[1..encoded.len() - 1].to_string()
+}
+
+fn open_responses_apply_patch_input_prefix(
+    tool_call_id: &str,
+    operation: Option<&JsonValue>,
+) -> String {
+    let operation_type = operation
+        .and_then(|operation| operation.get("type"))
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default();
+    let path = operation
+        .and_then(|operation| operation.get("path"))
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default();
+
+    format!(
+        "{{\"callId\":\"{}\",\"operation\":{{\"type\":\"{}\",\"path\":\"{}\",\"diff\":\"",
+        open_responses_escape_json_delta(tool_call_id),
+        open_responses_escape_json_delta(operation_type),
+        open_responses_escape_json_delta(path)
+    )
+}
+
+fn open_responses_finish_code_interpreter_tool_input(
+    stream: &mut Vec<LanguageModelStreamPart>,
+    tool_call: &mut OngoingOpenResponsesToolCall,
+    code_value: Option<&JsonValue>,
+    container_value: Option<&JsonValue>,
+) -> bool {
+    let Some(code_interpreter) = tool_call.code_interpreter.as_mut() else {
+        return false;
+    };
+
+    let tool_call_id = tool_call.tool_call_id.clone();
+    let tool_name = tool_call.tool_name.clone();
+
+    if !code_interpreter.end_emitted {
+        if !code_interpreter.has_code_delta {
+            if let Some(code) = code_value.and_then(JsonValue::as_str) {
+                stream.push(LanguageModelStreamPart::ToolInputDelta(
+                    LanguageModelToolInputDelta::new(
+                        &tool_call_id,
+                        open_responses_escape_json_delta(code),
+                    ),
+                ));
+                code_interpreter.has_code_delta = true;
+            }
+        }
+
+        stream.push(LanguageModelStreamPart::ToolInputDelta(
+            LanguageModelToolInputDelta::new(&tool_call_id, "\"}"),
+        ));
+        stream.push(LanguageModelStreamPart::ToolInputEnd(
+            LanguageModelToolInputEnd::new(&tool_call_id),
+        ));
+        code_interpreter.end_emitted = true;
+    }
+
+    if !code_interpreter.tool_call_emitted {
+        let container_id = code_interpreter
+            .container_id
+            .as_ref()
+            .filter(|container_id| !container_id.is_empty())
+            .map(|container_id| JsonValue::String(container_id.clone()))
+            .or_else(|| container_value.cloned())
+            .unwrap_or(JsonValue::Null);
+
+        stream.push(LanguageModelStreamPart::ToolCall(
+            LanguageModelToolCall::new(
+                &tool_call_id,
+                tool_name,
+                json!({
+                    "code": code_value.cloned().unwrap_or(JsonValue::Null),
+                    "containerId": container_id
+                })
+                .to_string(),
+            )
+            .with_provider_executed(true),
+        ));
+        code_interpreter.tool_call_emitted = true;
+    }
+
+    true
+}
+
+fn open_responses_finish_apply_patch_tool_input(
+    stream: &mut Vec<LanguageModelStreamPart>,
+    tool_call: &mut OngoingOpenResponsesToolCall,
+    diff_value: Option<&JsonValue>,
+) -> bool {
+    let Some(apply_patch) = tool_call.apply_patch.as_mut() else {
+        return false;
+    };
+
+    if !apply_patch.end_emitted {
+        if !apply_patch.has_diff {
+            if let Some(diff) = diff_value.and_then(JsonValue::as_str) {
+                stream.push(LanguageModelStreamPart::ToolInputDelta(
+                    LanguageModelToolInputDelta::new(
+                        &tool_call.tool_call_id,
+                        open_responses_escape_json_delta(diff),
+                    ),
+                ));
+                apply_patch.has_diff = true;
+            }
+        }
+
+        stream.push(LanguageModelStreamPart::ToolInputDelta(
+            LanguageModelToolInputDelta::new(&tool_call.tool_call_id, "\"}}"),
+        ));
+        stream.push(LanguageModelStreamPart::ToolInputEnd(
+            LanguageModelToolInputEnd::new(&tool_call.tool_call_id),
+        ));
+        apply_patch.end_emitted = true;
+    }
+
+    true
 }
 
 fn open_responses_record_pending_tool_call(
@@ -5978,6 +6478,184 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_streams_tool_input_delta_refinements() {
+        let transport: OpenResponsesTransport = Arc::new(
+            move |_request| -> OpenResponsesTransportFuture {
+                let sse = [
+                    r#"data: {"type":"response.created","response":{"id":"resp_stream_tool_deltas","created_at":1711115037,"model":"gpt-4.1-mini"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":0,"item":{"id":"custom_item","type":"custom_tool_call","call_id":"custom_1","name":"sqlWriter","input":""}}"#,
+                    "",
+                    r#"data: {"type":"response.custom_tool_call_input.delta","output_index":0,"delta":"select "}"#,
+                    "",
+                    r#"data: {"type":"response.custom_tool_call_input.delta","output_index":0,"delta":"1"}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":0,"item":{"id":"custom_item","type":"custom_tool_call","call_id":"custom_1","name":"sqlWriter","input":"select 1"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":1,"item":{"id":"ci_123","type":"code_interpreter_call","status":"in_progress","container_id":"container_123"}}"#,
+                    "",
+                    r#"data: {"type":"response.code_interpreter_call_code.delta","output_index":1,"delta":"print("}"#,
+                    "",
+                    r#"data: {"type":"response.code_interpreter_call_code.delta","output_index":1,"delta":"1)\n"}"#,
+                    "",
+                    r#"data: {"type":"response.code_interpreter_call_code.done","output_index":1,"code":"print(1)\n"}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":1,"item":{"id":"ci_123","type":"code_interpreter_call","status":"completed","code":"print(1)\n","container_id":"container_123","outputs":[{"type":"logs","logs":"1"}]}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":2,"item":{"id":"ig_123","type":"image_generation_call","status":"in_progress"}}"#,
+                    "",
+                    r#"data: {"type":"response.image_generation_call.partial_image","output_index":2,"item_id":"ig_123","partial_image_b64":"partial-base64"}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":2,"item":{"id":"ig_123","type":"image_generation_call","status":"completed","result":"final-base64"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":3,"item":{"id":"patch_1","type":"apply_patch_call","call_id":"patch_call_1","operation":{"type":"update_file","path":"README.md"}}}"#,
+                    "",
+                    r#"data: {"type":"response.apply_patch_call_operation_diff.delta","output_index":3,"delta":"@@\n-old\n+new\n"}"#,
+                    "",
+                    r#"data: {"type":"response.apply_patch_call_operation_diff.done","output_index":3,"diff":"@@\n-old\n+new\n"}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":3,"item":{"id":"patch_1","type":"apply_patch_call","call_id":"patch_call_1","status":"completed","operation":{"type":"update_file","path":"README.md","diff":"@@\n-old\n+new\n"}}}"#,
+                    "",
+                    r#"data: {"type":"response.completed","response":{"id":"resp_stream_tool_deltas","created_at":1711115037,"model":"gpt-4.1-mini","usage":{"input_tokens":15,"output_tokens":9}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let result =
+            poll_ready(
+                model.do_stream(
+                    LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                        LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                            LanguageModelTextPart::new("Use streaming tool deltas"),
+                        )]),
+                    )])
+                    .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                        "openai.code_interpreter",
+                        "codeRunner",
+                        JsonObject::new(),
+                    )))
+                    .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                        "openai.image_generation",
+                        "imageMaker",
+                        JsonObject::new(),
+                    )))
+                    .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                        "openai.apply_patch",
+                        "patchTool",
+                        JsonObject::new(),
+                    ))),
+                ),
+            );
+
+        let input_deltas_for = |tool_call_id: &str| {
+            result
+                .stream
+                .iter()
+                .filter_map(|part| match part {
+                    LanguageModelStreamPart::ToolInputDelta(delta) if delta.id == tool_call_id => {
+                        Some(delta.delta.as_str())
+                    }
+                    _ => None,
+                })
+                .fold(String::new(), |mut input, delta| {
+                    input.push_str(delta);
+                    input
+                })
+        };
+        let tool_call_by_id = |tool_call_id: &str| {
+            result
+                .stream
+                .iter()
+                .find_map(|part| match part {
+                    LanguageModelStreamPart::ToolCall(tool_call)
+                        if tool_call.tool_call_id == tool_call_id =>
+                    {
+                        Some(tool_call)
+                    }
+                    _ => None,
+                })
+                .expect("stream includes expected tool call")
+        };
+
+        assert_eq!(input_deltas_for("custom_1"), "select 1");
+        assert_eq!(
+            tool_call_by_id("custom_1").input,
+            json!("select 1").to_string()
+        );
+
+        assert_eq!(
+            input_deltas_for("ci_123"),
+            r#"{"containerId":"container_123","code":"print(1)\n"}"#
+        );
+        assert_eq!(
+            tool_call_by_id("ci_123").input,
+            json!({
+                "code": "print(1)\n",
+                "containerId": "container_123"
+            })
+            .to_string()
+        );
+        assert_eq!(tool_call_by_id("ci_123").provider_executed, Some(true));
+
+        let image_results = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolResult(tool_result)
+                    if tool_result.tool_call_id == "ig_123" =>
+                {
+                    Some(tool_result)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(image_results.len(), 2);
+        assert_eq!(image_results[0].preliminary, Some(true));
+        assert_eq!(
+            image_results[0].result.as_value(),
+            &json!({
+                "result": "partial-base64"
+            })
+        );
+        assert_eq!(image_results[1].preliminary, None);
+        assert_eq!(
+            image_results[1].result.as_value(),
+            &json!({
+                "result": "final-base64"
+            })
+        );
+
+        assert_eq!(
+            input_deltas_for("patch_call_1"),
+            r#"{"callId":"patch_call_1","operation":{"type":"update_file","path":"README.md","diff":"@@\n-old\n+new\n"}}"#
+        );
+        assert_eq!(
+            tool_call_by_id("patch_call_1").input,
+            json!({
+                "callId": "patch_call_1",
+                "operation": {
+                    "type": "update_file",
+                    "path": "README.md",
+                    "diff": "@@\n-old\n+new\n"
+                }
+            })
+            .to_string()
+        );
+    }
+
+    #[test]
     fn open_responses_provider_streams_additional_tool_items() {
         let transport: OpenResponsesTransport = Arc::new(
             move |_request| -> OpenResponsesTransportFuture {
@@ -5996,7 +6674,7 @@ mod tests {
                     "",
                     r#"data: {"type":"response.output_item.done","output_index":5,"item":{"id":"shell_out_1","type":"shell_call_output","call_id":"shell_call_1","output":[{"stdout":"hi\n","stderr":"","outcome":{"type":"exit","exit_code":0}}]}}"#,
                     "",
-                    r#"data: {"type":"response.output_item.done","output_index":6,"item":{"id":"patch_1","type":"apply_patch_call","call_id":"patch_call_1","operation":{"type":"update_file","path":"README.md","diff":"@@\n"}}}"#,
+                    r#"data: {"type":"response.output_item.done","output_index":6,"item":{"id":"patch_1","type":"apply_patch_call","call_id":"patch_call_1","status":"completed","operation":{"type":"update_file","path":"README.md","diff":"@@\n"}}}"#,
                     "",
                     r#"data: {"type":"response.output_item.done","output_index":7,"item":{"id":"mcp_1","type":"mcp_call","server_label":"server","name":"lookup","arguments":"{\"query\":\"rust\"}","output":{"ok":true}}}"#,
                     "",
