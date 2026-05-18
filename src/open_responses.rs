@@ -997,7 +997,7 @@ fn open_responses_input(
                             }));
                         }
                         LanguageModelUserContentPart::File(file) => {
-                            content.push(open_responses_file_part(file)?);
+                            content.push(open_responses_file_part(file, provider_options_name)?);
                         }
                     }
                 }
@@ -1299,6 +1299,7 @@ fn open_responses_input(
                                 input.push(open_responses_custom_tool_call_output_item(
                                     &part.tool_call_id,
                                     &part.output,
+                                    provider_options_name,
                                     warnings,
                                 ));
                                 continue;
@@ -1309,6 +1310,7 @@ fn open_responses_input(
                                 "call_id": part.tool_call_id,
                                 "output": open_responses_tool_result_output(
                                     &part.output,
+                                    provider_options_name,
                                     warnings
                                 )
                             }));
@@ -1620,12 +1622,13 @@ fn open_responses_custom_tool_call_item(
 fn open_responses_custom_tool_call_output_item(
     call_id: &str,
     output: &LanguageModelToolResultOutput,
+    provider_options_name: &str,
     warnings: &mut Vec<Warning>,
 ) -> JsonValue {
     json!({
         "type": "custom_tool_call_output",
         "call_id": call_id,
-        "output": open_responses_tool_result_output(output, warnings)
+        "output": open_responses_tool_result_output(output, provider_options_name, warnings)
     })
 }
 
@@ -1776,7 +1779,10 @@ fn open_responses_execution_denied_approval_id(
     }
 }
 
-fn open_responses_file_part(file: &LanguageModelFilePart) -> Result<JsonValue, String> {
+fn open_responses_file_part(
+    file: &LanguageModelFilePart,
+    provider_options_name: &str,
+) -> Result<JsonValue, String> {
     let top_level_media_type = get_top_level_media_type(&file.media_type);
 
     match &file.data {
@@ -1789,10 +1795,10 @@ fn open_responses_file_part(file: &LanguageModelFilePart) -> Result<JsonValue, S
         }
         FileData::Url { url } => {
             if top_level_media_type == "image" {
-                Ok(json!({
-                    "type": "input_image",
-                    "image_url": url.as_str()
-                }))
+                Ok(open_responses_image_file_part(
+                    url.as_str().to_string(),
+                    open_responses_image_detail(file, provider_options_name),
+                ))
             } else {
                 Ok(json!({
                     "type": "input_file",
@@ -1806,10 +1812,10 @@ fn open_responses_file_part(file: &LanguageModelFilePart) -> Result<JsonValue, S
             let data_uri = format!("data:{full_media_type};base64,{}", convert_to_base64(data));
 
             if top_level_media_type == "image" {
-                Ok(json!({
-                    "type": "input_image",
-                    "image_url": data_uri
-                }))
+                Ok(open_responses_image_file_part(
+                    data_uri,
+                    open_responses_image_detail(file, provider_options_name),
+                ))
             } else {
                 Ok(json!({
                     "type": "input_file",
@@ -1821,8 +1827,34 @@ fn open_responses_file_part(file: &LanguageModelFilePart) -> Result<JsonValue, S
     }
 }
 
+fn open_responses_image_file_part(image_url: String, detail: Option<JsonValue>) -> JsonValue {
+    let mut part = JsonObject::new();
+    part.insert(
+        "type".to_string(),
+        JsonValue::String("input_image".to_string()),
+    );
+    part.insert("image_url".to_string(), JsonValue::String(image_url));
+    if let Some(detail) = detail {
+        part.insert("detail".to_string(), detail);
+    }
+    JsonValue::Object(part)
+}
+
+fn open_responses_image_detail(
+    file: &LanguageModelFilePart,
+    provider_options_name: &str,
+) -> Option<JsonValue> {
+    file.provider_options
+        .as_ref()
+        .and_then(|provider_options| provider_options.get(provider_options_name))
+        .and_then(|options| options.get("imageDetail"))
+        .filter(|detail| !detail.is_null())
+        .cloned()
+}
+
 fn open_responses_tool_result_output(
     output: &LanguageModelToolResultOutput,
+    provider_options_name: &str,
     warnings: &mut Vec<Warning>,
 ) -> JsonValue {
     match output {
@@ -1851,7 +1883,7 @@ fn open_responses_tool_result_output(
                         }));
                     }
                     LanguageModelToolResultContentPart::File(file) => {
-                        match open_responses_file_part(file) {
+                        match open_responses_file_part(file, provider_options_name) {
                             Ok(file_part) => content.push(file_part),
                             Err(message) => warnings.push(Warning::Unsupported {
                                 feature: "toolResultFileContent".to_string(),
@@ -8321,6 +8353,18 @@ mod tests {
         )
         .with_transport(transport);
         let model = provider.language_model("gpt-4.1-mini");
+        let image_data_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "imageDetail": "original"
+            }
+        }))
+        .expect("provider options deserialize");
+        let image_url_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "imageDetail": "high"
+            }
+        }))
+        .expect("provider options deserialize");
 
         let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
             LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
@@ -8336,14 +8380,18 @@ mod tests {
                                 data: FileDataContent::Bytes(vec![0, 1, 2, 3]),
                             },
                             "image/png",
-                        )),
-                        LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
-                            FileData::Url {
-                                url: Url::parse("https://example.com/photo.jpg")
-                                    .expect("url parses"),
-                            },
-                            "image/jpeg",
-                        )),
+                        )
+                        .with_provider_options(image_data_options)),
+                        LanguageModelToolResultContentPart::File(
+                            LanguageModelFilePart::new(
+                                FileData::Url {
+                                    url: Url::parse("https://example.com/photo.jpg")
+                                        .expect("url parses"),
+                                },
+                                "image/jpeg",
+                            )
+                            .with_provider_options(image_url_options),
+                        ),
                         LanguageModelToolResultContentPart::File(
                             LanguageModelFilePart::new(
                                 FileData::Data {
@@ -8390,11 +8438,13 @@ mod tests {
                             },
                             {
                                 "type": "input_image",
-                                "image_url": "data:image/png;base64,AAECAw=="
+                                "image_url": "data:image/png;base64,AAECAw==",
+                                "detail": "original"
                             },
                             {
                                 "type": "input_image",
-                                "image_url": "https://example.com/photo.jpg"
+                                "image_url": "https://example.com/photo.jpg",
+                                "detail": "high"
                             },
                             {
                                 "type": "input_file",
