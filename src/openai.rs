@@ -251,7 +251,8 @@ impl OpenAIProvider {
             provider_name,
             format!("{}/responses", openai_base_url(&self.settings)),
         )
-        .with_user_agent_suffix(format!("ai-sdk/openai/{}", crate::VERSION));
+        .with_user_agent_suffix(format!("ai-sdk/openai/{}", crate::VERSION))
+        .with_file_id_prefix("file-");
 
         if let Some(api_key) = openai_api_key(self.settings.api_key.as_ref()) {
             settings = settings.with_api_key(api_key);
@@ -340,10 +341,15 @@ fn non_empty_optional_setting(value: Option<String>) -> Option<String> {
 mod tests {
     use super::{DEFAULT_OPENAI_BASE_URL, OpenAIProvider, OpenAIProviderSettings, create_openai};
     use crate::embed::{EmbedManyOptions, embed_many};
+    use crate::file_data::{FileData, FileDataContent};
     use crate::generate_image::{GenerateImageOptions, GenerateImagePrompt, generate_image};
     use crate::generate_text::{GenerateTextOptions, generate_text};
     use crate::headers::Headers;
     use crate::json::JsonValue;
+    use crate::language_model::{
+        LanguageModel, LanguageModelCallOptions, LanguageModelFilePart, LanguageModelMessage,
+        LanguageModelUserContentPart, LanguageModelUserMessage,
+    };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
     use crate::provider::{Provider, ProviderMetadata, ProviderOptions};
@@ -586,6 +592,100 @@ mod tests {
                             {
                                 "type": "input_text",
                                 "text": "Say hello"
+                            }
+                        ]
+                    }
+                ]
+            }))
+        );
+    }
+
+    #[test]
+    fn openai_provider_responses_uses_default_file_id_prefix() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_openai_file_id_prefix",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "File ids accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 4,
+                            "output_tokens": 4
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = OpenAIProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://api.openai.test/v1/")
+            .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let _result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Base64("file-img-abc123".to_string()),
+                    },
+                    "image/png",
+                )),
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Base64("file-pdf-xyz789".to_string()),
+                    },
+                    "application/pdf",
+                )),
+            ])),
+        ])));
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.url, "https://api.openai.test/v1/responses");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "gpt-4.1-mini",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_image",
+                                "file_id": "file-img-abc123"
+                            },
+                            {
+                                "type": "input_file",
+                                "file_id": "file-pdf-xyz789"
                             }
                         ]
                     }
