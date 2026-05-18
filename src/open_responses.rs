@@ -785,7 +785,9 @@ fn open_responses_input(
                                 "type": "function_call",
                                 "call_id": tool_call.tool_call_id,
                                 "name": tool_call.tool_name,
-                                "arguments": tool_call.input
+                                "arguments": open_responses_function_call_arguments(
+                                    &tool_call.input
+                                )
                             }));
                         }
                         LanguageModelAssistantContentPart::ToolResult(part) => {
@@ -887,6 +889,13 @@ fn open_responses_flush_assistant_content(
         "role": "assistant",
         "content": std::mem::take(content)
     }));
+}
+
+fn open_responses_function_call_arguments(input: &JsonValue) -> String {
+    input
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| input.to_string())
 }
 
 fn open_responses_store_enabled(
@@ -5347,6 +5356,112 @@ mod tests {
                     {
                         "type": "item_reference",
                         "id": "mcp_result_item"
+                    }
+                ]
+            }))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_stringifies_assistant_function_call_arguments() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_tool_args",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Arguments accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 5,
+                            "output_tokens": 3
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                    "Checking tools",
+                )),
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call_object",
+                    "get_weather",
+                    json!({
+                        "location": "Brisbane"
+                    }),
+                )),
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call_string",
+                    "get_weather",
+                    JsonValue::String("{\"location\":\"Berlin\"}".to_string()),
+                )),
+            ])),
+        ])));
+
+        assert!(result.warnings.is_empty());
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "gpt-4.1-mini",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "Checking tools"
+                            }
+                        ]
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_object",
+                        "name": "get_weather",
+                        "arguments": "{\"location\":\"Brisbane\"}"
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_string",
+                        "name": "get_weather",
+                        "arguments": "{\"location\":\"Berlin\"}"
                     }
                 ]
             }))
