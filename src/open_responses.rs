@@ -487,7 +487,9 @@ fn open_responses_request_body(
     options: &LanguageModelCallOptions,
 ) -> Result<(JsonValue, Vec<Warning>), String> {
     let mut warnings = Vec::new();
-    let (input, instructions) = open_responses_input(&options.prompt, &mut warnings)?;
+    let store =
+        open_responses_store_enabled(provider_options_name, options.provider_options.as_ref());
+    let (input, instructions) = open_responses_input(&options.prompt, store, &mut warnings)?;
     let mut body = JsonObject::new();
     body.insert("model".to_string(), JsonValue::String(model_id.to_string()));
     body.insert("input".to_string(), JsonValue::Array(input));
@@ -654,10 +656,12 @@ fn open_responses_camel_case_provider_options_key(value: &str) -> String {
 
 fn open_responses_input(
     prompt: &[LanguageModelMessage],
+    store: bool,
     warnings: &mut Vec<Warning>,
 ) -> Result<(Vec<JsonValue>, Option<String>), String> {
     let mut input = Vec::new();
     let mut system_messages = Vec::new();
+    let mut processed_approval_ids = BTreeSet::new();
 
     for message in prompt {
         match message {
@@ -730,6 +734,10 @@ fn open_responses_input(
                 for part in &message.content {
                     match part {
                         LanguageModelToolContentPart::ToolResult(part) => {
+                            if open_responses_execution_denied_approval_id(&part.output).is_some() {
+                                continue;
+                            }
+
                             input.push(json!({
                                 "type": "function_call_output",
                                 "call_id": part.tool_call_id,
@@ -739,14 +747,23 @@ fn open_responses_input(
                                 )
                             }));
                         }
-                        LanguageModelToolContentPart::ToolApprovalResponse(_) => {
-                            warnings.push(Warning::Unsupported {
-                                feature: "toolApprovalResponse".to_string(),
-                                details: Some(
-                                    "Open Responses tool approval responses are not implemented yet."
-                                        .to_string(),
-                                ),
-                            });
+                        LanguageModelToolContentPart::ToolApprovalResponse(part) => {
+                            if !processed_approval_ids.insert(part.approval_id.clone()) {
+                                continue;
+                            }
+
+                            if store {
+                                input.push(json!({
+                                    "type": "item_reference",
+                                    "id": part.approval_id
+                                }));
+                            }
+
+                            input.push(json!({
+                                "type": "mcp_approval_response",
+                                "approval_request_id": part.approval_id,
+                                "approve": part.approved
+                            }));
                         }
                     }
                 }
@@ -757,6 +774,52 @@ fn open_responses_input(
     let instructions = (!system_messages.is_empty()).then(|| system_messages.join("\n"));
 
     Ok((input, instructions))
+}
+
+fn open_responses_store_enabled(
+    provider_options_name: &str,
+    provider_options: Option<&ProviderOptions>,
+) -> bool {
+    let Some(provider_options) = provider_options else {
+        return true;
+    };
+
+    let raw_provider_options_name = provider_options_name
+        .split('.')
+        .next()
+        .unwrap_or(provider_options_name)
+        .trim();
+    let camel_provider_options_name =
+        open_responses_camel_case_provider_options_key(raw_provider_options_name);
+    let mut store = None;
+
+    if let Some(options) = provider_options.get(raw_provider_options_name) {
+        store = options.get("store").and_then(JsonValue::as_bool);
+    }
+
+    if camel_provider_options_name != raw_provider_options_name
+        && let Some(options) = provider_options.get(&camel_provider_options_name)
+        && let Some(value) = options.get("store").and_then(JsonValue::as_bool)
+    {
+        store = Some(value);
+    }
+
+    store.unwrap_or(true)
+}
+
+fn open_responses_execution_denied_approval_id(
+    output: &LanguageModelToolResultOutput,
+) -> Option<&str> {
+    match output {
+        LanguageModelToolResultOutput::ExecutionDenied {
+            provider_options: Some(provider_options),
+            ..
+        } => provider_options
+            .get("openai")
+            .and_then(|options| options.get("approvalId"))
+            .and_then(JsonValue::as_str),
+        _ => None,
+    }
 }
 
 fn open_responses_file_part(file: &LanguageModelFilePart) -> Result<JsonValue, String> {
@@ -4548,7 +4611,9 @@ mod tests {
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
         LanguageModelFilePart, LanguageModelMessage, LanguageModelProviderTool,
         LanguageModelSource, LanguageModelStreamPart, LanguageModelTextPart, LanguageModelTool,
-        LanguageModelToolChoice, LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelToolApprovalResponsePart, LanguageModelToolChoice,
+        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultOutput,
+        LanguageModelToolResultPart, LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::prompt::Prompt;
     use crate::provider::{ModelType, Provider, ProviderMetadata, ProviderOptions};
@@ -4720,6 +4785,106 @@ mod tests {
                 "metadata": {
                     "trace": "responses-test"
                 }
+            }))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_tool_approval_responses_to_mcp_input() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_approval",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Approval recorded"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 5,
+                            "output_tokens": 3
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let approval_provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "approvalId": "approval_1"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolApprovalResponse(
+                    LanguageModelToolApprovalResponsePart::new("approval_1", false)
+                        .with_reason("policy block"),
+                ),
+                LanguageModelToolContentPart::ToolApprovalResponse(
+                    LanguageModelToolApprovalResponsePart::new("approval_1", false),
+                ),
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "mcp_call_1",
+                    "mcp.deploy",
+                    LanguageModelToolResultOutput::execution_denied()
+                        .with_reason("policy block")
+                        .with_provider_options(approval_provider_options),
+                )),
+            ])),
+        ])));
+
+        assert!(result.warnings.is_empty());
+        assert_eq!(result.content.len(), 1);
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "gpt-4.1-mini",
+                "input": [
+                    {
+                        "type": "item_reference",
+                        "id": "approval_1"
+                    },
+                    {
+                        "type": "mcp_approval_response",
+                        "approval_request_id": "approval_1",
+                        "approve": false
+                    }
+                ]
             }))
         );
     }
