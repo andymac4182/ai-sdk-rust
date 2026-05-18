@@ -255,16 +255,16 @@ focused tests for each portable behavior before changing rows to `verified`.
    library surfaces are complete enough for end-to-end use.
 7. Port MCP, OTel, Workflow, UI-message, chat/completion transport, telemetry,
    logger, and HTTP server example surfaces.
-8. Crate splitting must be handled as an architectural requirement now, not as a
-   later cleanup. The Rust workspace must use a strict 1:1 mapping: every
-   upstream `vercel/ai` TypeScript package needs its own corresponding Rust
-   crate, and package-owned API must live in that crate. The current
-   `ai-sdk-rust` root crate is already merging multiple upstream packages into
-   one Rust boundary; every additional package surface added there increases the
-   future split cost and makes a clean extraction harder. Future iterations
-   should stop adding package-owned types, provider/options surfaces, docs, or
-   tests directly to the root crate unless there is an explicit, documented
-   reason and a concrete follow-up extraction path. The root crate should move
-   toward an aggregate/re-export role where useful, while package crates own
-   their corresponding upstream API, dependency boundary, provider/options
-   surface, docs, and tests.
+8. Crate splitting is a required architecture constraint for the next
+   iterations, not optional cleanup. The Rust workspace must converge on a
+   strict 1:1 mapping between upstream `vercel/ai` TypeScript packages and Rust
+   crates: each upstream package must have one corresponding Rust crate, and
+   package-owned API must be implemented, documented, and tested in that crate.
+   The current `ai-sdk-rust` root crate is already collapsing multiple upstream
+   packages into one Rust boundary, and continuing to merge additional package
+   surfaces there will make later extraction harder and more expensive. Future
+   parity work should default to creating or using the matching package crate
+   before porting new package-owned types, provider/options surfaces, docs, or
+   tests. Additions to the root crate should be limited to aggregate
+   re-exports, compatibility shims, or explicitly documented temporary staging
+   with a concrete follow-up extraction path.
