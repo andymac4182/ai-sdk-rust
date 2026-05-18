@@ -287,13 +287,16 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ## Next Unported Work Queue
 
-1. Finish all common/core SDK packages and Vercel AI Gateway coverage before
-   returning to unrelated standalone providers. This ordering covers
+1. Finish ALL common/core SDK packages and Vercel AI Gateway coverage before
+   returning to unrelated standalone providers. This ordering is a hard gate,
+   not a preference, and it covers
    `packages/ai`, `packages/provider`, `packages/provider-utils`,
    `packages/openai-compatible`, `packages/open-responses`, `packages/gateway`,
    the Vercel AI Gateway OpenAI-compatible and Open Responses routes, and the
    portable non-provider package rows such as MCP, OTel, Workflow, telemetry,
    UI transport, chat/completion transport, and test-server support.
+   Standalone provider slices are blocked while any of these rows are not yet
+   verified or explicitly documented as intentionally non-portable.
 2. Close the remaining Open Responses structured output/tools matrix, especially
    the remaining structured-output/tool-call edge cases now that MCP approval
    continuation, conversation history filtering, assistant text metadata,
@@ -318,11 +321,11 @@ focused tests for each portable behavior before changing rows to `verified`.
    image/embedding/reranking/video, account metadata, auth/observability,
    provider-executed tools, and error-classification slices with broader
    provider package tests.
-7. Defer unrelated standalone provider wrappers until the common/core SDK and
-   Vercel AI Gateway rows above are verified or explicitly documented as
-   intentionally non-portable. When standalone provider work resumes, continue
-   it only as package-owned crates that match their upstream TypeScript
-   packages; do not add new root-owned provider modules.
+7. Do not resume unrelated standalone provider wrappers until the common/core
+   SDK and Vercel AI Gateway rows above are verified or explicitly documented
+   as intentionally non-portable. When standalone provider work resumes,
+   continue it only as package-owned crates that match their upstream
+   TypeScript packages; do not add new root-owned provider modules.
 8. Crate splitting is an immediate hard acceptance gate, not optional cleanup
    after the port is otherwise complete. The Rust workspace must have a strict
    1:1 mapping between upstream `vercel/ai` TypeScript packages and Rust
