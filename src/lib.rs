@@ -27,6 +27,7 @@ pub mod image_model_middleware;
 pub mod json;
 pub mod language_model;
 pub mod language_model_middleware;
+pub mod logger;
 pub mod mock_models;
 pub mod open_responses;
 pub mod openai;
@@ -252,6 +253,11 @@ pub use language_model_middleware::{
     WrappedLanguageModel, add_tool_input_examples_middleware, default_extract_json_transform,
     default_format_tool_input_example, default_settings_middleware, extract_json_middleware,
     extract_reasoning_middleware, simulate_streaming_middleware, wrap_language_model,
+};
+pub use logger::{
+    FIRST_WARNING_INFO_MESSAGE, LogWarningsOptions, WarningLogKind, WarningLogRecord,
+    WarningLogger, format_warning, log_warnings, log_warnings_with_custom_logger,
+    reset_log_warnings_state, set_log_warnings_enabled,
 };
 pub use mock_models::{
     MockEmbeddingModel, MockImageModel, MockLanguageModel, MockProvider, MockRerankingModel,
