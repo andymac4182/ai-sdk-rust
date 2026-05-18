@@ -1845,82 +1845,78 @@ fn open_responses_push_annotation_sources(
         .into_iter()
         .flatten()
     {
-        match annotation.get("type").and_then(JsonValue::as_str) {
-            Some("url_citation") => {
-                let Some(url) = annotation.get("url").and_then(JsonValue::as_str) else {
-                    continue;
-                };
+        if let Some(source) = open_responses_annotation_source(
+            provider_name,
+            annotation,
+            open_responses_next_source_id(source_index),
+        ) {
+            content.push(LanguageModelContent::Source(source));
+        }
+    }
+}
 
-                let mut source =
-                    LanguageModelUrlSource::new(open_responses_next_source_id(source_index), url);
-                if let Some(title) = annotation.get("title").and_then(JsonValue::as_str) {
-                    source = source.with_title(title);
-                }
-                content.push(LanguageModelContent::Source(LanguageModelSource::Url(
-                    source,
-                )));
+fn open_responses_annotation_source(
+    provider_name: &str,
+    annotation: &JsonValue,
+    source_id: String,
+) -> Option<LanguageModelSource> {
+    match annotation.get("type").and_then(JsonValue::as_str) {
+        Some("url_citation") => {
+            let url = annotation.get("url").and_then(JsonValue::as_str)?;
+            let mut source = LanguageModelUrlSource::new(source_id, url);
+            if let Some(title) = annotation.get("title").and_then(JsonValue::as_str) {
+                source = source.with_title(title);
             }
-            Some("file_citation") => {
-                let source_id = open_responses_next_source_id(source_index);
-                let filename = annotation
-                    .get("filename")
-                    .and_then(JsonValue::as_str)
-                    .unwrap_or_default();
-                let source = LanguageModelDocumentSource::new(source_id, "text/plain", filename)
-                    .with_filename(filename)
-                    .with_provider_metadata(open_responses_annotation_metadata(
-                        provider_name,
-                        annotation,
-                        &[("type", "type"), ("file_id", "fileId"), ("index", "index")],
-                    ));
-                content.push(LanguageModelContent::Source(LanguageModelSource::Document(
-                    source,
-                )));
-            }
-            Some("container_file_citation") => {
-                let source_id = open_responses_next_source_id(source_index);
-                let filename = annotation
-                    .get("filename")
-                    .and_then(JsonValue::as_str)
-                    .unwrap_or_default();
-                let source = LanguageModelDocumentSource::new(source_id, "text/plain", filename)
-                    .with_filename(filename)
-                    .with_provider_metadata(open_responses_annotation_metadata(
-                        provider_name,
-                        annotation,
-                        &[
-                            ("type", "type"),
-                            ("file_id", "fileId"),
-                            ("container_id", "containerId"),
-                        ],
-                    ));
-                content.push(LanguageModelContent::Source(LanguageModelSource::Document(
-                    source,
-                )));
-            }
-            Some("file_path") => {
-                let source_id = open_responses_next_source_id(source_index);
-                let file_id = annotation
-                    .get("file_id")
-                    .and_then(JsonValue::as_str)
-                    .unwrap_or_default();
-                let source = LanguageModelDocumentSource::new(
-                    source_id,
-                    "application/octet-stream",
-                    file_id,
-                )
-                .with_filename(file_id)
+            Some(LanguageModelSource::Url(source))
+        }
+        Some("file_citation") => {
+            let filename = annotation
+                .get("filename")
+                .and_then(JsonValue::as_str)
+                .unwrap_or_default();
+            let source = LanguageModelDocumentSource::new(source_id, "text/plain", filename)
+                .with_filename(filename)
                 .with_provider_metadata(open_responses_annotation_metadata(
                     provider_name,
                     annotation,
                     &[("type", "type"), ("file_id", "fileId"), ("index", "index")],
                 ));
-                content.push(LanguageModelContent::Source(LanguageModelSource::Document(
-                    source,
-                )));
-            }
-            _ => {}
+            Some(LanguageModelSource::Document(source))
         }
+        Some("container_file_citation") => {
+            let filename = annotation
+                .get("filename")
+                .and_then(JsonValue::as_str)
+                .unwrap_or_default();
+            let source = LanguageModelDocumentSource::new(source_id, "text/plain", filename)
+                .with_filename(filename)
+                .with_provider_metadata(open_responses_annotation_metadata(
+                    provider_name,
+                    annotation,
+                    &[
+                        ("type", "type"),
+                        ("file_id", "fileId"),
+                        ("container_id", "containerId"),
+                    ],
+                ));
+            Some(LanguageModelSource::Document(source))
+        }
+        Some("file_path") => {
+            let file_id = annotation
+                .get("file_id")
+                .and_then(JsonValue::as_str)
+                .unwrap_or_default();
+            let source =
+                LanguageModelDocumentSource::new(source_id, "application/octet-stream", file_id)
+                    .with_filename(file_id)
+                    .with_provider_metadata(open_responses_annotation_metadata(
+                        provider_name,
+                        annotation,
+                        &[("type", "type"), ("file_id", "fileId"), ("index", "index")],
+                    ));
+            Some(LanguageModelSource::Document(source))
+        }
+        _ => None,
     }
 }
 
@@ -2257,6 +2253,16 @@ fn open_responses_stream_result_from_response(
     let mut active_reasoning = BTreeSet::<String>::new();
     let mut ended_reasoning = BTreeSet::<String>::new();
     let mut pending_tool_calls = BTreeMap::<String, PendingOpenResponsesToolCall>::new();
+    let mut source_index = 0usize;
+    let mut ongoing_annotations = Vec::<JsonValue>::new();
+    let mut active_message_phase = None::<String>;
+    let mut active_reasoning_items = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut active_message_items = BTreeSet::<String>::new();
+    let mut completed_message_text = BTreeMap::<String, String>::new();
+    let store_response = request_body
+        .get("store")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(true);
 
     for event in events {
         match event {
@@ -2296,7 +2302,7 @@ fn open_responses_stream_result_from_response(
                         if let Some(delta) = value.get("delta").and_then(JsonValue::as_str)
                             && !delta.is_empty()
                         {
-                            let id = open_responses_stream_block_id("txt", &value);
+                            let id = open_responses_stream_text_id(&value);
                             open_responses_push_text_delta(
                                 &mut stream,
                                 &mut text_buffers,
@@ -2304,27 +2310,46 @@ fn open_responses_stream_result_from_response(
                                 &ended_text,
                                 &id,
                                 delta,
+                                open_responses_stream_text_metadata(
+                                    provider_name,
+                                    Some(&id),
+                                    active_message_phase.as_deref(),
+                                    &[],
+                                ),
                             );
                         }
                     }
                     Some("response.output_text.done") => {
-                        let id = open_responses_stream_block_id("txt", &value);
+                        let id = open_responses_stream_text_id(&value);
                         let text = value.get("text").and_then(JsonValue::as_str);
-                        open_responses_finish_text_block(
-                            &mut stream,
-                            &mut text_buffers,
-                            &mut active_text,
-                            &mut ended_text,
-                            &id,
-                            text,
-                        );
+                        if active_message_items.contains(&id) {
+                            if let Some(text) = text {
+                                completed_message_text.insert(id, text.to_string());
+                            }
+                        } else {
+                            open_responses_finish_text_block(
+                                &mut stream,
+                                &mut text_buffers,
+                                &mut active_text,
+                                &mut ended_text,
+                                &id,
+                                text,
+                                open_responses_stream_text_metadata(
+                                    provider_name,
+                                    Some(&id),
+                                    active_message_phase.as_deref(),
+                                    &ongoing_annotations,
+                                ),
+                            );
+                        }
                     }
                     Some("response.reasoning_summary_text.delta")
                     | Some("response.reasoning_text.delta") => {
                         if let Some(delta) = value.get("delta").and_then(JsonValue::as_str)
                             && !delta.is_empty()
                         {
-                            let id = open_responses_stream_block_id("reasoning", &value);
+                            let item_id = open_responses_stream_item_id(&value);
+                            let id = open_responses_stream_reasoning_id(&value);
                             open_responses_push_reasoning_delta(
                                 &mut stream,
                                 &mut reasoning_buffers,
@@ -2332,12 +2357,18 @@ fn open_responses_stream_result_from_response(
                                 &ended_reasoning,
                                 &id,
                                 delta,
+                                open_responses_stream_reasoning_metadata(
+                                    provider_name,
+                                    item_id.as_deref(),
+                                    None,
+                                ),
                             );
                         }
                     }
                     Some("response.reasoning_summary_text.done")
                     | Some("response.reasoning_text.done") => {
-                        let id = open_responses_stream_block_id("reasoning", &value);
+                        let item_id = open_responses_stream_item_id(&value);
+                        let id = open_responses_stream_reasoning_id(&value);
                         let text = value.get("text").and_then(JsonValue::as_str);
                         open_responses_finish_reasoning_block(
                             &mut stream,
@@ -2346,6 +2377,11 @@ fn open_responses_stream_result_from_response(
                             &mut ended_reasoning,
                             &id,
                             text,
+                            open_responses_stream_reasoning_metadata(
+                                provider_name,
+                                item_id.as_deref(),
+                                None,
+                            ),
                         );
                     }
                     Some("response.content_part.done") => {
@@ -2358,17 +2394,35 @@ fn open_responses_stream_result_from_response(
                             .and_then(JsonValue::as_str);
 
                         if matches!(part_type, Some("output_text")) {
-                            let id = open_responses_stream_block_id("txt", &value);
-                            open_responses_finish_text_block(
-                                &mut stream,
-                                &mut text_buffers,
-                                &mut active_text,
-                                &mut ended_text,
-                                &id,
-                                text,
-                            );
+                            let id = open_responses_stream_text_id(&value);
+                            let annotations = part
+                                .and_then(|part| part.get("annotations"))
+                                .and_then(JsonValue::as_array)
+                                .cloned()
+                                .unwrap_or_default();
+                            if active_message_items.contains(&id) {
+                                if let Some(text) = text {
+                                    completed_message_text.insert(id, text.to_string());
+                                }
+                            } else {
+                                open_responses_finish_text_block(
+                                    &mut stream,
+                                    &mut text_buffers,
+                                    &mut active_text,
+                                    &mut ended_text,
+                                    &id,
+                                    text,
+                                    open_responses_stream_text_metadata(
+                                        provider_name,
+                                        Some(&id),
+                                        active_message_phase.as_deref(),
+                                        &annotations,
+                                    ),
+                                );
+                            }
                         } else if open_responses_is_reasoning_text_part(part_type) {
-                            let id = open_responses_stream_block_id("reasoning", &value);
+                            let item_id = open_responses_stream_item_id(&value);
+                            let id = open_responses_stream_reasoning_id(&value);
                             open_responses_finish_reasoning_block(
                                 &mut stream,
                                 &mut reasoning_buffers,
@@ -2376,11 +2430,116 @@ fn open_responses_stream_result_from_response(
                                 &mut ended_reasoning,
                                 &id,
                                 text,
+                                open_responses_stream_reasoning_metadata(
+                                    provider_name,
+                                    item_id.as_deref(),
+                                    None,
+                                ),
                             );
+                        }
+                    }
+                    Some("response.reasoning_summary_part.added") => {
+                        if let Some(item_id) = value.get("item_id").and_then(JsonValue::as_str) {
+                            let summary_index = open_responses_stream_summary_index(&value);
+                            active_reasoning_items
+                                .entry(item_id.to_string())
+                                .or_default()
+                                .insert(summary_index.clone());
+                            let id = format!("{item_id}:{summary_index}");
+                            open_responses_start_reasoning_block(
+                                &mut stream,
+                                &mut active_reasoning,
+                                &ended_reasoning,
+                                &id,
+                                open_responses_stream_reasoning_metadata(
+                                    provider_name,
+                                    Some(item_id),
+                                    None,
+                                ),
+                            );
+                        }
+                    }
+                    Some("response.reasoning_summary_part.done") => {
+                        if store_response
+                            && let Some(item_id) = value.get("item_id").and_then(JsonValue::as_str)
+                        {
+                            let summary_index = open_responses_stream_summary_index(&value);
+                            let id = format!("{item_id}:{summary_index}");
+                            open_responses_finish_reasoning_block(
+                                &mut stream,
+                                &mut reasoning_buffers,
+                                &mut active_reasoning,
+                                &mut ended_reasoning,
+                                &id,
+                                None,
+                                open_responses_stream_reasoning_metadata(
+                                    provider_name,
+                                    Some(item_id),
+                                    None,
+                                ),
+                            );
+                        }
+                    }
+                    Some("response.output_text.annotation.added") => {
+                        if let Some(annotation) = value.get("annotation") {
+                            ongoing_annotations.push(annotation.clone());
+                            if let Some(source) = open_responses_annotation_source(
+                                provider_name,
+                                annotation,
+                                open_responses_next_source_id(&mut source_index),
+                            ) {
+                                stream.push(LanguageModelStreamPart::Source(source));
+                            }
                         }
                     }
                     Some("response.output_item.added") => {
                         if let Some(item) = value.get("item") {
+                            match item.get("type").and_then(JsonValue::as_str) {
+                                Some("message") => {
+                                    ongoing_annotations.clear();
+                                    active_message_phase = item
+                                        .get("phase")
+                                        .and_then(JsonValue::as_str)
+                                        .map(ToString::to_string);
+                                    if let Some(id) = item.get("id").and_then(JsonValue::as_str) {
+                                        active_message_items.insert(id.to_string());
+                                        open_responses_start_text_block(
+                                            &mut stream,
+                                            &mut active_text,
+                                            &ended_text,
+                                            id,
+                                            open_responses_stream_text_metadata(
+                                                provider_name,
+                                                Some(id),
+                                                active_message_phase.as_deref(),
+                                                &[],
+                                            ),
+                                        );
+                                    }
+                                }
+                                Some("reasoning") => {
+                                    if let Some(item_id) =
+                                        item.get("id").and_then(JsonValue::as_str)
+                                    {
+                                        active_reasoning_items
+                                            .entry(item_id.to_string())
+                                            .or_default()
+                                            .insert("0".to_string());
+                                        let id = format!("{item_id}:0");
+                                        open_responses_start_reasoning_block(
+                                            &mut stream,
+                                            &mut active_reasoning,
+                                            &ended_reasoning,
+                                            &id,
+                                            Some(open_responses_reasoning_metadata(
+                                                provider_name,
+                                                item,
+                                            )),
+                                        );
+                                    }
+                                }
+                                _ => {}
+                            }
                             open_responses_record_pending_tool_call(&mut pending_tool_calls, item);
                         }
                     }
@@ -2397,15 +2556,89 @@ fn open_responses_stream_result_from_response(
                         );
                     }
                     Some("response.output_item.done") => {
-                        if let Some(item) = value.get("item")
-                            && open_responses_push_tool_call_from_item(
-                                &mut stream,
-                                &mut emitted_tool_calls,
-                                &mut pending_tool_calls,
-                                item,
-                            )
-                        {
-                            has_tool_calls = true;
+                        if let Some(item) = value.get("item") {
+                            match item.get("type").and_then(JsonValue::as_str) {
+                                Some("message") => {
+                                    if let Some(id) = item.get("id").and_then(JsonValue::as_str) {
+                                        let phase = item
+                                            .get("phase")
+                                            .and_then(JsonValue::as_str)
+                                            .or(active_message_phase.as_deref());
+                                        let final_text = completed_message_text.remove(id);
+                                        open_responses_finish_text_block(
+                                            &mut stream,
+                                            &mut text_buffers,
+                                            &mut active_text,
+                                            &mut ended_text,
+                                            id,
+                                            final_text.as_deref(),
+                                            open_responses_stream_text_metadata(
+                                                provider_name,
+                                                Some(id),
+                                                phase,
+                                                &ongoing_annotations,
+                                            ),
+                                        );
+                                        active_message_items.remove(id);
+                                    }
+                                    active_message_phase = None;
+                                }
+                                Some("reasoning") => {
+                                    if let Some(item_id) =
+                                        item.get("id").and_then(JsonValue::as_str)
+                                    {
+                                        let summary_indices = active_reasoning_items
+                                            .remove(item_id)
+                                            .unwrap_or_else(|| BTreeSet::from(["0".to_string()]));
+                                        for summary_index in summary_indices {
+                                            let id = format!("{item_id}:{summary_index}");
+                                            open_responses_start_reasoning_block(
+                                                &mut stream,
+                                                &mut active_reasoning,
+                                                &ended_reasoning,
+                                                &id,
+                                                Some(open_responses_reasoning_metadata(
+                                                    provider_name,
+                                                    item,
+                                                )),
+                                            );
+                                            open_responses_finish_reasoning_block(
+                                                &mut stream,
+                                                &mut reasoning_buffers,
+                                                &mut active_reasoning,
+                                                &mut ended_reasoning,
+                                                &id,
+                                                None,
+                                                Some(open_responses_reasoning_metadata(
+                                                    provider_name,
+                                                    item,
+                                                )),
+                                            );
+                                        }
+                                    }
+                                }
+                                Some("compaction") => {
+                                    stream.push(LanguageModelStreamPart::Custom(
+                                        LanguageModelCustomContent::new("openai.compaction")
+                                            .with_provider_metadata(
+                                                open_responses_compaction_metadata(
+                                                    provider_name,
+                                                    item,
+                                                ),
+                                            ),
+                                    ));
+                                }
+                                _ => {
+                                    if open_responses_push_tool_call_from_item(
+                                        &mut stream,
+                                        &mut emitted_tool_calls,
+                                        &mut pending_tool_calls,
+                                        item,
+                                    ) {
+                                        has_tool_calls = true;
+                                    }
+                                }
+                            }
                         }
                     }
                     Some("response.completed") => {
@@ -2576,6 +2809,31 @@ fn open_responses_stream_block_id(prefix: &str, value: &JsonValue) -> String {
     parts.join("-")
 }
 
+fn open_responses_stream_item_id(value: &JsonValue) -> Option<String> {
+    value
+        .get("item_id")
+        .or_else(|| value.get("item").and_then(|item| item.get("id")))
+        .and_then(JsonValue::as_str)
+        .map(ToString::to_string)
+}
+
+fn open_responses_stream_text_id(value: &JsonValue) -> String {
+    open_responses_stream_item_id(value)
+        .unwrap_or_else(|| open_responses_stream_block_id("txt", value))
+}
+
+fn open_responses_stream_summary_index(value: &JsonValue) -> String {
+    open_responses_json_index(value.get("summary_index"))
+        .or_else(|| open_responses_json_index(value.get("content_index")))
+        .unwrap_or_else(|| "0".to_string())
+}
+
+fn open_responses_stream_reasoning_id(value: &JsonValue) -> String {
+    open_responses_stream_item_id(value)
+        .map(|item_id| format!("{item_id}:{}", open_responses_stream_summary_index(value)))
+        .unwrap_or_else(|| open_responses_stream_block_id("reasoning", value))
+}
+
 fn open_responses_json_index(value: Option<&JsonValue>) -> Option<String> {
     value
         .and_then(JsonValue::as_u64)
@@ -2587,6 +2845,68 @@ fn open_responses_json_index(value: Option<&JsonValue>) -> Option<String> {
         })
 }
 
+fn open_responses_stream_text_metadata(
+    provider_name: &str,
+    item_id: Option<&str>,
+    phase: Option<&str>,
+    annotations: &[JsonValue],
+) -> Option<ProviderMetadata> {
+    let mut metadata = JsonObject::new();
+
+    if let Some(item_id) = item_id {
+        metadata.insert("itemId".to_string(), JsonValue::String(item_id.to_string()));
+    }
+
+    if let Some(phase) = phase {
+        metadata.insert("phase".to_string(), JsonValue::String(phase.to_string()));
+    }
+
+    if !annotations.is_empty() {
+        metadata.insert(
+            "annotations".to_string(),
+            JsonValue::Array(annotations.to_vec()),
+        );
+    }
+
+    (!metadata.is_empty()).then(|| open_responses_metadata(provider_name, metadata))
+}
+
+fn open_responses_stream_reasoning_metadata(
+    provider_name: &str,
+    item_id: Option<&str>,
+    encrypted_content: Option<JsonValue>,
+) -> Option<ProviderMetadata> {
+    let item_id = item_id?;
+    let mut metadata = JsonObject::new();
+    metadata.insert("itemId".to_string(), JsonValue::String(item_id.to_string()));
+
+    if let Some(encrypted_content) = encrypted_content {
+        metadata.insert("reasoningEncryptedContent".to_string(), encrypted_content);
+    }
+
+    Some(open_responses_metadata(provider_name, metadata))
+}
+
+fn open_responses_start_text_block(
+    stream: &mut Vec<LanguageModelStreamPart>,
+    active_text: &mut BTreeSet<String>,
+    ended_text: &BTreeSet<String>,
+    id: &str,
+    provider_metadata: Option<ProviderMetadata>,
+) {
+    if ended_text.contains(id) {
+        return;
+    }
+
+    if active_text.insert(id.to_string()) {
+        let mut start = LanguageModelTextStart::new(id);
+        if let Some(provider_metadata) = provider_metadata {
+            start = start.with_provider_metadata(provider_metadata);
+        }
+        stream.push(LanguageModelStreamPart::TextStart(start));
+    }
+}
+
 fn open_responses_push_text_delta(
     stream: &mut Vec<LanguageModelStreamPart>,
     text_buffers: &mut BTreeMap<String, String>,
@@ -2594,16 +2914,13 @@ fn open_responses_push_text_delta(
     ended_text: &BTreeSet<String>,
     id: &str,
     delta: &str,
+    provider_metadata: Option<ProviderMetadata>,
 ) {
     if ended_text.contains(id) {
         return;
     }
 
-    if active_text.insert(id.to_string()) {
-        stream.push(LanguageModelStreamPart::TextStart(
-            LanguageModelTextStart::new(id),
-        ));
-    }
+    open_responses_start_text_block(stream, active_text, ended_text, id, provider_metadata);
 
     text_buffers
         .entry(id.to_string())
@@ -2621,6 +2938,7 @@ fn open_responses_finish_text_block(
     ended_text: &mut BTreeSet<String>,
     id: &str,
     final_text: Option<&str>,
+    provider_metadata: Option<ProviderMetadata>,
 ) {
     if ended_text.contains(id) {
         return;
@@ -2629,15 +2947,45 @@ fn open_responses_finish_text_block(
     let buffered = text_buffers.remove(id).unwrap_or_default();
     let emitted_final_text = buffered.is_empty() && final_text.is_some_and(|text| !text.is_empty());
     if emitted_final_text && let Some(text) = final_text {
-        open_responses_push_text_delta(stream, text_buffers, active_text, ended_text, id, text);
+        open_responses_push_text_delta(
+            stream,
+            text_buffers,
+            active_text,
+            ended_text,
+            id,
+            text,
+            provider_metadata.clone(),
+        );
         text_buffers.remove(id);
     }
 
     if active_text.remove(id) || !buffered.is_empty() || emitted_final_text {
-        stream.push(LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new(
-            id,
-        )));
+        let mut end = LanguageModelTextEnd::new(id);
+        if let Some(provider_metadata) = provider_metadata {
+            end = end.with_provider_metadata(provider_metadata);
+        }
+        stream.push(LanguageModelStreamPart::TextEnd(end));
         ended_text.insert(id.to_string());
+    }
+}
+
+fn open_responses_start_reasoning_block(
+    stream: &mut Vec<LanguageModelStreamPart>,
+    active_reasoning: &mut BTreeSet<String>,
+    ended_reasoning: &BTreeSet<String>,
+    id: &str,
+    provider_metadata: Option<ProviderMetadata>,
+) {
+    if ended_reasoning.contains(id) {
+        return;
+    }
+
+    if active_reasoning.insert(id.to_string()) {
+        let mut start = LanguageModelReasoningStart::new(id);
+        if let Some(provider_metadata) = provider_metadata {
+            start = start.with_provider_metadata(provider_metadata);
+        }
+        stream.push(LanguageModelStreamPart::ReasoningStart(start));
     }
 }
 
@@ -2648,24 +2996,29 @@ fn open_responses_push_reasoning_delta(
     ended_reasoning: &BTreeSet<String>,
     id: &str,
     delta: &str,
+    provider_metadata: Option<ProviderMetadata>,
 ) {
     if ended_reasoning.contains(id) {
         return;
     }
 
-    if active_reasoning.insert(id.to_string()) {
-        stream.push(LanguageModelStreamPart::ReasoningStart(
-            LanguageModelReasoningStart::new(id),
-        ));
-    }
+    open_responses_start_reasoning_block(
+        stream,
+        active_reasoning,
+        ended_reasoning,
+        id,
+        provider_metadata.clone(),
+    );
 
     reasoning_buffers
         .entry(id.to_string())
         .or_default()
         .push_str(delta);
-    stream.push(LanguageModelStreamPart::ReasoningDelta(
-        LanguageModelReasoningDelta::new(id, delta),
-    ));
+    let mut delta_part = LanguageModelReasoningDelta::new(id, delta);
+    if let Some(provider_metadata) = provider_metadata {
+        delta_part = delta_part.with_provider_metadata(provider_metadata);
+    }
+    stream.push(LanguageModelStreamPart::ReasoningDelta(delta_part));
 }
 
 fn open_responses_finish_reasoning_block(
@@ -2675,6 +3028,7 @@ fn open_responses_finish_reasoning_block(
     ended_reasoning: &mut BTreeSet<String>,
     id: &str,
     final_text: Option<&str>,
+    provider_metadata: Option<ProviderMetadata>,
 ) {
     if ended_reasoning.contains(id) {
         return;
@@ -2690,14 +3044,17 @@ fn open_responses_finish_reasoning_block(
             ended_reasoning,
             id,
             text,
+            provider_metadata.clone(),
         );
         reasoning_buffers.remove(id);
     }
 
     if active_reasoning.remove(id) || !buffered.is_empty() || emitted_final_text {
-        stream.push(LanguageModelStreamPart::ReasoningEnd(
-            LanguageModelReasoningEnd::new(id),
-        ));
+        let mut end = LanguageModelReasoningEnd::new(id);
+        if let Some(provider_metadata) = provider_metadata {
+            end = end.with_provider_metadata(provider_metadata);
+        }
+        stream.push(LanguageModelStreamPart::ReasoningEnd(end));
         ended_reasoning.insert(id.to_string());
     }
 }
@@ -4898,6 +5255,178 @@ mod tests {
                 .and_then(|error| error.get("message"))
                 .and_then(JsonValue::as_str),
             Some("response failed")
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_streams_text_sources_reasoning_and_compaction_metadata() {
+        let transport: OpenResponsesTransport = Arc::new(
+            move |_request| -> OpenResponsesTransportFuture {
+                let sse = [
+                    r#"data: {"type":"response.created","response":{"id":"resp_stream_metadata","created_at":1711115037,"model":"gpt-4.1-mini"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":0,"item":{"id":"message_1","type":"message","phase":"final_answer","role":"assistant","content":[]}}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","item_id":"message_1","output_index":0,"content_index":0,"delta":"Cited answer"}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.done","item_id":"message_1","output_index":0,"content_index":0,"text":"Cited answer"}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.annotation.added","item_id":"message_1","output_index":0,"content_index":0,"annotation_index":0,"annotation":{"type":"url_citation","url":"https://example.com/article","title":"Example Article"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.annotation.added","item_id":"message_1","output_index":0,"content_index":0,"annotation_index":1,"annotation":{"type":"file_citation","file_id":"file_123","filename":"guide.md","index":7}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":0,"item":{"id":"message_1","type":"message","phase":"final_answer","role":"assistant","content":[{"type":"output_text","text":"Cited answer"}]}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":1,"item":{"id":"reasoning_1","type":"reasoning","encrypted_content":"encrypted-reasoning","summary":[]}}"#,
+                    "",
+                    r#"data: {"type":"response.reasoning_summary_text.delta","item_id":"reasoning_1","output_index":1,"summary_index":0,"delta":"thinking"}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":1,"item":{"id":"reasoning_1","type":"reasoning","encrypted_content":"encrypted-reasoning","summary":[{"type":"summary_text","text":"thinking"}]}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":2,"item":{"id":"compaction_1","type":"compaction","encrypted_content":"encrypted-context"}}"#,
+                    "",
+                    r#"data: {"type":"response.completed","response":{"id":"resp_stream_metadata","created_at":1711115037,"model":"gpt-4.1-mini","usage":{"input_tokens":7,"output_tokens":5}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Use sources")),
+            ])),
+        ])));
+
+        let text_start = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextStart(text_start) => Some(text_start),
+                _ => None,
+            })
+            .expect("stream includes text start");
+        assert_eq!(text_start.id, "message_1");
+        assert_eq!(
+            text_start
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("openai"))
+                .and_then(|metadata| metadata.get("phase"))
+                .and_then(JsonValue::as_str),
+            Some("final_answer")
+        );
+
+        let sources = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::Source(source) => Some(source),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sources.len(), 2);
+        assert!(matches!(
+            sources[0],
+            LanguageModelSource::Url(source)
+                if source.id == "source-0"
+                    && source.url == "https://example.com/article"
+                    && source.title.as_deref() == Some("Example Article")
+        ));
+        assert!(matches!(
+            sources[1],
+            LanguageModelSource::Document(source)
+                if source.id == "source-1"
+                    && source.title == "guide.md"
+                    && source.filename.as_deref() == Some("guide.md")
+                    && source
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("openai"))
+                        .and_then(|metadata| metadata.get("fileId"))
+                        .and_then(JsonValue::as_str)
+                        == Some("file_123")
+        ));
+
+        let text_end = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextEnd(text_end) => Some(text_end),
+                _ => None,
+            })
+            .expect("stream includes text end");
+        assert_eq!(
+            text_end
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("openai"))
+                .and_then(|metadata| metadata.get("annotations"))
+                .and_then(JsonValue::as_array)
+                .map(Vec::len),
+            Some(2)
+        );
+
+        let reasoning_start = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ReasoningStart(reasoning_start) => Some(reasoning_start),
+                _ => None,
+            })
+            .expect("stream includes reasoning start");
+        assert_eq!(reasoning_start.id, "reasoning_1:0");
+        assert_eq!(
+            reasoning_start
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("openai"))
+                .and_then(|metadata| metadata.get("reasoningEncryptedContent"))
+                .and_then(JsonValue::as_str),
+            Some("encrypted-reasoning")
+        );
+        assert!(
+            result
+                .stream
+                .iter()
+                .any(|part| matches!(part, LanguageModelStreamPart::ReasoningDelta(delta) if delta.id == "reasoning_1:0" && delta.delta == "thinking"))
+        );
+        assert!(
+            result
+                .stream
+                .iter()
+                .any(|part| matches!(part, LanguageModelStreamPart::ReasoningEnd(end) if end.id == "reasoning_1:0"
+                    && end
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("openai"))
+                        .and_then(|metadata| metadata.get("reasoningEncryptedContent"))
+                        .and_then(JsonValue::as_str)
+                        == Some("encrypted-reasoning")))
+        );
+
+        assert!(
+            result
+                .stream
+                .iter()
+                .any(|part| matches!(part, LanguageModelStreamPart::Custom(custom) if custom.kind == "openai.compaction"
+                    && custom
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("openai"))
+                        .and_then(|metadata| metadata.get("encryptedContent"))
+                        .and_then(JsonValue::as_str)
+                        == Some("encrypted-context")))
         );
     }
 
