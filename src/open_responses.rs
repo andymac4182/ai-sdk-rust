@@ -1256,7 +1256,7 @@ fn open_responses_input(
                                 &mut content,
                             );
 
-                            if open_responses_execution_denied_approval_id(&part.output).is_some() {
+                            if open_responses_is_execution_denied_output(&part.output) {
                                 continue;
                             }
 
@@ -2032,6 +2032,17 @@ fn open_responses_execution_denied_approval_id(
             .and_then(|options| options.get("approvalId"))
             .and_then(JsonValue::as_str),
         _ => None,
+    }
+}
+
+fn open_responses_is_execution_denied_output(output: &LanguageModelToolResultOutput) -> bool {
+    match output {
+        LanguageModelToolResultOutput::ExecutionDenied { .. } => true,
+        LanguageModelToolResultOutput::Json { value, .. } => value
+            .get("type")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|kind| kind == "execution-denied"),
+        _ => false,
     }
 }
 
@@ -7693,6 +7704,143 @@ mod tests {
                         {
                             "type": "output_text",
                             "text": "Search complete."
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_skips_assistant_execution_denied_tool_results() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_denied_tool_results",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Denied results skipped"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 8,
+                            "output_tokens": 3
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "store": false
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                    LanguageModelAssistantMessage::new(vec![
+                        LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                            "I need approval before running the first tool.",
+                        )),
+                        LanguageModelAssistantContentPart::ToolResult(
+                            LanguageModelToolResultPart::new(
+                                "ws_denied_direct",
+                                "web_search",
+                                LanguageModelToolResultOutput::execution_denied()
+                                    .with_reason("User denied the tool execution"),
+                            ),
+                        ),
+                        LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                            "The first tool was not run.",
+                        )),
+                        LanguageModelAssistantContentPart::ToolResult(
+                            LanguageModelToolResultPart::new(
+                                "ws_denied_json",
+                                "web_search",
+                                LanguageModelToolResultOutput::json(json!({
+                                    "type": "execution-denied",
+                                    "reason": "User denied the tool execution"
+                                })),
+                            ),
+                        ),
+                        LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                            "The second tool was not run.",
+                        )),
+                    ]),
+                )])
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "I need approval before running the first tool."
+                        }
+                    ]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "The first tool was not run."
+                        }
+                    ]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "The second tool was not run."
                         }
                     ]
                 }
