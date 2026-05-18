@@ -278,28 +278,30 @@ focused tests for each portable behavior before changing rows to `verified`.
    library surfaces are complete enough for end-to-end use.
 7. Port MCP, OTel, Workflow, UI-message, chat/completion transport, telemetry,
    logger, and HTTP server example surfaces.
-8. Crate splitting is a non-negotiable acceptance requirement for the next
-   iterations, not optional cleanup after the port is otherwise complete. The
-   Rust workspace must enforce a strict 1:1 mapping between upstream
-   `vercel/ai` TypeScript packages and Rust crates: every upstream package gets
-   exactly one corresponding Rust crate, and package-owned API must be
-   implemented, documented, and tested in that crate. The current
-   `ai-sdk-rust` root crate is already merging multiple upstream packages into
-   one Rust boundary. That is architectural debt being created today, not a
-   neutral staging choice, and it gets more expensive every time another
-   TypeScript package is folded into the root crate. Continuing to merge
-   multiple TypeScript packages into the root crate makes the future split
-   harder and should be treated as increasing known migration debt.
+8. Crate splitting is a hard acceptance gate for every future parity slice, not
+   optional cleanup after the port is otherwise complete. The Rust workspace
+   must have a strict 1:1 mapping between upstream `vercel/ai` TypeScript
+   packages and Rust crates: each upstream package gets exactly one
+   corresponding Rust crate, and that crate owns the package's types,
+   provider/options surfaces, docs, and tests. A parity slice that ports a
+   TypeScript package without creating or using its matching Rust crate is
+   blocked.
 
-   Future parity work must stop treating the root crate as the implementation
-   home for package-owned surfaces. Before adding parity for an upstream
-   TypeScript package, create or use the matching Rust crate and put that
-   package's types, provider/options surfaces, docs, and tests there first. The
-   root crate should only aggregate re-exports and compatibility shims; it
-   should not own APIs from multiple upstream packages. Existing package-owned
-   surfaces already merged into the root crate are migration debt and should be
-   moved behind their matching package crates before more API is layered on top
-   of them.
+   The current `ai-sdk-rust` root crate is already merging multiple upstream
+   TypeScript packages into one Rust boundary. That is architectural debt being
+   created today, not a neutral staging choice. Every additional package folded
+   into the root crate increases the amount of API that must be untangled later,
+   makes a clean 1:1 split harder, and raises the risk of breaking users during
+   the eventual extraction. Future work must stop growing this debt.
+
+   Future parity work must not treat the root crate as the implementation home
+   for package-owned surfaces. Before adding parity for an upstream TypeScript
+   package, create or use the matching Rust crate and put the package-owned API
+   there first. The root crate should only aggregate re-exports and
+   compatibility shims; it must not own APIs from multiple upstream packages.
+   Existing package-owned surfaces already merged into the root crate are
+   migration debt and should be moved behind their matching package crates
+   before more API is layered on top of them.
 
    New package-owned APIs must not be added to the root crate unless there is a
    documented, temporary staging exception that names the destination crate,
