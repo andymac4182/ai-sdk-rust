@@ -4028,12 +4028,179 @@ fn provider_api_response(
 
 #[cfg(test)]
 mod tests {
-    use super::{OpenAICompatibleProviderSettings, create_openai_compatible};
+    use super::{
+        OpenAICompatibleProviderSettings, OpenAICompatibleTransport,
+        OpenAICompatibleTransportFuture, create_openai_compatible,
+    };
+    use ai_sdk_provider::headers::Headers;
     use ai_sdk_provider::image_model::ImageModel;
-    use std::future::Future;
+    use ai_sdk_provider_utils::{
+        ProviderApiRequest, ProviderApiRequestMethod, ProviderApiResponse,
+    };
+    use serde_json::json;
+    use std::future::{Future, ready};
     use std::pin::Pin;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
+
+    #[test]
+    fn openai_compatible_provider_lists_models() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "object": "list",
+                        "data": [
+                            {
+                                "id": "provider/chat-model",
+                                "object": "model",
+                                "created": 1711115037,
+                                "owned_by": "provider",
+                                "contextWindow": 128000,
+                                "max_tokens": 4096,
+                                "type": "language",
+                                "tags": ["tool-use"]
+                            },
+                            {
+                                "id": "provider/embedding-model",
+                                "object": "model",
+                                "ownedBy": "provider"
+                            }
+                        ]
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from([(
+                    "x-request-id".to_string(),
+                    "models_req".to_string(),
+                )])))))
+            });
+        let provider = create_openai_compatible(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com/v1/")
+                .with_api_key("test-api-key")
+                .with_header("custom-header", "value")
+                .with_query_param("catalog", "current"),
+        )
+        .with_transport(transport);
+
+        let result = poll_ready(provider.list_models()).expect("model list succeeds");
+        assert_eq!(result.object.as_deref(), Some("list"));
+        assert_eq!(
+            result.model_ids().collect::<Vec<_>>(),
+            vec!["provider/chat-model", "provider/embedding-model"]
+        );
+        assert_eq!(result.data[0].created, Some(1711115037));
+        assert_eq!(result.data[0].owned_by.as_deref(), Some("provider"));
+        assert_eq!(result.data[0].context_window, Some(128000));
+        assert_eq!(result.data[0].max_tokens, Some(4096));
+        assert_eq!(result.data[0].model_type.as_deref(), Some("language"));
+        assert_eq!(result.data[0].tags, vec!["tool-use"]);
+        assert_eq!(result.data[1].owned_by.as_deref(), Some("provider"));
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Get);
+        assert_eq!(
+            request.url,
+            "https://api.example.com/v1/models?catalog=current"
+        );
+        assert!(request.body.is_none());
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+        assert!(
+            request
+                .headers
+                .get("user-agent")
+                .is_some_and(|value| value.contains("ai-sdk/openai-compatible/0.1.0"))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_provider_retrieves_model_by_id() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "provider/chat-model",
+                        "object": "model",
+                        "created": 1711115037,
+                        "owned_by": "provider",
+                        "contextWindow": 128000,
+                        "maxTokens": 4096,
+                        "modelType": "language",
+                        "tags": ["tool-use"]
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from([(
+                    "x-request-id".to_string(),
+                    "model_req".to_string(),
+                )])))))
+            });
+        let provider = create_openai_compatible(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com/v1/")
+                .with_api_key("test-api-key")
+                .with_header("custom-header", "value")
+                .with_query_param("catalog", "current"),
+        )
+        .with_transport(transport);
+
+        let result = poll_ready(provider.retrieve_model("provider/chat-model"))
+            .expect("model retrieval succeeds");
+        assert_eq!(result.id, "provider/chat-model");
+        assert_eq!(result.object.as_deref(), Some("model"));
+        assert_eq!(result.created, Some(1711115037));
+        assert_eq!(result.owned_by.as_deref(), Some("provider"));
+        assert_eq!(result.context_window, Some(128000));
+        assert_eq!(result.max_tokens, Some(4096));
+        assert_eq!(result.model_type.as_deref(), Some("language"));
+        assert_eq!(result.tags, vec!["tool-use"]);
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Get);
+        assert_eq!(
+            request.url,
+            "https://api.example.com/v1/models/provider%2Fchat-model?catalog=current"
+        );
+        assert!(request.body.is_none());
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+    }
 
     #[test]
     fn openai_compatible_provider_configures_headers_urls_and_model_aliases() {
