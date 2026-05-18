@@ -502,6 +502,10 @@ fn open_responses_request_body(
     let store = open_responses_store_enabled(provider_options_name, provider_options);
     let has_conversation =
         open_responses_conversation_enabled(provider_options_name, provider_options);
+    let pass_through_unsupported_files = open_responses_pass_through_unsupported_files_enabled(
+        provider_options_name,
+        provider_options,
+    );
     if has_conversation
         && open_responses_previous_response_id_enabled(provider_options_name, provider_options)
     {
@@ -515,6 +519,7 @@ fn open_responses_request_body(
     let prompt_input_options = OpenResponsesPromptInputOptions {
         store,
         has_conversation,
+        pass_through_unsupported_files,
         provider_options_name,
         tool_name_mapping: &tool_name_mapping,
         has_local_shell_tool,
@@ -955,6 +960,7 @@ fn open_responses_camel_case_provider_options_key(value: &str) -> String {
 struct OpenResponsesPromptInputOptions<'a> {
     store: bool,
     has_conversation: bool,
+    pass_through_unsupported_files: bool,
     provider_options_name: &'a str,
     tool_name_mapping: &'a ToolNameMapping,
     has_local_shell_tool: bool,
@@ -970,6 +976,7 @@ fn open_responses_input(
 ) -> Result<(Vec<JsonValue>, Option<String>), String> {
     let store = options.store;
     let has_conversation = options.has_conversation;
+    let pass_through_unsupported_files = options.pass_through_unsupported_files;
     let provider_options_name = options.provider_options_name;
     let tool_name_mapping = options.tool_name_mapping;
     let has_local_shell_tool = options.has_local_shell_tool;
@@ -990,7 +997,7 @@ fn open_responses_input(
             LanguageModelMessage::User(message) => {
                 let mut content = Vec::new();
 
-                for part in &message.content {
+                for (index, part) in message.content.iter().enumerate() {
                     match part {
                         LanguageModelUserContentPart::Text(text) => {
                             content.push(json!({
@@ -999,7 +1006,14 @@ fn open_responses_input(
                             }));
                         }
                         LanguageModelUserContentPart::File(file) => {
-                            content.push(open_responses_file_part(file, provider_options_name)?);
+                            content.push(open_responses_file_part(
+                                file,
+                                provider_options_name,
+                                OpenResponsesFilePartContext::Prompt {
+                                    index,
+                                    pass_through_unsupported_files,
+                                },
+                            )?);
                         }
                     }
                 }
@@ -1982,6 +1996,22 @@ fn open_responses_previous_response_id_enabled(
     .is_some()
 }
 
+fn open_responses_pass_through_unsupported_files_enabled(
+    provider_options_name: &str,
+    provider_options: Option<&ProviderOptions>,
+) -> bool {
+    open_responses_provider_option_value(
+        provider_options_name,
+        provider_options,
+        &[
+            "passThroughUnsupportedFiles",
+            "pass_through_unsupported_files",
+        ],
+    )
+    .and_then(JsonValue::as_bool)
+    .unwrap_or(false)
+}
+
 fn open_responses_provider_option_value<'a>(
     provider_options_name: &str,
     provider_options: Option<&'a ProviderOptions>,
@@ -2050,14 +2080,31 @@ fn open_responses_is_execution_denied_output(output: &LanguageModelToolResultOut
     }
 }
 
+#[derive(Clone, Copy)]
+enum OpenResponsesFilePartContext {
+    Prompt {
+        index: usize,
+        pass_through_unsupported_files: bool,
+    },
+    ToolResult,
+}
+
 fn open_responses_file_part(
     file: &LanguageModelFilePart,
     provider_options_name: &str,
+    context: OpenResponsesFilePartContext,
 ) -> Result<JsonValue, String> {
     let top_level_media_type = get_top_level_media_type(&file.media_type);
 
     match &file.data {
         FileData::Reference { reference } => {
+            if matches!(context, OpenResponsesFilePartContext::ToolResult) {
+                return Err(
+                    "Open Responses file parts with provider references are not implemented yet."
+                        .to_string(),
+                );
+            }
+
             let file_id = reference
                 .provider_id(provider_options_name)
                 .map_err(|error| error.message().to_string())?;
@@ -2101,9 +2148,34 @@ fn open_responses_file_part(
                     open_responses_image_detail(file, provider_options_name),
                 ))
             } else {
+                if let OpenResponsesFilePartContext::Prompt {
+                    pass_through_unsupported_files,
+                    ..
+                } = context
+                    && full_media_type != "application/pdf"
+                    && !pass_through_unsupported_files
+                {
+                    return Err(format!("file part media type {full_media_type}"));
+                }
+
+                let filename = match context {
+                    OpenResponsesFilePartContext::Prompt { index, .. } => {
+                        file.filename.clone().unwrap_or_else(|| {
+                            if full_media_type == "application/pdf" {
+                                format!("part-{index}.pdf")
+                            } else {
+                                format!("part-{index}")
+                            }
+                        })
+                    }
+                    OpenResponsesFilePartContext::ToolResult => {
+                        file.filename.clone().unwrap_or_else(|| "data".to_string())
+                    }
+                };
+
                 Ok(json!({
                     "type": "input_file",
-                    "filename": file.filename.as_deref().unwrap_or("data"),
+                    "filename": filename,
                     "file_data": data_uri
                 }))
             }
@@ -2183,7 +2255,11 @@ fn open_responses_tool_result_output(
                         }));
                     }
                     LanguageModelToolResultContentPart::File(file) => {
-                        match open_responses_file_part(file, provider_options_name) {
+                        match open_responses_file_part(
+                            file,
+                            provider_options_name,
+                            OpenResponsesFilePartContext::ToolResult,
+                        ) {
                             Ok(file_part) => content.push(file_part),
                             Err(message) => warnings.push(Warning::Unsupported {
                                 feature: "toolResultFileContent".to_string(),
@@ -9368,6 +9444,153 @@ mod tests {
                     }
                 ]
             }))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_handles_prompt_file_defaults_and_unsupported_files() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let captured_requests_for_transport = Arc::clone(&captured_requests);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                captured_requests_for_transport
+                    .lock()
+                    .expect("captured requests mutex is not poisoned")
+                    .push(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_file_defaults",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "File defaults accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 9,
+                            "output_tokens": 4
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let rejected = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Base64("AQIDBAU=".to_string()),
+                    },
+                    "text/plain",
+                )),
+            ])),
+        ])));
+
+        assert_eq!(rejected.finish_reason.unified, FinishReason::Error);
+        assert_eq!(
+            openai_metadata_value(&rejected.provider_metadata, "errorMessage")
+                .and_then(JsonValue::as_str),
+            Some("file part media type text/plain")
+        );
+        assert!(
+            captured_requests
+                .lock()
+                .expect("captured requests mutex is not poisoned")
+                .is_empty()
+        );
+
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "passThroughUnsupportedFiles": true
+            }
+        }))
+        .expect("provider options deserialize");
+        let accepted = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![
+                        LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                            FileData::Data {
+                                data: FileDataContent::Base64("AQIDBAU=".to_string()),
+                            },
+                            "application/pdf",
+                        )),
+                        LanguageModelUserContentPart::File(
+                            LanguageModelFilePart::new(
+                                FileData::Data {
+                                    data: FileDataContent::Base64(
+                                        "bmFtZSxyb2xlCkFkYSxlbmdpbmVlcgo=".to_string(),
+                                    ),
+                                },
+                                "text/csv",
+                            )
+                            .with_filename("names.csv"),
+                        ),
+                    ]),
+                )])
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(
+            accepted
+                .content
+                .iter()
+                .filter_map(|part| match part {
+                    LanguageModelContent::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["File defaults accepted"]
+        );
+        let requests = captured_requests
+            .lock()
+            .expect("captured requests mutex is not poisoned");
+        assert_eq!(requests.len(), 1);
+        let request_body = requests[0]
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_file",
+                            "filename": "part-0.pdf",
+                            "file_data": "data:application/pdf;base64,AQIDBAU="
+                        },
+                        {
+                            "type": "input_file",
+                            "filename": "names.csv",
+                            "file_data": "data:text/csv;base64,bmFtZSxyb2xlCkFkYSxlbmdpbmVlcgo="
+                        }
+                    ]
+                }
+            ])
         );
     }
 
