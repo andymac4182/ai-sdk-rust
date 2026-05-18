@@ -259,15 +259,18 @@ focused tests for each portable behavior before changing rows to `verified`.
 7. Port MCP, OTel, Workflow, UI-message, chat/completion transport, telemetry,
    logger, and HTTP server example surfaces.
 8. Crate splitting is a required architecture constraint for the next
-   iterations, not optional cleanup. The Rust workspace must converge on a
+   iterations and should be treated as mandatory parity work, not optional
+   cleanup after the port is otherwise complete. The Rust workspace must have a
    strict 1:1 mapping between upstream `vercel/ai` TypeScript packages and Rust
    crates: each upstream package must have one corresponding Rust crate, and
    package-owned API must be implemented, documented, and tested in that crate.
-   The current `ai-sdk-rust` root crate is already collapsing multiple upstream
-   packages into one Rust boundary, and continuing to merge additional package
-   surfaces there will make later extraction harder and more expensive. Future
-   parity work should default to creating or using the matching package crate
-   before porting new package-owned types, provider/options surfaces, docs, or
-   tests. Additions to the root crate should be limited to aggregate
-   re-exports, compatibility shims, or explicitly documented temporary staging
-   with a concrete follow-up extraction path.
+   The current `ai-sdk-rust` root crate is already merging multiple upstream
+   packages into one Rust boundary. Every additional package surface added to
+   that root crate increases the future extraction cost and makes the eventual
+   1:1 split riskier. Future parity work should create or use the matching
+   package crate before porting new package-owned types, provider/options
+   surfaces, docs, or tests. New package-owned APIs should not be added to the
+   root crate unless the change is explicitly documented as temporary staging
+   with the target crate named and a concrete follow-up extraction path. The
+   root crate should converge toward aggregate re-exports and compatibility
+   shims only.
