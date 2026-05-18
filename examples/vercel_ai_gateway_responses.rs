@@ -10,7 +10,7 @@ use ai_sdk_rust::{
 
 fn main() {
     let api_key = gateway_api_key().expect(
-        "set AI_GATEWAY_API_KEY or AI_SDK_RUST_AI_GATEWAY_API_KEY in the environment or .env.local",
+        "set AI_GATEWAY_API_KEY, AI_SDK_RUST_AI_GATEWAY_API_KEY, or VERCEL_OIDC_TOKEN in the environment or .env.local",
     );
     let model_id = env::var("AI_SDK_RUST_AI_GATEWAY_OPENAI_RESPONSES_MODEL")
         .or_else(|_| env::var("AI_GATEWAY_OPENAI_RESPONSES_MODEL"))
@@ -37,8 +37,10 @@ fn main() {
 fn gateway_api_key() -> Option<String> {
     non_empty_env_setting("AI_GATEWAY_API_KEY")
         .or_else(|| non_empty_env_setting("AI_SDK_RUST_AI_GATEWAY_API_KEY"))
+        .or_else(|| non_empty_env_setting("VERCEL_OIDC_TOKEN"))
         .or_else(|| dotenv_setting("AI_GATEWAY_API_KEY"))
         .or_else(|| dotenv_setting("AI_SDK_RUST_AI_GATEWAY_API_KEY"))
+        .or_else(|| dotenv_setting("VERCEL_OIDC_TOKEN"))
 }
 
 fn non_empty_env_setting(name: &str) -> Option<String> {

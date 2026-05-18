@@ -180,6 +180,53 @@ pub struct OpenAICompatibleModelEntry {
     )]
     pub owned_by: Option<String>,
 
+    /// Display name when the provider includes richer model metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// Model description when the provider includes richer model metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    /// Release timestamp when the provider includes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released: Option<i64>,
+
+    /// Maximum context length in tokens when the provider includes it.
+    #[serde(
+        default,
+        rename = "context_window",
+        alias = "contextWindow",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub context_window: Option<u64>,
+
+    /// Maximum output tokens when the provider includes it.
+    #[serde(
+        default,
+        rename = "max_tokens",
+        alias = "maxTokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_tokens: Option<u64>,
+
+    /// Model category such as `language`, `embedding`, `image`, or `video`.
+    #[serde(
+        default,
+        rename = "type",
+        alias = "modelType",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub model_type: Option<String>,
+
+    /// Capability tags when the provider includes them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+
+    /// Pricing metadata when the provider includes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<JsonObject>,
+
     /// Additional provider-specific model metadata.
     #[serde(default, flatten)]
     pub metadata: JsonObject,
@@ -1513,6 +1560,11 @@ fn openai_compatible_chat_request_body(
     }
 
     body.extend(additional_body_options);
+    merge_vercel_ai_gateway_provider_options(
+        &settings.name,
+        options.provider_options.as_ref(),
+        &mut body,
+    );
 
     if let Some(user) = user {
         body.insert("user".to_string(), JsonValue::String(user));
@@ -1853,7 +1905,33 @@ fn openai_compatible_image_provider_options(
         body_options.extend(options.clone());
     }
 
+    merge_vercel_ai_gateway_provider_options(provider, Some(provider_options), &mut body_options);
+
     body_options
+}
+
+fn merge_vercel_ai_gateway_provider_options(
+    provider_name: &str,
+    provider_options: Option<&ProviderOptions>,
+    body: &mut JsonObject,
+) {
+    if provider_name != "vercel-ai-gateway" {
+        return;
+    }
+
+    let Some(gateway_options) = provider_options.and_then(|options| options.get("gateway")) else {
+        return;
+    };
+
+    let request_provider_options = body
+        .entry("providerOptions".to_string())
+        .or_insert_with(|| JsonValue::Object(JsonObject::new()));
+
+    if let JsonValue::Object(request_provider_options) = request_provider_options {
+        request_provider_options
+            .entry("gateway".to_string())
+            .or_insert_with(|| JsonValue::Object(gateway_options.clone()));
+    }
 }
 
 fn openai_compatible_image_generation_request_body(
@@ -2030,6 +2108,8 @@ fn openai_compatible_embedding_provider_options(
     {
         add_openai_compatible_embedding_body_options(body, options);
     }
+
+    merge_vercel_ai_gateway_provider_options(provider, Some(provider_options), body);
 
     warnings
 }
@@ -4065,7 +4145,10 @@ mod tests {
                                 "object": "model",
                                 "created": 1711115037,
                                 "owned_by": "provider",
-                                "contextWindow": 128000
+                                "contextWindow": 128000,
+                                "max_tokens": 4096,
+                                "type": "language",
+                                "tags": ["tool-use"]
                             },
                             {
                                 "id": "provider/embedding-model",
@@ -4097,13 +4180,10 @@ mod tests {
         );
         assert_eq!(result.data[0].created, Some(1711115037));
         assert_eq!(result.data[0].owned_by.as_deref(), Some("provider"));
-        assert_eq!(
-            result.data[0]
-                .metadata
-                .get("contextWindow")
-                .and_then(JsonValue::as_u64),
-            Some(128000)
-        );
+        assert_eq!(result.data[0].context_window, Some(128000));
+        assert_eq!(result.data[0].max_tokens, Some(4096));
+        assert_eq!(result.data[0].model_type.as_deref(), Some("language"));
+        assert_eq!(result.data[0].tags, vec!["tool-use"]);
         assert_eq!(result.data[1].owned_by.as_deref(), Some("provider"));
 
         let request = captured_request
@@ -4151,7 +4231,10 @@ mod tests {
                         "object": "model",
                         "created": 1711115037,
                         "owned_by": "provider",
-                        "contextWindow": 128000
+                        "contextWindow": 128000,
+                        "maxTokens": 4096,
+                        "modelType": "language",
+                        "tags": ["tool-use"]
                     })
                     .to_string(),
                 )
@@ -4174,13 +4257,10 @@ mod tests {
         assert_eq!(result.object.as_deref(), Some("model"));
         assert_eq!(result.created, Some(1711115037));
         assert_eq!(result.owned_by.as_deref(), Some("provider"));
-        assert_eq!(
-            result
-                .metadata
-                .get("contextWindow")
-                .and_then(JsonValue::as_u64),
-            Some(128000)
-        );
+        assert_eq!(result.context_window, Some(128000));
+        assert_eq!(result.max_tokens, Some(4096));
+        assert_eq!(result.model_type.as_deref(), Some("language"));
+        assert_eq!(result.tags, vec!["tool-use"]);
 
         let request = captured_request
             .lock()

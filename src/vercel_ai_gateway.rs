@@ -28,8 +28,9 @@ pub struct VercelAiGatewayOpenAICompatibleSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
 
-    /// AI Gateway API key. When omitted, `AI_GATEWAY_API_KEY` and then
-    /// `AI_SDK_RUST_AI_GATEWAY_API_KEY` are read at model creation time.
+    /// AI Gateway API key. When omitted, `AI_GATEWAY_API_KEY`, then
+    /// `AI_SDK_RUST_AI_GATEWAY_API_KEY`, then `VERCEL_OIDC_TOKEN` are read at
+    /// model creation time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
 
@@ -178,7 +179,7 @@ impl VercelAiGatewayOpenAICompatibleProvider {
         )
         .with_supports_json_object_response_format(false);
 
-        if let Some(api_key) = vercel_ai_gateway_api_key(self.settings.api_key.as_ref()) {
+        if let Some(api_key) = vercel_ai_gateway_auth_token(self.settings.api_key.as_ref()) {
             settings = settings.with_api_key(api_key);
         }
 
@@ -208,7 +209,7 @@ impl VercelAiGatewayOpenAICompatibleProvider {
             ),
         );
 
-        if let Some(api_key) = vercel_ai_gateway_api_key(self.settings.api_key.as_ref()) {
+        if let Some(api_key) = vercel_ai_gateway_auth_token(self.settings.api_key.as_ref()) {
             settings = settings.with_api_key(api_key);
         }
 
@@ -291,14 +292,18 @@ pub fn vercel_ai_gateway_openai_compatible_image(
     VercelAiGatewayOpenAICompatibleProvider::new().image_model(model_id)
 }
 
-fn vercel_ai_gateway_api_key(explicit_api_key: Option<&String>) -> Option<String> {
-    non_empty_optional_setting(explicit_api_key.cloned())
-        .or_else(|| non_empty_env_setting("AI_GATEWAY_API_KEY"))
-        .or_else(|| non_empty_env_setting("AI_SDK_RUST_AI_GATEWAY_API_KEY"))
+fn vercel_ai_gateway_auth_token(explicit_api_key: Option<&String>) -> Option<String> {
+    vercel_ai_gateway_auth_token_with_env(explicit_api_key, |name| env::var(name).ok())
 }
 
-fn non_empty_env_setting(name: &str) -> Option<String> {
-    non_empty_optional_setting(env::var(name).ok())
+fn vercel_ai_gateway_auth_token_with_env(
+    explicit_api_key: Option<&String>,
+    mut load_env: impl FnMut(&str) -> Option<String>,
+) -> Option<String> {
+    non_empty_optional_setting(explicit_api_key.cloned())
+        .or_else(|| non_empty_optional_setting(load_env("AI_GATEWAY_API_KEY")))
+        .or_else(|| non_empty_optional_setting(load_env("AI_SDK_RUST_AI_GATEWAY_API_KEY")))
+        .or_else(|| non_empty_optional_setting(load_env("VERCEL_OIDC_TOKEN")))
 }
 
 fn non_empty_optional_setting(value: Option<String>) -> Option<String> {
@@ -310,12 +315,14 @@ mod tests {
     use super::{
         VERCEL_AI_GATEWAY_OPENAI_COMPATIBLE_BASE_URL, VercelAiGatewayOpenAICompatibleProvider,
         VercelAiGatewayOpenAICompatibleSettings, create_vercel_ai_gateway_openai_compatible,
-        vercel_ai_gateway_openai_compatible, vercel_ai_gateway_openai_compatible_embedding,
-        vercel_ai_gateway_openai_compatible_image, vercel_ai_gateway_openai_responses,
+        vercel_ai_gateway_auth_token_with_env, vercel_ai_gateway_openai_compatible,
+        vercel_ai_gateway_openai_compatible_embedding, vercel_ai_gateway_openai_compatible_image,
+        vercel_ai_gateway_openai_responses,
     };
     use crate::embed::{EmbedManyOptions, EmbedOptions, embed, embed_many};
     use crate::embedding_model::EmbeddingModel;
     use crate::file_data::{FileData, FileDataContent};
+    use crate::gateway::{GatewayProviderOptions, GatewayProviderTimeouts};
     use crate::generate_image::{GenerateImageOptions, generate_image};
     use crate::generate_object::{GenerateObjectOptions, generate_object};
     use crate::generate_text::{GenerateTextOptions, PrepareStepResult, generate_text};
@@ -458,6 +465,95 @@ mod tests {
                 ],
                 "max_tokens": 16,
                 "temperature": 0.0
+            })
+        );
+    }
+
+    #[test]
+    fn vercel_ai_gateway_openai_compatible_passes_gateway_provider_options_through_openai_chat() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "chatcmpl-vercel-gateway-options",
+                        "created": 1711115037,
+                        "model": "openai/gpt-4.1-mini",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Gateway options accepted"
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 4,
+                            "completion_tokens": 3,
+                            "total_tokens": 7
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_vercel_ai_gateway_openai_compatible(
+            VercelAiGatewayOpenAICompatibleSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://ai-gateway.test/v1"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("openai/gpt-4.1-mini");
+        let provider_options = GatewayProviderOptions::new()
+            .with_order(["vertex", "anthropic"])
+            .with_models(["anthropic/claude-sonnet-4.6", "google/gemini-3-pro"])
+            .with_zero_data_retention(true)
+            .with_provider_timeouts(
+                GatewayProviderTimeouts::new().with_byok_timeout("openai", 5000),
+            )
+            .into_provider_options();
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(&model, Prompt::from_prompt("Use Gateway routing"))
+                .expect("prompt is valid")
+                .with_provider_options(provider_options),
+        ));
+
+        assert_eq!(result.text, "Gateway options accepted");
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["providerOptions"],
+            json!({
+                "gateway": {
+                    "order": ["vertex", "anthropic"],
+                    "models": ["anthropic/claude-sonnet-4.6", "google/gemini-3-pro"],
+                    "zeroDataRetention": true,
+                    "providerTimeouts": {
+                        "byok": {
+                            "openai": 5000
+                        }
+                    }
+                }
             })
         );
     }
@@ -1497,6 +1593,59 @@ mod tests {
     }
 
     #[test]
+    fn vercel_ai_gateway_openai_compatible_auth_token_matches_gateway_precedence() {
+        let explicit = "explicit-api-key".to_string();
+        let token = vercel_ai_gateway_auth_token_with_env(
+            Some(&explicit),
+            env_lookup(&[
+                ("AI_GATEWAY_API_KEY", "env-api-key"),
+                ("AI_SDK_RUST_AI_GATEWAY_API_KEY", "rust-env-api-key"),
+                ("VERCEL_OIDC_TOKEN", "oidc-token"),
+            ]),
+        )
+        .expect("explicit token resolves");
+        assert_eq!(token, "explicit-api-key");
+
+        let token = vercel_ai_gateway_auth_token_with_env(
+            None,
+            env_lookup(&[
+                ("AI_GATEWAY_API_KEY", "env-api-key"),
+                ("AI_SDK_RUST_AI_GATEWAY_API_KEY", "rust-env-api-key"),
+                ("VERCEL_OIDC_TOKEN", "oidc-token"),
+            ]),
+        )
+        .expect("gateway api key resolves before compatibility env and OIDC");
+        assert_eq!(token, "env-api-key");
+
+        let token = vercel_ai_gateway_auth_token_with_env(
+            None,
+            env_lookup(&[
+                ("AI_SDK_RUST_AI_GATEWAY_API_KEY", "rust-env-api-key"),
+                ("VERCEL_OIDC_TOKEN", "oidc-token"),
+            ]),
+        )
+        .expect("compatibility api key resolves before OIDC");
+        assert_eq!(token, "rust-env-api-key");
+
+        let token = vercel_ai_gateway_auth_token_with_env(
+            None,
+            env_lookup(&[("VERCEL_OIDC_TOKEN", "oidc-token")]),
+        )
+        .expect("OIDC token resolves when API keys are absent");
+        assert_eq!(token, "oidc-token");
+
+        let token = vercel_ai_gateway_auth_token_with_env(
+            None,
+            env_lookup(&[
+                ("AI_GATEWAY_API_KEY", ""),
+                ("AI_SDK_RUST_AI_GATEWAY_API_KEY", ""),
+                ("VERCEL_OIDC_TOKEN", ""),
+            ]),
+        );
+        assert_eq!(token, None);
+    }
+
+    #[test]
     fn vercel_ai_gateway_openai_compatible_lists_models() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -1515,7 +1664,19 @@ mod tests {
                             {
                                 "id": "openai/gpt-4.1-mini",
                                 "object": "model",
-                                "owned_by": "openai"
+                                "created": 1711115037,
+                                "released": 1710000000,
+                                "owned_by": "openai",
+                                "name": "GPT 4.1 mini",
+                                "description": "Fast OpenAI language model",
+                                "context_window": 128000,
+                                "max_tokens": 32768,
+                                "type": "language",
+                                "tags": ["tool-use", "vision"],
+                                "pricing": {
+                                    "input": "0.0000004",
+                                    "output": "0.0000016"
+                                }
                             },
                             {
                                 "id": "anthropic/claude-sonnet-4.5",
@@ -1536,7 +1697,7 @@ mod tests {
                                 "id": "cohere/embed-v4.0",
                                 "object": "model",
                                 "owned_by": "cohere",
-                                "modelType": "embedding"
+                                "type": "embedding"
                             }
                         ]
                     })
@@ -1566,13 +1727,21 @@ mod tests {
             ]
         );
         assert_eq!(result.data[0].owned_by.as_deref(), Some("openai"));
+        assert_eq!(result.data[0].name.as_deref(), Some("GPT 4.1 mini"));
+        assert_eq!(result.data[0].released, Some(1710000000));
+        assert_eq!(result.data[0].context_window, Some(128000));
+        assert_eq!(result.data[0].max_tokens, Some(32768));
+        assert_eq!(result.data[0].model_type.as_deref(), Some("language"));
+        assert_eq!(result.data[0].tags, vec!["tool-use", "vision"]);
         assert_eq!(
-            result.data[4]
-                .metadata
-                .get("modelType")
+            result.data[0]
+                .pricing
+                .as_ref()
+                .and_then(|pricing| pricing.get("input"))
                 .and_then(JsonValue::as_str),
-            Some("embedding")
+            Some("0.0000004")
         );
+        assert_eq!(result.data[4].model_type.as_deref(), Some("embedding"));
 
         let request = captured_request
             .lock()
@@ -1616,7 +1785,10 @@ mod tests {
                         "object": "model",
                         "created": 1711115037,
                         "owned_by": "openai",
-                        "contextWindow": 128000
+                        "contextWindow": 128000,
+                        "maxTokens": 32768,
+                        "modelType": "language",
+                        "tags": ["tool-use"]
                     })
                     .to_string(),
                 )
@@ -1636,13 +1808,10 @@ mod tests {
         assert_eq!(result.id, "openai/gpt-4.1-mini");
         assert_eq!(result.object.as_deref(), Some("model"));
         assert_eq!(result.owned_by.as_deref(), Some("openai"));
-        assert_eq!(
-            result
-                .metadata
-                .get("contextWindow")
-                .and_then(JsonValue::as_u64),
-            Some(128000)
-        );
+        assert_eq!(result.context_window, Some(128000));
+        assert_eq!(result.max_tokens, Some(32768));
+        assert_eq!(result.model_type.as_deref(), Some("language"));
+        assert_eq!(result.tags, vec!["tool-use"]);
 
         let request = captured_request
             .lock()
@@ -2877,9 +3046,18 @@ mod tests {
             .collect()
     }
 
+    fn env_lookup<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl FnMut(&str) -> Option<String> + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find_map(|(key, value)| (*key == name).then(|| (*value).to_string()))
+        }
+    }
+
     fn live_gateway_api_key() -> Option<String> {
-        env::var("AI_SDK_RUST_AI_GATEWAY_API_KEY")
-            .or_else(|_| env::var("AI_GATEWAY_API_KEY"))
+        env::var("AI_GATEWAY_API_KEY")
+            .or_else(|_| env::var("AI_SDK_RUST_AI_GATEWAY_API_KEY"))
+            .or_else(|_| env::var("VERCEL_OIDC_TOKEN"))
             .ok()
             .filter(|value| !value.trim().is_empty())
             .or_else(load_gateway_api_key_from_dotenv)
@@ -2900,7 +3078,7 @@ mod tests {
 
             if matches!(
                 name.trim(),
-                "AI_SDK_RUST_AI_GATEWAY_API_KEY" | "AI_GATEWAY_API_KEY"
+                "AI_SDK_RUST_AI_GATEWAY_API_KEY" | "AI_GATEWAY_API_KEY" | "VERCEL_OIDC_TOKEN"
             ) {
                 let value = value
                     .trim()

@@ -7,33 +7,45 @@ use std::task::{Context, Poll, Waker};
 use ai_sdk_rust::VercelAiGatewayOpenAICompatibleProvider;
 
 fn main() {
-    let api_key = gateway_api_key().expect(
-        "set AI_GATEWAY_API_KEY or AI_SDK_RUST_AI_GATEWAY_API_KEY in the environment or .env.local",
-    );
     let limit = env::var("AI_GATEWAY_MODEL_LIST_LIMIT")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(20);
-    let provider = VercelAiGatewayOpenAICompatibleProvider::new().with_api_key(api_key);
+    let provider = match gateway_api_key() {
+        Some(api_key) => VercelAiGatewayOpenAICompatibleProvider::new().with_api_key(api_key),
+        None => VercelAiGatewayOpenAICompatibleProvider::new(),
+    };
     let models = poll_ready(provider.list_models()).expect("Gateway model list request failed");
     let first_model_id = models.data.first().map(|model| model.id.clone());
 
     for model in models.data.iter().take(limit) {
-        println!("{}", model.id);
+        let model_type = model.model_type.as_deref().unwrap_or("unknown");
+        let tags = if model.tags.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", model.tags.join(","))
+        };
+        println!("{} ({}){}", model.id, model_type, tags);
     }
 
     if let Some(model_id) = first_model_id {
         let model = poll_ready(provider.retrieve_model(&model_id))
             .expect("Gateway model retrieval request failed");
-        println!("retrieved {}", model.id);
+        println!(
+            "retrieved {} ({})",
+            model.id,
+            model.model_type.as_deref().unwrap_or("unknown")
+        );
     }
 }
 
 fn gateway_api_key() -> Option<String> {
     non_empty_env_setting("AI_GATEWAY_API_KEY")
         .or_else(|| non_empty_env_setting("AI_SDK_RUST_AI_GATEWAY_API_KEY"))
+        .or_else(|| non_empty_env_setting("VERCEL_OIDC_TOKEN"))
         .or_else(|| dotenv_setting("AI_GATEWAY_API_KEY"))
         .or_else(|| dotenv_setting("AI_SDK_RUST_AI_GATEWAY_API_KEY"))
+        .or_else(|| dotenv_setting("VERCEL_OIDC_TOKEN"))
 }
 
 fn non_empty_env_setting(name: &str) -> Option<String> {
