@@ -1961,6 +1961,79 @@ mod tests {
     }
 
     #[test]
+    fn vercel_ai_gateway_openai_responses_maps_api_error_data_to_gateway_metadata_key() {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |_request| -> OpenAICompatibleTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    400,
+                    "Bad Request",
+                    json!({
+                        "error": {
+                            "message": "input: Invalid input",
+                            "type": "invalid_request_error",
+                            "param": "input",
+                            "code": "invalid_input"
+                        }
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from([(
+                    "x-request-id".to_string(),
+                    "req_gateway_responses_error".to_string(),
+                )])))))
+            });
+        let provider = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://ai-gateway.test/v1/")
+            .with_transport(transport);
+        let model = provider.responses("openai/gpt-4.1-mini");
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(&model, Prompt::from_prompt("Use invalid input"))
+                .expect("prompt is valid"),
+        ));
+
+        assert_eq!(result.finish_reason, FinishReason::Error);
+        let metadata = result
+            .provider_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("vercel-ai-gateway"))
+            .expect("Gateway Responses error metadata is present");
+        assert_eq!(
+            metadata.get("errorMessage").and_then(JsonValue::as_str),
+            Some("input: Invalid input")
+        );
+        assert_eq!(
+            metadata.get("errorType").and_then(JsonValue::as_str),
+            Some("invalid_request_error")
+        );
+        assert_eq!(
+            metadata.get("errorParam").and_then(JsonValue::as_str),
+            Some("input")
+        );
+        assert_eq!(
+            metadata.get("errorCode").and_then(JsonValue::as_str),
+            Some("invalid_input")
+        );
+        assert_eq!(
+            metadata.get("statusCode").and_then(JsonValue::as_u64),
+            Some(400)
+        );
+        assert_eq!(
+            metadata.get("isRetryable").and_then(JsonValue::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            result
+                .response
+                .as_ref()
+                .and_then(|response| response.headers.as_ref())
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("req_gateway_responses_error")
+        );
+    }
+
+    #[test]
     fn vercel_ai_gateway_openai_responses_converts_file_prompt_parts() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);

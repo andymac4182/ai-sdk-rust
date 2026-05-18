@@ -28,7 +28,8 @@ use crate::language_model::{
 };
 use crate::openai_compatible::{OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel};
 use crate::provider::{
-    ModelType, NoSuchModelError, Provider, ProviderMetadata, ProviderOptions, SpecificationVersion,
+    ApiCallError, ModelType, NoSuchModelError, Provider, ProviderMetadata, ProviderOptions,
+    SpecificationVersion,
 };
 use crate::provider_utils::{
     FetchErrorInfo, HandledFetchError, ParseJsonResult, PostJsonToApiOptions, ProviderApiRequest,
@@ -223,7 +224,7 @@ impl OpenResponsesLanguageModel {
             Err(message) => {
                 return open_responses_error_generate_result(
                     &self.config.provider_options_name,
-                    message,
+                    OpenResponsesErrorContext::from_message(message),
                     json!({ "model": self.model_id }),
                 );
             }
@@ -282,10 +283,8 @@ impl OpenResponsesLanguageModel {
             Ok(result) => result,
             Err(message) => {
                 return open_responses_error_stream_result(
-                    message,
+                    OpenResponsesErrorContext::from_message(message),
                     json!({ "model": self.model_id }),
-                    None,
-                    None,
                 );
             }
         };
@@ -411,14 +410,9 @@ impl OpenResponsesLanguageModel {
         error: HandledFetchError,
         request_body: JsonValue,
     ) -> LanguageModelGenerateResult {
-        let message = match error {
-            HandledFetchError::Original { error } => error.message().to_string(),
-            HandledFetchError::ApiCall { error } => error.message().to_string(),
-        };
-
         open_responses_error_generate_result(
             &self.config.provider_options_name,
-            message,
+            OpenResponsesErrorContext::from_fetch_error(error),
             request_body,
         )
     }
@@ -428,16 +422,10 @@ impl OpenResponsesLanguageModel {
         error: HandledFetchError,
         request_body: JsonValue,
     ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
-        let (message, headers, body) = match error {
-            HandledFetchError::Original { error } => (error.message().to_string(), None, None),
-            HandledFetchError::ApiCall { error } => (
-                error.message().to_string(),
-                error.response_headers().cloned(),
-                error.response_body().map(String::from),
-            ),
-        };
-
-        open_responses_error_stream_result(message, request_body, headers, body.as_deref())
+        open_responses_error_stream_result(
+            OpenResponsesErrorContext::from_fetch_error(error),
+            request_body,
+        )
     }
 }
 
@@ -1138,13 +1126,15 @@ fn open_responses_stream_result_from_response(
                 }
 
                 let event_type = value.get("type").and_then(JsonValue::as_str);
-                if value.get("error").is_some() || matches!(event_type, Some("error")) {
+                let has_error = value.get("error").is_some_and(|error| !error.is_null())
+                    || matches!(event_type, Some("error"));
+                if has_error {
                     finish_reason = LanguageModelFinishReason {
                         unified: FinishReason::Error,
                         raw: Some("open-responses-error".to_string()),
                     };
-                    stream.push(open_responses_stream_error(
-                        open_responses_error_message(&value),
+                    stream.push(open_responses_stream_event_error(
+                        &value,
                         Some(&raw_value.to_string()),
                     ));
                     continue;
@@ -1312,10 +1302,8 @@ fn open_responses_stream_result_from_response(
                             unified: FinishReason::Error,
                             raw: Some("open-responses-error".to_string()),
                         };
-                        stream.push(open_responses_stream_error(
-                            open_responses_event_response(&value)
-                                .map(open_responses_error_message)
-                                .unwrap_or_else(|| open_responses_error_message(&value)),
+                        stream.push(open_responses_stream_event_error(
+                            &value,
                             Some(&raw_value.to_string()),
                         ));
                     }
@@ -1751,6 +1739,66 @@ fn open_responses_finish_pending_tool_call_arguments(
         .arguments = Some(arguments.to_string());
 }
 
+#[derive(Clone, Debug)]
+struct OpenResponsesErrorContext {
+    message: String,
+    response_headers: Option<Headers>,
+    raw_body: Option<String>,
+    status_code: Option<u16>,
+    is_retryable: Option<bool>,
+    data: Option<JsonValue>,
+}
+
+impl OpenResponsesErrorContext {
+    fn from_message(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            response_headers: None,
+            raw_body: None,
+            status_code: None,
+            is_retryable: None,
+            data: None,
+        }
+    }
+
+    fn from_fetch_error(error: HandledFetchError) -> Self {
+        match error {
+            HandledFetchError::Original { error } => {
+                Self::from_message(error.message().to_string())
+            }
+            HandledFetchError::ApiCall { error } => Self::from_api_call(error.as_ref()),
+        }
+    }
+
+    fn from_api_call(error: &ApiCallError) -> Self {
+        let raw_body = error.response_body().map(String::from);
+        let data = error
+            .data()
+            .cloned()
+            .or_else(|| raw_body.as_deref().and_then(open_responses_parse_json_body));
+
+        Self {
+            message: error.message().to_string(),
+            response_headers: error.response_headers().cloned(),
+            raw_body,
+            status_code: error.status_code(),
+            is_retryable: Some(error.is_retryable()),
+            data,
+        }
+    }
+}
+
+fn open_responses_parse_json_body(body: &str) -> Option<JsonValue> {
+    serde_json::from_str::<JsonValue>(body).ok()
+}
+
+fn open_responses_response_body(raw_body: Option<&str>, fallback: &JsonValue) -> JsonValue {
+    raw_body
+        .and_then(open_responses_parse_json_body)
+        .or_else(|| raw_body.map(|body| JsonValue::String(body.to_string())))
+        .unwrap_or_else(|| fallback.clone())
+}
+
 fn open_responses_stream_error(
     message: impl Into<String>,
     raw_body: Option<&str>,
@@ -1760,6 +1808,37 @@ fn open_responses_stream_error(
 
     if let Some(raw_body) = raw_body {
         error.insert("body".to_string(), JsonValue::String(raw_body.to_string()));
+    }
+
+    LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(JsonValue::Object(error)))
+}
+
+fn open_responses_stream_error_from_context(
+    context: &OpenResponsesErrorContext,
+) -> LanguageModelStreamPart {
+    let mut error = open_responses_error_object(context);
+
+    if let Some(raw_body) = &context.raw_body {
+        error.insert("body".to_string(), JsonValue::String(raw_body.clone()));
+    }
+
+    LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(JsonValue::Object(error)))
+}
+
+fn open_responses_stream_event_error(
+    value: &JsonValue,
+    raw_body: Option<&str>,
+) -> LanguageModelStreamPart {
+    let mut error = value.as_object().cloned().unwrap_or_default();
+
+    error
+        .entry("message".to_string())
+        .or_insert_with(|| JsonValue::String(open_responses_error_message(value)));
+
+    if let Some(raw_body) = raw_body {
+        error
+            .entry("body".to_string())
+            .or_insert_with(|| JsonValue::String(raw_body.to_string()));
     }
 
     LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(JsonValue::Object(error)))
@@ -1816,11 +1895,10 @@ fn open_responses_error_message(error: &JsonValue) -> String {
 
 fn open_responses_error_generate_result(
     provider_name: &str,
-    message: impl Into<String>,
+    context: OpenResponsesErrorContext,
     request_body: JsonValue,
 ) -> LanguageModelGenerateResult {
-    let message = message.into();
-    LanguageModelGenerateResult::new(
+    let mut result = LanguageModelGenerateResult::new(
         Vec::new(),
         LanguageModelFinishReason {
             unified: FinishReason::Error,
@@ -1829,20 +1907,38 @@ fn open_responses_error_generate_result(
         LanguageModelUsage::default(),
     )
     .with_request(LanguageModelRequest::new().with_body(request_body))
-    .with_provider_metadata(open_responses_error_metadata(provider_name, message))
+    .with_provider_metadata(open_responses_error_metadata(provider_name, &context));
+
+    if context.response_headers.is_some() || context.raw_body.is_some() {
+        let mut response = LanguageModelResponse::new();
+
+        if let Some(body) = context
+            .raw_body
+            .as_deref()
+            .map(|body| open_responses_response_body(Some(body), &JsonValue::Null))
+        {
+            response = response.with_body(body);
+        }
+
+        if let Some(headers) = context.response_headers {
+            response = response_metadata_with_headers(response, headers);
+        }
+
+        result = result.with_response(response);
+    }
+
+    result
 }
 
 fn open_responses_error_stream_result(
-    message: impl Into<String>,
+    context: OpenResponsesErrorContext,
     request_body: JsonValue,
-    response_headers: Option<Headers>,
-    raw_body: Option<&str>,
 ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
     let mut result =
-        LanguageModelStreamResult::new(vec![open_responses_stream_error(message, raw_body)])
+        LanguageModelStreamResult::new(vec![open_responses_stream_error_from_context(&context)])
             .with_request(LanguageModelRequest::new().with_body(request_body));
 
-    if let Some(headers) = response_headers {
+    if let Some(headers) = context.response_headers {
         result = result.with_response(open_responses_stream_response_with_headers(headers));
     }
 
@@ -1860,12 +1956,53 @@ fn open_responses_provider_metadata(provider_name: &str, response_id: &str) -> P
     metadata
 }
 
-fn open_responses_error_metadata(provider_name: &str, message: String) -> ProviderMetadata {
+fn open_responses_error_metadata(
+    provider_name: &str,
+    context: &OpenResponsesErrorContext,
+) -> ProviderMetadata {
     let mut metadata = ProviderMetadata::new();
-    let mut provider = JsonObject::new();
-    provider.insert("errorMessage".to_string(), JsonValue::String(message));
-    metadata.insert(provider_name.to_string(), provider);
+    metadata.insert(
+        provider_name.to_string(),
+        open_responses_error_object(context),
+    );
     metadata
+}
+
+fn open_responses_error_object(context: &OpenResponsesErrorContext) -> JsonObject {
+    let mut provider = JsonObject::new();
+    provider.insert(
+        "errorMessage".to_string(),
+        JsonValue::String(context.message.clone()),
+    );
+
+    if let Some(status_code) = context.status_code {
+        provider.insert("statusCode".to_string(), json!(status_code));
+    }
+
+    if let Some(is_retryable) = context.is_retryable {
+        provider.insert("isRetryable".to_string(), json!(is_retryable));
+    }
+
+    if let Some(error) = context.data.as_ref().and_then(|data| data.get("error")) {
+        open_responses_insert_error_detail(&mut provider, error, "type", "errorType");
+        open_responses_insert_error_detail(&mut provider, error, "param", "errorParam");
+        open_responses_insert_error_detail(&mut provider, error, "code", "errorCode");
+    }
+
+    provider
+}
+
+fn open_responses_insert_error_detail(
+    provider: &mut JsonObject,
+    error: &JsonValue,
+    source_key: &str,
+    target_key: &str,
+) {
+    let Some(value) = error.get(source_key).filter(|value| !value.is_null()) else {
+        return;
+    };
+
+    provider.insert(target_key.to_string(), value.clone());
 }
 
 fn response_metadata_with_headers(
@@ -1954,7 +2091,7 @@ mod tests {
     };
     use crate::file_data::{FileData, FileDataContent};
     use crate::generate_object::{GenerateObjectOptions, generate_object};
-    use crate::generate_text::{GenerateTextOptions, generate_text};
+    use crate::generate_text::{GenerateTextInclude, GenerateTextOptions, generate_text};
     use crate::headers::Headers;
     use crate::json::{JsonObject, JsonValue};
     use crate::language_model::{
@@ -2372,6 +2509,96 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_maps_api_error_data_to_metadata_and_response() {
+        let transport: OpenResponsesTransport =
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    429,
+                    "Too Many Requests",
+                    json!({
+                        "error": {
+                            "message": "Quota exceeded",
+                            "type": "insufficient_quota",
+                            "param": "model",
+                            "code": "quota_exceeded"
+                        }
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from([(
+                    "x-request-id".to_string(),
+                    "req_open_responses_error".to_string(),
+                )])))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(&model, Prompt::from_prompt("Say hello"))
+                .expect("prompt is valid")
+                .with_include(GenerateTextInclude::new().with_response_body(true)),
+        ));
+
+        assert_eq!(result.finish_reason, FinishReason::Error);
+        assert_eq!(result.text, "");
+        let metadata = result
+            .provider_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("openai"))
+            .expect("Open Responses error metadata is present");
+        assert_eq!(
+            metadata.get("errorMessage").and_then(JsonValue::as_str),
+            Some("Quota exceeded")
+        );
+        assert_eq!(
+            metadata.get("errorType").and_then(JsonValue::as_str),
+            Some("insufficient_quota")
+        );
+        assert_eq!(
+            metadata.get("errorParam").and_then(JsonValue::as_str),
+            Some("model")
+        );
+        assert_eq!(
+            metadata.get("errorCode").and_then(JsonValue::as_str),
+            Some("quota_exceeded")
+        );
+        assert_eq!(
+            metadata.get("statusCode").and_then(JsonValue::as_u64),
+            Some(429)
+        );
+        assert_eq!(
+            metadata.get("isRetryable").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            result
+                .response
+                .as_ref()
+                .and_then(|response| response.headers.as_ref())
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("req_open_responses_error")
+        );
+        assert_eq!(
+            result
+                .response
+                .as_ref()
+                .and_then(|response| response.body.as_ref()),
+            Some(&json!({
+                "error": {
+                    "message": "Quota exceeded",
+                    "type": "insufficient_quota",
+                    "param": "model",
+                    "code": "quota_exceeded"
+                }
+            }))
+        );
+    }
+
+    #[test]
     fn open_responses_provider_reports_unsupported_embedding_and_image() {
         let provider = OpenResponsesProvider::from_settings(OpenResponsesProviderSettings::new(
             "openai",
@@ -2542,6 +2769,73 @@ mod tests {
                 "temperature": 0.0,
                 "stream": true
             }))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_preserves_stream_error_event_data() {
+        let transport: OpenResponsesTransport = Arc::new(
+            move |_request| -> OpenResponsesTransportFuture {
+                let sse = [
+                    r#"data: {"type":"response.created","response":{"id":"resp_stream_error","created_at":1711115037,"model":"gpt-4.1-mini"}}"#,
+                    "",
+                    r#"data: {"type":"error","sequence_number":1,"error":{"type":"server_error","code":"server_error","message":"response failed","param":null}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse)
+                    .with_headers(Headers::from([(
+                        "content-type".to_string(),
+                        "text/event-stream".to_string(),
+                    )])))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let result = poll_ready(stream_text(
+            StreamTextOptions::from_prompt(&model, Prompt::from_prompt("Say hello"))
+                .expect("prompt is valid"),
+        ));
+
+        assert_eq!(result.finish_reason, FinishReason::Error);
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("openai"))
+                .and_then(|metadata| metadata.get("responseId"))
+                .and_then(JsonValue::as_str),
+            Some("resp_stream_error")
+        );
+        let error = result.errors.first().expect("stream error is captured");
+        assert_eq!(error.get("type").and_then(JsonValue::as_str), Some("error"));
+        assert_eq!(
+            error
+                .get("error")
+                .and_then(|error| error.get("type"))
+                .and_then(JsonValue::as_str),
+            Some("server_error")
+        );
+        assert_eq!(
+            error
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(JsonValue::as_str),
+            Some("server_error")
+        );
+        assert_eq!(
+            error
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(JsonValue::as_str),
+            Some("response failed")
         );
     }
 
