@@ -5,9 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::headers::Headers;
 use crate::openai_compatible::{
-    OpenAICompatibleChatLanguageModel, OpenAICompatibleEmbeddingModel, OpenAICompatibleProvider,
-    OpenAICompatibleProviderSettings, OpenAICompatibleTransport,
+    OpenAICompatibleChatLanguageModel, OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel,
+    OpenAICompatibleProvider, OpenAICompatibleProviderSettings, OpenAICompatibleTransport,
 };
+use crate::provider::{ModelType, NoSuchModelError, Provider};
 
 /// OpenAI-compatible Vercel AI Gateway base URL.
 pub const VERCEL_AI_GATEWAY_OPENAI_COMPATIBLE_BASE_URL: &str = "https://ai-gateway.vercel.sh/v1";
@@ -130,6 +131,14 @@ impl VercelAiGatewayOpenAICompatibleProvider {
         self.embedding_model(model_id)
     }
 
+    /// Reports that this OpenAI-compatible Gateway wrapper does not expose image models.
+    pub fn image_model(
+        &self,
+        model_id: impl Into<String>,
+    ) -> Result<OpenAICompatibleImageModel, NoSuchModelError> {
+        Err(NoSuchModelError::new(model_id, ModelType::ImageModel))
+    }
+
     fn openai_compatible_provider(&self) -> OpenAICompatibleProvider {
         let mut settings = OpenAICompatibleProviderSettings::new(
             VERCEL_AI_GATEWAY_OPENAI_COMPATIBLE_PROVIDER_NAME,
@@ -161,6 +170,28 @@ impl VercelAiGatewayOpenAICompatibleProvider {
 impl Default for VercelAiGatewayOpenAICompatibleProvider {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Provider for VercelAiGatewayOpenAICompatibleProvider {
+    type LanguageModel = OpenAICompatibleChatLanguageModel;
+    type EmbeddingModel = OpenAICompatibleEmbeddingModel;
+    type ImageModel = OpenAICompatibleImageModel;
+
+    fn language_model(&self, model_id: &str) -> Result<Self::LanguageModel, NoSuchModelError> {
+        Ok(VercelAiGatewayOpenAICompatibleProvider::language_model(
+            self, model_id,
+        ))
+    }
+
+    fn embedding_model(&self, model_id: &str) -> Result<Self::EmbeddingModel, NoSuchModelError> {
+        Ok(VercelAiGatewayOpenAICompatibleProvider::embedding_model(
+            self, model_id,
+        ))
+    }
+
+    fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
+        VercelAiGatewayOpenAICompatibleProvider::image_model(self, model_id)
     }
 }
 
@@ -223,7 +254,7 @@ mod tests {
     };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
-    use crate::provider::ProviderOptions;
+    use crate::provider::{ModelType, Provider, ProviderOptions};
     use crate::provider_utils::{
         ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
         Tool, json_schema,
@@ -1131,6 +1162,28 @@ mod tests {
             VERCEL_AI_GATEWAY_OPENAI_COMPATIBLE_BASE_URL,
             "https://ai-gateway.vercel.sh/v1"
         );
+    }
+
+    #[test]
+    fn vercel_ai_gateway_openai_compatible_implements_provider_trait() {
+        let provider = VercelAiGatewayOpenAICompatibleProvider::new();
+        let language = Provider::language_model(&provider, "openai/gpt-4.1-mini")
+            .expect("language models are supported");
+        let embedding = Provider::embedding_model(&provider, "openai/text-embedding-3-small")
+            .expect("embedding models are supported");
+        let image = match Provider::image_model(&provider, "openai/gpt-image-1") {
+            Ok(_) => {
+                panic!("image models are not exposed by the OpenAI-compatible Gateway wrapper")
+            }
+            Err(error) => error,
+        };
+
+        assert_eq!(language.provider(), "vercel-ai-gateway.chat");
+        assert_eq!(language.model_id(), "openai/gpt-4.1-mini");
+        assert_eq!(embedding.provider(), "vercel-ai-gateway.embedding");
+        assert_eq!(embedding.model_id(), "openai/text-embedding-3-small");
+        assert_eq!(image.model_type(), ModelType::ImageModel);
+        assert_eq!(image.model_id(), "openai/gpt-image-1");
     }
 
     #[test]
