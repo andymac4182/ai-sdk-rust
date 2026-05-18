@@ -102,38 +102,55 @@ blocker that needs human input.
    JavaScript-only concepts such as `AbortSignal`.
 3. Add focused serialization/deserialization and behavior tests for every new
    public contract.
-4. Plan the Rust workspace around upstream Vercel AI SDK package boundaries:
-   core AI APIs, provider contracts, provider utilities, and provider
-   implementations. Introduce crates when there is enough real API surface to
-   justify the boundary; avoid empty placeholder crates.
-5. When adding a new surface, decide whether it belongs in the current crate or
-   should start/move into a workspace crate that matches the upstream package
-   it came from.
-6. Build and verify high-level APIs against deterministic fake/test models
+4. Enforce one-to-one crate/package boundaries now. Every portable upstream
+   `vercel/ai` TypeScript package that gains Rust API must have exactly one
+   matching Rust workspace crate, and that crate must own the package's public
+   types, options, implementation, docs, and tests. Do not merge multiple
+   upstream packages into `ai-sdk-rust` or any other single Rust crate.
+5. Treat the root crate as a facade, not a staging area. It may aggregate
+   re-exports and compatibility shims, and if it is the Rust equivalent of
+   `packages/ai`, it may own only that package's API. It must not also own
+   provider contracts, provider utilities, provider implementations, MCP,
+   workflow, telemetry, or other package-owned surfaces.
+6. Existing package-owned APIs already merged into the root crate are migration
+   debt being created today. Future slices must move toward the matching crate
+   boundary before layering on more API. A parity slice that ports a TypeScript
+   package without creating or using its matching Rust crate is blocked and not
+   mergeable, even if the implementation itself works.
+7. Do not use temporary staging exceptions for new package-owned
+   implementation. A temporary exception may only cover an unavoidable
+   transitional shim or extraction of existing root-crate debt, and it must be
+   documented in the ledger with the destination crate, the reason the matching
+   crate cannot land in the same slice, and the smallest concrete extraction
+   follow-up. Do not use this exception for convenience or to keep merging
+   unrelated packages into one crate.
+8. Build and verify high-level APIs against deterministic fake/test models
    before adding real provider networking.
-7. `generate_text(...)` and tool loops remain an early vertical-slice priority:
+9. `generate_text(...)` and tool loops remain an early vertical-slice priority:
    prove prompts/settings, model calls, tool calls, typed Rust tools, tool
    results, continuation until final text/max steps, and `GenerateTextResult`.
-8. Add deterministic end-to-end tests for plain text generation, single tool
+10. Add deterministic end-to-end tests for plain text generation, single tool
    call, multi-step tool call, tool error, unknown tool, invalid tool args, max
    step exhaustion, streaming/event sequences, structured output, provider
    metadata, and every additional high-level API as it lands.
-9. Ban vague generic naming such as `helpers`, `utils`, `common`, `misc`,
+11. Ban vague generic naming such as `helpers`, `utils`, `common`, `misc`,
    `stuff`, `shared`, and similar buckets in source paths, module names, crate
    names, public APIs, and docs. Prefer precise responsibility names. Add or
    improve a custom check to enforce this convention. Document explicit
    exceptions only when mirroring upstream package names.
-10. Do not churn dependencies, CI, or unrelated modules unless the next SDK
+12. Do not churn dependencies, CI, or unrelated modules unless the next SDK
     slice genuinely requires it.
-11. Port every upstream provider package. Prefer contract-first typed provider
-    crates/modules with fake/deterministic tests, then add HTTP/gateway-backed
-    integration tests where credentials are available.
-12. Port examples and docs once the corresponding API works. Rust examples
+13. Port every upstream provider package in its matching crate. Prefer
+    contract-first typed provider crates with fake/deterministic tests, then add
+    HTTP/gateway-backed integration tests where credentials are available. Do
+    not add root modules for provider-owned API except re-export shims or
+    cross-crate primitives that are not owned by the provider package.
+14. Port examples and docs once the corresponding API works. Rust examples
     should be runnable and should map clearly to upstream examples.
-13. When enough works end to end, add a kitchen sink example app that
+15. When enough works end to end, add a kitchen sink example app that
     demonstrates working generate text, tool execution, provider contracts, and
     any available gateway-backed validation.
-14. Keep expanding until the parity ledger is complete. A single slice is never
+16. Keep expanding until the parity ledger is complete. A single slice is never
     enough unless the ledger already proves full upstream parity.
 
 ## Parallel Work
