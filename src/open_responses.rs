@@ -699,17 +699,60 @@ fn open_responses_input(
             }
             LanguageModelMessage::Assistant(message) => {
                 let mut content = Vec::new();
-                let mut tool_calls = Vec::new();
+                let mut assistant_items = Vec::new();
 
                 for part in &message.content {
                     match part {
                         LanguageModelAssistantContentPart::Text(text) => {
+                            if store
+                                && let Some(item_id) = open_responses_prompt_item_id(
+                                    text.provider_options.as_ref(),
+                                    provider_options_name,
+                                )
+                            {
+                                open_responses_flush_assistant_content(
+                                    &mut assistant_items,
+                                    &mut content,
+                                );
+                                assistant_items.push(json!({
+                                    "type": "item_reference",
+                                    "id": item_id
+                                }));
+                                continue;
+                            }
+
                             content.push(json!({
                                 "type": "output_text",
                                 "text": text.text
                             }));
                         }
+                        LanguageModelAssistantContentPart::Reasoning(reasoning) => {
+                            if store
+                                && let Some(item_id) = open_responses_prompt_item_id(
+                                    reasoning.provider_options.as_ref(),
+                                    provider_options_name,
+                                )
+                            {
+                                open_responses_flush_assistant_content(
+                                    &mut assistant_items,
+                                    &mut content,
+                                );
+                                assistant_items.push(json!({
+                                    "type": "item_reference",
+                                    "id": item_id
+                                }));
+                            } else {
+                                return Err(
+                                    "Open Responses assistant prompt part is not implemented yet."
+                                        .to_string(),
+                                );
+                            }
+                        }
                         LanguageModelAssistantContentPart::ToolCall(tool_call) => {
+                            open_responses_flush_assistant_content(
+                                &mut assistant_items,
+                                &mut content,
+                            );
                             if tool_call.provider_executed == Some(true) {
                                 if store
                                     && let Some(item_id) = open_responses_prompt_item_id(
@@ -717,7 +760,7 @@ fn open_responses_input(
                                         provider_options_name,
                                     )
                                 {
-                                    tool_calls.push(json!({
+                                    assistant_items.push(json!({
                                         "type": "item_reference",
                                         "id": item_id
                                     }));
@@ -731,19 +774,46 @@ fn open_responses_input(
                                     provider_options_name,
                                 )
                             {
-                                tool_calls.push(json!({
+                                assistant_items.push(json!({
                                     "type": "item_reference",
                                     "id": item_id
                                 }));
                                 continue;
                             }
 
-                            tool_calls.push(json!({
+                            assistant_items.push(json!({
                                 "type": "function_call",
                                 "call_id": tool_call.tool_call_id,
                                 "name": tool_call.tool_name,
                                 "arguments": tool_call.input
                             }));
+                        }
+                        LanguageModelAssistantContentPart::ToolResult(part) => {
+                            open_responses_flush_assistant_content(
+                                &mut assistant_items,
+                                &mut content,
+                            );
+
+                            if open_responses_execution_denied_approval_id(&part.output).is_some() {
+                                continue;
+                            }
+
+                            if store {
+                                let item_id = open_responses_prompt_item_id(
+                                    part.provider_options.as_ref(),
+                                    provider_options_name,
+                                )
+                                .unwrap_or(part.tool_call_id.as_str());
+                                assistant_items.push(json!({
+                                    "type": "item_reference",
+                                    "id": item_id
+                                }));
+                            } else {
+                                return Err(
+                                    "Open Responses assistant prompt part is not implemented yet."
+                                        .to_string(),
+                                );
+                            }
                         }
                         LanguageModelAssistantContentPart::ToolApprovalRequest(_) => {}
                         _ => {
@@ -755,15 +825,8 @@ fn open_responses_input(
                     }
                 }
 
-                if !content.is_empty() {
-                    input.push(json!({
-                        "type": "message",
-                        "role": "assistant",
-                        "content": content
-                    }));
-                }
-
-                input.extend(tool_calls);
+                open_responses_flush_assistant_content(&mut assistant_items, &mut content);
+                input.extend(assistant_items);
             }
             LanguageModelMessage::Tool(message) => {
                 for part in &message.content {
@@ -809,6 +872,21 @@ fn open_responses_input(
     let instructions = (!system_messages.is_empty()).then(|| system_messages.join("\n"));
 
     Ok((input, instructions))
+}
+
+fn open_responses_flush_assistant_content(
+    input: &mut Vec<JsonValue>,
+    content: &mut Vec<JsonValue>,
+) {
+    if content.is_empty() {
+        return;
+    }
+
+    input.push(json!({
+        "type": "message",
+        "role": "assistant",
+        "content": std::mem::take(content)
+    }));
 }
 
 fn open_responses_store_enabled(
@@ -5150,6 +5228,120 @@ mod tests {
         assert_eq!(tool_calls[0].tool_name, "mcp.deploy");
         assert_eq!(tool_results[0].tool_call_id, "pending_tool_call_1");
         assert_eq!(tool_results[0].tool_name, "mcp.deploy");
+    }
+
+    #[test]
+    fn open_responses_provider_uses_item_references_for_stored_assistant_history() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_refs",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "References accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 4,
+                            "output_tokens": 3
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let item_options = |item_id: &str| -> ProviderOptions {
+            serde_json::from_value(json!({
+                "openai": {
+                    "itemId": item_id
+                }
+            }))
+            .expect("provider options deserialize")
+        };
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::Text(
+                    LanguageModelTextPart::new("stored text")
+                        .with_provider_options(item_options("message_item")),
+                ),
+                LanguageModelAssistantContentPart::ToolCall(
+                    LanguageModelToolCallPart::new(
+                        "provider_call_1",
+                        "mcp.lookup",
+                        json!({
+                            "query": "rust"
+                        }),
+                    )
+                    .with_provider_executed(true)
+                    .with_provider_options(item_options("mcp_call_item")),
+                ),
+                LanguageModelAssistantContentPart::ToolResult(
+                    LanguageModelToolResultPart::new(
+                        "provider_call_1",
+                        "mcp.lookup",
+                        LanguageModelToolResultOutput::json(json!({
+                            "answer": "ok"
+                        })),
+                    )
+                    .with_provider_options(item_options("mcp_result_item")),
+                ),
+            ])),
+        ])));
+
+        assert!(result.warnings.is_empty());
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "gpt-4.1-mini",
+                "input": [
+                    {
+                        "type": "item_reference",
+                        "id": "message_item"
+                    },
+                    {
+                        "type": "item_reference",
+                        "id": "mcp_call_item"
+                    },
+                    {
+                        "type": "item_reference",
+                        "id": "mcp_result_item"
+                    }
+                ]
+            }))
+        );
     }
 
     #[test]
