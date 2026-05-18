@@ -21,6 +21,7 @@ cargo test --all-features
 cargo run --example kitchen_sink
 cargo run --example vercel_ai_gateway_text
 cargo run --example vercel_ai_gateway_models
+cargo run --example vercel_ai_gateway_image
 ```
 
 ## Codex `/goal` Runner

@@ -9,7 +9,7 @@ use crate::openai_compatible::{
     OpenAICompatibleModelListResponse, OpenAICompatibleProvider, OpenAICompatibleProviderSettings,
     OpenAICompatibleTransport,
 };
-use crate::provider::{ModelType, NoSuchModelError, Provider};
+use crate::provider::{NoSuchModelError, Provider};
 use crate::provider_utils::HandledFetchError;
 
 /// OpenAI-compatible Vercel AI Gateway base URL.
@@ -133,12 +133,14 @@ impl VercelAiGatewayOpenAICompatibleProvider {
         self.embedding_model(model_id)
     }
 
-    /// Reports that this OpenAI-compatible Gateway wrapper does not expose image models.
-    pub fn image_model(
-        &self,
-        model_id: impl Into<String>,
-    ) -> Result<OpenAICompatibleImageModel, NoSuchModelError> {
-        Err(NoSuchModelError::new(model_id, ModelType::ImageModel))
+    /// Creates a Gateway OpenAI-compatible image model.
+    pub fn image_model(&self, model_id: impl Into<String>) -> OpenAICompatibleImageModel {
+        self.openai_compatible_provider().image_model(model_id)
+    }
+
+    /// Alias for [`VercelAiGatewayOpenAICompatibleProvider::image_model`].
+    pub fn image(&self, model_id: impl Into<String>) -> OpenAICompatibleImageModel {
+        self.image_model(model_id)
     }
 
     /// Lists models from Vercel AI Gateway's OpenAI-compatible `/models` endpoint.
@@ -200,7 +202,9 @@ impl Provider for VercelAiGatewayOpenAICompatibleProvider {
     }
 
     fn image_model(&self, model_id: &str) -> Result<Self::ImageModel, NoSuchModelError> {
-        VercelAiGatewayOpenAICompatibleProvider::image_model(self, model_id)
+        Ok(VercelAiGatewayOpenAICompatibleProvider::image_model(
+            self, model_id,
+        ))
     }
 }
 
@@ -225,6 +229,13 @@ pub fn vercel_ai_gateway_openai_compatible_embedding(
     VercelAiGatewayOpenAICompatibleProvider::new().embedding_model(model_id)
 }
 
+/// Creates a Vercel AI Gateway OpenAI-compatible image model.
+pub fn vercel_ai_gateway_openai_compatible_image(
+    model_id: impl Into<String>,
+) -> OpenAICompatibleImageModel {
+    VercelAiGatewayOpenAICompatibleProvider::new().image_model(model_id)
+}
+
 fn vercel_ai_gateway_api_key(explicit_api_key: Option<&String>) -> Option<String> {
     non_empty_optional_setting(explicit_api_key.cloned())
         .or_else(|| non_empty_env_setting("AI_GATEWAY_API_KEY"))
@@ -245,13 +256,16 @@ mod tests {
         VERCEL_AI_GATEWAY_OPENAI_COMPATIBLE_BASE_URL, VercelAiGatewayOpenAICompatibleProvider,
         VercelAiGatewayOpenAICompatibleSettings, create_vercel_ai_gateway_openai_compatible,
         vercel_ai_gateway_openai_compatible, vercel_ai_gateway_openai_compatible_embedding,
+        vercel_ai_gateway_openai_compatible_image,
     };
     use crate::embed::{EmbedManyOptions, EmbedOptions, embed, embed_many};
     use crate::embedding_model::EmbeddingModel;
     use crate::file_data::{FileData, FileDataContent};
+    use crate::generate_image::{GenerateImageOptions, generate_image};
     use crate::generate_object::{GenerateObjectOptions, generate_object};
     use crate::generate_text::{GenerateTextOptions, PrepareStepResult, generate_text};
     use crate::headers::Headers;
+    use crate::image_model::ImageModel;
     use crate::json::{JsonObject, JsonValue};
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelAssistantContentPart,
@@ -263,7 +277,7 @@ mod tests {
     };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
-    use crate::provider::{ModelType, Provider, ProviderOptions};
+    use crate::provider::{Provider, ProviderOptions};
     use crate::provider_utils::{
         ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
         Tool, json_schema,
@@ -1162,11 +1176,14 @@ mod tests {
         let model = vercel_ai_gateway_openai_compatible("openai/gpt-4.1-mini");
         let embedding =
             vercel_ai_gateway_openai_compatible_embedding("openai/text-embedding-3-small");
+        let image = vercel_ai_gateway_openai_compatible_image("google/imagen-4.0-generate-001");
 
         assert_eq!(model.provider(), "vercel-ai-gateway.chat");
         assert_eq!(model.model_id(), "openai/gpt-4.1-mini");
         assert_eq!(embedding.provider(), "vercel-ai-gateway.embedding");
         assert_eq!(embedding.model_id(), "openai/text-embedding-3-small");
+        assert_eq!(image.provider(), "vercel-ai-gateway.image");
+        assert_eq!(image.model_id(), "google/imagen-4.0-generate-001");
         assert_eq!(
             VERCEL_AI_GATEWAY_OPENAI_COMPATIBLE_BASE_URL,
             "https://ai-gateway.vercel.sh/v1"
@@ -1180,19 +1197,15 @@ mod tests {
             .expect("language models are supported");
         let embedding = Provider::embedding_model(&provider, "openai/text-embedding-3-small")
             .expect("embedding models are supported");
-        let image = match Provider::image_model(&provider, "openai/gpt-image-1") {
-            Ok(_) => {
-                panic!("image models are not exposed by the OpenAI-compatible Gateway wrapper")
-            }
-            Err(error) => error,
-        };
+        let image = Provider::image_model(&provider, "google/imagen-4.0-generate-001")
+            .expect("image models are supported");
 
         assert_eq!(language.provider(), "vercel-ai-gateway.chat");
         assert_eq!(language.model_id(), "openai/gpt-4.1-mini");
         assert_eq!(embedding.provider(), "vercel-ai-gateway.embedding");
         assert_eq!(embedding.model_id(), "openai/text-embedding-3-small");
-        assert_eq!(image.model_type(), ModelType::ImageModel);
-        assert_eq!(image.model_id(), "openai/gpt-image-1");
+        assert_eq!(image.provider(), "vercel-ai-gateway.image");
+        assert_eq!(image.model_id(), "google/imagen-4.0-generate-001");
     }
 
     #[test]
@@ -1754,6 +1767,110 @@ mod tests {
     }
 
     #[test]
+    fn vercel_ai_gateway_openai_compatible_generates_images_through_openai_images_endpoint() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "data": [
+                            {
+                                "b64_json": "aW1hZ2UtMQ=="
+                            },
+                            {
+                                "b64_json": "aW1hZ2UtMg=="
+                            }
+                        ]
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from([(
+                    "x-request-id".to_string(),
+                    "req_vercel_ai_gateway_image".to_string(),
+                )])))))
+            });
+        let provider = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://ai-gateway.test/v1/")
+            .with_header("custom-header", "value")
+            .with_transport(transport);
+        let model = provider.image_model("google/imagen-4.0-generate-001");
+
+        assert_eq!(model.provider(), "vercel-ai-gateway.image");
+        assert_eq!(model.model_id(), "google/imagen-4.0-generate-001");
+        assert_eq!(poll_ready(model.max_images_per_call()), Some(10));
+
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "vercelAiGateway": {
+                "user": "image-user"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = poll_ready(generate_image(
+            GenerateImageOptions::new(&model, "A tiny geometric icon")
+                .with_n(2)
+                .with_size("1024x1024")
+                .with_provider_options(provider_options)
+                .with_header("x-call", "image"),
+        ))
+        .expect("image generation succeeds");
+
+        assert_eq!(result.images.len(), 2);
+        assert_eq!(result.image.base64(), "aW1hZ2UtMQ==");
+        assert_eq!(
+            result
+                .responses
+                .first()
+                .and_then(|response| response.headers.as_ref())
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("req_vercel_ai_gateway_image")
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://ai-gateway.test/v1/images/generations");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+        assert_eq!(
+            request.headers.get("x-call").map(String::as_str),
+            Some("image")
+        );
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "google/imagen-4.0-generate-001",
+                "prompt": "A tiny geometric icon",
+                "n": 2,
+                "size": "1024x1024",
+                "user": "image-user",
+                "response_format": "b64_json"
+            }))
+        );
+    }
+
+    #[test]
     #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI-compatible model call"]
     fn live_vercel_ai_gateway_openai_compatible_generate_text() {
         let Some(api_key) = live_gateway_api_key() else {
@@ -2033,6 +2150,39 @@ mod tests {
         assert!(
             !result.embedding.is_empty(),
             "Gateway OpenAI-compatible embedding response was empty"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI-compatible image call"]
+    fn live_vercel_ai_gateway_openai_compatible_generate_image() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!(
+                "skipping live Gateway OpenAI-compatible image test because no API key is configured"
+            );
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_AI_GATEWAY_OPENAI_COMPATIBLE_IMAGE_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_OPENAI_COMPATIBLE_IMAGE_MODEL"))
+            .or_else(|_| env::var("AI_SDK_RUST_GATEWAY_IMAGE_MODEL"))
+            .or_else(|_| env::var("AI_GATEWAY_IMAGE_MODEL"))
+            .unwrap_or_else(|_| "google/imagen-4.0-fast-generate-001".to_string());
+        let model = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key(api_key)
+            .image_model(model_id);
+        let result = poll_ready(generate_image(
+            GenerateImageOptions::new(
+                &model,
+                "A simple flat icon of the Rust gear on a white background",
+            )
+            .with_n(1),
+        ))
+        .expect("Gateway OpenAI-compatible image generation succeeds");
+
+        assert_eq!(result.images.len(), 1);
+        assert!(
+            !result.image.base64().is_empty(),
+            "Gateway OpenAI-compatible image response was empty"
         );
     }
 
