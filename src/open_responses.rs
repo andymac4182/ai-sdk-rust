@@ -498,6 +498,7 @@ fn open_responses_request_body(
     let has_shell_tool = open_responses_has_provider_tool(&options.tools, "openai.shell");
     let has_apply_patch_tool =
         open_responses_has_provider_tool(&options.tools, "openai.apply_patch");
+    let custom_provider_tool_names = open_responses_custom_provider_tool_names(&options.tools);
     let store = open_responses_store_enabled(provider_options_name, provider_options);
     let has_conversation =
         open_responses_conversation_enabled(provider_options_name, provider_options);
@@ -519,6 +520,7 @@ fn open_responses_request_body(
         has_local_shell_tool,
         has_shell_tool,
         has_apply_patch_tool,
+        custom_provider_tool_names: &custom_provider_tool_names,
     };
     let (input, instructions) =
         open_responses_input(&options.prompt, &prompt_input_options, &mut warnings)?;
@@ -958,6 +960,7 @@ struct OpenResponsesPromptInputOptions<'a> {
     has_local_shell_tool: bool,
     has_shell_tool: bool,
     has_apply_patch_tool: bool,
+    custom_provider_tool_names: &'a BTreeSet<String>,
 }
 
 fn open_responses_input(
@@ -972,6 +975,7 @@ fn open_responses_input(
     let has_local_shell_tool = options.has_local_shell_tool;
     let has_shell_tool = options.has_shell_tool;
     let has_apply_patch_tool = options.has_apply_patch_tool;
+    let custom_provider_tool_names = options.custom_provider_tool_names;
     let mut input = Vec::new();
     let mut system_messages = Vec::new();
     let mut processed_approval_ids = BTreeSet::new();
@@ -1134,6 +1138,15 @@ fn open_responses_input(
                                 continue;
                             }
 
+                            if custom_provider_tool_names.contains(&resolved_tool_name) {
+                                assistant_items.push(open_responses_custom_tool_call_item(
+                                    tool_call,
+                                    &resolved_tool_name,
+                                    item_id,
+                                ));
+                                continue;
+                            }
+
                             assistant_items.push(json!({
                                 "type": "function_call",
                                 "call_id": tool_call.tool_call_id,
@@ -1278,6 +1291,15 @@ fn open_responses_input(
                                 input.push(open_responses_apply_patch_call_output_item(
                                     &part.tool_call_id,
                                     output,
+                                ));
+                                continue;
+                            }
+
+                            if custom_provider_tool_names.contains(&resolved_tool_name) {
+                                input.push(open_responses_custom_tool_call_output_item(
+                                    &part.tool_call_id,
+                                    &part.output,
+                                    warnings,
                                 ));
                                 continue;
                             }
@@ -1563,6 +1585,47 @@ fn open_responses_apply_patch_call_output_item(call_id: &str, output: &JsonValue
             .cloned()
             .unwrap_or_else(|| JsonValue::String("completed".to_string())),
         "output": output.get("output").cloned().unwrap_or(JsonValue::Null)
+    })
+}
+
+fn open_responses_custom_tool_call_item(
+    tool_call: &LanguageModelToolCallPart,
+    resolved_tool_name: &str,
+    item_id: Option<&str>,
+) -> JsonValue {
+    let input = match &tool_call.input {
+        JsonValue::String(input) => input.clone(),
+        input => open_responses_stringified_json(input.clone()),
+    };
+    let mut item = JsonObject::new();
+    item.insert(
+        "type".to_string(),
+        JsonValue::String("custom_tool_call".to_string()),
+    );
+    item.insert(
+        "call_id".to_string(),
+        JsonValue::String(tool_call.tool_call_id.clone()),
+    );
+    item.insert(
+        "name".to_string(),
+        JsonValue::String(resolved_tool_name.to_string()),
+    );
+    item.insert("input".to_string(), JsonValue::String(input));
+    if let Some(item_id) = item_id {
+        item.insert("id".to_string(), JsonValue::String(item_id.to_string()));
+    }
+    JsonValue::Object(item)
+}
+
+fn open_responses_custom_tool_call_output_item(
+    call_id: &str,
+    output: &LanguageModelToolResultOutput,
+    warnings: &mut Vec<Warning>,
+) -> JsonValue {
+    json!({
+        "type": "custom_tool_call_output",
+        "call_id": call_id,
+        "output": open_responses_tool_result_output(output, warnings)
     })
 }
 
@@ -3069,6 +3132,22 @@ fn open_responses_has_provider_tool(tools: &Option<Vec<LanguageModelTool>>, tool
 
         tool.id == tool_id
     })
+}
+
+fn open_responses_custom_provider_tool_names(
+    tools: &Option<Vec<LanguageModelTool>>,
+) -> BTreeSet<String> {
+    tools
+        .iter()
+        .flatten()
+        .filter_map(|tool| {
+            let LanguageModelTool::Provider(tool) = tool else {
+                return None;
+            };
+
+            (tool.id == "openai.custom").then(|| tool.name.clone())
+        })
+        .collect()
 }
 
 fn open_responses_shell_provider_executed(tools: &Option<Vec<LanguageModelTool>>) -> bool {
@@ -5691,6 +5770,14 @@ mod tests {
         ))
     }
 
+    fn open_responses_test_custom_tool() -> LanguageModelTool {
+        LanguageModelTool::Provider(LanguageModelProviderTool::new(
+            "openai.custom",
+            "write_sql",
+            JsonObject::new(),
+        ))
+    }
+
     #[test]
     fn open_responses_provider_generates_text_with_request_and_response_metadata() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
@@ -7376,6 +7463,265 @@ mod tests {
                     "call_id": "call_apply_patch_2",
                     "status": "incomplete",
                     "output": "Deletion denied"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_reconstructs_custom_tool_calls() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_custom_tool_calls",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Custom tool calls accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 12,
+                            "output_tokens": 4
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let item_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "itemId": "custom_tool_item_3"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                    LanguageModelAssistantMessage::new(vec![
+                        LanguageModelAssistantContentPart::ToolCall(
+                            LanguageModelToolCallPart::new(
+                                "call_custom_1",
+                                "write_sql",
+                                JsonValue::String("SELECT * FROM users".to_string()),
+                            ),
+                        ),
+                        LanguageModelAssistantContentPart::ToolCall(
+                            LanguageModelToolCallPart::new(
+                                "call_custom_2",
+                                "write_sql",
+                                json!({
+                                    "query": "SELECT 1"
+                                }),
+                            ),
+                        ),
+                        LanguageModelAssistantContentPart::ToolCall(
+                            LanguageModelToolCallPart::new(
+                                "call_custom_3",
+                                "write_sql",
+                                JsonValue::String("SELECT stored".to_string()),
+                            )
+                            .with_provider_options(item_options),
+                        ),
+                    ]),
+                )])
+                .with_tool(open_responses_test_custom_tool()),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_custom_1",
+                    "name": "write_sql",
+                    "input": "SELECT * FROM users"
+                },
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_custom_2",
+                    "name": "write_sql",
+                    "input": "{\"query\":\"SELECT 1\"}"
+                },
+                {
+                    "type": "item_reference",
+                    "id": "custom_tool_item_3"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_reconstructs_custom_tool_outputs() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_custom_tool_outputs",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Custom tool outputs accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 15,
+                            "output_tokens": 5
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::Tool(
+                    LanguageModelToolMessage::new(vec![
+                        LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                            "call_custom_text",
+                            "write_sql",
+                            LanguageModelToolResultOutput::text("Query executed successfully."),
+                        )),
+                        LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                            "call_custom_json",
+                            "write_sql",
+                            LanguageModelToolResultOutput::json(json!({
+                                "rows": [1, 2]
+                            })),
+                        )),
+                        LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                            "call_custom_denied",
+                            "write_sql",
+                            LanguageModelToolResultOutput::execution_denied()
+                                .with_reason("User denied the tool execution"),
+                        )),
+                        LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                            "call_custom_content",
+                            "write_sql",
+                            LanguageModelToolResultOutput::content(vec![
+                                LanguageModelToolResultContentPart::Text(
+                                    LanguageModelTextPart::new("Here is the file:"),
+                                ),
+                                LanguageModelToolResultContentPart::File(
+                                    LanguageModelFilePart::new(
+                                        FileData::Url {
+                                            url: Url::parse("https://example.com/test.pdf")
+                                                .expect("valid URL"),
+                                        },
+                                        "application/pdf",
+                                    ),
+                                ),
+                            ]),
+                        )),
+                    ]),
+                )])
+                .with_tool(open_responses_test_custom_tool()),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_custom_text",
+                    "output": "Query executed successfully."
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_custom_json",
+                    "output": "{\"rows\":[1,2]}"
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_custom_denied",
+                    "output": "User denied the tool execution"
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_custom_content",
+                    "output": [
+                        {
+                            "type": "input_text",
+                            "text": "Here is the file:"
+                        },
+                        {
+                            "type": "input_file",
+                            "file_url": "https://example.com/test.pdf"
+                        }
+                    ]
                 }
             ])
         );
