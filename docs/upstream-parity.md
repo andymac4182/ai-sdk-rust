@@ -287,7 +287,14 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ## Next Unported Work Queue
 
-1. Close the remaining Open Responses structured output/tools matrix, especially
+1. Finish all common/core SDK packages and Vercel AI Gateway coverage before
+   returning to unrelated standalone providers. This ordering covers
+   `packages/ai`, `packages/provider`, `packages/provider-utils`,
+   `packages/openai-compatible`, `packages/open-responses`, `packages/gateway`,
+   the Vercel AI Gateway OpenAI-compatible and Open Responses routes, and the
+   portable non-provider package rows such as MCP, OTel, Workflow, telemetry,
+   logger, UI transport, chat/completion transport, and test-server support.
+2. Close the remaining Open Responses structured output/tools matrix, especially
    the remaining structured-output/tool-call edge cases now that MCP approval
    continuation, conversation history filtering, assistant text metadata,
    assistant reasoning, compaction, `tool_search` request/history, assistant
@@ -298,25 +305,24 @@ focused tests for each portable behavior before changing rows to `verified`.
    id prefixes, `allowedTools` tool-choice override, shell request/history,
    apply-patch request/history, and custom provider-tool request/prompt
    reconstruction are represented.
-2. Keep the next slices Gateway-first: close broader `packages/gateway`
+3. Keep the next slices Gateway-first: close broader `packages/gateway`
    provider-package test gaps and remaining Vercel AI Gateway OpenAI-compatible
    endpoint coverage before expanding to unrelated providers.
-3. Continue `streamText` parity with aborts/retries, UI response helpers, error
+4. Continue `streamText` parity with aborts/retries, UI response helpers, error
    propagation, and remaining stream transform details because Gateway relies on
    this high-level library surface.
-4. Continue `streamObject` parity with telemetry, retries/abort, and remaining
+5. Continue `streamObject` parity with telemetry, retries/abort, and remaining
    partial-output strategy edge cases after the Gateway text/stream/UI path is
    stronger.
-5. Expand native Gateway beyond the current language, streaming,
+6. Expand native Gateway beyond the current language, streaming,
    image/embedding/reranking/video, account metadata, auth/observability,
    provider-executed tools, and error-classification slices with broader
    provider package tests.
-6. Continue concrete provider wrappers only as package-owned crates that match
-   their upstream TypeScript packages; do not add new root-owned provider
-   modules while Gateway and supporting library surfaces are still being
-   completed.
-7. Port MCP, OTel, Workflow, UI-message, chat/completion transport, telemetry,
-   logger, and HTTP server example surfaces.
+7. Defer unrelated standalone provider wrappers until the common/core SDK and
+   Vercel AI Gateway rows above are verified or explicitly documented as
+   intentionally non-portable. When standalone provider work resumes, continue
+   it only as package-owned crates that match their upstream TypeScript
+   packages; do not add new root-owned provider modules.
 8. Crate splitting is an immediate hard acceptance gate, not optional cleanup
    after the port is otherwise complete. The Rust workspace must have a strict
    1:1 mapping between upstream `vercel/ai` TypeScript packages and Rust
