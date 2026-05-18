@@ -127,6 +127,7 @@ inventory.
 | Open Responses shell prompt history reconstruction | verified | `src/open_responses.rs` | `open_responses_provider_reconstructs_shell_history_with_store_false`; `open_responses_provider_reconstructs_stored_assistant_shell_outputs` | Open Responses prompt conversion now recognizes the OpenAI shell provider tool during history serialization, maps shell prompt calls to `shell_call` with snake-case request action fields when not stored, maps shell outputs from tool-role messages to `shell_call_output`, and reconstructs assistant shell outputs even when `store` is enabled because upstream shell output item ids differ from shell call item ids. |
 | Open Responses apply-patch prompt history reconstruction | verified | `src/open_responses.rs` | `open_responses_provider_reconstructs_apply_patch_history_with_store_false`; `open_responses_provider_reconstructs_stored_apply_patch_outputs` | Open Responses prompt conversion now recognizes the OpenAI apply-patch provider tool during history serialization, maps unstored apply-patch calls to `apply_patch_call` with `callId`, item id, status, and operation, and maps apply-patch tool-role outputs to `apply_patch_call_output` even when the call itself is represented by a stored `item_reference`. |
 | Open Responses custom provider-tool prompt history reconstruction | verified | `src/open_responses.rs` | `open_responses_provider_reconstructs_custom_tool_calls`; `open_responses_provider_reconstructs_custom_tool_outputs` | Open Responses prompt conversion now recognizes `openai.custom` provider tool names during history serialization, maps assistant custom tool calls to `custom_tool_call` with string-preserving or JSON-stringified input, preserves stored item references, and maps text, JSON, execution-denied, and multipart content tool-role outputs to `custom_tool_call_output`. |
+| Open Responses assistant text prompt metadata | verified | `src/open_responses.rs` | `open_responses_provider_reconstructs_text_item_id_and_phase_with_store_false`; `open_responses_provider_uses_item_references_for_stored_assistant_history` | Assistant text prompt history now preserves OpenAI item IDs and `phase` metadata when `store` is disabled, including `commentary` and `final_answer`, and still collapses stored text items to `item_reference` entries when `store` is enabled. |
 | Open Responses reasoning prompt history reconstruction | verified | `src/open_responses.rs` | `open_responses_provider_reconstructs_reasoning_history_with_store_false`; `open_responses_provider_warns_for_unstored_reasoning_without_encrypted_content` | Open Responses prompt conversion now reconstructs assistant reasoning history when `store` is disabled, merges repeated reasoning item IDs into one `reasoning` item with summary parts, updates encrypted content from later parts, supports encrypted reasoning without an item id, deduplicates stored reasoning item references, and warns/skips reasoning parts that cannot be sent without encrypted content. |
 | Open Responses compaction prompt history reconstruction | verified | `src/open_responses.rs` | `open_responses_provider_reconstructs_compaction_history_with_store_false`; `open_responses_provider_uses_item_references_for_stored_assistant_history` | Open Responses prompt conversion now maps assistant `openai.compaction` custom prompt history to `compaction` items with encrypted content when `store` is disabled and to stored `item_reference` entries when the compaction item is persisted. |
 | Open Responses multipart tool-result file outputs | verified | `src/open_responses.rs` | `open_responses_provider_converts_tool_result_file_content_outputs` | Multipart tool-result `content` outputs now convert text plus image/file URL and data parts into Responses `function_call_output` arrays using `input_text`, `input_image`, and `input_file`, forwards OpenAI `imageDetail` provider options on image outputs, and keeps unsupported file data forms and custom parts warning-backed. |
@@ -237,9 +238,9 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 1. Close the remaining Open Responses structured output/tools matrix, especially
    the remaining structured-output/tool-call edge cases now that MCP approval
-   continuation, conversation history filtering, assistant reasoning,
-   compaction, `tool_search`, local-shell, shell, apply-patch, and custom
-   provider-tool prompt reconstruction are represented.
+   continuation, conversation history filtering, assistant text metadata,
+   assistant reasoning, compaction, `tool_search`, local-shell, shell,
+   apply-patch, and custom provider-tool prompt reconstruction are represented.
 2. Keep the next slices Gateway-first: close broader `packages/gateway`
    provider-package test gaps and remaining Vercel AI Gateway OpenAI-compatible
    endpoint coverage before expanding to unrelated providers.
@@ -258,15 +259,18 @@ focused tests for each portable behavior before changing rows to `verified`.
 7. Port MCP, OTel, Workflow, UI-message, chat/completion transport, telemetry,
    logger, and HTTP server example surfaces.
 8. Crate splitting is a required architecture constraint for the next
-   iterations, not optional cleanup. The Rust workspace must converge on a
+   iterations and should be treated as mandatory parity work, not optional
+   cleanup after the port is otherwise complete. The Rust workspace must have a
    strict 1:1 mapping between upstream `vercel/ai` TypeScript packages and Rust
    crates: each upstream package must have one corresponding Rust crate, and
    package-owned API must be implemented, documented, and tested in that crate.
-   The current `ai-sdk-rust` root crate is already collapsing multiple upstream
-   packages into one Rust boundary, and continuing to merge additional package
-   surfaces there will make later extraction harder and more expensive. Future
-   parity work should default to creating or using the matching package crate
-   before porting new package-owned types, provider/options surfaces, docs, or
-   tests. Additions to the root crate should be limited to aggregate
-   re-exports, compatibility shims, or explicitly documented temporary staging
-   with a concrete follow-up extraction path.
+   The current `ai-sdk-rust` root crate is already merging multiple upstream
+   packages into one Rust boundary. Every additional package surface added to
+   that root crate increases the future extraction cost and makes the eventual
+   1:1 split riskier. Future parity work should create or use the matching
+   package crate before porting new package-owned types, provider/options
+   surfaces, docs, or tests. New package-owned APIs should not be added to the
+   root crate unless the change is explicitly documented as temporary staging
+   with the target crate named and a concrete follow-up extraction path. The
+   root crate should converge toward aggregate re-exports and compatibility
+   shims only.
