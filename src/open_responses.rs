@@ -593,8 +593,17 @@ fn open_responses_request_body(
         });
     }
 
-    let (tools, tool_choice) =
-        open_responses_prepare_tools(&options.tools, &options.tool_choice, &mut warnings);
+    let allowed_tools = open_responses_provider_option_value(
+        provider_options_name,
+        provider_options,
+        &["allowedTools", "allowed_tools"],
+    );
+    let (tools, tool_choice) = open_responses_prepare_tools(
+        &options.tools,
+        &options.tool_choice,
+        allowed_tools,
+        &mut warnings,
+    );
     if let Some(tools) = tools {
         body.insert("tools".to_string(), JsonValue::Array(tools));
     }
@@ -2345,6 +2354,7 @@ fn open_responses_tool_result_output(
 fn open_responses_prepare_tools(
     tools: &Option<Vec<LanguageModelTool>>,
     tool_choice: &Option<LanguageModelToolChoice>,
+    allowed_tools: Option<&JsonValue>,
     warnings: &mut Vec<Warning>,
 ) -> (Option<Vec<JsonValue>>, Option<JsonValue>) {
     let provider_tool_names = open_responses_provider_tool_names();
@@ -2398,30 +2408,69 @@ fn open_responses_prepare_tools(
         (!prepared_tools.is_empty()).then_some(prepared_tools)
     });
 
-    let prepared_tool_choice = tool_choice.as_ref().map(|choice| match choice {
-        LanguageModelToolChoice::Auto => JsonValue::String("auto".to_string()),
-        LanguageModelToolChoice::None => JsonValue::String("none".to_string()),
-        LanguageModelToolChoice::Required => JsonValue::String("required".to_string()),
-        LanguageModelToolChoice::Tool { tool_name } => {
-            let resolved_tool_name = tool_name_mapping.to_provider_tool_name(tool_name);
+    let prepared_tool_choice =
+        open_responses_allowed_tools_choice(allowed_tools, &tool_name_mapping).or_else(|| {
+            tool_choice.as_ref().map(|choice| match choice {
+                LanguageModelToolChoice::Auto => JsonValue::String("auto".to_string()),
+                LanguageModelToolChoice::None => JsonValue::String("none".to_string()),
+                LanguageModelToolChoice::Required => JsonValue::String("required".to_string()),
+                LanguageModelToolChoice::Tool { tool_name } => {
+                    let resolved_tool_name = tool_name_mapping.to_provider_tool_name(tool_name);
 
-            if open_responses_hosted_tool_choice_type(&resolved_tool_name) {
-                json!({ "type": resolved_tool_name })
-            } else if custom_provider_tool_names.contains(&resolved_tool_name) {
-                json!({
-                    "type": "custom",
-                    "name": resolved_tool_name
-                })
-            } else {
-                json!({
-                    "type": "function",
-                    "name": resolved_tool_name
-                })
-            }
-        }
-    });
+                    if open_responses_hosted_tool_choice_type(&resolved_tool_name) {
+                        json!({ "type": resolved_tool_name })
+                    } else if custom_provider_tool_names.contains(&resolved_tool_name) {
+                        json!({
+                            "type": "custom",
+                            "name": resolved_tool_name
+                        })
+                    } else {
+                        json!({
+                            "type": "function",
+                            "name": resolved_tool_name
+                        })
+                    }
+                }
+            })
+        });
 
     (prepared_tools, prepared_tool_choice)
+}
+
+fn open_responses_allowed_tools_choice(
+    allowed_tools: Option<&JsonValue>,
+    tool_name_mapping: &ToolNameMapping,
+) -> Option<JsonValue> {
+    let allowed_tools = allowed_tools?.as_object()?;
+    let tool_names = allowed_tools
+        .get("toolNames")
+        .or_else(|| allowed_tools.get("tool_names"))?
+        .as_array()?
+        .iter()
+        .filter_map(JsonValue::as_str)
+        .map(|name| {
+            json!({
+                "type": "function",
+                "name": tool_name_mapping.to_provider_tool_name(name)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if tool_names.is_empty() {
+        return None;
+    }
+
+    let mode = allowed_tools
+        .get("mode")
+        .and_then(JsonValue::as_str)
+        .filter(|mode| matches!(*mode, "auto" | "required"))
+        .unwrap_or("auto");
+
+    Some(json!({
+        "type": "allowed_tools",
+        "mode": mode,
+        "tools": tool_names
+    }))
 }
 
 fn open_responses_provider_tool_names() -> BTreeMap<String, String> {
@@ -6198,12 +6247,13 @@ mod tests {
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelAssistantContentPart,
         LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
-        LanguageModelCustomPart, LanguageModelFilePart, LanguageModelMessage,
-        LanguageModelProviderTool, LanguageModelReasoningEffort, LanguageModelReasoningPart,
-        LanguageModelResponseFormat, LanguageModelSource, LanguageModelStreamPart,
-        LanguageModelTextPart, LanguageModelTool, LanguageModelToolApprovalRequestPart,
-        LanguageModelToolApprovalResponsePart, LanguageModelToolCallPart, LanguageModelToolChoice,
-        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultContentPart,
+        LanguageModelCustomPart, LanguageModelFilePart, LanguageModelFunctionTool,
+        LanguageModelMessage, LanguageModelProviderTool, LanguageModelReasoningEffort,
+        LanguageModelReasoningPart, LanguageModelResponseFormat, LanguageModelSource,
+        LanguageModelStreamPart, LanguageModelTextPart, LanguageModelTool,
+        LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
+        LanguageModelToolCallPart, LanguageModelToolChoice, LanguageModelToolContentPart,
+        LanguageModelToolMessage, LanguageModelToolResultContentPart,
         LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUserContentPart,
         LanguageModelUserMessage,
     };
@@ -10307,6 +10357,141 @@ mod tests {
                 "type": "web_search"
             })
         );
+    }
+
+    #[test]
+    fn open_responses_provider_maps_allowed_tools_to_tool_choice() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_allowed_tools",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Allowed tools accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 6,
+                            "output_tokens": 4
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "allowedTools": {
+                    "toolNames": ["get_weather"]
+                }
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Use one allowed tool"),
+                    )]),
+                )])
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "get_weather",
+                        json_object(json!({
+                            "type": "object",
+                            "properties": {}
+                        })),
+                    )
+                    .with_description("Get weather"),
+                ))
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "get_time",
+                        json_object(json!({
+                            "type": "object",
+                            "properties": {}
+                        })),
+                    )
+                    .with_description("Get time"),
+                ))
+                .with_tool_choice(LanguageModelToolChoice::Required)
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                },
+                {
+                    "type": "function",
+                    "name": "get_time",
+                    "description": "Get time",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
+            ])
+        );
+        assert_eq!(
+            request_body["tool_choice"],
+            json!({
+                "type": "allowed_tools",
+                "mode": "auto",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "get_weather"
+                    }
+                ]
+            })
+        );
+        assert!(request_body.get("allowedTools").is_none());
     }
 
     #[test]
