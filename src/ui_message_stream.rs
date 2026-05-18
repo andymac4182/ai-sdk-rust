@@ -1,7 +1,12 @@
+use std::collections::BTreeMap;
+use std::fmt;
+
 use crate::headers::Headers;
-use crate::json::JsonValue;
+use crate::json::{JsonObject, JsonValue};
+use crate::language_model::FinishReason;
 use crate::provider::ProviderMetadata;
 use crate::provider_utils::normalize_headers;
+use crate::util::merge_objects;
 
 /// Default content type used by upstream UI-message stream response helpers.
 pub const UI_MESSAGE_STREAM_CONTENT_TYPE: &str = "text/event-stream";
@@ -20,6 +25,20 @@ pub const UI_MESSAGE_STREAM_VERSION: &str = "v1";
     rename_all_fields = "camelCase"
 )]
 pub enum UiMessageChunk {
+    /// Start of a UI-message stream.
+    Start {
+        /// Optional message identifier to assign to the response.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+
+        /// Optional metadata to merge into the UI message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_metadata: Option<JsonValue>,
+    },
+
+    /// Start of a model-call step inside the UI-message stream.
+    StartStep,
+
     /// Start of a text part.
     TextStart {
         /// Text part identifier.
@@ -53,10 +72,63 @@ pub enum UiMessageChunk {
         provider_metadata: Option<ProviderMetadata>,
     },
 
+    /// Start of a reasoning part.
+    ReasoningStart {
+        /// Reasoning part identifier.
+        id: String,
+
+        /// Provider-specific metadata for the reasoning part.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+
+    /// Delta for a reasoning part.
+    ReasoningDelta {
+        /// Reasoning part identifier.
+        id: String,
+
+        /// Reasoning delta.
+        delta: String,
+
+        /// Provider-specific metadata for the reasoning delta.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+
+    /// End of a reasoning part.
+    ReasoningEnd {
+        /// Reasoning part identifier.
+        id: String,
+
+        /// Provider-specific metadata for the reasoning part.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+
     /// Error chunk sent to UI-message stream consumers.
     Error {
         /// Error text visible to the client.
         error_text: String,
+    },
+
+    /// End of a model-call step inside the UI-message stream.
+    FinishStep,
+
+    /// End of a UI-message stream.
+    Finish {
+        /// Optional finish reason reported by the model.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        finish_reason: Option<FinishReason>,
+
+        /// Optional metadata to merge into the UI message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_metadata: Option<JsonValue>,
+    },
+
+    /// Metadata update for the streamed UI message.
+    MessageMetadata {
+        /// Metadata to merge into the UI message.
+        message_metadata: JsonValue,
     },
 }
 
@@ -89,7 +161,7 @@ pub struct UiMessage {
     pub metadata: Option<JsonValue>,
 
     /// UI message parts.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub parts: Vec<JsonValue>,
 }
 
@@ -166,6 +238,48 @@ pub fn get_response_ui_message_id(
 }
 
 impl UiMessageChunk {
+    /// Creates a stream-start UI-message chunk.
+    pub fn start() -> Self {
+        Self::Start {
+            message_id: None,
+            message_metadata: None,
+        }
+    }
+
+    /// Creates a stream-start UI-message chunk with a message id.
+    pub fn start_with_message_id(message_id: impl Into<String>) -> Self {
+        Self::Start {
+            message_id: Some(message_id.into()),
+            message_metadata: None,
+        }
+    }
+
+    /// Adds message metadata to a stream-start or stream-finish chunk.
+    pub fn with_message_metadata(mut self, message_metadata: impl Into<JsonValue>) -> Self {
+        let message_metadata = Some(message_metadata.into());
+
+        match &mut self {
+            Self::Start {
+                message_metadata: target,
+                ..
+            }
+            | Self::Finish {
+                message_metadata: target,
+                ..
+            } => {
+                *target = message_metadata;
+            }
+            _ => {}
+        }
+
+        self
+    }
+
+    /// Creates a step-start UI-message chunk.
+    pub fn start_step() -> Self {
+        Self::StartStep
+    }
+
     /// Creates a text-start UI-message chunk.
     pub fn text_start(id: impl Into<String>) -> Self {
         Self::TextStart {
@@ -191,12 +305,492 @@ impl UiMessageChunk {
         }
     }
 
+    /// Creates a reasoning-start UI-message chunk.
+    pub fn reasoning_start(id: impl Into<String>) -> Self {
+        Self::ReasoningStart {
+            id: id.into(),
+            provider_metadata: None,
+        }
+    }
+
+    /// Creates a reasoning-delta UI-message chunk.
+    pub fn reasoning_delta(id: impl Into<String>, delta: impl Into<String>) -> Self {
+        Self::ReasoningDelta {
+            id: id.into(),
+            delta: delta.into(),
+            provider_metadata: None,
+        }
+    }
+
+    /// Creates a reasoning-end UI-message chunk.
+    pub fn reasoning_end(id: impl Into<String>) -> Self {
+        Self::ReasoningEnd {
+            id: id.into(),
+            provider_metadata: None,
+        }
+    }
+
     /// Creates an error UI-message chunk.
     pub fn error(error_text: impl Into<String>) -> Self {
         Self::Error {
             error_text: error_text.into(),
         }
     }
+
+    /// Creates a step-finish UI-message chunk.
+    pub fn finish_step() -> Self {
+        Self::FinishStep
+    }
+
+    /// Creates a stream-finish UI-message chunk.
+    pub fn finish() -> Self {
+        Self::Finish {
+            finish_reason: None,
+            message_metadata: None,
+        }
+    }
+
+    /// Creates a stream-finish UI-message chunk with a finish reason.
+    pub fn finish_with_reason(finish_reason: FinishReason) -> Self {
+        Self::Finish {
+            finish_reason: Some(finish_reason),
+            message_metadata: None,
+        }
+    }
+
+    /// Creates a message-metadata UI-message chunk.
+    pub fn message_metadata(message_metadata: impl Into<JsonValue>) -> Self {
+        Self::MessageMetadata {
+            message_metadata: message_metadata.into(),
+        }
+    }
+}
+
+/// Error returned when a UI-message stream cannot be applied to message state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiMessageStreamProcessError {
+    chunk_type: String,
+    chunk_id: String,
+    message: String,
+}
+
+impl UiMessageStreamProcessError {
+    /// Creates a UI-message stream error.
+    pub fn new(
+        chunk_type: impl Into<String>,
+        chunk_id: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            chunk_type: chunk_type.into(),
+            chunk_id: chunk_id.into(),
+            message: message.into(),
+        }
+    }
+
+    /// Returns the stream chunk type associated with this error.
+    pub fn chunk_type(&self) -> &str {
+        &self.chunk_type
+    }
+
+    /// Returns the stream chunk id associated with this error.
+    pub fn chunk_id(&self) -> &str {
+        &self.chunk_id
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for UiMessageStreamProcessError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for UiMessageStreamProcessError {}
+
+/// Mutable UI-message state used while applying UI-message stream chunks.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StreamingUiMessageState {
+    /// Current accumulated UI message.
+    pub message: UiMessage,
+
+    /// Last finish reason observed for the stream.
+    pub finish_reason: Option<FinishReason>,
+
+    active_text_parts: BTreeMap<String, usize>,
+    active_reasoning_parts: BTreeMap<String, usize>,
+}
+
+impl StreamingUiMessageState {
+    /// Creates streaming UI-message state from an optional previous message.
+    pub fn new(message_id: impl Into<String>, last_message: Option<UiMessage>) -> Self {
+        let message = match last_message {
+            Some(message) if message.role == UiMessageRole::Assistant => message,
+            _ => UiMessage::new(message_id, UiMessageRole::Assistant),
+        };
+
+        Self {
+            message,
+            finish_reason: None,
+            active_text_parts: BTreeMap::new(),
+            active_reasoning_parts: BTreeMap::new(),
+        }
+    }
+}
+
+/// Options for [`read_ui_message_stream`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReadUiMessageStreamOptions {
+    /// Previous assistant message to resume from.
+    pub message: Option<UiMessage>,
+
+    /// UI-message stream chunks to apply.
+    pub stream: Vec<UiMessageChunk>,
+
+    /// Whether an `error` chunk terminates processing.
+    pub terminate_on_error: bool,
+}
+
+impl ReadUiMessageStreamOptions {
+    /// Creates read options for a UI-message stream.
+    pub fn new<I>(stream: I) -> Self
+    where
+        I: IntoIterator<Item = UiMessageChunk>,
+    {
+        Self {
+            message: None,
+            stream: stream.into_iter().collect(),
+            terminate_on_error: false,
+        }
+    }
+
+    /// Sets the previous assistant message to resume from.
+    pub fn with_message(mut self, message: UiMessage) -> Self {
+        self.message = Some(message);
+        self
+    }
+
+    /// Sets whether an `error` chunk terminates processing.
+    pub fn with_terminate_on_error(mut self, terminate_on_error: bool) -> Self {
+        self.terminate_on_error = terminate_on_error;
+        self
+    }
+}
+
+/// Transforms plain text stream chunks into the upstream UI-message chunk sequence.
+pub fn transform_text_to_ui_message_stream<I, S>(stream: I) -> Vec<UiMessageChunk>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut chunks = vec![
+        UiMessageChunk::start(),
+        UiMessageChunk::start_step(),
+        UiMessageChunk::text_start("text-1"),
+    ];
+
+    chunks.extend(
+        stream
+            .into_iter()
+            .map(|part| UiMessageChunk::text_delta("text-1", part.into())),
+    );
+
+    chunks.push(UiMessageChunk::text_end("text-1"));
+    chunks.push(UiMessageChunk::finish_step());
+    chunks.push(UiMessageChunk::finish());
+
+    chunks
+}
+
+/// Applies UI-message stream chunks and returns cloned message states after writes.
+pub fn process_ui_message_stream<I>(
+    state: &mut StreamingUiMessageState,
+    stream: I,
+    terminate_on_error: bool,
+) -> Result<Vec<UiMessage>, UiMessageStreamProcessError>
+where
+    I: IntoIterator<Item = UiMessageChunk>,
+{
+    let mut updates = Vec::new();
+
+    for chunk in stream {
+        match chunk {
+            UiMessageChunk::Start {
+                message_id,
+                message_metadata,
+            } => {
+                let should_write = message_id.is_some() || message_metadata.is_some();
+
+                if let Some(message_id) = message_id {
+                    state.message.id = message_id;
+                }
+
+                update_ui_message_metadata(&mut state.message, message_metadata);
+
+                if should_write {
+                    updates.push(state.message.clone());
+                }
+            }
+            UiMessageChunk::StartStep => {
+                state.message.parts.push(step_start_part());
+            }
+            UiMessageChunk::TextStart {
+                id,
+                provider_metadata,
+            } => {
+                let index = state.message.parts.len();
+                state
+                    .message
+                    .parts
+                    .push(streaming_text_part("", provider_metadata));
+                state.active_text_parts.insert(id, index);
+                updates.push(state.message.clone());
+            }
+            UiMessageChunk::TextDelta {
+                id,
+                delta,
+                provider_metadata,
+            } => {
+                let index = *state.active_text_parts.get(&id).ok_or_else(|| {
+                    UiMessageStreamProcessError::new(
+                        "text-delta",
+                        id.clone(),
+                        format!(
+                            "Received text-delta for missing text part with ID \"{id}\". \
+Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
+                        ),
+                    )
+                })?;
+
+                append_ui_message_part_text(&mut state.message.parts[index], &delta);
+                merge_ui_message_part_provider_metadata(
+                    &mut state.message.parts[index],
+                    provider_metadata,
+                );
+                updates.push(state.message.clone());
+            }
+            UiMessageChunk::TextEnd {
+                id,
+                provider_metadata,
+            } => {
+                let index = *state.active_text_parts.get(&id).ok_or_else(|| {
+                    UiMessageStreamProcessError::new(
+                        "text-end",
+                        id.clone(),
+                        format!(
+                            "Received text-end for missing text part with ID \"{id}\". \
+Ensure a \"text-start\" chunk is sent before any \"text-end\" chunks."
+                        ),
+                    )
+                })?;
+
+                set_ui_message_part_state(&mut state.message.parts[index], "done");
+                merge_ui_message_part_provider_metadata(
+                    &mut state.message.parts[index],
+                    provider_metadata,
+                );
+                state.active_text_parts.remove(&id);
+                updates.push(state.message.clone());
+            }
+            UiMessageChunk::ReasoningStart {
+                id,
+                provider_metadata,
+            } => {
+                let index = state.message.parts.len();
+                state
+                    .message
+                    .parts
+                    .push(streaming_reasoning_part("", provider_metadata));
+                state.active_reasoning_parts.insert(id, index);
+                updates.push(state.message.clone());
+            }
+            UiMessageChunk::ReasoningDelta {
+                id,
+                delta,
+                provider_metadata,
+            } => {
+                let index = *state.active_reasoning_parts.get(&id).ok_or_else(|| {
+                    UiMessageStreamProcessError::new(
+                        "reasoning-delta",
+                        id.clone(),
+                        format!(
+                            "Received reasoning-delta for missing reasoning part with ID \"{id}\". \
+Ensure a \"reasoning-start\" chunk is sent before any \"reasoning-delta\" chunks."
+                        ),
+                    )
+                })?;
+
+                append_ui_message_part_text(&mut state.message.parts[index], &delta);
+                merge_ui_message_part_provider_metadata(
+                    &mut state.message.parts[index],
+                    provider_metadata,
+                );
+                updates.push(state.message.clone());
+            }
+            UiMessageChunk::ReasoningEnd {
+                id,
+                provider_metadata,
+            } => {
+                let index = *state.active_reasoning_parts.get(&id).ok_or_else(|| {
+                    UiMessageStreamProcessError::new(
+                        "reasoning-end",
+                        id.clone(),
+                        format!(
+                            "Received reasoning-end for missing reasoning part with ID \"{id}\". \
+Ensure a \"reasoning-start\" chunk is sent before any \"reasoning-end\" chunks."
+                        ),
+                    )
+                })?;
+
+                set_ui_message_part_state(&mut state.message.parts[index], "done");
+                merge_ui_message_part_provider_metadata(
+                    &mut state.message.parts[index],
+                    provider_metadata,
+                );
+                state.active_reasoning_parts.remove(&id);
+                updates.push(state.message.clone());
+            }
+            UiMessageChunk::Error { error_text } => {
+                if terminate_on_error {
+                    return Err(UiMessageStreamProcessError::new("error", "", error_text));
+                }
+            }
+            UiMessageChunk::FinishStep => {
+                state.active_text_parts.clear();
+                state.active_reasoning_parts.clear();
+            }
+            UiMessageChunk::Finish {
+                finish_reason,
+                message_metadata,
+            } => {
+                let should_write = message_metadata.is_some();
+                state.finish_reason = finish_reason;
+                update_ui_message_metadata(&mut state.message, message_metadata);
+
+                if should_write {
+                    updates.push(state.message.clone());
+                }
+            }
+            UiMessageChunk::MessageMetadata { message_metadata } => {
+                update_ui_message_metadata(&mut state.message, Some(message_metadata));
+                updates.push(state.message.clone());
+            }
+        }
+    }
+
+    Ok(updates)
+}
+
+/// Reads UI-message stream chunks into cloned message states.
+pub fn read_ui_message_stream(
+    options: ReadUiMessageStreamOptions,
+) -> Result<Vec<UiMessage>, UiMessageStreamProcessError> {
+    let message_id = options
+        .message
+        .as_ref()
+        .map(|message| message.id.clone())
+        .unwrap_or_default();
+    let mut state = StreamingUiMessageState::new(message_id, options.message);
+
+    process_ui_message_stream(&mut state, options.stream, options.terminate_on_error)
+}
+
+fn update_ui_message_metadata(message: &mut UiMessage, message_metadata: Option<JsonValue>) {
+    if let Some(message_metadata) = message_metadata {
+        message.metadata = merge_objects(message.metadata.as_ref(), Some(&message_metadata));
+    }
+}
+
+fn step_start_part() -> JsonValue {
+    let mut object = JsonObject::new();
+    object.insert(
+        "type".to_string(),
+        JsonValue::String("step-start".to_string()),
+    );
+    JsonValue::Object(object)
+}
+
+fn streaming_text_part(
+    text: impl Into<String>,
+    provider_metadata: Option<ProviderMetadata>,
+) -> JsonValue {
+    streaming_text_like_part("text", text, provider_metadata)
+}
+
+fn streaming_reasoning_part(
+    text: impl Into<String>,
+    provider_metadata: Option<ProviderMetadata>,
+) -> JsonValue {
+    streaming_text_like_part("reasoning", text, provider_metadata)
+}
+
+fn streaming_text_like_part(
+    part_type: &str,
+    text: impl Into<String>,
+    provider_metadata: Option<ProviderMetadata>,
+) -> JsonValue {
+    let mut object = JsonObject::new();
+    object.insert("type".to_string(), JsonValue::String(part_type.to_string()));
+    object.insert("text".to_string(), JsonValue::String(text.into()));
+    object.insert(
+        "state".to_string(),
+        JsonValue::String("streaming".to_string()),
+    );
+
+    if let Some(provider_metadata) = provider_metadata {
+        object.insert(
+            "providerMetadata".to_string(),
+            provider_metadata_to_json(provider_metadata),
+        );
+    }
+
+    JsonValue::Object(object)
+}
+
+fn append_ui_message_part_text(part: &mut JsonValue, delta: &str) {
+    if let Some(object) = ui_message_part_object_mut(part) {
+        match object.get_mut("text") {
+            Some(JsonValue::String(text)) => text.push_str(delta),
+            _ => {
+                object.insert("text".to_string(), JsonValue::String(delta.to_string()));
+            }
+        }
+    }
+}
+
+fn set_ui_message_part_state(part: &mut JsonValue, state: &str) {
+    if let Some(object) = ui_message_part_object_mut(part) {
+        object.insert("state".to_string(), JsonValue::String(state.to_string()));
+    }
+}
+
+fn merge_ui_message_part_provider_metadata(
+    part: &mut JsonValue,
+    provider_metadata: Option<ProviderMetadata>,
+) {
+    if let (Some(object), Some(provider_metadata)) =
+        (ui_message_part_object_mut(part), provider_metadata)
+    {
+        object.insert(
+            "providerMetadata".to_string(),
+            provider_metadata_to_json(provider_metadata),
+        );
+    }
+}
+
+fn ui_message_part_object_mut(part: &mut JsonValue) -> Option<&mut JsonObject> {
+    match part {
+        JsonValue::Object(object) => Some(object),
+        _ => None,
+    }
+}
+
+fn provider_metadata_to_json(provider_metadata: ProviderMetadata) -> JsonValue {
+    serde_json::to_value(provider_metadata).expect("provider metadata serializes")
 }
 
 /// Response metadata supplied to UI-message stream response helpers.
@@ -587,6 +1181,218 @@ mod tests {
             ]
         );
         assert!(response.ended);
+    }
+
+    #[test]
+    fn transform_text_to_ui_message_stream_emits_upstream_sequence() {
+        let chunks = transform_text_to_ui_message_stream(["Hello", " ", "World"]);
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                { "type": "start" },
+                { "type": "start-step" },
+                { "type": "text-start", "id": "text-1" },
+                { "type": "text-delta", "id": "text-1", "delta": "Hello" },
+                { "type": "text-delta", "id": "text-1", "delta": " " },
+                { "type": "text-delta", "id": "text-1", "delta": "World" },
+                { "type": "text-end", "id": "text-1" },
+                { "type": "finish-step" },
+                { "type": "finish" }
+            ])
+        );
+    }
+
+    #[test]
+    fn transform_text_to_ui_message_stream_handles_empty_streams() {
+        let chunks = transform_text_to_ui_message_stream(Vec::<String>::new());
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                { "type": "start" },
+                { "type": "start-step" },
+                { "type": "text-start", "id": "text-1" },
+                { "type": "text-end", "id": "text-1" },
+                { "type": "finish-step" },
+                { "type": "finish" }
+            ])
+        );
+    }
+
+    #[test]
+    fn read_ui_message_stream_returns_message_states_for_basic_text_stream() {
+        let messages = read_ui_message_stream(ReadUiMessageStreamOptions::new([
+            UiMessageChunk::start_with_message_id("msg-123"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Hello, "),
+            UiMessageChunk::text_delta("text-1", "world!"),
+            UiMessageChunk::text_end("text-1"),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish(),
+        ]))
+        .expect("stream reads");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "id": "msg-123",
+                    "role": "assistant",
+                    "parts": []
+                },
+                {
+                    "id": "msg-123",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "text",
+                            "text": "",
+                            "state": "streaming"
+                        }
+                    ]
+                },
+                {
+                    "id": "msg-123",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "text",
+                            "text": "Hello, ",
+                            "state": "streaming"
+                        }
+                    ]
+                },
+                {
+                    "id": "msg-123",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "text",
+                            "text": "Hello, world!",
+                            "state": "streaming"
+                        }
+                    ]
+                },
+                {
+                    "id": "msg-123",
+                    "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        {
+                            "type": "text",
+                            "text": "Hello, world!",
+                            "state": "done"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_accumulates_reasoning_parts() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let messages = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::reasoning_start("reasoning-1"),
+                UiMessageChunk::reasoning_delta("reasoning-1", "Thinking"),
+                UiMessageChunk::reasoning_delta("reasoning-1", "..."),
+                UiMessageChunk::reasoning_end("reasoning-1"),
+            ],
+            false,
+        )
+        .expect("stream processes");
+
+        assert_eq!(messages.len(), 4);
+        assert_eq!(
+            serde_json::to_value(state.message).expect("message serializes"),
+            json!({
+                "id": "msg-123",
+                "role": "assistant",
+                "parts": [
+                    {
+                        "type": "reasoning",
+                        "text": "Thinking...",
+                        "state": "done"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_merges_message_metadata() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let messages = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::start().with_message_metadata(json!({
+                    "trace": { "id": "trace-1", "attempt": 1 },
+                    "keep": true
+                })),
+                UiMessageChunk::message_metadata(json!({
+                    "trace": { "attempt": 2 },
+                    "finish": true
+                })),
+            ],
+            false,
+        )
+        .expect("stream processes");
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            state.message.metadata,
+            Some(json!({
+                "trace": { "id": "trace-1", "attempt": 2 },
+                "keep": true,
+                "finish": true
+            }))
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_reports_missing_text_delta() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+
+        let error = process_ui_message_stream(
+            &mut state,
+            [UiMessageChunk::text_delta("missing-id", "Hello")],
+            false,
+        )
+        .expect_err("missing text start fails");
+
+        assert_eq!(error.chunk_type(), "text-delta");
+        assert_eq!(error.chunk_id(), "missing-id");
+        assert_eq!(
+            error.message(),
+            "Received text-delta for missing text part with ID \"missing-id\". \
+Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
+        );
+    }
+
+    #[test]
+    fn read_ui_message_stream_terminates_on_error_chunk_when_requested() {
+        let error = read_ui_message_stream(
+            ReadUiMessageStreamOptions::new([
+                UiMessageChunk::start_with_message_id("msg-123"),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", "Hello"),
+                UiMessageChunk::error("Test error message"),
+            ])
+            .with_terminate_on_error(true),
+        )
+        .expect_err("error chunk terminates");
+
+        assert_eq!(error.message(), "Test error message");
+        assert_eq!(error.chunk_type(), "error");
     }
 
     #[test]
