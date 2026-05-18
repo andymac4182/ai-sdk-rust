@@ -38,7 +38,7 @@ use crate::provider_utils::{
     ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     ProviderApiResponseHandlerError, RuntimeEnvironment, combine_headers, convert_to_base64,
     create_event_source_response_handler, create_json_error_response_handler,
-    create_json_response_handler, create_tool_name_mapping, get_top_level_media_type,
+    create_json_response_handler, create_tool_name_mapping, generate_id, get_top_level_media_type,
     post_json_to_api, resolve_full_media_type, with_user_agent_suffix,
 };
 use crate::warning::Warning;
@@ -266,7 +266,7 @@ impl OpenResponsesLanguageModel {
                 response.raw_value,
                 response.response_headers,
                 request_body_for_response,
-                &options.tools,
+                &options,
                 warnings,
             ),
             Err(error) => self.generate_result_from_error(error, request_body_for_error),
@@ -333,7 +333,7 @@ impl OpenResponsesLanguageModel {
                 request_body_for_response,
                 warnings,
                 include_raw_chunks,
-                &options.tools,
+                &options,
             ),
             Err(error) => self.stream_result_from_error(error, request_body_for_error),
         }
@@ -362,11 +362,15 @@ impl OpenResponsesLanguageModel {
         raw_response: Option<JsonValue>,
         response_headers: Option<Headers>,
         request_body: JsonValue,
-        tools: &Option<Vec<LanguageModelTool>>,
+        options: &LanguageModelCallOptions,
         warnings: Vec<Warning>,
     ) -> LanguageModelGenerateResult {
-        let (content, has_tool_calls) =
-            open_responses_content(&response, tools, &self.config.provider_options_name);
+        let (content, has_tool_calls) = open_responses_content(
+            &response,
+            &options.prompt,
+            &options.tools,
+            &self.config.provider_options_name,
+        );
         let usage = open_responses_usage(response.get("usage"));
         let finish_reason = map_open_responses_finish_reason(
             response
@@ -489,7 +493,8 @@ fn open_responses_request_body(
     let mut warnings = Vec::new();
     let store =
         open_responses_store_enabled(provider_options_name, options.provider_options.as_ref());
-    let (input, instructions) = open_responses_input(&options.prompt, store, &mut warnings)?;
+    let (input, instructions) =
+        open_responses_input(&options.prompt, store, provider_options_name, &mut warnings)?;
     let mut body = JsonObject::new();
     body.insert("model".to_string(), JsonValue::String(model_id.to_string()));
     body.insert("input".to_string(), JsonValue::Array(input));
@@ -657,6 +662,7 @@ fn open_responses_camel_case_provider_options_key(value: &str) -> String {
 fn open_responses_input(
     prompt: &[LanguageModelMessage],
     store: bool,
+    provider_options_name: &str,
     warnings: &mut Vec<Warning>,
 ) -> Result<(Vec<JsonValue>, Option<String>), String> {
     let mut input = Vec::new();
@@ -704,6 +710,34 @@ fn open_responses_input(
                             }));
                         }
                         LanguageModelAssistantContentPart::ToolCall(tool_call) => {
+                            if tool_call.provider_executed == Some(true) {
+                                if store
+                                    && let Some(item_id) = open_responses_prompt_item_id(
+                                        tool_call.provider_options.as_ref(),
+                                        provider_options_name,
+                                    )
+                                {
+                                    tool_calls.push(json!({
+                                        "type": "item_reference",
+                                        "id": item_id
+                                    }));
+                                }
+                                continue;
+                            }
+
+                            if store
+                                && let Some(item_id) = open_responses_prompt_item_id(
+                                    tool_call.provider_options.as_ref(),
+                                    provider_options_name,
+                                )
+                            {
+                                tool_calls.push(json!({
+                                    "type": "item_reference",
+                                    "id": item_id
+                                }));
+                                continue;
+                            }
+
                             tool_calls.push(json!({
                                 "type": "function_call",
                                 "call_id": tool_call.tool_call_id,
@@ -711,6 +745,7 @@ fn open_responses_input(
                                 "arguments": tool_call.input
                             }));
                         }
+                        LanguageModelAssistantContentPart::ToolApprovalRequest(_) => {}
                         _ => {
                             return Err(
                                 "Open Responses assistant prompt part is not implemented yet."
@@ -1438,6 +1473,7 @@ fn open_responses_text_format(
 
 fn open_responses_content(
     response: &JsonValue,
+    prompt: &[LanguageModelMessage],
     tools: &Option<Vec<LanguageModelTool>>,
     provider_options_name: &str,
 ) -> (Vec<LanguageModelContent>, bool) {
@@ -1449,6 +1485,9 @@ fn open_responses_content(
     let web_search_tool_name = open_responses_web_search_response_tool_name(tools);
     let shell_provider_executed = open_responses_shell_provider_executed(tools);
     let mut hosted_tool_search_call_ids = VecDeque::<String>::new();
+    let approval_request_tool_call_ids =
+        open_responses_approval_request_tool_call_ids(prompt, provider_options_name);
+    let mut approval_request_stream_tool_call_ids = BTreeMap::<String, String>::new();
 
     for part in response
         .get("output")
@@ -1659,10 +1698,11 @@ fn open_responses_content(
                 )));
             }
             Some("mcp_call") => {
-                let tool_call_id = part
-                    .get("id")
-                    .and_then(JsonValue::as_str)
-                    .unwrap_or_default();
+                let tool_call_id = open_responses_mcp_tool_call_id(
+                    part,
+                    &approval_request_tool_call_ids,
+                    &approval_request_stream_tool_call_ids,
+                );
                 let tool_name = part
                     .get("name")
                     .and_then(JsonValue::as_str)
@@ -1674,23 +1714,23 @@ fn open_responses_content(
                     .unwrap_or("{}");
 
                 content.push(LanguageModelContent::ToolCall(
-                    LanguageModelToolCall::new(tool_call_id, tool_name.clone(), input)
+                    LanguageModelToolCall::new(&tool_call_id, tool_name.clone(), input)
                         .with_provider_executed(true)
                         .with_dynamic(true),
                 ));
                 content.push(LanguageModelContent::ToolResult(
-                    open_responses_mcp_tool_result(part, tool_call_id, &tool_name),
+                    open_responses_mcp_tool_result(part, &tool_call_id, &tool_name),
                 ));
             }
             Some("mcp_approval_request") => {
-                let tool_call_id = part
-                    .get("id")
-                    .and_then(JsonValue::as_str)
-                    .unwrap_or_default();
                 let approval_id = part
                     .get("approval_request_id")
                     .and_then(JsonValue::as_str)
-                    .unwrap_or(tool_call_id);
+                    .or_else(|| part.get("id").and_then(JsonValue::as_str))
+                    .unwrap_or_default();
+                let tool_call_id = generate_id();
+                approval_request_stream_tool_call_ids
+                    .insert(approval_id.to_string(), tool_call_id.clone());
                 let tool_name = part
                     .get("name")
                     .and_then(JsonValue::as_str)
@@ -1701,13 +1741,17 @@ fn open_responses_content(
                     .and_then(JsonValue::as_str)
                     .unwrap_or("{}");
 
-                content.push(LanguageModelContent::ToolCall(
-                    LanguageModelToolCall::new(tool_call_id, tool_name, input)
-                        .with_provider_executed(true)
-                        .with_dynamic(true),
-                ));
+                let mut tool_call = LanguageModelToolCall::new(&tool_call_id, tool_name, input)
+                    .with_provider_executed(true)
+                    .with_dynamic(true);
+                if let Some(metadata) =
+                    open_responses_mcp_approval_metadata(provider_options_name, part, approval_id)
+                {
+                    tool_call = tool_call.with_provider_metadata(metadata);
+                }
+                content.push(LanguageModelContent::ToolCall(tool_call));
                 content.push(LanguageModelContent::ToolApprovalRequest(
-                    LanguageModelToolApprovalRequest::new(approval_id, tool_call_id),
+                    LanguageModelToolApprovalRequest::new(approval_id, &tool_call_id),
                 ));
             }
             Some("computer_call") => {
@@ -1833,6 +1877,115 @@ fn open_responses_metadata(provider_name: &str, provider: JsonObject) -> Provide
     let mut metadata = ProviderMetadata::new();
     metadata.insert(provider_name.to_string(), provider);
     metadata
+}
+
+fn open_responses_approval_request_tool_call_ids(
+    prompt: &[LanguageModelMessage],
+    provider_name: &str,
+) -> BTreeMap<String, String> {
+    let mut mapping = BTreeMap::new();
+
+    for message in prompt {
+        let LanguageModelMessage::Assistant(message) = message else {
+            continue;
+        };
+
+        for part in &message.content {
+            let LanguageModelAssistantContentPart::ToolCall(tool_call) = part else {
+                continue;
+            };
+            let Some(approval_id) = open_responses_prompt_approval_request_id(
+                tool_call.provider_options.as_ref(),
+                provider_name,
+            ) else {
+                continue;
+            };
+            mapping.insert(approval_id.to_string(), tool_call.tool_call_id.clone());
+        }
+    }
+
+    mapping
+}
+
+fn open_responses_prompt_approval_request_id<'a>(
+    provider_options: Option<&'a ProviderOptions>,
+    provider_name: &str,
+) -> Option<&'a str> {
+    open_responses_prompt_provider_options(provider_options, provider_name)
+        .and_then(|metadata| metadata.get("approvalRequestId"))
+        .and_then(JsonValue::as_str)
+}
+
+fn open_responses_prompt_item_id<'a>(
+    provider_options: Option<&'a ProviderOptions>,
+    provider_name: &str,
+) -> Option<&'a str> {
+    open_responses_prompt_provider_options(provider_options, provider_name)
+        .and_then(|metadata| metadata.get("itemId"))
+        .and_then(JsonValue::as_str)
+}
+
+fn open_responses_prompt_provider_options<'a>(
+    provider_options: Option<&'a ProviderOptions>,
+    provider_name: &str,
+) -> Option<&'a JsonObject> {
+    let provider_options = provider_options?;
+
+    provider_options
+        .get(provider_name)
+        .or_else(|| {
+            let raw_provider_name = provider_name
+                .split('.')
+                .next()
+                .unwrap_or(provider_name)
+                .trim();
+            provider_options.get(raw_provider_name)
+        })
+        .or_else(|| provider_options.get("openai"))
+}
+
+fn open_responses_mcp_tool_call_id(
+    item: &JsonValue,
+    prompt_mapping: &BTreeMap<String, String>,
+    response_mapping: &BTreeMap<String, String>,
+) -> String {
+    if let Some(approval_id) = item.get("approval_request_id").and_then(JsonValue::as_str)
+        && let Some(tool_call_id) = response_mapping
+            .get(approval_id)
+            .or_else(|| prompt_mapping.get(approval_id))
+    {
+        return tool_call_id.clone();
+    }
+
+    item.get("id")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn open_responses_mcp_approval_metadata(
+    provider_name: &str,
+    item: &JsonValue,
+    approval_id: &str,
+) -> Option<ProviderMetadata> {
+    let mut metadata = JsonObject::new();
+
+    if let Some(item_id) = item.get("id").filter(|value| !value.is_null()) {
+        metadata.insert("itemId".to_string(), item_id.clone());
+    }
+
+    if let Some(namespace) = item.get("namespace").filter(|value| !value.is_null()) {
+        metadata.insert("namespace".to_string(), namespace.clone());
+    }
+
+    if !approval_id.is_empty() {
+        metadata.insert(
+            "approvalRequestId".to_string(),
+            JsonValue::String(approval_id.to_string()),
+        );
+    }
+
+    (!metadata.is_empty()).then(|| open_responses_metadata(provider_name, metadata))
 }
 
 fn open_responses_item_metadata(provider_name: &str, item: &JsonValue) -> Option<ProviderMetadata> {
@@ -2341,7 +2494,7 @@ fn open_responses_stream_result_from_response(
     request_body: JsonValue,
     warnings: Vec<Warning>,
     include_raw_chunks: bool,
-    tools: &Option<Vec<LanguageModelTool>>,
+    options: &LanguageModelCallOptions,
 ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
     let mut stream = vec![LanguageModelStreamPart::StreamStart(
         LanguageModelStreamStart::new(warnings),
@@ -2364,10 +2517,14 @@ fn open_responses_stream_result_from_response(
     let mut pending_tool_calls = BTreeMap::<String, PendingOpenResponsesToolCall>::new();
     let mut ongoing_tool_calls = BTreeMap::<String, OngoingOpenResponsesToolCall>::new();
     let provider_tool_names = open_responses_provider_tool_names();
-    let tool_name_mapping = create_tool_name_mapping(tools.iter().flatten(), &provider_tool_names);
-    let web_search_tool_name = open_responses_web_search_response_tool_name(tools);
-    let shell_provider_executed = open_responses_shell_provider_executed(tools);
+    let tool_name_mapping =
+        create_tool_name_mapping(options.tools.iter().flatten(), &provider_tool_names);
+    let web_search_tool_name = open_responses_web_search_response_tool_name(&options.tools);
+    let shell_provider_executed = open_responses_shell_provider_executed(&options.tools);
     let mut hosted_tool_search_call_ids = VecDeque::<String>::new();
+    let approval_request_tool_call_ids =
+        open_responses_approval_request_tool_call_ids(&options.prompt, provider_name);
+    let mut approval_request_stream_tool_call_ids = BTreeMap::<String, String>::new();
     let mut source_index = 0usize;
     let mut ongoing_annotations = Vec::<JsonValue>::new();
     let mut active_message_phase = None::<String>;
@@ -3252,10 +3409,11 @@ fn open_responses_stream_result_from_response(
                                     }
                                 }
                                 Some("mcp_call") => {
-                                    let tool_call_id = item
-                                        .get("id")
-                                        .and_then(JsonValue::as_str)
-                                        .unwrap_or_default();
+                                    let tool_call_id = open_responses_mcp_tool_call_id(
+                                        item,
+                                        &approval_request_tool_call_ids,
+                                        &approval_request_stream_tool_call_ids,
+                                    );
                                     let tool_name = item
                                         .get("name")
                                         .and_then(JsonValue::as_str)
@@ -3268,7 +3426,7 @@ fn open_responses_stream_result_from_response(
 
                                     stream.push(LanguageModelStreamPart::ToolCall(
                                         LanguageModelToolCall::new(
-                                            tool_call_id,
+                                            &tool_call_id,
                                             tool_name.clone(),
                                             input,
                                         )
@@ -3278,7 +3436,7 @@ fn open_responses_stream_result_from_response(
                                     stream.push(LanguageModelStreamPart::ToolResult({
                                         let mut tool_result = open_responses_mcp_tool_result(
                                             item,
-                                            tool_call_id,
+                                            &tool_call_id,
                                             &tool_name,
                                         );
                                         if let Some(metadata) =
@@ -3291,14 +3449,14 @@ fn open_responses_stream_result_from_response(
                                     }));
                                 }
                                 Some("mcp_approval_request") => {
-                                    let tool_call_id = item
-                                        .get("id")
-                                        .and_then(JsonValue::as_str)
-                                        .unwrap_or_default();
                                     let approval_id = item
                                         .get("approval_request_id")
                                         .and_then(JsonValue::as_str)
-                                        .unwrap_or(tool_call_id);
+                                        .or_else(|| item.get("id").and_then(JsonValue::as_str))
+                                        .unwrap_or_default();
+                                    let tool_call_id = generate_id();
+                                    approval_request_stream_tool_call_ids
+                                        .insert(approval_id.to_string(), tool_call_id.clone());
                                     let tool_name = item
                                         .get("name")
                                         .and_then(JsonValue::as_str)
@@ -3309,15 +3467,22 @@ fn open_responses_stream_result_from_response(
                                         .and_then(JsonValue::as_str)
                                         .unwrap_or("{}");
 
-                                    stream.push(LanguageModelStreamPart::ToolCall(
-                                        LanguageModelToolCall::new(tool_call_id, tool_name, input)
+                                    let mut tool_call =
+                                        LanguageModelToolCall::new(&tool_call_id, tool_name, input)
                                             .with_provider_executed(true)
-                                            .with_dynamic(true),
-                                    ));
+                                            .with_dynamic(true);
+                                    if let Some(metadata) = open_responses_mcp_approval_metadata(
+                                        provider_name,
+                                        item,
+                                        approval_id,
+                                    ) {
+                                        tool_call = tool_call.with_provider_metadata(metadata);
+                                    }
+                                    stream.push(LanguageModelStreamPart::ToolCall(tool_call));
                                     stream.push(LanguageModelStreamPart::ToolApprovalRequest(
                                         LanguageModelToolApprovalRequest::new(
                                             approval_id,
-                                            tool_call_id,
+                                            &tool_call_id,
                                         ),
                                     ));
                                 }
@@ -4608,12 +4773,14 @@ mod tests {
     use crate::headers::Headers;
     use crate::json::{JsonObject, JsonValue};
     use crate::language_model::{
-        FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
+        FinishReason, LanguageModel, LanguageModelAssistantContentPart,
+        LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
         LanguageModelFilePart, LanguageModelMessage, LanguageModelProviderTool,
         LanguageModelSource, LanguageModelStreamPart, LanguageModelTextPart, LanguageModelTool,
-        LanguageModelToolApprovalResponsePart, LanguageModelToolChoice,
-        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultOutput,
-        LanguageModelToolResultPart, LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
+        LanguageModelToolCallPart, LanguageModelToolChoice, LanguageModelToolContentPart,
+        LanguageModelToolMessage, LanguageModelToolResultOutput, LanguageModelToolResultPart,
+        LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::prompt::Prompt;
     use crate::provider::{ModelType, Provider, ProviderMetadata, ProviderOptions};
@@ -4887,6 +5054,102 @@ mod tests {
                 ]
             }))
         );
+    }
+
+    #[test]
+    fn open_responses_provider_aliases_mcp_calls_from_prompt_approval_metadata() {
+        let transport: OpenResponsesTransport =
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_mcp_approval_alias",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "id": "mcp_call_after_approval",
+                                "type": "mcp_call",
+                                "status": "completed",
+                                "approval_request_id": "approval_1",
+                                "arguments": "{\"target\":\"prod\"}",
+                                "name": "deploy",
+                                "server_label": "deployments",
+                                "output": "{\"deployed\":true}"
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 8,
+                            "output_tokens": 5
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let approval_metadata: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "approvalRequestId": "approval_1"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(
+                    LanguageModelToolCallPart::new(
+                        "pending_tool_call_1",
+                        "mcp.deploy",
+                        json!({
+                            "target": "prod"
+                        }),
+                    )
+                    .with_provider_executed(true)
+                    .with_provider_options(approval_metadata),
+                ),
+                LanguageModelAssistantContentPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequestPart::new(
+                        "approval_1",
+                        "pending_tool_call_1",
+                    ),
+                ),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolApprovalResponse(
+                    LanguageModelToolApprovalResponsePart::new("approval_1", true),
+                ),
+            ])),
+        ])));
+
+        let tool_calls = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let tool_results = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_results.len(), 1);
+        assert_eq!(tool_calls[0].tool_call_id, "pending_tool_call_1");
+        assert_eq!(tool_calls[0].tool_name, "mcp.deploy");
+        assert_eq!(tool_results[0].tool_call_id, "pending_tool_call_1");
+        assert_eq!(tool_results[0].tool_name, "mcp.deploy");
     }
 
     #[test]
@@ -5837,8 +6100,19 @@ mod tests {
         assert_eq!(tool_calls[6].tool_name, "mcp.deploy");
         assert_eq!(tool_calls[6].provider_executed, Some(true));
         assert_eq!(tool_calls[6].dynamic, Some(true));
+        assert_ne!(tool_calls[6].tool_call_id, "mcp_pending_1");
+        assert_eq!(
+            openai_metadata_value(&tool_calls[6].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some("mcp_pending_1")
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_calls[6].provider_metadata, "approvalRequestId")
+                .and_then(JsonValue::as_str),
+            Some("approval_1")
+        );
         assert_eq!(approvals[0].approval_id, "approval_1");
-        assert_eq!(approvals[0].tool_call_id, "mcp_pending_1");
+        assert_eq!(approvals[0].tool_call_id, tool_calls[6].tool_call_id);
         assert_eq!(tool_calls[7].tool_name, "computer_use");
         assert_eq!(tool_calls[7].input, "");
         assert_eq!(tool_calls[7].provider_executed, Some(true));
@@ -6937,7 +7211,9 @@ mod tests {
                     "",
                     r#"data: {"type":"response.output_item.done","output_index":8,"item":{"id":"mcp_approval_1","type":"mcp_approval_request","approval_request_id":"approval_1","name":"approve","arguments":"{}"}}"#,
                     "",
-                    r#"data: {"type":"response.output_item.done","output_index":9,"item":{"id":"computer_1","type":"computer_call","status":"completed"}}"#,
+                    r#"data: {"type":"response.output_item.done","output_index":9,"item":{"id":"mcp_call_after_approval","type":"mcp_call","approval_request_id":"approval_1","server_label":"server","name":"approve","arguments":"{}","output":{"approved":true}}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":10,"item":{"id":"computer_1","type":"computer_call","status":"completed"}}"#,
                     "",
                     r#"data: {"type":"response.completed","response":{"id":"resp_stream_extra_tools","created_at":1711115037,"model":"gpt-4.1-mini","usage":{"input_tokens":13,"output_tokens":8}}}"#,
                     "",
@@ -7010,8 +7286,8 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(tool_calls.len(), 8);
-        assert_eq!(tool_results.len(), 4);
+        assert_eq!(tool_calls.len(), 9);
+        assert_eq!(tool_results.len(), 5);
         assert_eq!(tool_calls[0].tool_call_id, "custom_1");
         assert_eq!(tool_calls[0].tool_name, "write_sql");
         assert_eq!(tool_calls[0].input, "\"select 1\"");
@@ -7089,15 +7365,35 @@ mod tests {
             Some("mcp_1")
         );
         assert_eq!(tool_calls[6].tool_name, "mcp.approve");
+        assert_ne!(tool_calls[6].tool_call_id, "mcp_approval_1");
+        assert_eq!(
+            openai_metadata_value(&tool_calls[6].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some("mcp_approval_1")
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_calls[6].provider_metadata, "approvalRequestId")
+                .and_then(JsonValue::as_str),
+            Some("approval_1")
+        );
+        let approval_tool_call_id = tool_calls[6].tool_call_id.clone();
         assert!(
             result
                 .stream
                 .iter()
-                .any(|part| matches!(part, LanguageModelStreamPart::ToolApprovalRequest(approval) if approval.approval_id == "approval_1" && approval.tool_call_id == "mcp_approval_1"))
+                .any(|part| matches!(part, LanguageModelStreamPart::ToolApprovalRequest(approval) if approval.approval_id == "approval_1" && approval.tool_call_id == approval_tool_call_id.as_str()))
         );
-        assert_eq!(tool_calls[7].tool_name, "computer_use");
+        assert_eq!(tool_calls[7].tool_name, "mcp.approve");
+        assert_eq!(tool_calls[7].tool_call_id, approval_tool_call_id);
+        assert_eq!(tool_results[3].tool_call_id, tool_calls[7].tool_call_id);
         assert_eq!(
-            tool_results[3].result.as_value(),
+            openai_metadata_value(&tool_results[3].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some("mcp_call_after_approval")
+        );
+        assert_eq!(tool_calls[8].tool_name, "computer_use");
+        assert_eq!(
+            tool_results[4].result.as_value(),
             &json!({
                 "type": "computer_use_tool_result",
                 "status": "completed"
