@@ -102,7 +102,8 @@ blocker that needs human input.
    JavaScript-only concepts such as `AbortSignal`.
 3. Add focused serialization/deserialization and behavior tests for every new
    public contract.
-4. Enforce one-to-one crate/package boundaries now. Every portable upstream
+4. Enforce one-to-one crate/package boundaries now. This is a non-negotiable
+   acceptance gate, not cleanup for a later pass. Every portable upstream
    `vercel/ai` TypeScript package that gains Rust API must have exactly one
    matching Rust workspace crate, and that crate must own the package's public
    types, options, implementation, docs, and tests. Do not merge multiple
@@ -112,18 +113,23 @@ blocker that needs human input.
    `packages/ai`, it may own only that package's API. It must not also own
    provider contracts, provider utilities, provider implementations, MCP,
    workflow, telemetry, or other package-owned surfaces.
-6. Existing package-owned APIs already merged into the root crate are migration
-   debt being created today. Future slices must move toward the matching crate
-   boundary before layering on more API. A parity slice that ports a TypeScript
-   package without creating or using its matching Rust crate is blocked and not
-   mergeable, even if the implementation itself works.
+6. Existing package-owned APIs already merged into the root crate are
+   architecture debt being created today, and every additional package folded
+   into that crate makes the eventual split more expensive and more breaking.
+   Future slices must stop growing that debt. Before adding API for any
+   upstream TypeScript package, create or use its matching Rust crate and put
+   the package-owned types and implementation there. A parity slice that ports
+   a TypeScript package without creating or using its matching Rust crate is
+   blocked and not mergeable, even if the implementation itself works.
 7. Do not use temporary staging exceptions for new package-owned
    implementation. A temporary exception may only cover an unavoidable
    transitional shim or extraction of existing root-crate debt, and it must be
    documented in the ledger with the destination crate, the reason the matching
    crate cannot land in the same slice, and the smallest concrete extraction
-   follow-up. Do not use this exception for convenience or to keep merging
-   unrelated packages into one crate.
+   follow-up. Do not use this exception for convenience, to land a working
+   implementation faster, or to keep merging unrelated packages into one crate.
+   A package row cannot be marked `verified` while its portable implementation
+   is owned only by the wrong crate.
 8. Build and verify high-level APIs against deterministic fake/test models
    before adding real provider networking.
 9. `generate_text(...)` and tool loops remain an early vertical-slice priority:
@@ -276,7 +282,12 @@ You are done only when:
 2. Every ledger item is `verified` or `js-only-documented`.
 3. The Rust crate/workspace has validated equivalents for all portable
    upstream surfaces.
-4. The full validation suite passes.
-5. The final complete slice is merged to `main` and pushed.
+4. The Rust workspace has a one-to-one crate mapping for every portable
+   upstream TypeScript package, and no crate owns package-owned APIs from more
+   than one upstream package. Existing root-crate package debt must be
+   extracted or explicitly tracked as not yet complete; it cannot count as
+   verified parity.
+5. The full validation suite passes.
+6. The final complete slice is merged to `main` and pushed.
 
 If any ledger item remains `not-started` or `in-progress`, keep working.
