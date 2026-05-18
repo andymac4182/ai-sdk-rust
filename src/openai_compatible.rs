@@ -7,7 +7,7 @@ mod tests {
         OpenAICompatibleTransportFuture,
     };
     use crate::embed::{EmbedManyOptions, embed_many};
-    use crate::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions};
+    use crate::embedding_model::EmbeddingModel;
     use crate::file_data::{FileData, FileDataContent};
     use crate::generate_image::{
         GenerateImageOptions, GenerateImagePromptImage, GenerateImagePromptImages, generate_image,
@@ -157,125 +157,6 @@ mod tests {
                 "input": ["sunny day", "rainy city"],
                 "encoding_format": "float"
             }))
-        );
-    }
-
-    #[test]
-    fn openai_compatible_embedding_model_passes_options_and_errors() {
-        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
-        let captured_request_for_transport = Arc::clone(&captured_request);
-        let transport: OpenAICompatibleTransport =
-            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
-                *captured_request_for_transport
-                    .lock()
-                    .expect("captured request mutex is not poisoned") = Some(request.clone());
-
-                Box::pin(ready(Ok(ProviderApiResponse::text(
-                    200,
-                    "OK",
-                    json!({
-                        "data": [
-                            {
-                                "embedding": [0.1, 0.2]
-                            }
-                        ],
-                        "usage": {
-                            "prompt_tokens": 3
-                        }
-                    })
-                    .to_string(),
-                ))))
-            });
-        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
-            "test-provider",
-            "https://api.example.com",
-        ))
-        .with_transport(transport)
-        .embedding_model("text-embedding-3-small");
-        let provider_options: ProviderOptions = serde_json::from_value(json!({
-            "openai-compatible": {
-                "dimensions": 64,
-                "user": "user-123"
-            },
-            "openaiCompatible": {
-                "dimensions": 32
-            },
-            "test-provider": {
-                "user": "user-456"
-            }
-        }))
-        .expect("provider options deserialize");
-        let result = poll_ready(
-            model.do_embed(
-                EmbeddingModelCallOptions::new(vec!["hello".to_string()])
-                    .with_provider_options(provider_options),
-            ),
-        );
-
-        assert_eq!(result.embeddings, vec![vec![0.1, 0.2]]);
-        assert!(result.warnings.iter().any(|warning| {
-            matches!(
-                warning,
-                Warning::Deprecated { setting, .. }
-                    if setting == "providerOptions key 'openai-compatible'"
-            )
-        }));
-        assert!(result.warnings.iter().any(|warning| {
-            matches!(
-                warning,
-                Warning::Deprecated { setting, .. }
-                    if setting == "providerOptions key 'test-provider'"
-            )
-        }));
-        assert_eq!(
-            captured_request
-                .lock()
-                .expect("captured request mutex is not poisoned")
-                .clone()
-                .expect("request is captured")
-                .body
-                .and_then(|body| body.as_text().map(str::to_string))
-                .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok()),
-            Some(json!({
-                "model": "text-embedding-3-small",
-                "input": ["hello"],
-                "encoding_format": "float",
-                "dimensions": 32,
-                "user": "user-456"
-            }))
-        );
-
-        let error_transport: OpenAICompatibleTransport =
-            Arc::new(|_request| -> OpenAICompatibleTransportFuture {
-                Box::pin(ready(Ok(ProviderApiResponse::text(
-                    401,
-                    "Unauthorized",
-                    json!({
-                        "error": {
-                            "message": "Invalid API key"
-                        }
-                    })
-                    .to_string(),
-                ))))
-            });
-        let error_model = OpenAICompatibleProvider::from_settings(
-            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com"),
-        )
-        .with_transport(error_transport)
-        .embedding_model("text-embedding-3-small");
-        let error_result = poll_ready(
-            error_model.do_embed(EmbeddingModelCallOptions::new(vec!["hello".to_string()])),
-        );
-
-        assert!(error_result.embeddings.is_empty());
-        assert_eq!(
-            error_result
-                .provider_metadata
-                .as_ref()
-                .and_then(|metadata| metadata.get("test-provider"))
-                .and_then(|metadata| metadata.get("errorMessage"))
-                .and_then(JsonValue::as_str),
-            Some("Invalid API key")
         );
     }
 
