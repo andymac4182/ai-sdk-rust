@@ -99,12 +99,14 @@ while IFS= read -r path; do
   check_path "$path"
 done < <(git ls-files)
 
-while IFS= read -r line; do
-  value="${line#*=}"
-  value="${value%\"}"
-  value="${value#*\"}"
-  check_identifier "Cargo.toml crate name" "$value"
-done < <(grep -E '^[[:space:]]*name[[:space:]]*=' Cargo.toml)
+while IFS= read -r cargo_manifest; do
+  while IFS= read -r line; do
+    value="${line#*=}"
+    value="${value%\"}"
+    value="${value#*\"}"
+    check_identifier "$cargo_manifest crate name" "$value"
+  done < <(grep -E '^[[:space:]]*name[[:space:]]*=' "$cargo_manifest")
+done < <(git ls-files 'Cargo.toml' '*/Cargo.toml')
 
 while IFS= read -r path; do
   case "$path" in
