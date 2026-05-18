@@ -979,6 +979,8 @@ fn open_responses_input(
     let mut input = Vec::new();
     let mut system_messages = Vec::new();
     let mut processed_approval_ids = BTreeSet::new();
+    let mut referenced_reasoning_item_ids = BTreeSet::new();
+    let mut reasoning_item_positions = BTreeMap::<String, usize>::new();
 
     for message in prompt {
         match message {
@@ -1049,6 +1051,10 @@ fn open_responses_input(
                                 reasoning.provider_options.as_ref(),
                                 provider_options_name,
                             );
+                            let encrypted_content = open_responses_reasoning_encrypted_content(
+                                reasoning.provider_options.as_ref(),
+                                provider_options_name,
+                            );
                             if has_conversation && item_id.is_some() {
                                 open_responses_flush_assistant_content(
                                     &mut assistant_items,
@@ -1062,15 +1068,44 @@ fn open_responses_input(
                                     &mut assistant_items,
                                     &mut content,
                                 );
-                                assistant_items.push(json!({
-                                    "type": "item_reference",
-                                    "id": item_id
-                                }));
-                            } else {
-                                return Err(
-                                    "Open Responses assistant prompt part is not implemented yet."
-                                        .to_string(),
+                                if referenced_reasoning_item_ids.insert(item_id.to_string()) {
+                                    assistant_items.push(json!({
+                                        "type": "item_reference",
+                                        "id": item_id
+                                    }));
+                                }
+                            } else if let Some(item_id) = item_id {
+                                open_responses_flush_assistant_items(
+                                    &mut input,
+                                    &mut assistant_items,
+                                    &mut content,
                                 );
+                                open_responses_push_reasoning_item(
+                                    &mut input,
+                                    &mut reasoning_item_positions,
+                                    Some(item_id),
+                                    encrypted_content,
+                                    reasoning,
+                                    warnings,
+                                );
+                            } else if let Some(encrypted_content) = encrypted_content {
+                                open_responses_flush_assistant_items(
+                                    &mut input,
+                                    &mut assistant_items,
+                                    &mut content,
+                                );
+                                input.push(open_responses_reasoning_item(
+                                    None,
+                                    Some(encrypted_content),
+                                    &reasoning.text,
+                                ));
+                            } else {
+                                warnings.push(Warning::Other {
+                                    message: format!(
+                                        "Non-OpenAI reasoning parts are not supported. Skipping reasoning part: {}.",
+                                        open_responses_reasoning_warning_part(reasoning)
+                                    ),
+                                });
                             }
                         }
                         LanguageModelAssistantContentPart::ToolCall(tool_call) => {
@@ -1339,6 +1374,17 @@ fn open_responses_input(
         }
     }
 
+    if !store
+        && input
+            .iter()
+            .any(open_responses_reasoning_missing_encrypted_content)
+    {
+        warnings.push(Warning::Other {
+            message: "Reasoning parts without encrypted content are not supported when store is false. Skipping reasoning parts.".to_string(),
+        });
+        input.retain(|item| !open_responses_reasoning_missing_encrypted_content(item));
+    }
+
     let instructions = (!system_messages.is_empty()).then(|| system_messages.join("\n"));
 
     Ok((input, instructions))
@@ -1357,6 +1403,114 @@ fn open_responses_flush_assistant_content(
         "role": "assistant",
         "content": std::mem::take(content)
     }));
+}
+
+fn open_responses_flush_assistant_items(
+    input: &mut Vec<JsonValue>,
+    assistant_items: &mut Vec<JsonValue>,
+    content: &mut Vec<JsonValue>,
+) {
+    open_responses_flush_assistant_content(assistant_items, content);
+    input.append(assistant_items);
+}
+
+fn open_responses_push_reasoning_item(
+    input: &mut Vec<JsonValue>,
+    reasoning_item_positions: &mut BTreeMap<String, usize>,
+    item_id: Option<&str>,
+    encrypted_content: Option<&str>,
+    reasoning: &crate::language_model::LanguageModelReasoningPart,
+    warnings: &mut Vec<Warning>,
+) {
+    let Some(item_id) = item_id else {
+        input.push(open_responses_reasoning_item(
+            None,
+            encrypted_content,
+            &reasoning.text,
+        ));
+        return;
+    };
+
+    if let Some(position) = reasoning_item_positions.get(item_id).copied() {
+        if reasoning.text.is_empty() {
+            warnings.push(Warning::Other {
+                message: format!(
+                    "Cannot append empty reasoning part to existing reasoning sequence. Skipping reasoning part: {}.",
+                    open_responses_reasoning_warning_part(reasoning)
+                ),
+            });
+        } else if let Some(summary) = input
+            .get_mut(position)
+            .and_then(JsonValue::as_object_mut)
+            .and_then(|item| item.get_mut("summary"))
+            .and_then(JsonValue::as_array_mut)
+        {
+            summary.push(json!({
+                "type": "summary_text",
+                "text": reasoning.text
+            }));
+        }
+
+        if let Some(encrypted_content) = encrypted_content
+            && let Some(item) = input.get_mut(position).and_then(JsonValue::as_object_mut)
+        {
+            item.insert(
+                "encrypted_content".to_string(),
+                JsonValue::String(encrypted_content.to_string()),
+            );
+        }
+        return;
+    }
+
+    reasoning_item_positions.insert(item_id.to_string(), input.len());
+    input.push(open_responses_reasoning_item(
+        Some(item_id),
+        encrypted_content,
+        &reasoning.text,
+    ));
+}
+
+fn open_responses_reasoning_item(
+    item_id: Option<&str>,
+    encrypted_content: Option<&str>,
+    text: &str,
+) -> JsonValue {
+    let mut item = JsonObject::new();
+    item.insert(
+        "type".to_string(),
+        JsonValue::String("reasoning".to_string()),
+    );
+    if let Some(item_id) = item_id {
+        item.insert("id".to_string(), JsonValue::String(item_id.to_string()));
+    }
+    if let Some(encrypted_content) = encrypted_content {
+        item.insert(
+            "encrypted_content".to_string(),
+            JsonValue::String(encrypted_content.to_string()),
+        );
+    }
+
+    let summary = if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![json!({
+            "type": "summary_text",
+            "text": text
+        })]
+    };
+    item.insert("summary".to_string(), JsonValue::Array(summary));
+    JsonValue::Object(item)
+}
+
+fn open_responses_reasoning_missing_encrypted_content(item: &JsonValue) -> bool {
+    item.get("type").and_then(JsonValue::as_str) == Some("reasoning")
+        && item.get("encrypted_content").is_none_or(JsonValue::is_null)
+}
+
+fn open_responses_reasoning_warning_part(
+    reasoning: &crate::language_model::LanguageModelReasoningPart,
+) -> String {
+    serde_json::to_string(reasoning).unwrap_or_else(|_| "{\"type\":\"reasoning\"}".to_string())
 }
 
 fn open_responses_function_call_arguments(input: &JsonValue) -> String {
@@ -2873,6 +3027,15 @@ fn open_responses_prompt_item_id<'a>(
 ) -> Option<&'a str> {
     open_responses_prompt_provider_options(provider_options, provider_name)
         .and_then(|metadata| metadata.get("itemId"))
+        .and_then(JsonValue::as_str)
+}
+
+fn open_responses_reasoning_encrypted_content<'a>(
+    provider_options: Option<&'a ProviderOptions>,
+    provider_name: &str,
+) -> Option<&'a str> {
+    open_responses_prompt_provider_options(provider_options, provider_name)
+        .and_then(|metadata| metadata.get("reasoningEncryptedContent"))
         .and_then(JsonValue::as_str)
 }
 
@@ -6264,6 +6427,283 @@ mod tests {
                         "id": "mcp_result_item"
                     }
                 ]
+            }))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_reconstructs_reasoning_history_with_store_false() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_reasoning_history",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Reasoning accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 7,
+                            "output_tokens": 3
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let reasoning_options =
+            |item_id: Option<&str>, encrypted_content: Option<&str>| -> ProviderOptions {
+                let mut openai = JsonObject::new();
+                if let Some(item_id) = item_id {
+                    openai.insert("itemId".to_string(), JsonValue::String(item_id.to_string()));
+                }
+                if let Some(encrypted_content) = encrypted_content {
+                    openai.insert(
+                        "reasoningEncryptedContent".to_string(),
+                        JsonValue::String(encrypted_content.to_string()),
+                    );
+                }
+
+                let mut options = ProviderOptions::new();
+                options.insert("openai".to_string(), openai);
+                options
+            };
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "store": false
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                    LanguageModelAssistantMessage::new(vec![
+                        LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                            "Visible before reasoning",
+                        )),
+                        LanguageModelAssistantContentPart::Reasoning(
+                            LanguageModelReasoningPart::new("First reasoning step")
+                                .with_provider_options(reasoning_options(
+                                    Some("reasoning_001"),
+                                    None,
+                                )),
+                        ),
+                        LanguageModelAssistantContentPart::Reasoning(
+                            LanguageModelReasoningPart::new("Second reasoning step")
+                                .with_provider_options(reasoning_options(
+                                    Some("reasoning_001"),
+                                    Some("encrypted_content_001"),
+                                )),
+                        ),
+                        LanguageModelAssistantContentPart::Reasoning(
+                            LanguageModelReasoningPart::new("Reasoning without item id")
+                                .with_provider_options(reasoning_options(
+                                    None,
+                                    Some("encrypted_without_id"),
+                                )),
+                        ),
+                        LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                            "Visible after reasoning",
+                        )),
+                    ]),
+                )])
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "gpt-4.1-mini",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "Visible before reasoning"
+                            }
+                        ]
+                    },
+                    {
+                        "type": "reasoning",
+                        "id": "reasoning_001",
+                        "encrypted_content": "encrypted_content_001",
+                        "summary": [
+                            {
+                                "type": "summary_text",
+                                "text": "First reasoning step"
+                            },
+                            {
+                                "type": "summary_text",
+                                "text": "Second reasoning step"
+                            }
+                        ]
+                    },
+                    {
+                        "type": "reasoning",
+                        "encrypted_content": "encrypted_without_id",
+                        "summary": [
+                            {
+                                "type": "summary_text",
+                                "text": "Reasoning without item id"
+                            }
+                        ]
+                    },
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "Visible after reasoning"
+                            }
+                        ]
+                    }
+                ],
+                "store": false
+            }))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_warns_for_unstored_reasoning_without_encrypted_content() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_reasoning_warning",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Reasoning warning accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 1,
+                            "output_tokens": 2
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let item_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "itemId": "reasoning_without_encryption"
+            }
+        }))
+        .expect("provider options deserialize");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "store": false
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                    LanguageModelAssistantMessage::new(vec![
+                        LanguageModelAssistantContentPart::Reasoning(
+                            LanguageModelReasoningPart::new("Reasoning without encrypted content")
+                                .with_provider_options(item_options),
+                        ),
+                        LanguageModelAssistantContentPart::Reasoning(
+                            LanguageModelReasoningPart::new("Reasoning without provider options"),
+                        ),
+                    ]),
+                )])
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(result.warnings.len(), 2);
+        assert!(result.warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                crate::warning::Warning::Other { message }
+                    if message == "Reasoning parts without encrypted content are not supported when store is false. Skipping reasoning parts."
+            )
+        }));
+        assert!(result.warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                crate::warning::Warning::Other { message }
+                    if message.starts_with("Non-OpenAI reasoning parts are not supported.")
+            )
+        }));
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "gpt-4.1-mini",
+                "input": [],
+                "store": false
             }))
         );
     }
