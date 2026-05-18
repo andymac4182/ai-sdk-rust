@@ -2,6 +2,7 @@
 members = [
     ".",
     "crates/ai-sdk-provider",
+    "crates/ai-sdk-provider-utils",
     "crates/ai-sdk-assemblyai",
     "crates/ai-sdk-azure",
     "crates/ai-sdk-black-forest-labs",
@@ -40,6 +41,7 @@ all = "warn"
 
 [dependencies]
 ai-sdk-provider = { path = "crates/ai-sdk-provider" }
+ai-sdk-provider-utils = { path = "crates/ai-sdk-provider-utils" }
 regex = "1.12.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"

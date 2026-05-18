@@ -6,7 +6,8 @@ set -euo pipefail
 # and documented identifiers.
 #
 # Explicit upstream-mirroring exceptions:
-# - provider_utils mirrors the upstream @ai-sdk/provider-utils package boundary.
+# - provider_utils and ai-sdk-provider-utils mirror the upstream
+#   @ai-sdk/provider-utils package boundary.
 # - util mirrors the existing upstream packages/ai utility surface already
 #   exposed by this crate.
 # - SharedV4ProviderReference is an upstream provider-v4 type name mentioned in
@@ -44,7 +45,7 @@ allowed_identifier_token() {
   local name="$1"
   local token="$2"
 
-  if [[ "$token" == "utils" && "$name" == *provider_utils* ]]; then
+  if [[ "$token" == "utils" && ( "$name" == *provider_utils* || "$name" == *provider-utils* ) ]]; then
     return 0
   fi
 
