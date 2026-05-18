@@ -34,6 +34,22 @@ provider utilities, provider packages, MCP, Workflow, telemetry, adapters, and
 other separately packaged upstream surfaces must move to, or start in, their own
 matching crates.
 
+## Required Work Order
+
+The queue is two-phase and gated:
+
+1. Finish ALL common/core SDK packages and Vercel AI Gateway provider coverage.
+2. Resume unrelated standalone provider packages only after that first phase is
+   verified or intentionally documented as non-portable.
+
+The first phase includes `packages/ai`, `packages/provider`,
+`packages/provider-utils`, `packages/openai-compatible`,
+`packages/open-responses`, `packages/gateway`, the Vercel AI Gateway
+OpenAI-compatible and Open Responses routes, and portable non-provider rows such
+as MCP, OTel, Workflow, telemetry, logger, UI transport, chat/completion
+transport, and test-server support. A standalone provider slice is blocked
+while any first-phase row is `not-started` or `in-progress`.
+
 ## Inventory Rules
 
 - Record the upstream commit SHA/date used for each inventory pass.

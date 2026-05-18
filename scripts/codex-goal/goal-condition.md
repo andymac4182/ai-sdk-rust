@@ -19,6 +19,17 @@ inventory, every provider package, every core/helper/library package, public
 APIs, examples, tests, and feature status. Do not mark the goal complete while
 any ledger row is unported, unverified, or undocumented. Re-scan upstream often.
 
+Required order: finish ALL common/core SDK packages and Vercel AI Gateway
+coverage before taking more unrelated standalone provider slices. This is a
+hard ordering gate, not a scheduling preference. The first phase includes
+`packages/ai`, `packages/provider`, `packages/provider-utils`,
+`packages/openai-compatible`, `packages/open-responses`, `packages/gateway`,
+Vercel AI Gateway OpenAI-compatible and Open Responses routes, and portable
+non-provider rows such as MCP, OTel, Workflow, telemetry, UI transport,
+chat/completion transport, and test-server support. Other provider packages
+resume only after those rows are verified or explicitly documented as
+intentionally non-portable.
+
 Preserve Rust 2024 style, serde shapes, builders, public exports, tests, and
 workspace boundaries that align with upstream package responsibilities. Build
 against deterministic fake models first, then use the ignored `.env.local`

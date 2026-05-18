@@ -94,6 +94,23 @@ upstream inventory changes, update the ledger and continue. Do not stop while
 the ledger contains `not-started` or `in-progress` items unless you hit a real
 blocker that needs human input.
 
+## Required Work Order
+
+The implementation order is a hard gate:
+
+1. Finish ALL common/core SDK packages.
+2. Finish Vercel AI Gateway provider coverage, including Gateway's
+   OpenAI-compatible and Open Responses routes.
+3. Only then resume unrelated standalone provider packages.
+
+The first phase includes `packages/ai`, `packages/provider`,
+`packages/provider-utils`, `packages/openai-compatible`,
+`packages/open-responses`, `packages/gateway`, and portable non-provider rows
+such as MCP, OTel, Workflow, telemetry, logger, UI transport, chat/completion
+transport, and test-server support. Do not pick another standalone provider
+slice while any first-phase row is still `not-started` or `in-progress`, unless
+that row is explicitly documented as intentionally non-portable.
+
 ## Priorities
 
 1. Preserve the existing Rust 2024 crate style, serde shapes, builder helpers,
