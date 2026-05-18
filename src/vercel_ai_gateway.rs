@@ -1961,6 +1961,133 @@ mod tests {
     }
 
     #[test]
+    fn vercel_ai_gateway_openai_responses_generates_object() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport = Arc::new(
+            move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_gateway_object",
+                        "created_at": 1711115037,
+                        "model": "openai/gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "{\"answer\":\"Gateway Responses object\",\"count\":4}"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 9,
+                            "output_tokens": 7
+                        }
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from([(
+                    "x-request-id".to_string(),
+                    "req_gateway_responses_object".to_string(),
+                )])))))
+            },
+        );
+        let provider = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://ai-gateway.test/v1/")
+            .with_header("custom-header", "value")
+            .with_transport(transport);
+        let model = provider.responses("openai/gpt-4.1-mini");
+        let object_schema: JsonObject = serde_json::from_value(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": {
+                "answer": {
+                    "type": "string"
+                },
+                "count": {
+                    "type": "integer"
+                }
+            },
+            "required": ["answer", "count"],
+            "additionalProperties": false
+        }))
+        .expect("schema deserializes");
+
+        let result = poll_ready(generate_object(
+            GenerateObjectOptions::from_prompt(
+                &model,
+                Prompt::from_prompt("Return a JSON object with answer and count."),
+            )
+            .expect("prompt is valid")
+            .with_schema(json_schema(object_schema.clone()))
+            .with_schema_name("gateway_answer")
+            .with_schema_description("A Gateway Responses answer object.")
+            .with_max_output_tokens(32)
+            .with_temperature(0.0),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(result.object["answer"], "Gateway Responses object");
+        assert_eq!(result.object["count"], 4);
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(9));
+        assert_eq!(result.usage.output_tokens.total, Some(7));
+        assert!(result.warnings.as_ref().is_none_or(Vec::is_empty));
+        assert_eq!(
+            result.response.headers.as_ref().and_then(|headers| {
+                headers.get("x-request-id").map(std::string::String::as_str)
+            }),
+            Some("req_gateway_responses_object")
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://ai-gateway.test/v1/responses");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+        assert_eq!(request_body["model"], "openai/gpt-4.1-mini");
+        assert_eq!(request_body["max_output_tokens"], 32);
+        assert_eq!(request_body["temperature"], 0.0);
+        assert_eq!(
+            request_body["text"]["format"],
+            json!({
+                "type": "json_schema",
+                "name": "gateway_answer",
+                "description": "A Gateway Responses answer object.",
+                "schema": object_schema,
+                "strict": true
+            })
+        );
+    }
+
+    #[test]
     fn vercel_ai_gateway_openai_responses_passes_gateway_provider_options() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
