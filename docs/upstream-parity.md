@@ -241,7 +241,11 @@ focused tests for each portable behavior before changing rows to `verified`.
    library surfaces are complete enough for end-to-end use.
 7. Port MCP, OTel, Workflow, UI-message, chat/completion transport, telemetry,
    logger, and HTTP server example surfaces.
-8. Future iterations should evaluate splitting the single Rust crate into
-   multiple workspace crates aligned with upstream `vercel/ai` TypeScript
-   package boundaries, once enough concrete API surface exists to justify the
-   boundaries without creating placeholder crates.
+8. Future iterations should treat package-aligned crate splitting as a required
+   architecture direction, not an optional cleanup. The Rust workspace should
+   move toward a 1:1 mapping between crates and upstream `vercel/ai` TypeScript
+   packages. Avoid continuing to fold distinct upstream packages into the single
+   `ai-sdk-rust` crate, because every merged surface makes later extraction and
+   dependency boundary recovery harder. The root crate should become an
+   aggregate/re-export layer where useful, while package crates own their
+   corresponding upstream types, provider/options surface, docs, and tests.
