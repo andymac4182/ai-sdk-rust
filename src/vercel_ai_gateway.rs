@@ -2756,6 +2756,262 @@ mod tests {
     }
 
     #[test]
+    fn vercel_ai_gateway_openai_responses_runs_stream_text_tool_loop_end_to_end() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let captured_requests_for_transport = Arc::clone(&captured_requests);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                let call_number = {
+                    let mut requests = captured_requests_for_transport
+                        .lock()
+                        .expect("captured requests mutex is not poisoned");
+                    requests.push(request.clone());
+                    requests.len()
+                };
+
+                let body = match call_number {
+                    1 => sse_body([
+                        json!({
+                            "type": "response.created",
+                            "response": {
+                                "id": "resp_gateway_stream_tool_call",
+                                "created_at": 1711115037,
+                                "model": "openai/gpt-4.1-mini"
+                            }
+                        }),
+                        json!({
+                            "type": "response.output_item.added",
+                            "output_index": 0,
+                            "item": {
+                                "id": "fc_gateway_stream_weather",
+                                "type": "function_call",
+                                "call_id": "call_gateway_stream_weather",
+                                "name": "weather",
+                                "arguments": ""
+                            }
+                        }),
+                        json!({
+                            "type": "response.function_call_arguments.delta",
+                            "item_id": "fc_gateway_stream_weather",
+                            "output_index": 0,
+                            "delta": "{\"location\""
+                        }),
+                        json!({
+                            "type": "response.function_call_arguments.delta",
+                            "item_id": "fc_gateway_stream_weather",
+                            "output_index": 0,
+                            "delta": ":\"Brisbane\"}"
+                        }),
+                        json!({
+                            "type": "response.function_call_arguments.done",
+                            "item_id": "fc_gateway_stream_weather",
+                            "output_index": 0,
+                            "arguments": "{\"location\":\"Brisbane\"}"
+                        }),
+                        json!({
+                            "type": "response.output_item.done",
+                            "output_index": 0,
+                            "item": {
+                                "id": "fc_gateway_stream_weather",
+                                "type": "function_call",
+                                "call_id": "call_gateway_stream_weather",
+                                "name": "weather",
+                                "arguments": "{\"location\":\"Brisbane\"}"
+                            }
+                        }),
+                        json!({
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_gateway_stream_tool_call",
+                                "created_at": 1711115037,
+                                "model": "openai/gpt-4.1-mini",
+                                "output": [
+                                    {
+                                        "id": "fc_gateway_stream_weather",
+                                        "type": "function_call",
+                                        "call_id": "call_gateway_stream_weather",
+                                        "name": "weather",
+                                        "arguments": "{\"location\":\"Brisbane\"}"
+                                    }
+                                ],
+                                "usage": {
+                                    "input_tokens": 9,
+                                    "output_tokens": 3
+                                }
+                            }
+                        }),
+                    ]),
+                    2 => sse_body([
+                        json!({
+                            "type": "response.created",
+                            "response": {
+                                "id": "resp_gateway_stream_tool_final",
+                                "created_at": 1711115038,
+                                "model": "openai/gpt-4.1-mini"
+                            }
+                        }),
+                        json!({
+                            "type": "response.output_text.delta",
+                            "item_id": "msg_gateway_stream_tool_final",
+                            "output_index": 0,
+                            "content_index": 0,
+                            "delta": "Brisbane is sunny through "
+                        }),
+                        json!({
+                            "type": "response.output_text.delta",
+                            "item_id": "msg_gateway_stream_tool_final",
+                            "output_index": 0,
+                            "content_index": 0,
+                            "delta": "Gateway Responses stream."
+                        }),
+                        json!({
+                            "type": "response.output_text.done",
+                            "item_id": "msg_gateway_stream_tool_final",
+                            "output_index": 0,
+                            "content_index": 0,
+                            "text": "Brisbane is sunny through Gateway Responses stream."
+                        }),
+                        json!({
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_gateway_stream_tool_final",
+                                "created_at": 1711115038,
+                                "model": "openai/gpt-4.1-mini",
+                                "usage": {
+                                    "input_tokens": 12,
+                                    "output_tokens": 7
+                                }
+                            }
+                        }),
+                    ]),
+                    other => panic!("unexpected request #{other}"),
+                };
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", body)
+                    .with_headers(Headers::from([
+                        ("content-type".to_string(), "text/event-stream".to_string()),
+                        (
+                            "x-request-id".to_string(),
+                            format!("req_vercel_ai_gateway_responses_tool_stream_{call_number}"),
+                        ),
+                    ])))))
+            });
+        let provider = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://ai-gateway.test/v1/")
+            .with_header("custom-header", "value")
+            .with_transport(transport);
+        let model = provider.responses("openai/gpt-4.1-mini");
+        let input_schema: JsonObject = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "location": {
+                    "type": "string"
+                }
+            },
+            "required": ["location"]
+        }))
+        .expect("schema deserializes");
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::from_prompt(&model, Prompt::from_prompt("Weather in Brisbane?"))
+                .expect("prompt is valid")
+                .with_tool(
+                    Tool::new("weather", input_schema.clone())
+                        .with_description("Get weather for a location")
+                        .with_execute(|input, options| async move {
+                            Ok(json!({
+                                "location": input
+                                    .get("location")
+                                    .and_then(JsonValue::as_str)
+                                    .unwrap_or("Brisbane"),
+                                "forecast": "sunny",
+                                "toolCallId": options.tool_call_id
+                            }))
+                        }),
+                )
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(
+            result.text,
+            "Brisbane is sunny through Gateway Responses stream."
+        );
+        assert_eq!(
+            result.text_stream,
+            vec![
+                "Brisbane is sunny through ".to_string(),
+                "Gateway Responses stream.".to_string()
+            ]
+        );
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.steps.len(), 2);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].output["forecast"], "sunny");
+
+        let requests = captured_requests
+            .lock()
+            .expect("captured requests mutex is not poisoned")
+            .clone();
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| {
+            request.method == ProviderApiRequestMethod::Post
+                && request.url == "https://ai-gateway.test/v1/responses"
+                && request.headers.get("authorization").map(String::as_str)
+                    == Some("Bearer test-api-key")
+                && request.headers.get("custom-header").map(String::as_str) == Some("value")
+        }));
+
+        let request_bodies = requests
+            .iter()
+            .map(|request| {
+                request
+                    .body
+                    .as_ref()
+                    .and_then(ProviderApiRequestBody::as_text)
+                    .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+                    .expect("request body is JSON")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            request_bodies[0].get("model"),
+            Some(&json!("openai/gpt-4.1-mini"))
+        );
+        assert_eq!(request_bodies[0].get("stream"), Some(&json!(true)));
+        assert_eq!(
+            request_bodies[0].get("tools"),
+            Some(&json!([
+                {
+                    "type": "function",
+                    "name": "weather",
+                    "description": "Get weather for a location",
+                    "parameters": input_schema
+                }
+            ]))
+        );
+
+        let second_input = request_bodies[1]
+            .get("input")
+            .and_then(JsonValue::as_array)
+            .expect("second request input is an array");
+        assert!(second_input.iter().any(|item| {
+            item.get("type").and_then(JsonValue::as_str) == Some("item_reference")
+                && item.get("id").and_then(JsonValue::as_str) == Some("fc_gateway_stream_weather")
+        }));
+        assert!(second_input.iter().any(|item| {
+            item.get("type").and_then(JsonValue::as_str) == Some("function_call_output")
+                && item.get("call_id").and_then(JsonValue::as_str)
+                    == Some("call_gateway_stream_weather")
+                && item
+                    .get("output")
+                    .and_then(JsonValue::as_str)
+                    .is_some_and(|output| output.contains("\"forecast\":\"sunny\""))
+        }));
+        assert_eq!(request_bodies[1].get("stream"), Some(&json!(true)));
+    }
+
+    #[test]
     fn vercel_ai_gateway_openai_compatible_streams_text_through_openai_chat() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
