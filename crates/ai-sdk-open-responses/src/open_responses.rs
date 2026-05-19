@@ -5285,6 +5285,20 @@ fn open_responses_stream_summary_index(value: &JsonValue) -> String {
 }
 
 fn open_responses_stream_reasoning_id(value: &JsonValue) -> String {
+    let event_type = value.get("type").and_then(JsonValue::as_str);
+    let part_type = value
+        .get("part")
+        .and_then(|part| part.get("type"))
+        .and_then(JsonValue::as_str);
+    let is_reasoning_text = event_type.is_some_and(|event_type| {
+        event_type.starts_with("response.reasoning_text.")
+            && !event_type.starts_with("response.reasoning_summary_text.")
+    }) || part_type == Some("reasoning_text");
+
+    if is_reasoning_text && let Some(item_id) = open_responses_stream_item_id(value) {
+        return item_id;
+    }
+
     open_responses_stream_item_id(value)
         .map(|item_id| format!("{item_id}:{}", open_responses_stream_summary_index(value)))
         .unwrap_or_else(|| open_responses_stream_block_id("reasoning", value))
@@ -10229,6 +10243,342 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_maps_lmstudio_tool_call_response_fixture() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_930de53bd4b5933673481fa630f3dc5f58027a2c67598a2a",
+                        "object": "response",
+                        "created_at": 1769005553,
+                        "completed_at": 1769005560,
+                        "status": "completed",
+                        "model": "mistralai/ministral-3-14b-reasoning",
+                        "output": [
+                            {
+                                "id": "fc_ru0kcno9erlzp8573yub",
+                                "call_id": "call_2866856768160095",
+                                "type": "function_call",
+                                "name": "weather",
+                                "arguments": "{\"location\":\"San Francisco\"}",
+                                "status": "completed"
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 1189,
+                            "output_tokens": 11,
+                            "total_tokens": 1200,
+                            "input_tokens_details": {
+                                "cached_tokens": 891
+                            },
+                            "output_tokens_details": {
+                                "reasoning_tokens": 0
+                            }
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("lmstudio", "https://localhost:1234/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gemma-7b-it");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("What is the weather in San Francisco?"),
+                    )]),
+                )])
+                .with_tool(weather_function_tool())
+                .with_tool_choice(LanguageModelToolChoice::Required)
+                .with_temperature(0.1)
+                .with_top_p(0.95)
+                .with_presence_penalty(0.0)
+                .with_frequency_penalty(1.1)
+                .with_max_output_tokens(512),
+            ),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::ToolCalls);
+        assert_eq!(result.finish_reason.raw, None);
+        assert_eq!(result.content.len(), 1);
+        assert!(matches!(
+            &result.content[0],
+            LanguageModelContent::ToolCall(tool_call)
+                if tool_call.tool_call_id == "call_2866856768160095"
+                    && tool_call.tool_name == "weather"
+                    && tool_call.input == "{\"location\":\"San Francisco\"}"
+        ));
+        assert_eq!(result.usage.input_tokens.total, Some(1189));
+        assert_eq!(result.usage.input_tokens.no_cache, Some(298));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(891));
+        assert_eq!(result.usage.output_tokens.total, Some(11));
+        assert_eq!(result.usage.output_tokens.text, Some(11));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(0));
+        assert_eq!(
+            result
+                .usage
+                .raw
+                .as_ref()
+                .and_then(|usage| usage.get("total_tokens"))
+                .and_then(JsonValue::as_u64),
+            Some(1200)
+        );
+
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(request_body["model"], "gemma-7b-it");
+        assert_eq!(request_body["tool_choice"], "required");
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "function",
+                    "name": "weather",
+                    "description": "Get the weather in a location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {
+                                "type": "string",
+                                "description": "The location to get the weather for"
+                            }
+                        },
+                        "required": ["location"],
+                        "additionalProperties": false
+                    }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_streams_lmstudio_tool_call_fixture() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport = Arc::new(
+            move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                let sse = [
+                    r#"data: {"type":"response.created","response":{"id":"resp_83a575a640aadab0a95a3e0649f43693892dc467e666dbd7","created_at":1770130762,"model":"zai-org/glm-4.7-flash","usage":null}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_jm2uvisepha7peu2y40spd","type":"reasoning","status":"in_progress","summary":[],"content":[]}}"#,
+                    "",
+                    r#"data: {"type":"response.content_part.added","item_id":"rs_jm2uvisepha7peu2y40spd","output_index":0,"content_index":0,"part":{"type":"reasoning_text","text":""}}"#,
+                    "",
+                    r#"data: {"type":"response.reasoning_text.delta","item_id":"rs_jm2uvisepha7peu2y40spd","output_index":0,"content_index":0,"delta":"The"}"#,
+                    "",
+                    r#"data: {"type":"response.reasoning_text.delta","item_id":"rs_jm2uvisepha7peu2y40spd","output_index":0,"content_index":0,"delta":" user"}"#,
+                    "",
+                    r#"data: {"type":"response.reasoning_text.done","item_id":"rs_jm2uvisepha7peu2y40spd","output_index":0,"content_index":0,"text":"The user"}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_jm2uvisepha7peu2y40spd","type":"reasoning","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"The user"}]}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":1,"item":{"id":"msg_pgh5uhkjz68thx8ph44ia","type":"message","status":"in_progress","content":[],"role":"assistant"}}"#,
+                    "",
+                    r#"data: {"type":"response.content_part.added","item_id":"msg_pgh5uhkjz68thx8ph44ia","output_index":1,"content_index":0,"part":{"type":"output_text","text":"","annotations":[],"logprobs":[]}}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","item_id":"msg_pgh5uhkjz68thx8ph44ia","output_index":1,"content_index":0,"delta":"I"}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","item_id":"msg_pgh5uhkjz68thx8ph44ia","output_index":1,"content_index":0,"delta":"'ll"}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","item_id":"msg_pgh5uhkjz68thx8ph44ia","output_index":1,"content_index":0,"delta":" get"}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.done","item_id":"msg_pgh5uhkjz68thx8ph44ia","output_index":1,"content_index":0,"text":"I'll get","logprobs":[]}"#,
+                    "",
+                    r#"data: {"type":"response.content_part.done","item_id":"msg_pgh5uhkjz68thx8ph44ia","output_index":1,"content_index":0,"part":{"type":"output_text","text":"I'll get","annotations":[],"logprobs":[]}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":1,"item":{"id":"msg_pgh5uhkjz68thx8ph44ia","type":"message","status":"completed","content":[{"type":"output_text","text":"I'll get","annotations":[],"logprobs":[]}],"role":"assistant"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":2,"item":{"id":"fc_5ee21s0i48xzoskcmd67h","type":"function_call","status":"in_progress","arguments":"","call_id":"call_3466696471230001","name":"weather"}}"#,
+                    "",
+                    r#"data: {"type":"response.function_call_arguments.done","item_id":"fc_5ee21s0i48xzoskcmd67h","output_index":2,"arguments":"{\"location\":\"San Francisco\"}"}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":2,"item":{"id":"fc_5ee21s0i48xzoskcmd67h","type":"function_call","status":"completed","arguments":"{\"location\":\"San Francisco\"}","call_id":"call_3466696471230001","name":"weather"}}"#,
+                    "",
+                    r#"data: {"type":"response.completed","response":{"id":"resp_83a575a640aadab0a95a3e0649f43693892dc467e666dbd7","created_at":1770130762,"model":"zai-org/glm-4.7-flash","output":[{"id":"rs_jm2uvisepha7peu2y40spd","type":"reasoning","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"The user"}]},{"id":"msg_pgh5uhkjz68thx8ph44ia","type":"message","status":"completed","content":[{"type":"output_text","text":"I'll get","annotations":[],"logprobs":[]}],"role":"assistant"},{"id":"fc_5ee21s0i48xzoskcmd67h","type":"function_call","status":"completed","arguments":"{\"location\":\"San Francisco\"}","call_id":"call_3466696471230001","name":"weather"}],"usage":{"input_tokens":182,"output_tokens":60,"total_tokens":242,"input_tokens_details":{"cached_tokens":52},"output_tokens_details":{"reasoning_tokens":47}}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("lmstudio", "https://localhost:1234/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("zai-org/glm-4.7-flash");
+
+        let stream_result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("What is the weather in San Francisco?"),
+                    )]),
+                )])
+                .with_tool(weather_function_tool())
+                .with_tool_choice(LanguageModelToolChoice::Required)
+                .with_temperature(0.2)
+                .with_top_p(0.95)
+                .with_presence_penalty(0.0)
+                .with_frequency_penalty(0.0),
+            ),
+        );
+
+        assert!(stream_result.stream.iter().any(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::ReasoningStart(start)
+                    if start.id == "rs_jm2uvisepha7peu2y40spd"
+            )
+        }));
+        let reasoning_deltas = stream_result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ReasoningDelta(delta) => Some(delta.delta.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reasoning_deltas, vec!["The", " user"]);
+        assert!(stream_result.stream.iter().any(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::ReasoningEnd(end)
+                    if end.id == "rs_jm2uvisepha7peu2y40spd"
+            )
+        }));
+
+        let text_deltas = stream_result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) => Some(delta.delta.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(text_deltas, vec!["I", "'ll", " get"]);
+        assert!(stream_result.stream.iter().any(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::TextEnd(end)
+                    if end.id == "msg_pgh5uhkjz68thx8ph44ia"
+            )
+        }));
+
+        assert!(stream_result.stream.iter().any(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::ToolInputStart(start)
+                    if start.id == "call_3466696471230001"
+                        && start.tool_name == "weather"
+            )
+        }));
+        let tool_call = stream_result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .expect("stream includes tool call");
+        assert_eq!(tool_call.tool_call_id, "call_3466696471230001");
+        assert_eq!(tool_call.tool_name, "weather");
+        assert_eq!(tool_call.input, r#"{"location":"San Francisco"}"#);
+        assert_eq!(
+            tool_call
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("lmstudio"))
+                .and_then(|metadata| metadata.get("itemId"))
+                .and_then(JsonValue::as_str),
+            Some("fc_5ee21s0i48xzoskcmd67h")
+        );
+
+        let finish = stream_result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish part");
+        assert_eq!(finish.finish_reason.unified, FinishReason::ToolCalls);
+        assert_eq!(finish.usage.input_tokens.total, Some(182));
+        assert_eq!(finish.usage.input_tokens.no_cache, Some(130));
+        assert_eq!(finish.usage.input_tokens.cache_read, Some(52));
+        assert_eq!(finish.usage.output_tokens.total, Some(60));
+        assert_eq!(finish.usage.output_tokens.text, Some(13));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(47));
+        assert_eq!(
+            finish
+                .usage
+                .raw
+                .as_ref()
+                .and_then(|usage| usage.get("total_tokens"))
+                .and_then(JsonValue::as_u64),
+            Some(242)
+        );
+
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(request_body["model"], "zai-org/glm-4.7-flash");
+        assert_eq!(request_body["stream"], true);
+        assert_eq!(request_body["tool_choice"], "required");
+        assert_eq!(
+            request_body["tools"][0]["parameters"],
+            json!({
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "The location to get the weather for"
+                    }
+                },
+                "required": ["location"],
+                "additionalProperties": false
+            })
+        );
+    }
+
+    #[test]
     fn open_responses_provider_maps_deprecated_file_id_prefixes() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -13336,6 +13686,26 @@ mod tests {
 
     fn json_object(value: JsonValue) -> JsonObject {
         serde_json::from_value(value).expect("value is a JSON object")
+    }
+
+    fn weather_function_tool() -> LanguageModelTool {
+        LanguageModelTool::Function(
+            LanguageModelFunctionTool::new(
+                "weather",
+                json_object(json!({
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "The location to get the weather for"
+                        }
+                    },
+                    "required": ["location"],
+                    "additionalProperties": false
+                })),
+            )
+            .with_description("Get the weather in a location"),
+        )
     }
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
