@@ -9810,6 +9810,113 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_warns_for_unsupported_standard_call_options() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_unsupported_call_options",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Done."
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 3,
+                            "output_tokens": 1
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Hello"),
+                    )]),
+                )])
+                .with_stop_sequence("</done>")
+                .with_top_k(40)
+                .with_seed(1234),
+            ),
+        );
+
+        let warning_features = result
+            .warnings
+            .iter()
+            .map(|warning| match warning {
+                ai_sdk_provider::warning::Warning::Unsupported { feature, details } => {
+                    assert!(details.is_none());
+                    feature.as_str()
+                }
+                other => panic!("expected unsupported warning, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(warning_features, vec!["stopSequences", "topK", "seed"]);
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-4.1-mini",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ]
+            })
+        );
+        assert!(request_body.get("stopSequences").is_none());
+        assert!(request_body.get("stop_sequences").is_none());
+        assert!(request_body.get("topK").is_none());
+        assert!(request_body.get("top_k").is_none());
+        assert!(request_body.get("seed").is_none());
+    }
+
+    #[test]
     fn open_responses_provider_maps_reasoning_effort_and_summary_options() {
         let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
         let captured_requests_for_transport = Arc::clone(&captured_requests);
