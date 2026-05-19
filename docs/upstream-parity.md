@@ -215,6 +215,7 @@ inventory.
 | Open Responses custom provider-tool request formats | verified | `src/open_responses.rs` | `open_responses_provider_prepares_custom_tool_formats_and_choice` | Open Responses custom provider-tool request preparation now mirrors upstream grammar-tool shaping for regex and Lark formats and resolves `tool_choice` to `{ type: "custom", name }` when the selected tool name belongs to an `openai.custom` provider tool. |
 | Open Responses apply-patch and tool-search request tools | verified | `src/open_responses.rs` | `open_responses_provider_prepares_apply_patch_and_tool_search_tools` | Open Responses request preparation now mirrors upstream provider-tool handling for `openai.apply_patch` and `openai.tool_search`: apply-patch emits `{ "type": "apply_patch" }` and resolves hosted tool choice to that type, while tool-search emits `tool_search` with optional `execution`, `description`, and `parameters`; function tools alongside tool-search preserve OpenAI `deferLoading` as `defer_loading`. |
 | Open Responses shell request environment tools | verified | `src/open_responses.rs` | `open_responses_provider_prepares_shell_tool_environment_skills`; `open_responses_provider_rejects_unresolved_shell_skill_reference` | Open Responses shell provider-tool request preparation now mirrors upstream container environment shaping for `fileIds`, `memoryLimit`, allowlist network policies with domain secrets, skill references, inline skills, and default skill-reference versions. Shell `skillReference.providerReference` must resolve an OpenAI id; references for other providers now fail request preparation instead of emitting an empty `skill_id`. |
+| Open Responses unsupported assistant prompt parts | verified | `crates/ai-sdk-open-responses/src/open_responses.rs` | `open_responses_provider_ignores_unsupported_assistant_file_parts` | Assistant prompt conversion now mirrors upstream by ignoring assistant file and reasoning-file parts while still serializing surrounding assistant text and tool calls. |
 | Open Responses top-level image media type resolution | verified | `src/open_responses.rs`, `crates/ai-sdk-provider-utils` | `open_responses_provider_resolves_top_level_image_media_types`; `resolve_full_media_type_detects_inline_byte_subtype`; `resolve_full_media_type_treats_wildcard_as_top_level` | Prompt file conversion now has direct Open Responses coverage for upstream top-level-only media behavior: full `image/png`, top-level `image`, URL-backed top-level `image`, and wildcard `image/*` all produce concrete `input_image` request parts. |
 | Open Responses user file provider references | verified | `src/open_responses.rs`, `src/file_data.rs` | `open_responses_provider_converts_user_file_prompt_parts`; `provider_reference_resolves_provider_specific_id` | User file prompt conversion now resolves provider references for the active provider into Responses `input_image.file_id` and `input_file.file_id` parts, including mixed-provider references in one message. |
 | Open Responses prompt file defaults and unsupported files | verified | `src/open_responses.rs` | `open_responses_provider_handles_prompt_file_defaults_and_unsupported_files` | User prompt file conversion now defaults unnamed PDF data parts to upstream `part-{index}.pdf`, rejects unsupported non-PDF file data by default, and honors provider `passThroughUnsupportedFiles` for explicit unsupported-file passthrough without leaking that SDK-only flag into the request body. |
@@ -372,6 +373,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   assistant tool-call/tool-result history for static and dynamic tools,
   output-error raw input, step boundaries, provider-executed results, and denied
   approval responses.
+- 2026-05-19: Open Responses unsupported assistant prompt part parity added
+  `open_responses_provider_ignores_unsupported_assistant_file_parts` in
+  `crates/ai-sdk-open-responses/src/open_responses.rs`, covering upstream
+  assistant prompt conversion behavior where file and reasoning-file parts are
+  ignored while text and tool-call parts still serialize.
 
 ## Next Unported Work Queue
 
@@ -409,6 +415,7 @@ focused tests for each portable behavior before changing rows to `verified`.
    web-search-preview/local-shell request tools, code-interpreter and
    image-generation request options, user file provider references, prompt file
    defaults/unsupported-file handling, deprecated file id prefixes,
+   unsupported assistant file/reasoning-file prompt part filtering,
    `allowedTools` tool-choice override, shell request/history, apply-patch
    request/history, and custom provider-tool request/prompt reconstruction are
    represented.
