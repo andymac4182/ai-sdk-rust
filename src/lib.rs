@@ -44,6 +44,7 @@ pub mod skills;
 pub mod speech_model;
 pub mod stream_object;
 pub mod stream_text;
+pub mod telemetry;
 pub mod text_stream_response;
 pub mod togetherai;
 pub mod transcribe;
@@ -379,6 +380,13 @@ pub use stream_text::{
     TextStreamFinishPart, TextStreamFinishStepPart, TextStreamPart, TextStreamReasoningDeltaPart,
     TextStreamReasoningFilePart, TextStreamStartPart, TextStreamStartStepPart,
     TextStreamTextDeltaPart, stream_text,
+};
+pub use telemetry::{
+    AI_SDK_TELEMETRY_DIAGNOSTIC_CHANNEL, TelemetryDiagnosticMessage,
+    TelemetryDiagnosticSubscription, TelemetryDispatcher, TelemetryEvent, TelemetryEventKind,
+    TelemetryExecuteToolOptions, TelemetryIntegration, TelemetryOptions,
+    create_telemetry_dispatcher, get_global_telemetry_integrations, register_telemetry,
+    register_telemetry_integration, subscribe_telemetry_diagnostics,
 };
 pub use text_stream_response::{
     TEXT_STREAM_CONTENT_TYPE, TextStreamResponse, TextStreamResponseInit,
