@@ -13305,6 +13305,81 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_stream_incomplete_response_sets_length_finish_reason() {
+        let transport: OpenResponsesTransport = Arc::new(
+            move |_request| -> OpenResponsesTransportFuture {
+                let sse = [
+                    r#"data: {"type":"response.created","response":{"id":"resp_stream_incomplete_start","created_at":1711115037,"model":"gpt-4.1-mini"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_incomplete_start","type":"message","status":"in_progress","role":"assistant","content":[]}}"#,
+                    "",
+                    r#"data: {"type":"response.content_part.added","item_id":"msg_incomplete_start","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","item_id":"msg_incomplete_start","output_index":0,"content_index":0,"delta":"Hello,"}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.done","item_id":"msg_incomplete_done","output_index":0,"content_index":0,"text":"Hello,"}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_incomplete_done","type":"message","status":"incomplete","role":"assistant","content":[{"type":"output_text","text":"Hello,","annotations":[]}]}}"#,
+                    "",
+                    r#"data: {"type":"response.incomplete","response":{"id":"resp_stream_incomplete_final","created_at":1711115038,"model":"gpt-4.1-mini","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":8,"input_tokens_details":{"cached_tokens":3},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":2}}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse)
+                    .with_headers(Headers::from([(
+                        "content-type".to_string(),
+                        "text/event-stream".to_string(),
+                    )])))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Say hello")),
+            ])),
+        ])));
+
+        assert!(
+            result.stream.iter().any(|part| matches!(
+                part,
+                LanguageModelStreamPart::TextDelta(delta) if delta.delta == "Hello,"
+            )),
+            "stream includes text delta before incomplete finish"
+        );
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish part");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Length);
+        assert_eq!(
+            finish.finish_reason.raw.as_deref(),
+            Some("max_output_tokens")
+        );
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId"),
+            Some(&json!("resp_stream_incomplete_start"))
+        );
+        assert_eq!(finish.usage.input_tokens.total, Some(8));
+        assert_eq!(finish.usage.input_tokens.no_cache, Some(5));
+        assert_eq!(finish.usage.input_tokens.cache_read, Some(3));
+        assert_eq!(finish.usage.output_tokens.total, Some(5));
+        assert_eq!(finish.usage.output_tokens.text, Some(3));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(2));
+    }
+
+    #[test]
     fn open_responses_provider_streams_text_sources_reasoning_and_compaction_metadata() {
         let transport: OpenResponsesTransport = Arc::new(
             move |_request| -> OpenResponsesTransportFuture {
