@@ -1863,6 +1863,199 @@ impl OpenTelemetryStartEvent {
     }
 }
 
+/// Object-generation operation start event.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenTelemetryObjectStartEvent {
+    pub call_id: String,
+    pub operation_id: String,
+    pub provider: String,
+    pub model_id: String,
+    pub telemetry: TelemetryOptions,
+    pub settings: TelemetryAttributes,
+    pub system_instructions: Option<Vec<SemConvSystemInstruction>>,
+    pub input_messages: Option<Vec<SemConvMessage>>,
+    pub schema: Option<JsonValue>,
+    pub schema_name: Option<String>,
+    pub schema_description: Option<String>,
+    pub output_mode: Option<String>,
+}
+
+impl OpenTelemetryObjectStartEvent {
+    /// Creates an object-generation operation start event.
+    pub fn new(
+        call_id: impl Into<String>,
+        operation_id: impl Into<String>,
+        provider: impl Into<String>,
+        model_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            operation_id: operation_id.into(),
+            provider: provider.into(),
+            model_id: model_id.into(),
+            telemetry: TelemetryOptions::new(),
+            settings: TelemetryAttributes::new(),
+            system_instructions: None,
+            input_messages: None,
+            schema: None,
+            schema_name: None,
+            schema_description: None,
+            output_mode: None,
+        }
+    }
+
+    /// Sets telemetry recording options.
+    pub fn with_telemetry(mut self, telemetry: TelemetryOptions) -> Self {
+        self.telemetry = telemetry;
+        self
+    }
+
+    /// Sets model call settings.
+    pub fn with_settings(mut self, settings: TelemetryAttributes) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    /// Sets formatted system instructions.
+    pub fn with_system_instructions(
+        mut self,
+        system_instructions: Vec<SemConvSystemInstruction>,
+    ) -> Self {
+        self.system_instructions = Some(system_instructions);
+        self
+    }
+
+    /// Sets formatted input messages.
+    pub fn with_input_messages(mut self, input_messages: Vec<SemConvMessage>) -> Self {
+        self.input_messages = Some(input_messages);
+        self
+    }
+
+    /// Sets object schema supplemental data.
+    pub fn with_schema(
+        mut self,
+        schema: JsonValue,
+        name: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        self.schema = Some(schema);
+        self.schema_name = Some(name.into());
+        self.schema_description = Some(description.into());
+        self
+    }
+
+    /// Sets the object output mode supplemental data.
+    pub fn with_output_mode(mut self, output_mode: impl Into<String>) -> Self {
+        self.output_mode = Some(output_mode.into());
+        self
+    }
+}
+
+/// Object-generation model call start event.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenTelemetryObjectStepStartEvent {
+    pub call_id: String,
+    pub provider: String,
+    pub model_id: String,
+    pub settings: TelemetryAttributes,
+    pub input_messages: Option<Vec<SemConvMessage>>,
+}
+
+impl OpenTelemetryObjectStepStartEvent {
+    /// Creates an object step start event.
+    pub fn new(
+        call_id: impl Into<String>,
+        provider: impl Into<String>,
+        model_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            provider: provider.into(),
+            model_id: model_id.into(),
+            settings: TelemetryAttributes::new(),
+            input_messages: None,
+        }
+    }
+
+    /// Sets model call settings.
+    pub fn with_settings(mut self, settings: TelemetryAttributes) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    /// Sets formatted input messages.
+    pub fn with_input_messages(mut self, input_messages: Vec<SemConvMessage>) -> Self {
+        self.input_messages = Some(input_messages);
+        self
+    }
+}
+
+/// Object-generation model call finish event.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenTelemetryObjectStepFinishEvent {
+    pub call_id: String,
+    pub finish_reason: String,
+    pub usage: Option<TelemetryTokenUsage>,
+    pub object_text: Option<String>,
+}
+
+impl OpenTelemetryObjectStepFinishEvent {
+    /// Creates an object step finish event.
+    pub fn new(call_id: impl Into<String>, finish_reason: impl Into<String>) -> Self {
+        Self {
+            call_id: call_id.into(),
+            finish_reason: finish_reason.into(),
+            usage: None,
+            object_text: None,
+        }
+    }
+
+    /// Sets usage values.
+    pub fn with_usage(mut self, usage: TelemetryTokenUsage) -> Self {
+        self.usage = Some(usage);
+        self
+    }
+
+    /// Sets object text output.
+    pub fn with_object_text(mut self, object_text: impl Into<String>) -> Self {
+        self.object_text = Some(object_text.into());
+        self
+    }
+}
+
+/// Object-generation operation end event.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenTelemetryObjectEndEvent {
+    pub call_id: String,
+    pub finish_reason: String,
+    pub usage: Option<TelemetryTokenUsage>,
+    pub object: Option<JsonValue>,
+}
+
+impl OpenTelemetryObjectEndEvent {
+    /// Creates an object-generation operation end event.
+    pub fn new(call_id: impl Into<String>, finish_reason: impl Into<String>) -> Self {
+        Self {
+            call_id: call_id.into(),
+            finish_reason: finish_reason.into(),
+            usage: None,
+            object: None,
+        }
+    }
+
+    /// Sets usage values.
+    pub fn with_usage(mut self, usage: TelemetryTokenUsage) -> Self {
+        self.usage = Some(usage);
+        self
+    }
+
+    /// Sets the generated object.
+    pub fn with_object(mut self, object: JsonValue) -> Self {
+        self.object = Some(object);
+        self
+    }
+}
+
 /// Step start event accepted by [`OpenTelemetry::on_step_start`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OpenTelemetryStepStartEvent {
@@ -2361,6 +2554,121 @@ impl OpenTelemetry {
     /// Returns active call state count.
     pub fn active_call_count(&self) -> usize {
         self.call_states.len()
+    }
+
+    /// Starts a high-level object-generation operation span.
+    pub fn on_object_operation_start(&mut self, event: OpenTelemetryObjectStartEvent) {
+        let attributes = object_operation_start_attributes(
+            &event.telemetry,
+            &event.operation_id,
+            &event.provider,
+            &event.model_id,
+            &event.settings,
+            event.system_instructions.as_ref(),
+            event.input_messages.as_ref(),
+            ObjectSchemaSupplemental {
+                schema: event.schema.as_ref(),
+                schema_name: event.schema_name.as_deref(),
+                schema_description: event.schema_description.as_deref(),
+                output_mode: event.output_mode.as_deref(),
+            },
+            self.options.supplemental_attributes,
+        );
+        let span_attributes = self.span_attributes(
+            attributes,
+            OpenTelemetrySpanType::Operation,
+            &event.operation_id,
+            &event.call_id,
+            None,
+        );
+        let span_name = format!(
+            "{} {}",
+            map_operation_name(&event.operation_id),
+            event.model_id
+        );
+        let root_span = self.tracer.start_span(span_name, span_attributes);
+
+        self.call_states.insert(
+            event.call_id.clone(),
+            OpenTelemetryCallState {
+                operation_id: event.operation_id,
+                telemetry: event.telemetry,
+                provider: event.provider,
+                model_id: event.model_id,
+                root_span,
+                step_span: None,
+                inference_span: None,
+                embed_spans: BTreeMap::new(),
+                rerank_span: None,
+                tool_spans: BTreeMap::new(),
+                runtime_context: None,
+            },
+        );
+    }
+
+    /// Starts an object-generation model call span.
+    pub fn on_object_step_start(&mut self, event: OpenTelemetryObjectStepStartEvent) {
+        let Some((operation_id, telemetry, runtime_context)) =
+            self.call_states.get(&event.call_id).map(|state| {
+                (
+                    state.operation_id.clone(),
+                    state.telemetry.clone(),
+                    state.runtime_context.clone(),
+                )
+            })
+        else {
+            return;
+        };
+        let attributes = object_model_start_attributes(
+            &telemetry,
+            &event.provider,
+            &event.model_id,
+            &event.settings,
+            event.input_messages.as_ref(),
+        );
+        let span_attributes = self.span_attributes(
+            attributes,
+            OpenTelemetrySpanType::LanguageModel,
+            &operation_id,
+            &event.call_id,
+            runtime_context.as_ref(),
+        );
+        let span = self
+            .tracer
+            .start_span(format!("chat {}", event.model_id), span_attributes);
+        if let Some(state) = self.call_states.get_mut(&event.call_id) {
+            state.inference_span = Some(span);
+        }
+    }
+
+    /// Finishes an object-generation model call span.
+    pub fn on_object_step_finish(&mut self, event: OpenTelemetryObjectStepFinishEvent) {
+        let Some((span, telemetry)) = self.call_states.get(&event.call_id).and_then(|state| {
+            state
+                .inference_span
+                .map(|span| (span, state.telemetry.clone()))
+        }) else {
+            return;
+        };
+        self.end_span_with_attributes(
+            Some(span),
+            object_step_finish_attributes(&telemetry, &event),
+        );
+        if let Some(state) = self.call_states.get_mut(&event.call_id) {
+            state.inference_span = None;
+        }
+    }
+
+    /// Finishes a high-level object-generation operation span.
+    pub fn on_object_operation_end(&mut self, event: OpenTelemetryObjectEndEvent) {
+        let Some(state) = self.call_states.remove(&event.call_id) else {
+            return;
+        };
+        self.end_span_with_attributes(state.inference_span, TelemetryAttributes::new());
+        self.end_span_with_attributes(
+            Some(state.root_span),
+            object_operation_end_attributes(&state.telemetry, &event),
+        );
     }
 
     /// Starts a high-level embedding operation span.
@@ -3062,6 +3370,200 @@ fn language_model_end_attributes(
     attributes
 }
 
+struct ObjectSchemaSupplemental<'a> {
+    schema: Option<&'a JsonValue>,
+    schema_name: Option<&'a str>,
+    schema_description: Option<&'a str>,
+    output_mode: Option<&'a str>,
+}
+
+fn object_operation_start_attributes(
+    telemetry: &TelemetryOptions,
+    operation_id: &str,
+    provider: &str,
+    model_id: &str,
+    settings: &TelemetryAttributes,
+    system_instructions: Option<&Vec<SemConvSystemInstruction>>,
+    input_messages: Option<&Vec<SemConvMessage>>,
+    schema: ObjectSchemaSupplemental<'_>,
+    supplemental_attributes: SupplementalAttributeOptions,
+) -> TelemetryAttributes {
+    let mut attributes = select_attributes(
+        Some(telemetry),
+        vec![
+            (
+                "gen_ai.operation.name".to_string(),
+                AttributeSpec::value(json!(map_operation_name(operation_id))),
+            ),
+            (
+                "gen_ai.provider.name".to_string(),
+                AttributeSpec::value(json!(map_provider_name(provider))),
+            ),
+            (
+                "gen_ai.request.model".to_string(),
+                AttributeSpec::value(json!(model_id)),
+            ),
+            (
+                "gen_ai.agent.name".to_string(),
+                telemetry
+                    .function_id
+                    .as_ref()
+                    .map_or(AttributeSpec::Omitted, |function_id| {
+                        AttributeSpec::value(json!(function_id))
+                    }),
+            ),
+            (
+                "gen_ai.output.type".to_string(),
+                AttributeSpec::value(json!("json")),
+            ),
+            (
+                "gen_ai.system_instructions".to_string(),
+                system_instructions.map_or(AttributeSpec::Omitted, |system_instructions| {
+                    AttributeSpec::input(json!(system_instructions))
+                }),
+            ),
+            (
+                "gen_ai.input.messages".to_string(),
+                input_messages.map_or(AttributeSpec::Omitted, |input_messages| {
+                    AttributeSpec::input(json!(input_messages))
+                }),
+            ),
+        ],
+    );
+    append_request_settings(&mut attributes, telemetry, settings);
+    attributes.extend(select_supplemental_attributes(
+        Some(telemetry),
+        supplemental_attributes,
+        SupplementalAttributes {
+            schema: object_schema_attributes(schema),
+            ..SupplementalAttributes::default()
+        },
+    ));
+    attributes
+}
+
+fn object_model_start_attributes(
+    telemetry: &TelemetryOptions,
+    provider: &str,
+    model_id: &str,
+    settings: &TelemetryAttributes,
+    input_messages: Option<&Vec<SemConvMessage>>,
+) -> TelemetryAttributes {
+    let mut attributes = select_attributes(
+        Some(telemetry),
+        vec![
+            (
+                "gen_ai.operation.name".to_string(),
+                AttributeSpec::value(json!("chat")),
+            ),
+            (
+                "gen_ai.provider.name".to_string(),
+                AttributeSpec::value(json!(map_provider_name(provider))),
+            ),
+            (
+                "gen_ai.request.model".to_string(),
+                AttributeSpec::value(json!(model_id)),
+            ),
+            (
+                "gen_ai.output.type".to_string(),
+                AttributeSpec::value(json!("json")),
+            ),
+            (
+                "gen_ai.input.messages".to_string(),
+                input_messages.map_or(AttributeSpec::Omitted, |input_messages| {
+                    AttributeSpec::input(json!(input_messages))
+                }),
+            ),
+        ],
+    );
+    append_request_settings(&mut attributes, telemetry, settings);
+    attributes
+}
+
+fn object_step_finish_attributes(
+    telemetry: &TelemetryOptions,
+    event: &OpenTelemetryObjectStepFinishEvent,
+) -> TelemetryAttributes {
+    let output_messages = event
+        .object_text
+        .as_ref()
+        .map(|object_text| format_object_output_messages(object_text, &event.finish_reason));
+    language_model_end_attributes(
+        telemetry,
+        &OpenTelemetryLanguageModelCallEndEvent {
+            call_id: event.call_id.clone(),
+            finish_reason: event.finish_reason.clone(),
+            usage: event.usage,
+            output_messages,
+        },
+    )
+}
+
+fn object_operation_end_attributes(
+    telemetry: &TelemetryOptions,
+    event: &OpenTelemetryObjectEndEvent,
+) -> TelemetryAttributes {
+    let output_messages = event.object.as_ref().map(|object| {
+        format_object_output_messages(telemetry_json_string(object), &event.finish_reason)
+    });
+    language_model_end_attributes(
+        telemetry,
+        &OpenTelemetryLanguageModelCallEndEvent {
+            call_id: event.call_id.clone(),
+            finish_reason: event.finish_reason.clone(),
+            usage: event.usage,
+            output_messages,
+        },
+    )
+}
+
+fn object_schema_attributes(schema: ObjectSchemaSupplemental<'_>) -> Vec<(String, AttributeSpec)> {
+    vec![
+        (
+            "ai.schema".to_string(),
+            schema.schema.map_or(AttributeSpec::Omitted, |schema| {
+                AttributeSpec::input(json!(telemetry_json_string(schema)))
+            }),
+        ),
+        (
+            "ai.schema.name".to_string(),
+            schema
+                .schema_name
+                .map_or(AttributeSpec::Omitted, |schema_name| {
+                    AttributeSpec::value(json!(schema_name))
+                }),
+        ),
+        (
+            "ai.schema.description".to_string(),
+            schema
+                .schema_description
+                .map_or(AttributeSpec::Omitted, |schema_description| {
+                    AttributeSpec::value(json!(schema_description))
+                }),
+        ),
+        (
+            "ai.settings.output".to_string(),
+            schema
+                .output_mode
+                .map_or(AttributeSpec::Omitted, |output_mode| {
+                    AttributeSpec::value(json!(output_mode))
+                }),
+        ),
+    ]
+}
+
+fn append_request_settings(
+    attributes: &mut TelemetryAttributes,
+    telemetry: &TelemetryOptions,
+    settings: &TelemetryAttributes,
+) {
+    if telemetry.should_record() {
+        for (key, value) in settings.iter().filter(|(_, value)| !value.is_null()) {
+            attributes.insert(format!("gen_ai.request.{key}"), value.clone());
+        }
+    }
+}
+
 fn embedding_model_start_attributes(
     telemetry: &TelemetryOptions,
     provider: &str,
@@ -3693,6 +4195,122 @@ mod tests {
                 .spans
                 .iter()
                 .all(|span| span.attributes.keys().all(|key| !key.starts_with("ai.")))
+        );
+    }
+
+    #[test]
+    fn open_telemetry_records_object_operation_and_step_spans() {
+        let mut recorder =
+            OpenTelemetry::new(OpenTelemetryOptions::new().with_supplemental_attributes(
+                SupplementalAttributeOptions {
+                    schema: true,
+                    ..SupplementalAttributeOptions::default()
+                },
+            ));
+        let input_messages = vec![SemConvMessage::input(
+            "user",
+            vec![json!({ "type": "text", "content": "Return a short answer." })],
+        )];
+        let usage = TelemetryTokenUsage {
+            input_tokens: Some(5),
+            output_tokens: Some(7),
+            total_tokens: Some(12),
+        };
+
+        recorder.on_object_operation_start(
+            OpenTelemetryObjectStartEvent::new(
+                "object-call",
+                "ai.generateObject",
+                "openai.chat",
+                "gpt-4o-mini",
+            )
+            .with_telemetry(TelemetryOptions::new().with_function_id("answer"))
+            .with_settings(TelemetryAttributes::from([(
+                "temperature".to_string(),
+                json!(0.1),
+            )]))
+            .with_system_instructions(format_system_instructions("Return JSON only."))
+            .with_input_messages(input_messages.clone())
+            .with_schema(
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "answer": { "type": "string" }
+                    }
+                }),
+                "Answer",
+                "Answer schema",
+            )
+            .with_output_mode("object"),
+        );
+        recorder.on_object_step_start(
+            OpenTelemetryObjectStepStartEvent::new("object-call", "openai.chat", "gpt-4o-mini")
+                .with_settings(TelemetryAttributes::from([(
+                    "temperature".to_string(),
+                    json!(0.1),
+                )]))
+                .with_input_messages(input_messages),
+        );
+        recorder.on_object_step_finish(
+            OpenTelemetryObjectStepFinishEvent::new("object-call", "stop")
+                .with_usage(usage)
+                .with_object_text(r#"{"answer":"ok"}"#),
+        );
+        recorder.on_object_operation_end(
+            OpenTelemetryObjectEndEvent::new("object-call", "stop")
+                .with_usage(usage)
+                .with_object(json!({ "answer": "ok" })),
+        );
+
+        assert_eq!(recorder.active_call_count(), 0);
+        let tracer = recorder.into_tracer();
+        assert_eq!(tracer.spans.len(), 2);
+        assert_eq!(tracer.spans[0].name, "invoke_agent gpt-4o-mini");
+        assert_eq!(tracer.spans[1].name, "chat gpt-4o-mini");
+        assert!(tracer.spans.iter().all(|span| span.ended));
+        assert_eq!(
+            tracer.spans[0].attributes.get("gen_ai.output.type"),
+            Some(&json!("json"))
+        );
+        assert_eq!(
+            tracer.spans[0].attributes.get("gen_ai.request.temperature"),
+            Some(&json!(0.1))
+        );
+        assert_eq!(
+            tracer.spans[0].attributes.get("ai.schema.name"),
+            Some(&json!("Answer"))
+        );
+        assert_eq!(
+            tracer.spans[0].attributes.get("ai.schema.description"),
+            Some(&json!("Answer schema"))
+        );
+        assert_eq!(
+            tracer.spans[0].attributes.get("ai.settings.output"),
+            Some(&json!("object"))
+        );
+        assert_eq!(
+            tracer.spans[0]
+                .attributes
+                .get("gen_ai.output.messages")
+                .and_then(JsonValue::as_array)
+                .and_then(|messages| messages.first())
+                .and_then(|message| message.get("parts"))
+                .and_then(JsonValue::as_array)
+                .and_then(|parts| parts.first())
+                .and_then(|part| part.get("content")),
+            Some(&json!("{\"answer\":\"ok\"}"))
+        );
+        assert_eq!(
+            tracer.spans[1].attributes.get("gen_ai.operation.name"),
+            Some(&json!("chat"))
+        );
+        assert_eq!(
+            tracer.spans[1].attributes.get("gen_ai.output.type"),
+            Some(&json!("json"))
+        );
+        assert_eq!(
+            tracer.spans[1].attributes.get("gen_ai.usage.total_tokens"),
+            Some(&json!(12))
         );
     }
 
