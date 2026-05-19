@@ -9,6 +9,7 @@ members = [
     "crates/ai-sdk-provider",
     "crates/ai-sdk-provider-utils",
     "crates/ai-sdk-test-server",
+    "crates/ai-sdk-workflow",
     "crates/ai-sdk-assemblyai",
     "crates/ai-sdk-azure",
     "crates/ai-sdk-black-forest-labs",
