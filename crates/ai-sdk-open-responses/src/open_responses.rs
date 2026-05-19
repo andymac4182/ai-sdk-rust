@@ -623,7 +623,9 @@ fn open_responses_request_body(
         body.insert("tool_choice".to_string(), tool_choice);
     }
 
-    if let Some(text_format) = open_responses_text_format(&options.response_format) {
+    if let Some(text_format) =
+        open_responses_text_format(provider_options_name, &options.response_format)
+    {
         body.insert(
             "text".to_string(),
             json!({
@@ -2889,6 +2891,7 @@ fn open_responses_hosted_tool_choice_type(tool_name: &str) -> bool {
 }
 
 fn open_responses_text_format(
+    provider_options_name: &str,
     response_format: &Option<LanguageModelResponseFormat>,
 ) -> Option<JsonValue> {
     let Some(LanguageModelResponseFormat::Json {
@@ -2899,6 +2902,12 @@ fn open_responses_text_format(
     else {
         return None;
     };
+
+    if schema.is_none() && open_responses_json_object_response_format(provider_options_name) {
+        return Some(json!({
+            "type": "json_object"
+        }));
+    }
 
     let mut format = JsonObject::new();
     format.insert(
@@ -2922,6 +2931,13 @@ fn open_responses_text_format(
     }
 
     Some(JsonValue::Object(format))
+}
+
+fn open_responses_json_object_response_format(provider_options_name: &str) -> bool {
+    matches!(
+        provider_options_name,
+        "openai" | "azure" | "vercel-ai-gateway"
+    )
 }
 
 fn open_responses_content(
@@ -9806,6 +9822,108 @@ mod tests {
                     }
                 }
             }))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_maps_no_schema_json_format_by_route() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let captured_requests_for_transport = Arc::clone(&captured_requests);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                captured_requests_for_transport
+                    .lock()
+                    .expect("captured requests mutex is not poisoned")
+                    .push(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_no_schema_json_format",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "{\"status\":\"ok\"}"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 3,
+                            "output_tokens": 3
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+
+        for provider_name in ["openai", "azure", "vercel-ai-gateway", "lmstudio"] {
+            let provider = create_open_responses(
+                OpenResponsesProviderSettings::new(
+                    provider_name,
+                    format!("https://api.{provider_name}.test/v1/responses"),
+                )
+                .with_api_key("test-api-key"),
+            )
+            .with_transport(Arc::clone(&transport));
+            let model = provider.language_model("gpt-4.1-mini");
+
+            let result = poll_ready(
+                model.do_generate(
+                    LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                        LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                            LanguageModelTextPart::new("Hello"),
+                        )]),
+                    )])
+                    .with_response_format(LanguageModelResponseFormat::json()),
+                ),
+            );
+
+            assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+            assert!(result.warnings.is_empty());
+        }
+
+        let requests = captured_requests
+            .lock()
+            .expect("captured requests mutex is not poisoned")
+            .clone();
+        assert_eq!(requests.len(), 4);
+        let request_bodies = requests
+            .iter()
+            .map(|request| {
+                request
+                    .body
+                    .as_ref()
+                    .and_then(ProviderApiRequestBody::as_text)
+                    .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+                    .expect("request body is JSON")
+            })
+            .collect::<Vec<_>>();
+
+        for body in &request_bodies[..3] {
+            assert_eq!(
+                body["text"],
+                json!({
+                    "format": {
+                        "type": "json_object"
+                    }
+                })
+            );
+        }
+        assert_eq!(
+            request_bodies[3]["text"],
+            json!({
+                "format": {
+                    "type": "json_schema"
+                }
+            })
         );
     }
 
