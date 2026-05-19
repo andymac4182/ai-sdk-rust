@@ -768,6 +768,7 @@ pub type GenerateTextOnStartFunction<'a> =
 pub type GenerateTextOnStartCallback<'a> = GenerateTextOnStartFunction<'a>;
 
 /// Callback wrapper for upstream `experimental_onStart`.
+#[derive(Clone)]
 pub struct GenerateTextOnStart<'a> {
     on_start: Rc<GenerateTextOnStartFunction<'a>>,
 }
@@ -809,6 +810,7 @@ pub type GenerateTextOnStepStartFunction<'a> =
 pub type GenerateTextOnStepStartCallback<'a> = GenerateTextOnStepStartFunction<'a>;
 
 /// Callback wrapper for upstream `experimental_onStepStart`.
+#[derive(Clone)]
 pub struct GenerateTextOnStepStart<'a> {
     on_step_start: Rc<GenerateTextOnStepStartFunction<'a>>,
 }
@@ -847,6 +849,7 @@ pub type GenerateTextOnLanguageModelCallStartFunction<'a> =
     dyn Fn(LanguageModelCallStartEvent) -> GenerateTextOnLanguageModelCallStartFuture<'a> + 'a;
 
 /// Callback wrapper for upstream `experimental_onLanguageModelCallStart`.
+#[derive(Clone)]
 pub struct GenerateTextOnLanguageModelCallStart<'a> {
     on_language_model_call_start: Rc<GenerateTextOnLanguageModelCallStartFunction<'a>>,
 }
@@ -890,6 +893,7 @@ pub type GenerateTextOnLanguageModelCallEndFunction<'a> =
     dyn Fn(LanguageModelCallEndEvent) -> GenerateTextOnLanguageModelCallEndFuture<'a> + 'a;
 
 /// Callback wrapper for upstream `experimental_onLanguageModelCallEnd`.
+#[derive(Clone)]
 pub struct GenerateTextOnLanguageModelCallEnd<'a> {
     on_language_model_call_end: Rc<GenerateTextOnLanguageModelCallEndFunction<'a>>,
 }
@@ -992,6 +996,7 @@ pub type GenerateTextOnToolExecutionStartFunction<'a> =
 pub type OnToolExecutionStartCallback<'a> = GenerateTextOnToolExecutionStartFunction<'a>;
 
 /// Callback wrapper for upstream `onToolExecutionStart`.
+#[derive(Clone)]
 pub struct GenerateTextOnToolExecutionStart<'a> {
     on_tool_execution_start: Rc<GenerateTextOnToolExecutionStartFunction<'a>>,
 }
@@ -1036,6 +1041,7 @@ pub type GenerateTextOnToolExecutionEndFunction<'a> =
 pub type OnToolExecutionEndCallback<'a> = GenerateTextOnToolExecutionEndFunction<'a>;
 
 /// Callback wrapper for upstream `onToolExecutionEnd`.
+#[derive(Clone)]
 pub struct GenerateTextOnToolExecutionEnd<'a> {
     on_tool_execution_end: Rc<GenerateTextOnToolExecutionEndFunction<'a>>,
 }
@@ -1083,6 +1089,7 @@ pub type GenerateTextOnStepFinishCallback<'a> = GenerateTextOnStepFinishFunction
 ///
 /// The callback receives the fully constructed step result after response
 /// messages, include filtering, and performance metrics have been populated.
+#[derive(Clone)]
 pub struct GenerateTextOnStepFinish<'a> {
     on_step_finish: Rc<GenerateTextOnStepFinishFunction<'a>>,
 }
@@ -1127,6 +1134,7 @@ pub type GenerateTextOnFinishCallback<'a> = GenerateTextOnFinishFunction<'a>;
 ///
 /// The callback receives the final step fields plus all accumulated response
 /// messages, steps, and total usage before high-level output parsing.
+#[derive(Clone)]
 pub struct GenerateTextOnFinish<'a> {
     on_finish: Rc<GenerateTextOnFinishFunction<'a>>,
 }

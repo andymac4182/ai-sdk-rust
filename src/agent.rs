@@ -5,7 +5,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::generate_text::{
-    ActiveTools, GenerateTextInclude, GenerateTextOptions, GenerateTextResult, GenerateTextTool,
+    ActiveTools, GenerateTextFinishEvent, GenerateTextInclude, GenerateTextOnFinish,
+    GenerateTextOnStart, GenerateTextOnStepFinish, GenerateTextOnStepStart,
+    GenerateTextOnToolExecutionEnd, GenerateTextOnToolExecutionStart, GenerateTextOptions,
+    GenerateTextResult, GenerateTextStartEvent, GenerateTextStep, GenerateTextStepStartEvent,
+    GenerateTextTool, GenerateTextToolExecutionEndEvent, GenerateTextToolExecutionStartEvent,
     StopCondition, ToolApprovalConfiguration, ToolCallRepair, ToolInputRefinement, generate_text,
 };
 use crate::headers::Headers;
@@ -122,6 +126,24 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgent<'a, M> {
             tool_call_repair: options
                 .tool_call_repair
                 .or_else(|| self.settings.tool_call_repair.clone()),
+            on_start: merge_on_start(self.settings.on_start.clone(), options.on_start),
+            on_step_start: merge_on_step_start(
+                self.settings.on_step_start.clone(),
+                options.on_step_start,
+            ),
+            on_tool_execution_start: merge_on_tool_execution_start(
+                self.settings.on_tool_execution_start.clone(),
+                options.on_tool_execution_start,
+            ),
+            on_tool_execution_end: merge_on_tool_execution_end(
+                self.settings.on_tool_execution_end.clone(),
+                options.on_tool_execution_end,
+            ),
+            on_step_finish: merge_on_step_finish(
+                self.settings.on_step_finish.clone(),
+                options.on_step_finish,
+            ),
+            on_finish: merge_on_finish(self.settings.on_finish.clone(), options.on_finish),
             telemetry: options
                 .telemetry
                 .or_else(|| self.settings.telemetry.clone()),
@@ -180,6 +202,24 @@ pub struct ToolLoopAgentSettings<'a, M: LanguageModel + ?Sized> {
     /// Optional tool-call repair callback.
     pub tool_call_repair: Option<ToolCallRepair>,
 
+    /// Callback invoked before model work begins.
+    pub on_start: Option<GenerateTextOnStart<'a>>,
+
+    /// Callback invoked before each model step begins.
+    pub on_step_start: Option<GenerateTextOnStepStart<'a>>,
+
+    /// Callback invoked before each local Rust tool executor starts.
+    pub on_tool_execution_start: Option<GenerateTextOnToolExecutionStart<'a>>,
+
+    /// Callback invoked after each local Rust tool executor completes.
+    pub on_tool_execution_end: Option<GenerateTextOnToolExecutionEnd<'a>>,
+
+    /// Callback invoked after each completed model step.
+    pub on_step_finish: Option<GenerateTextOnStepFinish<'a>>,
+
+    /// Callback invoked after the full call finishes.
+    pub on_finish: Option<GenerateTextOnFinish<'a>>,
+
     /// Telemetry settings.
     pub telemetry: Option<TelemetryOptions>,
 
@@ -212,6 +252,12 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentSettings<'a, M> {
             tool_approval: None,
             tool_input_refinements: BTreeMap::new(),
             tool_call_repair: None,
+            on_start: None,
+            on_step_start: None,
+            on_tool_execution_start: None,
+            on_tool_execution_end: None,
+            on_step_finish: None,
+            on_finish: None,
             telemetry: None,
             max_steps: Some(20),
             stop_conditions: Vec::new(),
@@ -301,6 +347,69 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentSettings<'a, M> {
         E: fmt::Display,
     {
         self.tool_call_repair = Some(ToolCallRepair::new(repair));
+        self
+    }
+
+    /// Sets a default start callback.
+    pub fn with_on_start<F, Fut>(mut self, on_start: F) -> Self
+    where
+        F: Fn(GenerateTextStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_start = Some(GenerateTextOnStart::new(on_start));
+        self
+    }
+
+    /// Sets a default step-start callback.
+    pub fn with_on_step_start<F, Fut>(mut self, on_step_start: F) -> Self
+    where
+        F: Fn(GenerateTextStepStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_step_start = Some(GenerateTextOnStepStart::new(on_step_start));
+        self
+    }
+
+    /// Sets a default tool-execution start callback.
+    pub fn with_on_tool_execution_start<F, Fut>(mut self, on_tool_execution_start: F) -> Self
+    where
+        F: Fn(GenerateTextToolExecutionStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_tool_execution_start = Some(GenerateTextOnToolExecutionStart::new(
+            on_tool_execution_start,
+        ));
+        self
+    }
+
+    /// Sets a default tool-execution end callback.
+    pub fn with_on_tool_execution_end<F, Fut>(mut self, on_tool_execution_end: F) -> Self
+    where
+        F: Fn(GenerateTextToolExecutionEndEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_tool_execution_end =
+            Some(GenerateTextOnToolExecutionEnd::new(on_tool_execution_end));
+        self
+    }
+
+    /// Sets a default step-finish callback.
+    pub fn with_on_step_finish<F, Fut>(mut self, on_step_finish: F) -> Self
+    where
+        F: Fn(GenerateTextStep) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_step_finish = Some(GenerateTextOnStepFinish::new(on_step_finish));
+        self
+    }
+
+    /// Sets a default finish callback.
+    pub fn with_on_finish<F, Fut>(mut self, on_finish: F) -> Self
+    where
+        F: Fn(GenerateTextFinishEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_finish = Some(GenerateTextOnFinish::new(on_finish));
         self
     }
 
@@ -541,6 +650,12 @@ pub struct ToolLoopAgentCallOptions<'a, M: LanguageModel + ?Sized> {
     pub tool_approval: Option<ToolApprovalConfiguration>,
     pub tool_input_refinements: BTreeMap<String, ToolInputRefinement>,
     pub tool_call_repair: Option<ToolCallRepair>,
+    pub on_start: Option<GenerateTextOnStart<'a>>,
+    pub on_step_start: Option<GenerateTextOnStepStart<'a>>,
+    pub on_tool_execution_start: Option<GenerateTextOnToolExecutionStart<'a>>,
+    pub on_tool_execution_end: Option<GenerateTextOnToolExecutionEnd<'a>>,
+    pub on_step_finish: Option<GenerateTextOnStepFinish<'a>>,
+    pub on_finish: Option<GenerateTextOnFinish<'a>>,
     pub telemetry: Option<TelemetryOptions>,
     pub max_steps: Option<usize>,
     pub stop_conditions: Vec<StopCondition>,
@@ -563,6 +678,12 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentCallOptions<'a, M> {
             tool_approval: None,
             tool_input_refinements: BTreeMap::new(),
             tool_call_repair: None,
+            on_start: None,
+            on_step_start: None,
+            on_tool_execution_start: None,
+            on_tool_execution_end: None,
+            on_step_finish: None,
+            on_finish: None,
             telemetry: None,
             max_steps: None,
             stop_conditions: Vec::new(),
@@ -670,6 +791,69 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentCallOptions<'a, M> {
         self
     }
 
+    /// Sets a per-call start callback.
+    pub fn with_on_start<F, Fut>(mut self, on_start: F) -> Self
+    where
+        F: Fn(GenerateTextStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_start = Some(GenerateTextOnStart::new(on_start));
+        self
+    }
+
+    /// Sets a per-call step-start callback.
+    pub fn with_on_step_start<F, Fut>(mut self, on_step_start: F) -> Self
+    where
+        F: Fn(GenerateTextStepStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_step_start = Some(GenerateTextOnStepStart::new(on_step_start));
+        self
+    }
+
+    /// Sets a per-call tool-execution start callback.
+    pub fn with_on_tool_execution_start<F, Fut>(mut self, on_tool_execution_start: F) -> Self
+    where
+        F: Fn(GenerateTextToolExecutionStartEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_tool_execution_start = Some(GenerateTextOnToolExecutionStart::new(
+            on_tool_execution_start,
+        ));
+        self
+    }
+
+    /// Sets a per-call tool-execution end callback.
+    pub fn with_on_tool_execution_end<F, Fut>(mut self, on_tool_execution_end: F) -> Self
+    where
+        F: Fn(GenerateTextToolExecutionEndEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_tool_execution_end =
+            Some(GenerateTextOnToolExecutionEnd::new(on_tool_execution_end));
+        self
+    }
+
+    /// Sets a per-call step-finish callback.
+    pub fn with_on_step_finish<F, Fut>(mut self, on_step_finish: F) -> Self
+    where
+        F: Fn(GenerateTextStep) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_step_finish = Some(GenerateTextOnStepFinish::new(on_step_finish));
+        self
+    }
+
+    /// Sets a per-call finish callback.
+    pub fn with_on_finish<F, Fut>(mut self, on_finish: F) -> Self
+    where
+        F: Fn(GenerateTextFinishEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_finish = Some(GenerateTextOnFinish::new(on_finish));
+        self
+    }
+
     /// Sets per-call telemetry.
     pub fn with_telemetry(mut self, telemetry: TelemetryOptions) -> Self {
         self.telemetry = Some(telemetry);
@@ -727,6 +911,12 @@ pub struct ToolLoopAgentPreparedCall<'a, M: LanguageModel + ?Sized> {
     pub tool_approval: Option<ToolApprovalConfiguration>,
     pub tool_input_refinements: BTreeMap<String, ToolInputRefinement>,
     pub tool_call_repair: Option<ToolCallRepair>,
+    pub on_start: Option<GenerateTextOnStart<'a>>,
+    pub on_step_start: Option<GenerateTextOnStepStart<'a>>,
+    pub on_tool_execution_start: Option<GenerateTextOnToolExecutionStart<'a>>,
+    pub on_tool_execution_end: Option<GenerateTextOnToolExecutionEnd<'a>>,
+    pub on_step_finish: Option<GenerateTextOnStepFinish<'a>>,
+    pub on_finish: Option<GenerateTextOnFinish<'a>>,
     pub telemetry: Option<TelemetryOptions>,
     pub max_steps: usize,
     pub stop_conditions: Vec<StopCondition>,
@@ -827,6 +1017,12 @@ fn apply_generate_prepared_options<'a, M: LanguageModel + ?Sized>(
     options.tool_approval = prepared.tool_approval;
     options.tool_input_refinements = prepared.tool_input_refinements;
     options.tool_call_repair = prepared.tool_call_repair;
+    options.on_start = prepared.on_start;
+    options.on_step_start = prepared.on_step_start;
+    options.on_tool_execution_start = prepared.on_tool_execution_start;
+    options.on_tool_execution_end = prepared.on_tool_execution_end;
+    options.on_step_finish = prepared.on_step_finish;
+    options.on_finish = prepared.on_finish;
     options.telemetry = prepared.telemetry;
     options.max_steps = prepared.max_steps.max(1);
     options.stop_conditions = prepared.stop_conditions;
@@ -850,6 +1046,12 @@ fn apply_stream_prepared_options<'a, M: LanguageModel + ?Sized>(
     options.tool_approval = prepared.tool_approval;
     options.tool_input_refinements = prepared.tool_input_refinements;
     options.tool_call_repair = prepared.tool_call_repair;
+    options.on_start = prepared.on_start;
+    options.on_step_start = prepared.on_step_start;
+    options.on_tool_execution_start = prepared.on_tool_execution_start;
+    options.on_tool_execution_end = prepared.on_tool_execution_end;
+    options.on_step_finish = prepared.on_step_finish;
+    options.on_finish = prepared.on_finish;
     options.telemetry = prepared.telemetry;
     options.max_steps = prepared.max_steps.max(1);
     options.stop_conditions = prepared.stop_conditions;
@@ -883,10 +1085,120 @@ fn merge_tool_input_refinements(
     base
 }
 
+fn merge_on_start<'a>(
+    first: Option<GenerateTextOnStart<'a>>,
+    second: Option<GenerateTextOnStart<'a>>,
+) -> Option<GenerateTextOnStart<'a>> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(GenerateTextOnStart::new(move |event| {
+            let first = first.clone();
+            let second = second.clone();
+            async move {
+                first.start(event.clone()).await;
+                second.start(event).await;
+            }
+        })),
+        (Some(callback), None) | (None, Some(callback)) => Some(callback),
+        (None, None) => None,
+    }
+}
+
+fn merge_on_step_start<'a>(
+    first: Option<GenerateTextOnStepStart<'a>>,
+    second: Option<GenerateTextOnStepStart<'a>>,
+) -> Option<GenerateTextOnStepStart<'a>> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(GenerateTextOnStepStart::new(move |event| {
+            let first = first.clone();
+            let second = second.clone();
+            async move {
+                first.start(event.clone()).await;
+                second.start(event).await;
+            }
+        })),
+        (Some(callback), None) | (None, Some(callback)) => Some(callback),
+        (None, None) => None,
+    }
+}
+
+fn merge_on_tool_execution_start<'a>(
+    first: Option<GenerateTextOnToolExecutionStart<'a>>,
+    second: Option<GenerateTextOnToolExecutionStart<'a>>,
+) -> Option<GenerateTextOnToolExecutionStart<'a>> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(GenerateTextOnToolExecutionStart::new(move |event| {
+            let first = first.clone();
+            let second = second.clone();
+            async move {
+                first.start(event.clone()).await;
+                second.start(event).await;
+            }
+        })),
+        (Some(callback), None) | (None, Some(callback)) => Some(callback),
+        (None, None) => None,
+    }
+}
+
+fn merge_on_tool_execution_end<'a>(
+    first: Option<GenerateTextOnToolExecutionEnd<'a>>,
+    second: Option<GenerateTextOnToolExecutionEnd<'a>>,
+) -> Option<GenerateTextOnToolExecutionEnd<'a>> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(GenerateTextOnToolExecutionEnd::new(move |event| {
+            let first = first.clone();
+            let second = second.clone();
+            async move {
+                first.end(event.clone()).await;
+                second.end(event).await;
+            }
+        })),
+        (Some(callback), None) | (None, Some(callback)) => Some(callback),
+        (None, None) => None,
+    }
+}
+
+fn merge_on_step_finish<'a>(
+    first: Option<GenerateTextOnStepFinish<'a>>,
+    second: Option<GenerateTextOnStepFinish<'a>>,
+) -> Option<GenerateTextOnStepFinish<'a>> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(GenerateTextOnStepFinish::new(move |step| {
+            let first = first.clone();
+            let second = second.clone();
+            async move {
+                first.finish(step.clone()).await;
+                second.finish(step).await;
+            }
+        })),
+        (Some(callback), None) | (None, Some(callback)) => Some(callback),
+        (None, None) => None,
+    }
+}
+
+fn merge_on_finish<'a>(
+    first: Option<GenerateTextOnFinish<'a>>,
+    second: Option<GenerateTextOnFinish<'a>>,
+) -> Option<GenerateTextOnFinish<'a>> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(GenerateTextOnFinish::new(move |event| {
+            let first = first.clone();
+            let second = second.clone();
+            async move {
+                first.finish(event.clone()).await;
+                second.finish(event).await;
+            }
+        })),
+        (Some(callback), None) | (None, Some(callback)) => Some(callback),
+        (None, None) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::future::Future;
     use std::pin::Pin;
+    use std::rc::Rc;
     use std::task::{Context, Poll, Waker};
 
     use serde_json::json;
@@ -894,8 +1206,8 @@ mod tests {
     use super::*;
     use crate::language_model::{
         FinishReason, LanguageModelContent, LanguageModelFinishReason, LanguageModelGenerateResult,
-        LanguageModelStreamFinish, LanguageModelStreamResult, LanguageModelText,
-        LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
+        LanguageModelStreamFinish, LanguageModelStreamPart, LanguageModelStreamResult,
+        LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
         LanguageModelToolCall, LanguageModelUsage,
     };
     use crate::mock_models::MockLanguageModel;
@@ -1028,6 +1340,34 @@ mod tests {
     }
 
     #[test]
+    fn tool_loop_agent_merges_generate_start_callbacks_in_order() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let settings_calls = Rc::clone(&calls);
+        let call_calls = Rc::clone(&calls);
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model).with_on_start(
+            move |_event| {
+                let calls = Rc::clone(&settings_calls);
+                async move {
+                    calls.borrow_mut().push("settings");
+                }
+            },
+        ));
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("Hello").with_on_start(move |_event| {
+                let calls = Rc::clone(&call_calls);
+                async move {
+                    calls.borrow_mut().push("call");
+                }
+            });
+
+        let result = poll_ready(agent.generate(options)).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "reply");
+        assert_eq!(&*calls.borrow(), &["settings", "call"]);
+    }
+
+    #[test]
     fn tool_loop_agent_uses_upstream_twenty_step_default_for_tool_loop() {
         let model = MockLanguageModel::new()
             .with_generate_results([tool_call_result(), text_result("done")]);
@@ -1044,6 +1384,57 @@ mod tests {
         assert_eq!(result.text, "done");
         assert_eq!(result.steps.len(), 2);
         assert_eq!(model.generate_calls().len(), 2);
+    }
+
+    #[test]
+    fn tool_loop_agent_merges_tool_execution_callbacks_in_order() {
+        let model = MockLanguageModel::new()
+            .with_generate_results([tool_call_result(), text_result("done")]);
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let settings_start_calls = Rc::clone(&calls);
+        let settings_end_calls = Rc::clone(&calls);
+        let call_start_calls = Rc::clone(&calls);
+        let call_end_calls = Rc::clone(&calls);
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model)
+                .with_tool(Tool::new("weather", object_schema()).with_execute(
+                    |_input, _options| async move { Ok(json!({ "forecast": "sunny" })) },
+                ))
+                .with_on_tool_execution_start(move |_event| {
+                    let calls = Rc::clone(&settings_start_calls);
+                    async move {
+                        calls.borrow_mut().push("settings-start");
+                    }
+                })
+                .with_on_tool_execution_end(move |_event| {
+                    let calls = Rc::clone(&settings_end_calls);
+                    async move {
+                        calls.borrow_mut().push("settings-end");
+                    }
+                }),
+        );
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("What is the weather?")
+                .with_on_tool_execution_start(move |_event| {
+                    let calls = Rc::clone(&call_start_calls);
+                    async move {
+                        calls.borrow_mut().push("call-start");
+                    }
+                })
+                .with_on_tool_execution_end(move |_event| {
+                    let calls = Rc::clone(&call_end_calls);
+                    async move {
+                        calls.borrow_mut().push("call-end");
+                    }
+                });
+
+        let result = poll_ready(agent.generate(options)).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            &*calls.borrow(),
+            &["settings-start", "call-start", "settings-end", "call-end"]
+        );
     }
 
     #[test]
@@ -1071,5 +1462,45 @@ mod tests {
         assert_eq!(result.text, "hello");
         assert_eq!(model.stream_calls().len(), 1);
         assert_eq!(model.stream_calls()[0].temperature, Some(0.4));
+    }
+
+    #[test]
+    fn tool_loop_agent_merges_stream_finish_callbacks_in_order() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    LanguageModelUsage::default(),
+                    LanguageModelFinishReason {
+                        unified: FinishReason::Stop,
+                        raw: Some("stop".to_string()),
+                    },
+                )),
+            ]));
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let settings_calls = Rc::clone(&calls);
+        let call_calls = Rc::clone(&calls);
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model).with_on_finish(
+            move |_event| {
+                let calls = Rc::clone(&settings_calls);
+                async move {
+                    calls.borrow_mut().push("settings");
+                }
+            },
+        ));
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("Hello").with_on_finish(move |_event| {
+                let calls = Rc::clone(&call_calls);
+                async move {
+                    calls.borrow_mut().push("call");
+                }
+            });
+
+        let result = poll_ready(agent.stream(options)).expect("agent stream succeeds");
+
+        assert_eq!(result.text, "hello");
+        assert_eq!(&*calls.borrow(), &["settings", "call"]);
     }
 }
