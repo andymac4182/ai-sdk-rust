@@ -729,6 +729,10 @@ pub type McpClientResult<T> = Result<T, McpClientError>;
 type ElicitationRequestHandler =
     Arc<dyn Fn(ElicitationRequest) -> McpClientResult<ElicitResult> + Send + Sync>;
 
+/// Callback invoked for transport or request-handler errors that are not
+/// returned through a specific client method.
+pub type McpUncaughtErrorHandler = Arc<dyn Fn(McpClientError) + Send + Sync>;
+
 /// Environment variable names inherited by MCP stdio child processes.
 pub fn default_stdio_inherited_environment_keys() -> &'static [&'static str] {
     if cfg!(windows) {
@@ -1032,6 +1036,7 @@ impl McpTransport for StdioMcpTransport {
 /// Configuration used to create an MCP client.
 pub struct McpClientConfig {
     pub transport: Box<dyn McpTransport>,
+    pub on_uncaught_error: Option<McpUncaughtErrorHandler>,
     pub client_name: Option<String>,
     pub name: Option<String>,
     pub version: Option<String>,
@@ -1043,6 +1048,7 @@ impl McpClientConfig {
     pub fn new(transport: impl McpTransport + 'static) -> Self {
         Self {
             transport: Box::new(transport),
+            on_uncaught_error: None,
             client_name: None,
             name: None,
             version: None,
@@ -1071,6 +1077,15 @@ impl McpClientConfig {
     /// Sets client capabilities advertised during initialization.
     pub fn with_capabilities(mut self, capabilities: ClientCapabilities) -> Self {
         self.capabilities = Some(capabilities);
+        self
+    }
+
+    /// Sets the callback for uncaught transport or request-handler errors.
+    pub fn with_on_uncaught_error(
+        mut self,
+        handler: impl Fn(McpClientError) + Send + Sync + 'static,
+    ) -> Self {
+        self.on_uncaught_error = Some(Arc::new(handler));
         self
     }
 }
@@ -1187,6 +1202,7 @@ pub fn create_mcp_client(config: McpClientConfig) -> McpClientResult<McpClient> 
             server_info: Configuration::new("", ""),
             instructions: None,
             is_closed: true,
+            on_uncaught_error: config.on_uncaught_error,
             elicitation_request_handler: None,
         })),
     };
@@ -1214,6 +1230,7 @@ struct McpClientInner {
     server_info: Configuration,
     instructions: Option<String>,
     is_closed: bool,
+    on_uncaught_error: Option<McpUncaughtErrorHandler>,
     elicitation_request_handler: Option<ElicitationRequestHandler>,
 }
 
@@ -1428,7 +1445,10 @@ impl McpClient {
 
     fn init(&self) -> McpClientResult<()> {
         self.with_inner(|inner| {
-            inner.transport.start()?;
+            if let Err(error) = inner.transport.start() {
+                inner.on_uncaught_error(error.clone());
+                return Err(error);
+            }
             inner.is_closed = false;
             let result: InitializeResult = inner.request(
                 "initialize",
@@ -1541,10 +1561,12 @@ impl McpClientInner {
                 }
                 JsonRpcMessage::Request(request) => self.on_request_message(request)?,
                 JsonRpcMessage::Notification(notification) => {
-                    return Err(McpClientError::new(format!(
+                    let error = McpClientError::new(format!(
                         "Unsupported notification method: {}",
                         notification.method
-                    )));
+                    ));
+                    self.on_uncaught_error(error.clone());
+                    return Err(error);
                 }
             }
         }
@@ -1601,10 +1623,21 @@ impl McpClientInner {
 
         match handler(parsed_request) {
             Ok(result) => self.send_response(JsonRpcResponse::success(request.id, result)),
-            Err(error) => self.send_response(JsonRpcResponse::error(
-                request.id,
-                JsonRpcError::new(-32603, error.message),
-            )),
+            Err(error) => {
+                let message = error.message.clone();
+                let response = self.send_response(JsonRpcResponse::error(
+                    request.id,
+                    JsonRpcError::new(-32603, message),
+                ));
+                self.on_uncaught_error(error);
+                response
+            }
+        }
+    }
+
+    fn on_uncaught_error(&self, error: McpClientError) {
+        if let Some(handler) = &self.on_uncaught_error {
+            handler(error);
         }
     }
 
@@ -3692,6 +3725,71 @@ mod tests {
     }
 
     #[test]
+    fn mcp_client_invokes_uncaught_error_callback_for_transport_start_errors() {
+        let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let errors_clone = Arc::clone(&errors);
+        let result = create_mcp_client(
+            McpClientConfig::new(StartErrorTransport).with_on_uncaught_error(move |error| {
+                errors_clone
+                    .lock()
+                    .expect("uncaught errors lock")
+                    .push(error.message);
+            }),
+        );
+
+        let error = match result {
+            Ok(_) => panic!("transport start error should fail init"),
+            Err(error) => error,
+        };
+        assert_eq!(error.message, "transport start failed");
+        assert_eq!(
+            errors.lock().expect("uncaught errors lock").as_slice(),
+            ["transport start failed"]
+        );
+    }
+
+    #[test]
+    fn mcp_client_invokes_uncaught_error_callback_for_elicitation_handler_errors() {
+        let transport = ElicitationScenarioTransport::new(
+            JsonRpcRequest::new(json!("failing"), "elicitation/create").with_params(json!({
+                "message": "Name?",
+                "requestedSchema": { "type": "object" }
+            })),
+        );
+        let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let errors_clone = Arc::clone(&errors);
+        let client = create_mcp_client(
+            McpClientConfig::new(transport.clone()).with_on_uncaught_error(move |error| {
+                errors_clone
+                    .lock()
+                    .expect("uncaught errors lock")
+                    .push(error.message);
+            }),
+        )
+        .expect("client initializes");
+        client
+            .on_elicitation_request(|_| Err(McpClientError::new("user declined in host UI")))
+            .expect("handler registers");
+
+        client.list_tools(None).expect("tools list completes");
+
+        assert_eq!(
+            errors.lock().expect("uncaught errors lock").as_slice(),
+            ["user declined in host UI"]
+        );
+        assert!(transport.sent_messages().iter().any(|message| {
+            matches!(
+                message,
+                JsonRpcMessage::Response(response)
+                    if response.id == json!("failing")
+                        && response.error.as_ref().map(|error| error.code) == Some(-32603)
+                        && response.error.as_ref().map(|error| error.message.as_str())
+                            == Some("user declined in host UI")
+            )
+        }));
+    }
+
+    #[test]
     fn mcp_client_builds_executable_dynamic_tools_from_definitions() {
         let tool = app_tool("showDashboard", vec!["model", "app"]);
         let result = CallToolResult {
@@ -4297,6 +4395,18 @@ mod tests {
                     JsonRpcError::new(-32601, format!("Unsupported method: {}", request.method)),
                 ))]),
             }
+        }
+    }
+
+    struct StartErrorTransport;
+
+    impl McpTransport for StartErrorTransport {
+        fn start(&mut self) -> McpClientResult<()> {
+            Err(McpClientError::new("transport start failed"))
+        }
+
+        fn send(&mut self, _message: JsonRpcMessage) -> McpClientResult<Vec<JsonRpcMessage>> {
+            Ok(Vec::new())
         }
     }
 
