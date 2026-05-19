@@ -3,9 +3,10 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::VERSION;
@@ -542,6 +543,111 @@ pub enum TextStreamPart {
     Finish(TextStreamFinishPart),
 }
 
+/// Callback used by [`SmoothStreamChunking::Detector`] to split buffered text.
+pub type SmoothStreamChunkDetector = Arc<dyn Fn(&str) -> Option<String> + Send + Sync + 'static>;
+
+/// Chunking strategy used by [`smooth_stream`].
+#[derive(Clone, Default)]
+pub enum SmoothStreamChunking {
+    /// Emit the first word plus trailing whitespace, matching upstream `word`.
+    #[default]
+    Word,
+
+    /// Emit through the first newline sequence, matching upstream `line`.
+    Line,
+
+    /// Emit through the first custom pattern match.
+    Pattern(Regex),
+
+    /// Emit the custom detector's prefix match.
+    Detector(SmoothStreamChunkDetector),
+}
+
+impl fmt::Debug for SmoothStreamChunking {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Word => formatter.write_str("Word"),
+            Self::Line => formatter.write_str("Line"),
+            Self::Pattern(pattern) => formatter
+                .debug_tuple("Pattern")
+                .field(&pattern.as_str())
+                .finish(),
+            Self::Detector(_) => formatter.write_str("Detector(..)"),
+        }
+    }
+}
+
+/// Options for Rust-native `smoothStream` parity.
+#[derive(Clone, Debug)]
+pub struct SmoothStreamOptions {
+    /// Controls how buffered text and reasoning deltas are split.
+    pub chunking: SmoothStreamChunking,
+}
+
+impl SmoothStreamOptions {
+    /// Creates default word-based smoothing options.
+    pub fn new() -> Self {
+        Self {
+            chunking: SmoothStreamChunking::Word,
+        }
+    }
+
+    /// Sets the smoothing chunking strategy.
+    pub fn with_chunking(mut self, chunking: SmoothStreamChunking) -> Self {
+        self.chunking = chunking;
+        self
+    }
+}
+
+impl Default for SmoothStreamOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Error produced while applying [`smooth_stream`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SmoothStreamError {
+    /// A regular expression matched an empty string, which cannot advance the buffer.
+    EmptyPatternMatch { pattern: String },
+
+    /// A custom detector returned an empty chunk.
+    EmptyDetectorMatch,
+
+    /// A custom detector returned a chunk that is not a prefix of the buffer.
+    NonPrefixDetectorMatch { matched: String, buffer: String },
+}
+
+impl fmt::Display for SmoothStreamError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyPatternMatch { pattern } => {
+                write!(
+                    formatter,
+                    "Chunking pattern must not match an empty string. Received: {pattern}"
+                )
+            }
+            Self::EmptyDetectorMatch => {
+                formatter.write_str("Chunking function must return a non-empty string.")
+            }
+            Self::NonPrefixDetectorMatch { matched, buffer } => write!(
+                formatter,
+                "Chunking function must return a match that is a prefix of the buffer. Received: \"{matched}\" expected to start with \"{buffer}\""
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SmoothStreamError {}
+
+/// Smooths text and reasoning deltas in a collected stream part sequence.
+pub fn smooth_stream(
+    parts: impl IntoIterator<Item = TextStreamPart>,
+    options: SmoothStreamOptions,
+) -> Result<Vec<TextStreamPart>, SmoothStreamError> {
+    smooth_stream_parts(parts, &options)
+}
+
 /// Event sent for each portable streamed chunk accepted by `onChunk`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -746,6 +852,9 @@ pub struct StreamTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Maximum number of retries for failed provider stream requests.
     pub max_retries: usize,
 
+    /// Optional Rust-native smooth stream transform.
+    pub smooth_stream: Option<SmoothStreamOptions>,
+
     /// Optional callback invoked for portable stream chunks.
     pub on_chunk: Option<StreamTextOnChunk<'a>>,
 
@@ -789,6 +898,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             on_finish: None,
             telemetry: None,
             max_retries: DEFAULT_MAX_RETRIES,
+            smooth_stream: None,
             on_chunk: None,
             on_error: None,
             abort_signal: None,
@@ -828,6 +938,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             on_finish: None,
             telemetry: None,
             max_retries: DEFAULT_MAX_RETRIES,
+            smooth_stream: None,
             on_chunk: None,
             on_error: None,
             abort_signal,
@@ -1102,6 +1213,12 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
     /// Sets the maximum number of retries for failed provider stream requests.
     pub fn with_max_retries(mut self, max_retries: usize) -> Self {
         self.max_retries = max_retries;
+        self
+    }
+
+    /// Applies upstream-style smooth streaming to text and reasoning deltas.
+    pub fn with_smooth_stream(mut self, smooth_stream: SmoothStreamOptions) -> Self {
+        self.smooth_stream = Some(smooth_stream);
         self
     }
 
@@ -1979,6 +2096,7 @@ where
         on_finish,
         telemetry,
         max_retries,
+        smooth_stream,
         on_chunk,
         on_error,
         abort_signal,
@@ -2117,6 +2235,7 @@ where
             step_call_options.clone(),
             include_raw_chunks,
             max_retries,
+            smooth_stream.as_ref(),
             &mut parts,
             StreamTextCollectionControls {
                 on_chunk: on_chunk.as_ref(),
@@ -2509,6 +2628,41 @@ impl CollectedStreamTextStep {
             performance: self.performance,
         }
     }
+
+    fn apply_smoothed_parts(&mut self, parts: &[TextStreamPart]) {
+        let mut text = String::new();
+        let mut text_stream = Vec::new();
+        let mut reasoning_text = String::new();
+        let mut has_reasoning_text = false;
+
+        for part in parts {
+            match part {
+                TextStreamPart::TextDelta(part) if !part.text.is_empty() => {
+                    text.push_str(&part.text);
+                    text_stream.push(part.text.clone());
+                }
+                TextStreamPart::ReasoningDelta(part) => {
+                    has_reasoning_text = true;
+                    reasoning_text.push_str(&part.text);
+                }
+                _ => {}
+            }
+        }
+
+        self.text = text;
+        self.text_stream = text_stream;
+        self.reasoning_text = has_reasoning_text.then_some(reasoning_text);
+    }
+
+    fn apply_smooth_stream_error(&mut self, error: &SmoothStreamError) {
+        self.errors.push(JsonValue::String(error.to_string()));
+        self.finish_reason = FinishReason::Error;
+        self.raw_finish_reason = Some("error".to_string());
+        self.text.clear();
+        self.text_stream.clear();
+        self.reasoning_text = None;
+        self.provider_content.clear();
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2523,6 +2677,7 @@ async fn collect_stream_text_step_with_retries<M>(
     call_options: LanguageModelCallOptions,
     include_raw_chunks: bool,
     max_retries: usize,
+    smooth_stream: Option<&SmoothStreamOptions>,
     parts: &mut Vec<TextStreamPart>,
     controls: StreamTextCollectionControls<'_, '_>,
 ) -> CollectedStreamTextStep
@@ -2534,7 +2689,7 @@ where
 
     loop {
         let mut attempt_parts = Vec::new();
-        let collected_step = collect_stream_text_step(
+        let mut collected_step = collect_stream_text_step(
             model,
             call_options.clone(),
             include_raw_chunks,
@@ -2563,6 +2718,22 @@ where
             retries += 1;
             continue;
         }
+
+        let attempt_parts = match smooth_stream {
+            Some(smooth_stream) => match smooth_stream_parts(attempt_parts, smooth_stream) {
+                Ok(attempt_parts) => {
+                    collected_step.apply_smoothed_parts(&attempt_parts);
+                    attempt_parts
+                }
+                Err(error) => {
+                    collected_step.apply_smooth_stream_error(&error);
+                    vec![TextStreamPart::Error(LanguageModelErrorStreamPart::new(
+                        JsonValue::String(error.to_string()),
+                    ))]
+                }
+            },
+            None => attempt_parts,
+        };
 
         if let Some(abort_reason) = replay_stream_text_attempt_parts(
             parts,
@@ -2947,6 +3118,200 @@ fn stream_text_error_is_retryable(error: &JsonValue) -> bool {
         })
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SmoothStreamDeltaKind {
+    Text,
+    Reasoning,
+}
+
+struct SmoothStreamState<'a> {
+    chunking: &'a SmoothStreamChunking,
+    output: Vec<TextStreamPart>,
+    buffer: String,
+    id: String,
+    delta_kind: Option<SmoothStreamDeltaKind>,
+    provider_metadata: Option<ProviderMetadata>,
+}
+
+impl<'a> SmoothStreamState<'a> {
+    fn new(chunking: &'a SmoothStreamChunking) -> Self {
+        Self {
+            chunking,
+            output: Vec::new(),
+            buffer: String::new(),
+            id: String::new(),
+            delta_kind: None,
+            provider_metadata: None,
+        }
+    }
+
+    fn push_part(&mut self, part: TextStreamPart) -> Result<(), SmoothStreamError> {
+        match part {
+            TextStreamPart::TextDelta(part) => {
+                self.push_delta(
+                    SmoothStreamDeltaKind::Text,
+                    part.id,
+                    part.text,
+                    part.provider_metadata,
+                )?;
+            }
+            TextStreamPart::ReasoningDelta(part) => {
+                self.push_delta(
+                    SmoothStreamDeltaKind::Reasoning,
+                    part.id,
+                    part.text,
+                    part.provider_metadata,
+                )?;
+            }
+            part => {
+                self.flush_buffer();
+                self.output.push(part);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn finish(mut self) -> Vec<TextStreamPart> {
+        self.flush_buffer();
+        self.output
+    }
+
+    fn push_delta(
+        &mut self,
+        delta_kind: SmoothStreamDeltaKind,
+        id: String,
+        text: String,
+        provider_metadata: Option<ProviderMetadata>,
+    ) -> Result<(), SmoothStreamError> {
+        if (self.delta_kind != Some(delta_kind) || self.id != id) && !self.buffer.is_empty() {
+            self.flush_buffer();
+        }
+
+        self.buffer.push_str(&text);
+        self.id = id;
+        self.delta_kind = Some(delta_kind);
+
+        if provider_metadata.is_some() {
+            self.provider_metadata = provider_metadata;
+        }
+
+        while let Some(chunk) = detect_smooth_stream_chunk(&self.buffer, self.chunking)? {
+            self.push_delta_part(delta_kind, chunk.clone(), None);
+            self.buffer = self.buffer[chunk.len()..].to_string();
+        }
+
+        Ok(())
+    }
+
+    fn flush_buffer(&mut self) {
+        if self.buffer.is_empty() {
+            return;
+        }
+
+        let Some(delta_kind) = self.delta_kind else {
+            return;
+        };
+
+        let text = std::mem::take(&mut self.buffer);
+        let provider_metadata = self.provider_metadata.take();
+        self.push_delta_part(delta_kind, text, provider_metadata);
+    }
+
+    fn push_delta_part(
+        &mut self,
+        delta_kind: SmoothStreamDeltaKind,
+        text: String,
+        provider_metadata: Option<ProviderMetadata>,
+    ) {
+        match delta_kind {
+            SmoothStreamDeltaKind::Text => {
+                let mut part = TextStreamTextDeltaPart::new(self.id.clone(), text);
+                if let Some(provider_metadata) = provider_metadata {
+                    part = part.with_provider_metadata(provider_metadata);
+                }
+                self.output.push(TextStreamPart::TextDelta(part));
+            }
+            SmoothStreamDeltaKind::Reasoning => {
+                let mut part = TextStreamReasoningDeltaPart::new(self.id.clone(), text);
+                if let Some(provider_metadata) = provider_metadata {
+                    part = part.with_provider_metadata(provider_metadata);
+                }
+                self.output.push(TextStreamPart::ReasoningDelta(part));
+            }
+        }
+    }
+}
+
+fn smooth_stream_parts(
+    parts: impl IntoIterator<Item = TextStreamPart>,
+    options: &SmoothStreamOptions,
+) -> Result<Vec<TextStreamPart>, SmoothStreamError> {
+    let mut state = SmoothStreamState::new(&options.chunking);
+
+    for part in parts {
+        state.push_part(part)?;
+    }
+
+    Ok(state.finish())
+}
+
+fn detect_smooth_stream_chunk(
+    buffer: &str,
+    chunking: &SmoothStreamChunking,
+) -> Result<Option<String>, SmoothStreamError> {
+    match chunking {
+        SmoothStreamChunking::Word => detect_smooth_stream_regex_chunk(buffer, word_chunk_regex()),
+        SmoothStreamChunking::Line => detect_smooth_stream_regex_chunk(buffer, line_chunk_regex()),
+        SmoothStreamChunking::Pattern(regex) => detect_smooth_stream_regex_chunk(buffer, regex),
+        SmoothStreamChunking::Detector(detector) => {
+            let Some(chunk) = detector(buffer) else {
+                return Ok(None);
+            };
+
+            if chunk.is_empty() {
+                return Err(SmoothStreamError::EmptyDetectorMatch);
+            }
+
+            if !buffer.starts_with(&chunk) {
+                return Err(SmoothStreamError::NonPrefixDetectorMatch {
+                    matched: chunk,
+                    buffer: buffer.to_string(),
+                });
+            }
+
+            Ok(Some(chunk))
+        }
+    }
+}
+
+fn detect_smooth_stream_regex_chunk(
+    buffer: &str,
+    regex: &Regex,
+) -> Result<Option<String>, SmoothStreamError> {
+    let Some(chunk_match) = regex.find(buffer) else {
+        return Ok(None);
+    };
+
+    if chunk_match.start() == chunk_match.end() {
+        return Err(SmoothStreamError::EmptyPatternMatch {
+            pattern: regex.as_str().to_string(),
+        });
+    }
+
+    Ok(Some(buffer[..chunk_match.end()].to_string()))
+}
+
+fn word_chunk_regex() -> &'static Regex {
+    static WORD_CHUNK_REGEX: OnceLock<Regex> = OnceLock::new();
+    WORD_CHUNK_REGEX.get_or_init(|| Regex::new(r"\S+\s+").expect("word chunk regex compiles"))
+}
+
+fn line_chunk_regex() -> &'static Regex {
+    static LINE_CHUNK_REGEX: OnceLock<Regex> = OnceLock::new();
+    LINE_CHUNK_REGEX.get_or_init(|| Regex::new(r"\n+").expect("line chunk regex compiles"))
+}
+
 async fn replay_stream_text_attempt_parts(
     parts: &mut Vec<TextStreamPart>,
     attempt_parts: &[TextStreamPart],
@@ -3262,6 +3627,167 @@ mod tests {
         }
     }
 
+    #[test]
+    fn smooth_stream_combines_partial_words() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Hello")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", ", ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "world!")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should transform text chunks");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Hello, ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "world!")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_supports_line_and_pattern_chunking() {
+        let line_parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "First line\nSecond")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", " line\nFinal")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            SmoothStreamOptions::new().with_chunking(SmoothStreamChunking::Line),
+        )
+        .expect("line smoothing should succeed");
+
+        assert_eq!(
+            line_parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "First line\n")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Second line\n")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Final")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+
+        let pattern_parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Hello_, world!")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            SmoothStreamOptions::new().with_chunking(SmoothStreamChunking::Pattern(
+                Regex::new("_").expect("test regex compiles"),
+            )),
+        )
+        .expect("pattern smoothing should succeed");
+
+        assert_eq!(
+            pattern_parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Hello_")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", ", world!")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_supports_detector_chunking_and_validation() {
+        let detector = Arc::new(|buffer: &str| {
+            Regex::new("[^_]*_")
+                .ok()?
+                .find(buffer)
+                .map(|m| buffer[..m.end()].to_string())
+        });
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "He_llo, ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "w_orld!")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            SmoothStreamOptions::new().with_chunking(SmoothStreamChunking::Detector(detector)),
+        )
+        .expect("detector smoothing should succeed");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "He_")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "llo, w_")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "orld!")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+
+        let error = smooth_stream(
+            vec![TextStreamPart::TextDelta(TextStreamTextDeltaPart::new(
+                "1",
+                "Hello, world!",
+            ))],
+            SmoothStreamOptions::new().with_chunking(SmoothStreamChunking::Detector(Arc::new(
+                |_| Some("world".to_string()),
+            ))),
+        )
+        .expect_err("non-prefix detector matches should fail");
+
+        assert_eq!(
+            error,
+            SmoothStreamError::NonPrefixDetectorMatch {
+                matched: "world".to_string(),
+                buffer: "Hello, world!".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn smooth_stream_preserves_provider_metadata_on_flushed_reasoning_delta() {
+        let provider_metadata = ProviderMetadata::from([(
+            "anthropic".to_string(),
+            Map::from_iter([("signature".to_string(), json!("sig_abc123"))]),
+        )]);
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "I am")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new(
+                    "1",
+                    " thinking...",
+                )),
+                TextStreamPart::ReasoningDelta(
+                    TextStreamReasoningDeltaPart::new("1", "")
+                        .with_provider_metadata(provider_metadata.clone()),
+                ),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("reasoning smoothing should succeed");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "I ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "am ")),
+                TextStreamPart::ReasoningDelta(
+                    TextStreamReasoningDeltaPart::new("1", "thinking...")
+                        .with_provider_metadata(provider_metadata)
+                ),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+            ]
+        );
+    }
+
     fn tool_calls_finish_reason() -> LanguageModelFinishReason {
         LanguageModelFinishReason {
             unified: FinishReason::ToolCalls,
@@ -3398,6 +3924,57 @@ mod tests {
             text_response.decoded_body().expect("response body decodes"),
             result.text_stream
         );
+    }
+
+    #[test]
+    fn stream_text_smooth_stream_transforms_chunks_before_callbacks() {
+        let chunks = Arc::new(Mutex::new(Vec::new()));
+        let chunks_for_callback = Arc::clone(&chunks);
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", ", ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_smooth_stream(SmoothStreamOptions::new())
+                .with_on_chunk(move |event| {
+                    let chunks = Arc::clone(&chunks_for_callback);
+                    async move {
+                        if let TextStreamPart::TextDelta(part) = event.chunk {
+                            chunks
+                                .lock()
+                                .expect("chunks mutex is not poisoned")
+                                .push(part.text);
+                        }
+                    }
+                }),
+        ));
+
+        assert_eq!(result.text, "Hello, world!");
+        assert_eq!(
+            result.text_stream,
+            vec!["Hello, ".to_string(), "world!".to_string()]
+        );
+        assert_eq!(
+            *chunks.lock().expect("chunks mutex is not poisoned"),
+            ["Hello, ".to_string(), "world!".to_string()]
+        );
+        assert!(result.parts.iter().any(|part| {
+            matches!(
+                part,
+                TextStreamPart::TextDelta(part) if part.text == "Hello, "
+            )
+        }));
     }
 
     #[test]

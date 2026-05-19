@@ -404,13 +404,14 @@ pub use stream_object::{
     StreamObjectOptions, StreamObjectResponseMetadata, StreamObjectResult, stream_object,
 };
 pub use stream_text::{
+    SmoothStreamChunkDetector, SmoothStreamChunking, SmoothStreamError, SmoothStreamOptions,
     StreamTextAbortController, StreamTextAbortSignal, StreamTextMessageMetadata,
     StreamTextMessageMetadataFunction, StreamTextOnAbortEvent, StreamTextOptions,
     StreamTextResponseMetadata, StreamTextResult, StreamTextStep, StreamTextStepPerformance,
     StreamTextUiMessageStreamOptions, TextStreamFilePart, TextStreamFinishPart,
     TextStreamFinishStepPart, TextStreamPart, TextStreamReasoningDeltaPart,
     TextStreamReasoningFilePart, TextStreamStartPart, TextStreamStartStepPart,
-    TextStreamTextDeltaPart, stream_text,
+    TextStreamTextDeltaPart, smooth_stream, stream_text,
 };
 pub use telemetry::{
     AI_SDK_TELEMETRY_DIAGNOSTIC_CHANNEL, LegacyOpenTelemetryRecorder, OpenTelemetryRecorder,
