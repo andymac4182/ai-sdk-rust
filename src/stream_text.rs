@@ -1608,6 +1608,7 @@ where
                 experimental_sandbox.as_ref(),
                 on_tool_execution_start.as_ref(),
                 on_tool_execution_end.as_ref(),
+                None,
             ),
         )
         .await;
