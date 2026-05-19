@@ -30,7 +30,8 @@ non-provider rows such as MCP, OTel, Workflow, telemetry, UI transport,
 chat/completion transport, and test-server support. Treat Vercel AI Gateway as
 part of the first phase, not as a later standalone provider. Other provider
 packages resume only after those rows are verified or explicitly documented as
-intentionally non-portable.
+intentionally non-portable. Gateway progress does not unlock other providers by
+itself; the whole common/core plus Vercel AI Gateway phase must be closed first.
 
 Preserve Rust 2024 style, serde shapes, builders, public exports, tests, and
 workspace boundaries that align with upstream package responsibilities. Build

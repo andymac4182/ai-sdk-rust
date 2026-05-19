@@ -51,6 +51,8 @@ as MCP, OTel, Workflow, telemetry, logger, UI transport, chat/completion
 transport, and test-server support. Treat Vercel AI Gateway as part of the
 first phase, not as one of the later standalone providers. A standalone provider
 slice is blocked while any first-phase row is `not-started` or `in-progress`.
+Gateway progress alone does not unblock other providers; the whole common/core
+plus Vercel AI Gateway phase must be finished first.
 
 ## Inventory Rules
 
@@ -143,7 +145,7 @@ inventory.
 | `packages/mcp` (`@ai-sdk/mcp`) | protocol/client package | not-started | none | none | Needs MCP client, transports, OAuth, elicitation schemas, app bridge behavior, and tool conversion. |
 | `packages/otel` (`@ai-sdk/otel`) | telemetry package | not-started | none | none | Needs OpenTelemetry spans, GenAI message formatting, attribute selection, and legacy telemetry compatibility. |
 | `packages/workflow` (`@ai-sdk/workflow`) | agent/workflow package | not-started | none | none | Needs workflow agent, serializable schemas, stream iterators, chat transport, and integration-style behavior. |
-| `packages/test-server` (`@ai-sdk/test-server`) | testing support package | not-started | none | none | Needs Rust test server equivalent for provider/API behavior validation. |
+| `packages/test-server` (`@ai-sdk/test-server`) | testing support package | in-progress | `crates/ai-sdk-test-server` | `create_test_server_exposes_urls_and_empty_calls`; `create_test_server_supports_response_mutations_and_reset`; `create_test_server_supports_response_types`; `create_test_server_tracks_request_inspection`; `create_test_server_selects_sequence_and_dynamic_responses_by_call_number`; `response_controller_records_writes_errors_and_close` | Initial package-owned crate provides an in-memory Rust equivalent for the portable parts of upstream `createTestServer`: mutable URL handlers, static/missing/sequence/dynamic responses, JSON/stream/binary/empty/error/controlled-stream response rendering, call capture, request header/body/URL/method/credentials inspection, reset behavior, and `convertArrayToReadableStream`-style chunk collection. MSW interception, Vitest lifecycle hooks, multipart request inspection, and real HTTP server integration remain unported or JavaScript-runtime-specific. |
 | `packages/devtools` (`@ai-sdk/devtools`) | JavaScript devtools package | js-only-documented | none | This row | Upstream exposes JavaScript middleware/telemetry integration for AI SDK DevTools. Portable Rust tracing/telemetry behavior is tracked under telemetry rows; browser devtools integration is intentionally not ported. |
 | `packages/codemod` (`@ai-sdk/codemod`) | JavaScript migration tooling | js-only-documented | none | This row | Upstream codemods transform JavaScript/TypeScript source between AI SDK versions. No Rust SDK runtime equivalent is required. |
 | `packages/angular` (`@ai-sdk/angular`) | JavaScript framework adapter | js-only-documented | none | This row | Angular components/services are JavaScript framework bindings. Portable chat/object/transport semantics are tracked in API rows. |
@@ -300,7 +302,7 @@ focused tests for each portable behavior before changing rows to `verified`.
 | `packages/provider` | 1 | in-progress | Upstream provider contract test is partially covered by Rust provider/model module tests. |
 | `packages/provider-utils` | 77 | in-progress | Many provider support behaviors are represented in the matching `ai-sdk-provider-utils` crate, but stream/browser/fetch parity is incomplete. |
 | Framework adapter tests | 21 | js-only-documented | Angular, React, RSC, Svelte, and Vue bindings are JavaScript framework-specific; portable transport/message semantics are tracked separately. |
-| MCP, Gateway, OTel, Workflow, test server | 39 | in-progress | Gateway package coverage is partially represented, including the `ai-sdk-gateway` crate for provider implementation, errors, account APIs, and tools; MCP, OTel, Workflow, and test-server packages remain unported. |
+| MCP, Gateway, OTel, Workflow, test server | 39 | in-progress | Gateway package coverage is partially represented, including the `ai-sdk-gateway` crate for provider implementation, errors, account APIs, and tools; test-server has an initial package-owned in-memory crate; MCP, OTel, Workflow, and remaining test-server HTTP/MSW/Vitest surfaces remain unported or documented as runtime-specific. |
 | Codemod tests | 54 | js-only-documented | JavaScript migration tooling is intentionally not part of the Rust runtime. |
 | JavaScript library adapter/devtools tests | 6 | js-only-documented | DevTools, LangChain, LlamaIndex, and Valibot rows are documented as JavaScript-specific above. |
 | Repo docs, content, architecture, tools, skills, Changesets, package publishing | not counted | in-progress | Public behavior docs/examples still need Rust equivalents; JS-only repository operations are documented as non-portable where applicable. |
@@ -333,9 +335,13 @@ focused tests for each portable behavior before changing rows to `verified`.
    request/history, and custom provider-tool request/prompt reconstruction are
    represented.
 3. Keep the next slices Gateway-first within the first-phase queue: close
-   broader `packages/gateway` provider-package test gaps and remaining Vercel
-   AI Gateway OpenAI-compatible endpoint coverage before expanding to unrelated
-   providers.
+   the whole common/core plus Vercel AI Gateway first-phase queue before
+   expanding to unrelated providers. Continue choosing from `packages/ai`,
+   `packages/provider`, `packages/provider-utils`, `packages/openai-compatible`,
+   `packages/open-responses`, `packages/gateway`, Vercel AI Gateway routes, MCP,
+   OTel, Workflow, telemetry, UI transport, chat/completion transport, and
+   test-server support until those rows are verified or intentionally
+   documented as non-portable.
 4. Continue `streamText` parity with aborts/retries, UI response helpers, error
    propagation, and remaining stream transform details because Gateway relies on
    this high-level library surface.

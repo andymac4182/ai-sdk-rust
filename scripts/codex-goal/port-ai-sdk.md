@@ -111,7 +111,10 @@ transport, and test-server support. Treat Vercel AI Gateway as part of this
 first phase, not as one of the later standalone provider packages. Do not pick
 another standalone provider slice while any first-phase row is still
 `not-started` or `in-progress`, unless that row is explicitly documented as
-intentionally non-portable.
+intentionally non-portable. This gate applies to the entire first-phase set as
+a group: do not use Gateway progress as a reason to resume Anthropic, Google,
+Bedrock, xAI, or any other unrelated provider while a common/core package row is
+still open.
 
 ## Priorities
 
@@ -178,7 +181,10 @@ intentionally non-portable.
     package rows such as MCP, OTel, Workflow, telemetry, logger, UI transport,
     chat/completion transport, and test-server support. Standalone provider
     slices are blocked while any of those rows are not yet verified or
-    explicitly documented as intentionally non-portable.
+    explicitly documented as intentionally non-portable. The correct order is
+    not "pick another provider after Gateway has some coverage"; it is "finish
+    the whole common/core plus Vercel AI Gateway phase, then pick the remaining
+    providers."
 15. Port every upstream provider package in its matching crate. Prefer
     contract-first typed provider crates with fake/deterministic tests, then add
     HTTP/gateway-backed integration tests where credentials are available. Do
@@ -230,7 +236,9 @@ Repeat this loop until the goal is complete or you hit a real blocker:
    packages together with Vercel AI Gateway provider coverage, including the
    Gateway OpenAI-compatible and Open Responses routes. Do not select an
    unrelated standalone provider slice while any first-phase row is still
-   `not-started` or `in-progress`.
+   `not-started` or `in-progress`. If a slice is not part of that common/core
+   plus Vercel AI Gateway phase, it is out of order until the first phase is
+   closed.
 4. Implement it with tests and docs/examples where useful.
 5. Update `docs/upstream-parity.md` with status, evidence, and next queue.
 6. Run validation.
