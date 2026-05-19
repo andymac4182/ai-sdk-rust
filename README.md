@@ -36,8 +36,9 @@ scripts/check-otel-loopback.sh
 
 That check runs the dependency-free exporter proof and the real Rust
 OpenTelemetry SDK OTLP/HTTP JSON exporter against the loopback receiver. To
-also run the ignored live Vercel AI Gateway text, object, stream-text, and
-stream-object telemetry tests when `.env.local` contains credentials:
+also run the ignored live Vercel AI Gateway OpenAI-compatible text/object
+telemetry tests plus OpenAI Responses generate/stream telemetry tests when
+`.env.local` contains credentials:
 
 ```sh
 scripts/check-otel-loopback.sh --live-gateway
