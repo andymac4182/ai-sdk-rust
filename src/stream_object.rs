@@ -19,10 +19,11 @@ use crate::headers::Headers;
 use crate::json::{JsonSchema, JsonValue};
 use crate::language_model::{
     FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelPrompt,
-    LanguageModelRequest, LanguageModelResponseFormat, LanguageModelStreamPart, LanguageModelUsage,
+    LanguageModelRequest, LanguageModelResponseFormat, LanguageModelStreamPart,
+    LanguageModelStreamResult, LanguageModelUsage,
 };
 use crate::prompt::{Prompt, standardize_prompt};
-use crate::provider::{InvalidPromptError, ProviderMetadata, ProviderOptions};
+use crate::provider::{ApiCallError, InvalidPromptError, ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{
     FlexibleSchema, ParseJsonResult, ValidateTypesResult, safe_validate_types,
     with_user_agent_suffix,
@@ -197,6 +198,9 @@ pub struct StreamObjectOptions<'a, M: LanguageModel + ?Sized> {
 
     /// Optional telemetry dispatcher settings.
     pub telemetry: Option<TelemetryOptions>,
+
+    /// Maximum number of retries for failed provider stream requests.
+    pub max_retries: usize,
 }
 
 impl<'a, M: LanguageModel + ?Sized> StreamObjectOptions<'a, M> {
@@ -230,6 +234,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamObjectOptions<'a, M> {
             on_finish: None,
             on_error: None,
             telemetry: None,
+            max_retries: DEFAULT_MAX_RETRIES,
         }
     }
 
@@ -397,6 +402,12 @@ impl<'a, M: LanguageModel + ?Sized> StreamObjectOptions<'a, M> {
         self.telemetry = Some(telemetry);
         self
     }
+
+    /// Sets the maximum number of retries for failed provider stream requests.
+    pub fn with_max_retries(mut self, max_retries: usize) -> Self {
+        self.max_retries = max_retries;
+        self
+    }
 }
 
 /// Collected result of a high-level object streaming call.
@@ -493,6 +504,7 @@ where
         on_finish,
         on_error,
         telemetry,
+        max_retries,
     } = options;
 
     let output_kind = generate_object_output_kind(&schema, enum_values.as_deref(), array_output);
@@ -524,7 +536,7 @@ where
             presence_penalty: call_options.presence_penalty,
             frequency_penalty: call_options.frequency_penalty,
             seed: call_options.seed,
-            max_retries: DEFAULT_MAX_RETRIES,
+            max_retries,
             headers: call_options.headers.clone(),
             provider_options: call_options.provider_options.clone(),
             output: output_kind,
@@ -555,7 +567,7 @@ where
     }
 
     let stream_started_at = Instant::now();
-    let stream_result = model.do_stream(call_options).await;
+    let stream_result = do_stream_object_with_retries(model, call_options, max_retries).await;
     let request = stream_result.request;
     let envelope_response = stream_result.response;
     let mut response = StreamObjectResponseMetadata::new();
@@ -767,6 +779,72 @@ where
         response,
         provider_metadata,
     }
+}
+
+async fn do_stream_object_with_retries<M>(
+    model: &M,
+    call_options: LanguageModelCallOptions,
+    max_retries: usize,
+) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>>
+where
+    M: LanguageModel + ?Sized,
+    M::Stream: IntoIterator<Item = LanguageModelStreamPart>,
+{
+    let mut retries = 0;
+
+    loop {
+        let stream_result = model.do_stream(call_options.clone()).await;
+        let stream_result = LanguageModelStreamResult {
+            stream: stream_result.stream.into_iter().collect::<Vec<_>>(),
+            request: stream_result.request,
+            response: stream_result.response,
+        };
+
+        if retries < max_retries
+            && stream_object_result_is_retryable_pre_stream_failure(&stream_result)
+        {
+            retries += 1;
+            continue;
+        }
+
+        return stream_result;
+    }
+}
+
+fn stream_object_result_is_retryable_pre_stream_failure(
+    stream_result: &LanguageModelStreamResult<Vec<LanguageModelStreamPart>>,
+) -> bool {
+    let mut errors = stream_result.stream.iter().filter_map(|part| match part {
+        LanguageModelStreamPart::Error(part) => Some(&part.error),
+        _ => None,
+    });
+    let Some(error) = errors.next() else {
+        return false;
+    };
+
+    errors.next().is_none()
+        && stream_result.stream.iter().all(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::StreamStart(_) | LanguageModelStreamPart::Error(_)
+            )
+        })
+        && stream_object_error_is_retryable(error)
+}
+
+fn stream_object_error_is_retryable(error: &JsonValue) -> bool {
+    error
+        .get("isRetryable")
+        .or_else(|| error.get("is_retryable"))
+        .and_then(JsonValue::as_bool)
+        .unwrap_or_else(|| {
+            error
+                .get("statusCode")
+                .or_else(|| error.get("status_code"))
+                .and_then(JsonValue::as_u64)
+                .and_then(|status_code| u16::try_from(status_code).ok())
+                .is_some_and(ApiCallError::is_retryable_status_code)
+        })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1522,6 +1600,57 @@ mod tests {
                 .as_slice(),
             [json!({"message": "chunk failed"})]
         );
+    }
+
+    #[test]
+    fn stream_object_retries_retryable_pre_stream_errors() {
+        let retryable_error = LanguageModelStreamResult::new(vec![LanguageModelStreamPart::Error(
+            LanguageModelErrorStreamPart::new(json!({
+                "message": "rate limited",
+                "statusCode": 429,
+                "isRetryable": true
+            })),
+        )]);
+        let successful_stream = LanguageModelStreamResult::new(vec![
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                "json",
+                "{\"answer\":42}",
+            )),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+        let model =
+            MockLanguageModel::new().with_stream_results([retryable_error, successful_stream]);
+        let callback_errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let errors = Arc::clone(&callback_errors);
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_max_retries(1)
+                .with_on_error(move |event| {
+                    let errors = Arc::clone(&errors);
+                    async move {
+                        errors
+                            .lock()
+                            .expect("errors lock")
+                            .push(event.error["message"].as_str().unwrap_or("").to_string());
+                    }
+                }),
+        ));
+
+        assert_eq!(model.stream_calls().len(), 2);
+        assert_eq!(result.object, Some(json!({ "answer": 42 })));
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.error, None);
+        assert!(
+            !result
+                .parts
+                .iter()
+                .any(|part| matches!(part, ObjectStreamPart::Error { .. }))
+        );
+        assert!(callback_errors.lock().expect("errors lock").is_empty());
     }
 
     #[test]
