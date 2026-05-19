@@ -16,9 +16,11 @@ use crate::language_model::{
 };
 use crate::prompt::Prompt;
 use crate::provider::ProviderOptions;
-use crate::provider_utils::normalize_headers;
+use crate::provider_utils::{ParseJsonResult, normalize_headers, parse_json_event_stream};
 use crate::stream_text::StreamTextUiMessageStreamOptions;
-use crate::ui_message_stream::{UiMessage, UiMessageChunk, UiMessageRole};
+use crate::ui_message_stream::{
+    UiMessage, UiMessageChunk, UiMessageRole, transform_text_to_ui_message_stream,
+};
 
 /// Credentials mode used by upstream browser fetch transports.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -1163,6 +1165,179 @@ impl Default for HttpChatTransport {
     }
 }
 
+/// Rust equivalent of upstream `DefaultChatTransport`.
+///
+/// Networking is still caller-owned in this crate. This wrapper preserves the
+/// deterministic request-building behavior from [`HttpChatTransport`] and adds
+/// upstream UI-message JSON event stream parsing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DefaultChatTransport {
+    transport: HttpChatTransport,
+}
+
+impl DefaultChatTransport {
+    pub fn new() -> Self {
+        Self::with_options(HttpChatTransportOptions::default())
+    }
+
+    pub fn with_options(options: HttpChatTransportOptions) -> Self {
+        Self {
+            transport: HttpChatTransport::with_options(options),
+        }
+    }
+
+    pub fn options(&self) -> &HttpChatTransportOptions {
+        self.transport.options()
+    }
+
+    pub fn prepare_send_messages_request_options(
+        &self,
+        options: &ChatTransportSendOptions,
+    ) -> PrepareSendMessagesRequestOptions {
+        self.transport
+            .prepare_send_messages_request_options(options)
+    }
+
+    pub fn build_send_messages_request(
+        &self,
+        options: &ChatTransportSendOptions,
+        prepared: Option<PreparedSendMessagesRequest>,
+    ) -> HttpChatTransportRequest {
+        self.transport
+            .build_send_messages_request(options, prepared)
+    }
+
+    pub fn prepare_reconnect_to_stream_request_options(
+        &self,
+        options: &ChatTransportReconnectOptions,
+    ) -> PrepareReconnectToStreamRequestOptions {
+        self.transport
+            .prepare_reconnect_to_stream_request_options(options)
+    }
+
+    pub fn build_reconnect_to_stream_request(
+        &self,
+        options: &ChatTransportReconnectOptions,
+        prepared: Option<PreparedReconnectToStreamRequest>,
+    ) -> HttpChatTransportRequest {
+        self.transport
+            .build_reconnect_to_stream_request(options, prepared)
+    }
+
+    pub fn process_response_event_stream<B>(
+        &self,
+        chunks: impl IntoIterator<Item = B>,
+    ) -> Result<Vec<UiMessageChunk>, ChatTransportError>
+    where
+        B: AsRef<[u8]>,
+    {
+        parse_ui_message_event_stream(chunks)
+    }
+}
+
+impl Default for DefaultChatTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Rust equivalent of upstream `TextStreamChatTransport`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextStreamChatTransport {
+    transport: HttpChatTransport,
+}
+
+impl TextStreamChatTransport {
+    pub fn new() -> Self {
+        Self::with_options(HttpChatTransportOptions::default())
+    }
+
+    pub fn with_options(options: HttpChatTransportOptions) -> Self {
+        Self {
+            transport: HttpChatTransport::with_options(options),
+        }
+    }
+
+    pub fn options(&self) -> &HttpChatTransportOptions {
+        self.transport.options()
+    }
+
+    pub fn prepare_send_messages_request_options(
+        &self,
+        options: &ChatTransportSendOptions,
+    ) -> PrepareSendMessagesRequestOptions {
+        self.transport
+            .prepare_send_messages_request_options(options)
+    }
+
+    pub fn build_send_messages_request(
+        &self,
+        options: &ChatTransportSendOptions,
+        prepared: Option<PreparedSendMessagesRequest>,
+    ) -> HttpChatTransportRequest {
+        self.transport
+            .build_send_messages_request(options, prepared)
+    }
+
+    pub fn prepare_reconnect_to_stream_request_options(
+        &self,
+        options: &ChatTransportReconnectOptions,
+    ) -> PrepareReconnectToStreamRequestOptions {
+        self.transport
+            .prepare_reconnect_to_stream_request_options(options)
+    }
+
+    pub fn build_reconnect_to_stream_request(
+        &self,
+        options: &ChatTransportReconnectOptions,
+        prepared: Option<PreparedReconnectToStreamRequest>,
+    ) -> HttpChatTransportRequest {
+        self.transport
+            .build_reconnect_to_stream_request(options, prepared)
+    }
+
+    pub fn process_text_response_stream<S>(
+        &self,
+        chunks: impl IntoIterator<Item = S>,
+    ) -> Vec<UiMessageChunk>
+    where
+        S: Into<String>,
+    {
+        transform_text_to_ui_message_stream(chunks)
+    }
+}
+
+impl Default for TextStreamChatTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn parse_ui_message_event_stream<B>(
+    chunks: impl IntoIterator<Item = B>,
+) -> Result<Vec<UiMessageChunk>, ChatTransportError>
+where
+    B: AsRef<[u8]>,
+{
+    let parsed_chunks = parse_json_event_stream(chunks, |value| {
+        serde_json::from_value::<UiMessageChunk>(value.clone())
+    });
+    let mut chunks = Vec::new();
+
+    for parsed_chunk in parsed_chunks {
+        match parsed_chunk {
+            ParseJsonResult::Success { value, .. } => chunks.push(value),
+            ParseJsonResult::Failure { error, .. } => {
+                return Err(ChatTransportError::InvalidMessage(format!(
+                    "UI message stream chunk parse failed: {error}"
+                )));
+            }
+        }
+    }
+
+    Ok(chunks)
+}
+
 fn merged_body(base: Option<&JsonObject>, overrides: Option<&JsonObject>) -> JsonObject {
     let mut body = base.cloned().unwrap_or_default();
     if let Some(overrides) = overrides {
@@ -1526,6 +1701,77 @@ mod tests {
         assert_eq!(
             request.headers,
             Headers::from([("x-prepared".to_string(), "prepared".to_string())])
+        );
+    }
+
+    #[test]
+    fn default_chat_transport_parses_ui_message_event_stream() {
+        let transport = DefaultChatTransport::with_options(
+            HttpChatTransportOptions::new().with_api("/custom/chat"),
+        );
+        let send = ChatTransportSendOptions::new(ChatTransportTrigger::SubmitMessage, "chat-123");
+        assert_eq!(
+            transport.build_send_messages_request(&send, None).api,
+            "/custom/chat"
+        );
+
+        let chunks = transport
+            .process_response_event_stream(vec![
+                br#"data: {"type":"start","messageId":"msg-1"}"#.as_slice(),
+                b"\n\n".as_slice(),
+                br#"data: {"type":"text-start","id":"text-1"}"#.as_slice(),
+                b"\n\n".as_slice(),
+                br#"data: {"type":"text-delta","id":"text-1","delta":"Hello"}"#.as_slice(),
+                b"\n\n".as_slice(),
+                br#"data: {"type":"text-end","id":"text-1"}"#.as_slice(),
+                b"\n\n".as_slice(),
+                b"data: [DONE]\n\n".as_slice(),
+            ])
+            .expect("UI-message stream parses");
+
+        assert_eq!(
+            chunks,
+            vec![
+                UiMessageChunk::start_with_message_id("msg-1"),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", "Hello"),
+                UiMessageChunk::text_end("text-1"),
+            ]
+        );
+    }
+
+    #[test]
+    fn default_chat_transport_reports_invalid_ui_message_event() {
+        let transport = DefaultChatTransport::new();
+        let error = transport
+            .process_response_event_stream([br#"data: {"type":"missing-chunk"}"#.as_slice()])
+            .expect_err("invalid UI-message event fails");
+
+        assert!(
+            error
+                .to_string()
+                .contains("UI message stream chunk parse failed")
+        );
+    }
+
+    #[test]
+    fn text_stream_chat_transport_maps_text_to_ui_message_stream() {
+        let transport = TextStreamChatTransport::new();
+        let chunks = transport.process_text_response_stream(["Hello", ", ", "world!"]);
+
+        assert_eq!(
+            chunks,
+            vec![
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", "Hello"),
+                UiMessageChunk::text_delta("text-1", ", "),
+                UiMessageChunk::text_delta("text-1", "world!"),
+                UiMessageChunk::text_end("text-1"),
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ]
         );
     }
 

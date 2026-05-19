@@ -74,11 +74,12 @@ pub use cerebras::{
 };
 pub use chat_transport::{
     ChatRequestOptions, ChatTransport, ChatTransportError, ChatTransportReconnectOptions,
-    ChatTransportSendOptions, ChatTransportTrigger, DirectChatTransport,
+    ChatTransportSendOptions, ChatTransportTrigger, DefaultChatTransport, DirectChatTransport,
     DirectChatTransportOptions, HttpChatTransport, HttpChatTransportMethod,
     HttpChatTransportOptions, HttpChatTransportRequest, PrepareReconnectToStreamRequestOptions,
     PrepareSendMessagesRequestOptions, PreparedReconnectToStreamRequest,
-    PreparedSendMessagesRequest, RequestCredentials, convert_ui_messages_to_model_messages,
+    PreparedSendMessagesRequest, RequestCredentials, TextStreamChatTransport,
+    convert_ui_messages_to_model_messages,
 };
 pub use deepinfra::{
     DEFAULT_DEEPINFRA_BASE_URL, DeepInfraChatLanguageModel, DeepInfraImageModel, DeepInfraProvider,
