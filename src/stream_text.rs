@@ -1884,10 +1884,13 @@ fn stream_text_response_message_id(options: &StreamTextUiMessageStreamOptions) -
 
     options.generate_message_id.as_ref().and_then(|generate| {
         let generate = generate.clone();
-        get_response_ui_message_id(
-            options.original_messages.as_deref(),
-            ResponseUiMessageId::generate(move || generate.generate()),
-        )
+        match options.original_messages.as_deref() {
+            Some(original_messages) => get_response_ui_message_id(
+                Some(original_messages),
+                ResponseUiMessageId::generate(move || generate.generate()),
+            ),
+            None => Some(generate.generate()),
+        }
     })
 }
 
@@ -3478,7 +3481,10 @@ mod tests {
         )
         .expect("chunks serialize");
 
-        assert_eq!(client_generated[0], json!({ "type": "start" }));
+        assert_eq!(
+            client_generated[0],
+            json!({ "type": "start", "messageId": "generated-new" })
+        );
     }
 
     #[test]
