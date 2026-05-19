@@ -10314,6 +10314,148 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_maps_basic_function_tool_choices() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let captured_requests_for_transport = Arc::clone(&captured_requests);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                captured_requests_for_transport
+                    .lock()
+                    .expect("captured requests mutex is not poisoned")
+                    .push(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_tool_choice",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Tool choice accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 7,
+                            "output_tokens": 2
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let tool_schema = || {
+            json_object(json!({
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string"
+                    }
+                },
+                "required": ["location"]
+            }))
+        };
+        let call = |tool_choice| {
+            poll_ready(
+                model.do_generate(
+                    LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                        LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                            LanguageModelTextPart::new("Check the weather"),
+                        )]),
+                    )])
+                    .with_tool(LanguageModelTool::Function(
+                        LanguageModelFunctionTool::new("get_weather", tool_schema())
+                            .with_description("Get the current weather"),
+                    ))
+                    .with_tool_choice(tool_choice),
+                ),
+            )
+        };
+
+        assert_eq!(
+            call(LanguageModelToolChoice::Auto).finish_reason.unified,
+            FinishReason::Stop
+        );
+        assert_eq!(
+            call(LanguageModelToolChoice::None).finish_reason.unified,
+            FinishReason::Stop
+        );
+        assert_eq!(
+            call(LanguageModelToolChoice::Required)
+                .finish_reason
+                .unified,
+            FinishReason::Stop
+        );
+        assert_eq!(
+            call(LanguageModelToolChoice::Tool {
+                tool_name: "get_weather".to_string(),
+            })
+            .finish_reason
+            .unified,
+            FinishReason::Stop
+        );
+
+        let requests = captured_requests
+            .lock()
+            .expect("captured requests mutex is not poisoned");
+        assert_eq!(requests.len(), 4);
+        let bodies = requests
+            .iter()
+            .map(|request| {
+                request
+                    .body
+                    .as_ref()
+                    .and_then(ProviderApiRequestBody::as_text)
+                    .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+                    .expect("request body is JSON")
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            bodies[0]["tools"],
+            json!([
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "description": "Get the current weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {
+                                "type": "string"
+                            }
+                        },
+                        "required": ["location"]
+                    }
+                }
+            ])
+        );
+        assert_eq!(bodies[0]["tool_choice"], json!("auto"));
+        assert_eq!(bodies[1]["tool_choice"], json!("none"));
+        assert_eq!(bodies[2]["tool_choice"], json!("required"));
+        assert_eq!(
+            bodies[3]["tool_choice"],
+            json!({
+                "type": "function",
+                "name": "get_weather"
+            })
+        );
+    }
+
+    #[test]
     fn open_responses_provider_prepares_web_search_preview_and_local_shell_tools() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
