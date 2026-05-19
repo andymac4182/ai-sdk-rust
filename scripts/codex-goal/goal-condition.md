@@ -37,7 +37,10 @@ Preserve Rust 2024 style, serde shapes, builders, public exports, tests, and
 workspace boundaries that align with upstream package responsibilities. Build
 against deterministic fake models first, then use the ignored `.env.local`
 Vercel AI Gateway variables only for optional integration validation. Never
-print or commit secrets.
+print or commit secrets. For OTel/telemetry rows, deterministic span tests are
+not enough for verification: also prove OTLP/HTTP export against the loopback
+receiver or a local collector, and once root telemetry wiring exists pair
+provider live tests with that telemetry export assertion.
 
 Work in coherent slices. For each slice: rebase on latest main, implement,
 test, update the parity ledger, commit, then merge yourself back to `main`

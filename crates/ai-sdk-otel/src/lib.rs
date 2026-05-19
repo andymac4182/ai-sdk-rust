@@ -3,6 +3,12 @@
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
+use std::fmt;
+use std::io::{self, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use ai_sdk_provider::{
     FileData, FileDataContent, LanguageModelAssistantContentPart, LanguageModelMessage,
@@ -1145,6 +1151,1339 @@ pub fn record_span<T>(
     }
 }
 
+/// OTLP/HTTP JSON export options for locally validating recorded spans.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OtlpHttpTraceExportOptions {
+    pub endpoint: String,
+    pub service_name: String,
+    pub scope_name: String,
+    pub scope_version: String,
+    pub resource_attributes: TelemetryAttributes,
+}
+
+impl OtlpHttpTraceExportOptions {
+    /// Creates export options for an OTLP/HTTP `/v1/traces` endpoint.
+    pub fn new(endpoint: impl Into<String>) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            service_name: "ai-sdk-rust".to_string(),
+            scope_name: "ai-sdk-otel".to_string(),
+            scope_version: VERSION.to_string(),
+            resource_attributes: TelemetryAttributes::new(),
+        }
+    }
+
+    /// Sets the OTLP resource `service.name`.
+    pub fn with_service_name(mut self, service_name: impl Into<String>) -> Self {
+        self.service_name = service_name.into();
+        self
+    }
+
+    /// Sets the OTLP instrumentation scope name.
+    pub fn with_scope_name(mut self, scope_name: impl Into<String>) -> Self {
+        self.scope_name = scope_name.into();
+        self
+    }
+
+    /// Sets the OTLP instrumentation scope version.
+    pub fn with_scope_version(mut self, scope_version: impl Into<String>) -> Self {
+        self.scope_version = scope_version.into();
+        self
+    }
+
+    /// Adds a resource attribute to the OTLP export payload.
+    pub fn with_resource_attribute(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<TelemetryAttributeValue>,
+    ) -> Self {
+        self.resource_attributes.insert(key.into(), value.into());
+        self
+    }
+}
+
+/// Error produced while exporting spans over OTLP/HTTP JSON.
+#[derive(Debug)]
+pub enum OtlpHttpTraceExportError {
+    UnsupportedEndpoint(String),
+    Io(io::Error),
+    Serialize(serde_json::Error),
+    ResponseStatus {
+        status: u16,
+        status_line: String,
+        body: String,
+    },
+}
+
+impl fmt::Display for OtlpHttpTraceExportError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedEndpoint(endpoint) => {
+                write!(formatter, "unsupported OTLP HTTP endpoint: {endpoint}")
+            }
+            Self::Io(error) => write!(formatter, "OTLP HTTP export failed: {error}"),
+            Self::Serialize(error) => write!(formatter, "OTLP JSON serialization failed: {error}"),
+            Self::ResponseStatus {
+                status,
+                status_line,
+                body,
+            } => write!(
+                formatter,
+                "OTLP HTTP export returned status {status}: {status_line}; body: {body}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OtlpHttpTraceExportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Serialize(error) => Some(error),
+            Self::UnsupportedEndpoint(_) | Self::ResponseStatus { .. } => None,
+        }
+    }
+}
+
+impl From<io::Error> for OtlpHttpTraceExportError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<serde_json::Error> for OtlpHttpTraceExportError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Serialize(error)
+    }
+}
+
+/// Builds an OTLP/HTTP JSON trace export payload from recorded mock spans.
+pub fn build_otlp_http_trace_json(
+    tracer: &MockTracer,
+    options: &OtlpHttpTraceExportOptions,
+) -> JsonValue {
+    let mut resource_attributes =
+        TelemetryAttributes::from([("service.name".to_string(), json!(options.service_name))]);
+    resource_attributes.extend(options.resource_attributes.clone());
+
+    json!({
+        "resourceSpans": [
+            {
+                "resource": {
+                    "attributes": otlp_key_values(&resource_attributes),
+                },
+                "scopeSpans": [
+                    {
+                        "scope": {
+                            "name": options.scope_name,
+                            "version": options.scope_version,
+                        },
+                        "spans": tracer
+                            .spans
+                            .iter()
+                            .enumerate()
+                            .map(|(index, span)| otlp_span(index, span))
+                            .collect::<Vec<_>>(),
+                    }
+                ]
+            }
+        ]
+    })
+}
+
+/// Exports recorded mock spans to an OTLP/HTTP JSON endpoint.
+///
+/// This intentionally supports plain `http://` endpoints so local receivers and
+/// local OpenTelemetry Collector instances can be used in CI without TLS setup.
+pub fn export_tracer_to_otlp_http_json(
+    tracer: &MockTracer,
+    options: &OtlpHttpTraceExportOptions,
+) -> Result<(), OtlpHttpTraceExportError> {
+    let endpoint = parse_otlp_http_endpoint(&options.endpoint)?;
+    let body = serde_json::to_vec(&build_otlp_http_trace_json(tracer, options))?;
+    let host_header = match endpoint.port {
+        80 => endpoint.host.clone(),
+        port => format!("{}:{port}", endpoint.host),
+    };
+    let mut stream = TcpStream::connect((endpoint.host.as_str(), endpoint.port))?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    write!(
+        stream,
+        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        endpoint.path,
+        host_header,
+        body.len()
+    )?;
+    stream.write_all(&body)?;
+    stream.flush()?;
+
+    let response = read_http_response(&mut stream)?;
+    if !(200..300).contains(&response.status) {
+        return Err(OtlpHttpTraceExportError::ResponseStatus {
+            status: response.status,
+            status_line: response.status_line,
+            body: response.body,
+        });
+    }
+
+    Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OtlpHttpEndpoint {
+    host: String,
+    port: u16,
+    path: String,
+}
+
+fn parse_otlp_http_endpoint(endpoint: &str) -> Result<OtlpHttpEndpoint, OtlpHttpTraceExportError> {
+    let Some(rest) = endpoint.strip_prefix("http://") else {
+        return Err(OtlpHttpTraceExportError::UnsupportedEndpoint(
+            endpoint.to_string(),
+        ));
+    };
+    let (authority, path) = rest
+        .split_once('/')
+        .map_or((rest, "/".to_string()), |(authority, path)| {
+            (authority, format!("/{path}"))
+        });
+    if authority.is_empty() {
+        return Err(OtlpHttpTraceExportError::UnsupportedEndpoint(
+            endpoint.to_string(),
+        ));
+    }
+    let (host, port) = authority.split_once(':').map_or_else(
+        || Ok::<_, OtlpHttpTraceExportError>((authority.to_string(), 80)),
+        |(host, port)| {
+            let port = port
+                .parse::<u16>()
+                .map_err(|_| OtlpHttpTraceExportError::UnsupportedEndpoint(endpoint.to_string()))?;
+            Ok((host.to_string(), port))
+        },
+    )?;
+    if host.is_empty() {
+        return Err(OtlpHttpTraceExportError::UnsupportedEndpoint(
+            endpoint.to_string(),
+        ));
+    }
+    Ok(OtlpHttpEndpoint { host, port, path })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OtlpHttpResponse {
+    status: u16,
+    status_line: String,
+    body: String,
+}
+
+fn read_http_response(
+    stream: &mut TcpStream,
+) -> Result<OtlpHttpResponse, OtlpHttpTraceExportError> {
+    let mut response = String::new();
+    match stream.read_to_string(&mut response) {
+        Ok(_) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) && !response.is_empty() => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    let (head, body) = response
+        .split_once("\r\n\r\n")
+        .map_or((response.as_str(), ""), |(head, body)| (head, body));
+    let status_line = head.lines().next().unwrap_or_default().to_string();
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|status| status.parse::<u16>().ok())
+        .ok_or_else(|| {
+            OtlpHttpTraceExportError::UnsupportedEndpoint("invalid HTTP response".to_string())
+        })?;
+    Ok(OtlpHttpResponse {
+        status,
+        status_line,
+        body: body.to_string(),
+    })
+}
+
+fn otlp_span(index: usize, span: &MockSpan) -> JsonValue {
+    let start_time = ((index as u64) + 1) * 1_000;
+    let end_time = if span.ended {
+        start_time + 1
+    } else {
+        start_time
+    };
+    let mut value = serde_json::Map::new();
+    value.insert(
+        "traceId".to_string(),
+        json!("00000000000000000000000000000001"),
+    );
+    value.insert(
+        "spanId".to_string(),
+        json!(format!("{:016x}", (index as u64) + 1)),
+    );
+    value.insert("name".to_string(), json!(span.name));
+    value.insert("kind".to_string(), json!("SPAN_KIND_INTERNAL"));
+    value.insert(
+        "startTimeUnixNano".to_string(),
+        json!(start_time.to_string()),
+    );
+    value.insert("endTimeUnixNano".to_string(), json!(end_time.to_string()));
+    value.insert(
+        "attributes".to_string(),
+        json!(otlp_key_values(&span.attributes)),
+    );
+    if !span.events.is_empty() {
+        value.insert(
+            "events".to_string(),
+            json!(
+                span.events
+                    .iter()
+                    .map(otlp_event)
+                    .collect::<Vec<JsonValue>>()
+            ),
+        );
+    }
+    if let Some(status) = &span.status {
+        value.insert("status".to_string(), otlp_status(status));
+    }
+    JsonValue::Object(value)
+}
+
+fn otlp_event(event: &SpanEvent) -> JsonValue {
+    json!({
+        "timeUnixNano": "1",
+        "name": event.name,
+        "attributes": otlp_key_values(&event.attributes.clone().unwrap_or_default()),
+    })
+}
+
+fn otlp_status(status: &SpanStatus) -> JsonValue {
+    match status.code {
+        SpanStatusCode::Unset => json!({ "code": "STATUS_CODE_UNSET" }),
+        SpanStatusCode::Ok => json!({ "code": "STATUS_CODE_OK" }),
+        SpanStatusCode::Error => {
+            let mut value = serde_json::Map::new();
+            value.insert("code".to_string(), json!("STATUS_CODE_ERROR"));
+            if let Some(message) = &status.message {
+                value.insert("message".to_string(), json!(message));
+            }
+            JsonValue::Object(value)
+        }
+    }
+}
+
+fn otlp_key_values(attributes: &TelemetryAttributes) -> Vec<JsonValue> {
+    attributes
+        .iter()
+        .filter(|(_, value)| !value.is_null())
+        .map(|(key, value)| {
+            json!({
+                "key": key,
+                "value": otlp_any_value(value),
+            })
+        })
+        .collect()
+}
+
+fn otlp_any_value(value: &JsonValue) -> JsonValue {
+    match value {
+        JsonValue::Null => json!({ "stringValue": "null" }),
+        JsonValue::Bool(value) => json!({ "boolValue": value }),
+        JsonValue::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                json!({ "intValue": value.to_string() })
+            } else if let Some(value) = value.as_u64() {
+                json!({ "intValue": value.to_string() })
+            } else {
+                json!({ "doubleValue": value.as_f64().unwrap_or_default() })
+            }
+        }
+        JsonValue::String(value) => json!({ "stringValue": value }),
+        JsonValue::Array(values) => json!({
+            "arrayValue": {
+                "values": values.iter().map(otlp_any_value).collect::<Vec<_>>(),
+            },
+        }),
+        JsonValue::Object(values) => json!({
+            "kvlistValue": {
+                "values": values
+                    .iter()
+                    .filter(|(_, value)| !value.is_null())
+                    .map(|(key, value)| json!({
+                        "key": key,
+                        "value": otlp_any_value(value),
+                    }))
+                    .collect::<Vec<_>>(),
+            },
+        }),
+    }
+}
+
+/// HTTP request captured by [`LocalOtlpTraceReceiver`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OtlpHttpTraceRequest {
+    pub method: String,
+    pub path: String,
+    pub headers: BTreeMap<String, String>,
+    pub body: String,
+}
+
+impl OtlpHttpTraceRequest {
+    /// Parses the captured body as JSON.
+    pub fn body_json(&self) -> Option<JsonValue> {
+        serde_json::from_str(&self.body).ok()
+    }
+}
+
+/// Loopback OTLP/HTTP trace receiver for local end-to-end validation.
+pub struct LocalOtlpTraceReceiver {
+    endpoint: String,
+    requests: Arc<Mutex<Vec<OtlpHttpTraceRequest>>>,
+    shutdown: Option<mpsc::Sender<()>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl fmt::Debug for LocalOtlpTraceReceiver {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LocalOtlpTraceReceiver")
+            .field("endpoint", &self.endpoint)
+            .field("requests", &self.received_requests())
+            .finish_non_exhaustive()
+    }
+}
+
+impl LocalOtlpTraceReceiver {
+    /// Starts a loopback receiver on `127.0.0.1` with an ephemeral port.
+    pub fn start() -> io::Result<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        listener.set_nonblocking(true)?;
+        let address = listener.local_addr()?;
+        let endpoint = format!("http://{address}/v1/traces");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let server_requests = Arc::clone(&requests);
+        let (shutdown, stop) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            loop {
+                if stop.try_recv().is_ok() {
+                    break;
+                }
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let _ = capture_otlp_http_request(stream, &server_requests);
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Ok(Self {
+            endpoint,
+            requests,
+            shutdown: Some(shutdown),
+            thread: Some(thread),
+        })
+    }
+
+    /// Returns the receiver's OTLP/HTTP `/v1/traces` endpoint.
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    /// Returns all captured requests.
+    pub fn received_requests(&self) -> Vec<OtlpHttpTraceRequest> {
+        self.requests
+            .lock()
+            .expect("OTLP receiver request lock is not poisoned")
+            .clone()
+    }
+
+    /// Waits until the expected number of requests is captured or timeout elapses.
+    pub fn wait_for_requests(
+        &self,
+        expected_count: usize,
+        timeout: Duration,
+    ) -> Vec<OtlpHttpTraceRequest> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let requests = self.received_requests();
+            if requests.len() >= expected_count || Instant::now() >= deadline {
+                return requests;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for LocalOtlpTraceReceiver {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn capture_otlp_http_request(
+    mut stream: TcpStream,
+    requests: &Arc<Mutex<Vec<OtlpHttpTraceRequest>>>,
+) -> io::Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    let mut buffer = Vec::new();
+    let mut chunk = [0; 4096];
+    let header_end = loop {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            return Ok(());
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if let Some(header_end) = find_http_header_end(&buffer) {
+            break header_end;
+        }
+    };
+
+    let headers_text = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+    let mut lines = headers_text.split("\r\n");
+    let request_line = lines.next().unwrap_or_default();
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts.next().unwrap_or_default().to_string();
+    let path = request_parts.next().unwrap_or_default().to_string();
+    let mut headers = BTreeMap::new();
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':') {
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+    }
+
+    let body_start = header_end + 4;
+    let content_length = headers
+        .get("content-length")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    while buffer.len().saturating_sub(body_start) < content_length {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+    let body_end = body_start + content_length.min(buffer.len().saturating_sub(body_start));
+    let body = String::from_utf8_lossy(&buffer[body_start..body_end]).to_string();
+    requests
+        .lock()
+        .expect("OTLP receiver request lock is not poisoned")
+        .push(OtlpHttpTraceRequest {
+            method,
+            path,
+            headers,
+            body,
+        });
+
+    stream.write_all(
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+    )?;
+    stream.flush()
+}
+
+fn find_http_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+/// Span families emitted by the Rust OpenTelemetry recorder.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum OpenTelemetrySpanType {
+    /// Root operation span.
+    Operation,
+
+    /// Step span.
+    Step,
+
+    /// Language model call span.
+    LanguageModel,
+
+    /// Tool execution span.
+    Tool,
+
+    /// Embedding model call span.
+    Embedding,
+
+    /// Reranking model call span.
+    Reranking,
+}
+
+impl OpenTelemetrySpanType {
+    /// Returns the upstream span type string.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Operation => "operation",
+            Self::Step => "step",
+            Self::LanguageModel => "languageModel",
+            Self::Tool => "tool",
+            Self::Embedding => "embedding",
+            Self::Reranking => "reranking",
+        }
+    }
+}
+
+/// Options passed to `enrichSpan`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnrichSpanOptions {
+    pub span_type: OpenTelemetrySpanType,
+    pub operation_id: String,
+    pub call_id: String,
+    pub runtime_context: Option<TelemetryAttributes>,
+}
+
+/// Function that adds custom attributes when spans are created.
+pub type EnrichSpan = Arc<dyn Fn(EnrichSpanOptions) -> TelemetryAttributes + Send + Sync>;
+
+/// Options for the Rust OpenTelemetry recorder.
+#[derive(Clone, Default)]
+pub struct OpenTelemetryOptions {
+    pub supplemental_attributes: SupplementalAttributeOptions,
+    pub enrich_span: Option<EnrichSpan>,
+}
+
+impl OpenTelemetryOptions {
+    /// Creates default OTel options.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enables supplemental attributes.
+    pub fn with_supplemental_attributes(
+        mut self,
+        supplemental_attributes: SupplementalAttributeOptions,
+    ) -> Self {
+        self.supplemental_attributes = supplemental_attributes;
+        self
+    }
+
+    /// Adds a span enrichment function.
+    pub fn with_enrich_span(
+        mut self,
+        enrich_span: impl Fn(EnrichSpanOptions) -> TelemetryAttributes + Send + Sync + 'static,
+    ) -> Self {
+        self.enrich_span = Some(Arc::new(enrich_span));
+        self
+    }
+}
+
+#[derive(Clone, Debug)]
+struct OpenTelemetryCallState {
+    operation_id: String,
+    telemetry: TelemetryOptions,
+    root_span: usize,
+    step_span: Option<usize>,
+    inference_span: Option<usize>,
+    tool_spans: BTreeMap<String, usize>,
+    runtime_context: Option<TelemetryAttributes>,
+}
+
+/// Start event accepted by [`OpenTelemetry::on_start`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenTelemetryStartEvent {
+    pub call_id: String,
+    pub operation_id: String,
+    pub provider: String,
+    pub model_id: String,
+    pub telemetry: TelemetryOptions,
+    pub settings: TelemetryAttributes,
+    pub runtime_context: Option<TelemetryAttributes>,
+    pub system_instructions: Option<Vec<SemConvSystemInstruction>>,
+    pub input_messages: Option<Vec<SemConvMessage>>,
+}
+
+impl OpenTelemetryStartEvent {
+    /// Creates a root operation start event.
+    pub fn new(
+        call_id: impl Into<String>,
+        operation_id: impl Into<String>,
+        provider: impl Into<String>,
+        model_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            operation_id: operation_id.into(),
+            provider: provider.into(),
+            model_id: model_id.into(),
+            telemetry: TelemetryOptions::new(),
+            settings: TelemetryAttributes::new(),
+            runtime_context: None,
+            system_instructions: None,
+            input_messages: None,
+        }
+    }
+
+    /// Sets telemetry recording options.
+    pub fn with_telemetry(mut self, telemetry: TelemetryOptions) -> Self {
+        self.telemetry = telemetry;
+        self
+    }
+
+    /// Sets model call settings.
+    pub fn with_settings(mut self, settings: TelemetryAttributes) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    /// Sets runtime context values.
+    pub fn with_runtime_context(mut self, runtime_context: TelemetryAttributes) -> Self {
+        self.runtime_context = Some(runtime_context);
+        self
+    }
+
+    /// Sets formatted system instructions.
+    pub fn with_system_instructions(
+        mut self,
+        system_instructions: Vec<SemConvSystemInstruction>,
+    ) -> Self {
+        self.system_instructions = Some(system_instructions);
+        self
+    }
+
+    /// Sets formatted input messages.
+    pub fn with_input_messages(mut self, input_messages: Vec<SemConvMessage>) -> Self {
+        self.input_messages = Some(input_messages);
+        self
+    }
+}
+
+/// Step start event accepted by [`OpenTelemetry::on_step_start`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenTelemetryStepStartEvent {
+    pub call_id: String,
+    pub step_number: u64,
+}
+
+impl OpenTelemetryStepStartEvent {
+    /// Creates a step start event.
+    pub fn new(call_id: impl Into<String>, step_number: u64) -> Self {
+        Self {
+            call_id: call_id.into(),
+            step_number,
+        }
+    }
+}
+
+/// Language model call start event accepted by
+/// [`OpenTelemetry::on_language_model_call_start`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenTelemetryLanguageModelCallStartEvent {
+    pub call_id: String,
+    pub provider: String,
+    pub model_id: String,
+    pub input_messages: Option<Vec<SemConvMessage>>,
+}
+
+impl OpenTelemetryLanguageModelCallStartEvent {
+    /// Creates a language model call start event.
+    pub fn new(
+        call_id: impl Into<String>,
+        provider: impl Into<String>,
+        model_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            provider: provider.into(),
+            model_id: model_id.into(),
+            input_messages: None,
+        }
+    }
+
+    /// Sets formatted input messages.
+    pub fn with_input_messages(mut self, input_messages: Vec<SemConvMessage>) -> Self {
+        self.input_messages = Some(input_messages);
+        self
+    }
+}
+
+/// Token usage values for OTel lifecycle events.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TelemetryTokenUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+}
+
+/// Language model call end event accepted by
+/// [`OpenTelemetry::on_language_model_call_end`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenTelemetryLanguageModelCallEndEvent {
+    pub call_id: String,
+    pub finish_reason: String,
+    pub usage: Option<TelemetryTokenUsage>,
+    pub output_messages: Option<Vec<SemConvMessage>>,
+}
+
+impl OpenTelemetryLanguageModelCallEndEvent {
+    /// Creates a language model call end event.
+    pub fn new(call_id: impl Into<String>, finish_reason: impl Into<String>) -> Self {
+        Self {
+            call_id: call_id.into(),
+            finish_reason: finish_reason.into(),
+            usage: None,
+            output_messages: None,
+        }
+    }
+
+    /// Sets usage values.
+    pub fn with_usage(mut self, usage: TelemetryTokenUsage) -> Self {
+        self.usage = Some(usage);
+        self
+    }
+
+    /// Sets formatted output messages.
+    pub fn with_output_messages(mut self, output_messages: Vec<SemConvMessage>) -> Self {
+        self.output_messages = Some(output_messages);
+        self
+    }
+}
+
+/// Tool execution start event accepted by [`OpenTelemetry::on_tool_execution_start`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenTelemetryToolExecutionStartEvent {
+    pub call_id: String,
+    pub tool_call_id: String,
+    pub tool_name: String,
+}
+
+impl OpenTelemetryToolExecutionStartEvent {
+    /// Creates a tool execution start event.
+    pub fn new(
+        call_id: impl Into<String>,
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+        }
+    }
+}
+
+/// Tool execution end event accepted by [`OpenTelemetry::on_tool_execution_end`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenTelemetryToolExecutionEndEvent {
+    pub call_id: String,
+    pub tool_call_id: String,
+    pub output: Option<TelemetryAttributeValue>,
+}
+
+impl OpenTelemetryToolExecutionEndEvent {
+    /// Creates a tool execution end event.
+    pub fn new(call_id: impl Into<String>, tool_call_id: impl Into<String>) -> Self {
+        Self {
+            call_id: call_id.into(),
+            tool_call_id: tool_call_id.into(),
+            output: None,
+        }
+    }
+
+    /// Sets the tool output attribute.
+    pub fn with_output(mut self, output: impl Into<TelemetryAttributeValue>) -> Self {
+        self.output = Some(output.into());
+        self
+    }
+}
+
+/// Operation end event accepted by [`OpenTelemetry::on_end`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenTelemetryEndEvent {
+    pub call_id: String,
+    pub finish_reason: String,
+    pub usage: Option<TelemetryTokenUsage>,
+    pub output_messages: Option<Vec<SemConvMessage>>,
+}
+
+impl OpenTelemetryEndEvent {
+    /// Creates an operation end event.
+    pub fn new(call_id: impl Into<String>, finish_reason: impl Into<String>) -> Self {
+        Self {
+            call_id: call_id.into(),
+            finish_reason: finish_reason.into(),
+            usage: None,
+            output_messages: None,
+        }
+    }
+
+    /// Sets usage values.
+    pub fn with_usage(mut self, usage: TelemetryTokenUsage) -> Self {
+        self.usage = Some(usage);
+        self
+    }
+
+    /// Sets formatted output messages.
+    pub fn with_output_messages(mut self, output_messages: Vec<SemConvMessage>) -> Self {
+        self.output_messages = Some(output_messages);
+        self
+    }
+}
+
+/// Error event accepted by [`OpenTelemetry::on_error`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenTelemetryErrorEvent {
+    pub call_id: String,
+    pub error: RecordSpanError,
+}
+
+impl OpenTelemetryErrorEvent {
+    /// Creates an OTel error event.
+    pub fn new(call_id: impl Into<String>, error: RecordSpanError) -> Self {
+        Self {
+            call_id: call_id.into(),
+            error,
+        }
+    }
+}
+
+/// Dependency-free Rust recorder for upstream `OpenTelemetry` behavior.
+///
+/// This type intentionally records into [`MockTracer`] today. A future slice can
+/// adapt the same event semantics to the real `opentelemetry` crate without
+/// changing the tested attribute construction rules.
+pub struct OpenTelemetry {
+    tracer: MockTracer,
+    options: OpenTelemetryOptions,
+    call_states: BTreeMap<String, OpenTelemetryCallState>,
+}
+
+impl OpenTelemetry {
+    /// Creates a recorder with default options.
+    pub fn new(options: OpenTelemetryOptions) -> Self {
+        Self {
+            tracer: MockTracer::new(),
+            options,
+            call_states: BTreeMap::new(),
+        }
+    }
+
+    /// Returns the recorded tracer.
+    pub fn tracer(&self) -> &MockTracer {
+        &self.tracer
+    }
+
+    /// Consumes this recorder and returns the tracer.
+    pub fn into_tracer(self) -> MockTracer {
+        self.tracer
+    }
+
+    /// Returns active call state count.
+    pub fn active_call_count(&self) -> usize {
+        self.call_states.len()
+    }
+
+    /// Starts a root operation span.
+    pub fn on_start(&mut self, event: OpenTelemetryStartEvent) {
+        let provider_name = map_provider_name(&event.provider);
+        let operation_name = map_operation_name(&event.operation_id);
+        let mut attributes = select_attributes(
+            Some(&event.telemetry),
+            vec![
+                (
+                    "gen_ai.operation.name".to_string(),
+                    AttributeSpec::value(json!(operation_name)),
+                ),
+                (
+                    "gen_ai.provider.name".to_string(),
+                    AttributeSpec::value(json!(provider_name)),
+                ),
+                (
+                    "gen_ai.request.model".to_string(),
+                    AttributeSpec::value(json!(event.model_id)),
+                ),
+                (
+                    "gen_ai.agent.name".to_string(),
+                    event
+                        .telemetry
+                        .function_id
+                        .as_ref()
+                        .map_or(AttributeSpec::Omitted, |function_id| {
+                            AttributeSpec::value(json!(function_id))
+                        }),
+                ),
+                (
+                    "gen_ai.system_instructions".to_string(),
+                    event
+                        .system_instructions
+                        .as_ref()
+                        .map_or(AttributeSpec::Omitted, |system_instructions| {
+                            AttributeSpec::input(json!(system_instructions))
+                        }),
+                ),
+                (
+                    "gen_ai.input.messages".to_string(),
+                    event
+                        .input_messages
+                        .as_ref()
+                        .map_or(AttributeSpec::Omitted, |input_messages| {
+                            AttributeSpec::input(json!(input_messages))
+                        }),
+                ),
+            ],
+        );
+
+        if event.telemetry.should_record() {
+            for (key, value) in event.settings.iter().filter(|(_, value)| !value.is_null()) {
+                attributes.insert(format!("gen_ai.request.{key}"), value.clone());
+            }
+        }
+
+        attributes.extend(select_supplemental_attributes(
+            Some(&event.telemetry),
+            self.options.supplemental_attributes,
+            SupplementalAttributes {
+                runtime_context: event
+                    .runtime_context
+                    .as_ref()
+                    .map_or_else(Vec::new, get_runtime_context_attributes),
+                ..SupplementalAttributes::default()
+            },
+        ));
+
+        let span_attributes = self.span_attributes(
+            attributes,
+            OpenTelemetrySpanType::Operation,
+            &event.operation_id,
+            &event.call_id,
+            event.runtime_context.as_ref(),
+        );
+        let span_name = format!(
+            "{} {}",
+            map_operation_name(&event.operation_id),
+            event.model_id
+        );
+        let root_span = self.tracer.start_span(span_name, span_attributes);
+
+        self.call_states.insert(
+            event.call_id.clone(),
+            OpenTelemetryCallState {
+                operation_id: event.operation_id,
+                telemetry: event.telemetry,
+                root_span,
+                step_span: None,
+                inference_span: None,
+                tool_spans: BTreeMap::new(),
+                runtime_context: event.runtime_context,
+            },
+        );
+    }
+
+    /// Starts a step span.
+    pub fn on_step_start(&mut self, event: OpenTelemetryStepStartEvent) {
+        let Some((operation_id, runtime_context)) = self
+            .call_states
+            .get(&event.call_id)
+            .map(|state| (state.operation_id.clone(), state.runtime_context.clone()))
+        else {
+            return;
+        };
+        let attributes = self.span_attributes(
+            TelemetryAttributes::from([(
+                "gen_ai.operation.step".to_string(),
+                json!(event.step_number),
+            )]),
+            OpenTelemetrySpanType::Step,
+            &operation_id,
+            &event.call_id,
+            runtime_context.as_ref(),
+        );
+        let span = self
+            .tracer
+            .start_span(format!("step {}", event.step_number), attributes);
+        if let Some(state) = self.call_states.get_mut(&event.call_id) {
+            state.step_span = Some(span);
+        }
+    }
+
+    /// Starts a language model call span.
+    pub fn on_language_model_call_start(
+        &mut self,
+        event: OpenTelemetryLanguageModelCallStartEvent,
+    ) {
+        let Some((operation_id, telemetry, runtime_context)) =
+            self.call_states.get(&event.call_id).map(|state| {
+                (
+                    state.operation_id.clone(),
+                    state.telemetry.clone(),
+                    state.runtime_context.clone(),
+                )
+            })
+        else {
+            return;
+        };
+        let attributes = select_attributes(
+            Some(&telemetry),
+            vec![
+                (
+                    "gen_ai.operation.name".to_string(),
+                    AttributeSpec::value(json!("chat")),
+                ),
+                (
+                    "gen_ai.provider.name".to_string(),
+                    AttributeSpec::value(json!(map_provider_name(&event.provider))),
+                ),
+                (
+                    "gen_ai.request.model".to_string(),
+                    AttributeSpec::value(json!(event.model_id)),
+                ),
+                (
+                    "gen_ai.input.messages".to_string(),
+                    event
+                        .input_messages
+                        .as_ref()
+                        .map_or(AttributeSpec::Omitted, |input_messages| {
+                            AttributeSpec::input(json!(input_messages))
+                        }),
+                ),
+            ],
+        );
+        let span_attributes = self.span_attributes(
+            attributes,
+            OpenTelemetrySpanType::LanguageModel,
+            &operation_id,
+            &event.call_id,
+            runtime_context.as_ref(),
+        );
+        let span = self
+            .tracer
+            .start_span(format!("chat {}", event.model_id), span_attributes);
+        if let Some(state) = self.call_states.get_mut(&event.call_id) {
+            state.inference_span = Some(span);
+        }
+    }
+
+    /// Finishes a language model call span.
+    pub fn on_language_model_call_end(&mut self, event: OpenTelemetryLanguageModelCallEndEvent) {
+        let Some((span, telemetry)) = self.call_states.get(&event.call_id).and_then(|state| {
+            state
+                .inference_span
+                .map(|span| (span, state.telemetry.clone()))
+        }) else {
+            return;
+        };
+
+        let mut attributes = language_model_end_attributes(&telemetry, &event);
+        if let Some(span) = self.tracer.spans.get_mut(span) {
+            span.set_attributes(std::mem::take(&mut attributes));
+            span.end();
+        }
+        if let Some(state) = self.call_states.get_mut(&event.call_id) {
+            state.inference_span = None;
+        }
+    }
+
+    /// Starts a tool execution span.
+    pub fn on_tool_execution_start(&mut self, event: OpenTelemetryToolExecutionStartEvent) {
+        let Some((operation_id, runtime_context)) = self
+            .call_states
+            .get(&event.call_id)
+            .map(|state| (state.operation_id.clone(), state.runtime_context.clone()))
+        else {
+            return;
+        };
+        let attributes = self.span_attributes(
+            TelemetryAttributes::from([("gen_ai.tool.name".to_string(), json!(event.tool_name))]),
+            OpenTelemetrySpanType::Tool,
+            &operation_id,
+            &event.call_id,
+            runtime_context.as_ref(),
+        );
+        let span = self
+            .tracer
+            .start_span(format!("execute_tool {}", event.tool_name), attributes);
+        if let Some(state) = self.call_states.get_mut(&event.call_id) {
+            state.tool_spans.insert(event.tool_call_id, span);
+        }
+    }
+
+    /// Executes a closure in the corresponding tool span context when present.
+    pub fn execute_tool<T>(
+        &mut self,
+        call_id: &str,
+        tool_call_id: &str,
+        execute: impl FnOnce(Option<&mut MockSpan>) -> T,
+    ) -> T {
+        let span = self
+            .call_states
+            .get(call_id)
+            .and_then(|state| state.tool_spans.get(tool_call_id).copied());
+        match span.and_then(|index| self.tracer.spans.get_mut(index)) {
+            Some(span) => execute(Some(span)),
+            None => execute(None),
+        }
+    }
+
+    /// Finishes a tool execution span.
+    pub fn on_tool_execution_end(&mut self, event: OpenTelemetryToolExecutionEndEvent) {
+        let Some(span) = self
+            .call_states
+            .get_mut(&event.call_id)
+            .and_then(|state| state.tool_spans.remove(&event.tool_call_id))
+        else {
+            return;
+        };
+
+        let Some(state) = self.call_states.get(&event.call_id) else {
+            return;
+        };
+        let attributes = select_attributes(
+            Some(&state.telemetry),
+            [(
+                "gen_ai.tool.output".to_string(),
+                event
+                    .output
+                    .map_or(AttributeSpec::Omitted, AttributeSpec::output),
+            )],
+        );
+
+        if let Some(span) = self.tracer.spans.get_mut(span) {
+            span.set_attributes(attributes);
+            span.end();
+        }
+    }
+
+    /// Finishes the current step span.
+    pub fn on_step_finish(&mut self, call_id: &str) {
+        let Some(span) = self
+            .call_states
+            .get_mut(call_id)
+            .and_then(|state| state.step_span.take())
+        else {
+            return;
+        };
+        if let Some(span) = self.tracer.spans.get_mut(span) {
+            span.end();
+        }
+    }
+
+    /// Finishes the root operation span and cleans up call state.
+    pub fn on_end(&mut self, event: OpenTelemetryEndEvent) {
+        let Some(state) = self.call_states.remove(&event.call_id) else {
+            return;
+        };
+
+        let end_event = OpenTelemetryLanguageModelCallEndEvent {
+            call_id: event.call_id,
+            finish_reason: event.finish_reason,
+            usage: event.usage,
+            output_messages: event.output_messages,
+        };
+        let attributes = language_model_end_attributes(&state.telemetry, &end_event);
+        self.end_span_with_attributes(state.inference_span, TelemetryAttributes::new());
+        self.end_span_with_attributes(state.step_span, TelemetryAttributes::new());
+        for span in state.tool_spans.into_values() {
+            self.end_span_with_attributes(Some(span), TelemetryAttributes::new());
+        }
+        self.end_span_with_attributes(Some(state.root_span), attributes);
+    }
+
+    /// Records an error on active spans, ends them, and cleans up call state.
+    pub fn on_error(&mut self, event: OpenTelemetryErrorEvent) {
+        let Some(state) = self.call_states.remove(&event.call_id) else {
+            return;
+        };
+        let mut spans = Vec::new();
+        spans.extend(state.tool_spans.into_values());
+        spans.extend(
+            [state.inference_span, state.step_span, Some(state.root_span)]
+                .into_iter()
+                .flatten(),
+        );
+        for span in spans {
+            if let Some(span) = self.tracer.spans.get_mut(span) {
+                record_error_on_span(span, event.error.clone());
+                span.end();
+            }
+        }
+    }
+
+    fn span_attributes(
+        &self,
+        attributes: TelemetryAttributes,
+        span_type: OpenTelemetrySpanType,
+        operation_id: &str,
+        call_id: &str,
+        runtime_context: Option<&TelemetryAttributes>,
+    ) -> TelemetryAttributes {
+        let mut custom_attributes = self
+            .options
+            .enrich_span
+            .as_ref()
+            .and_then(|enrich_span| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    enrich_span(EnrichSpanOptions {
+                        span_type,
+                        operation_id: operation_id.to_string(),
+                        call_id: call_id.to_string(),
+                        runtime_context: runtime_context.cloned(),
+                    })
+                }))
+                .ok()
+            })
+            .unwrap_or_default();
+        custom_attributes.extend(attributes);
+        custom_attributes
+    }
+
+    fn end_span_with_attributes(&mut self, span: Option<usize>, attributes: TelemetryAttributes) {
+        let Some(span) = span.and_then(|span| self.tracer.spans.get_mut(span)) else {
+            return;
+        };
+        span.set_attributes(attributes);
+        span.end();
+    }
+}
+
+fn language_model_end_attributes(
+    telemetry: &TelemetryOptions,
+    event: &OpenTelemetryLanguageModelCallEndEvent,
+) -> TelemetryAttributes {
+    let mut attributes = select_attributes(
+        Some(telemetry),
+        vec![
+            (
+                "gen_ai.response.finish_reasons".to_string(),
+                AttributeSpec::value(json!([map_finish_reason(&event.finish_reason)])),
+            ),
+            (
+                "gen_ai.output.messages".to_string(),
+                event
+                    .output_messages
+                    .as_ref()
+                    .map_or(AttributeSpec::Omitted, |output_messages| {
+                        AttributeSpec::output(json!(output_messages))
+                    }),
+            ),
+        ],
+    );
+
+    if let Some(usage) = event.usage {
+        for (key, value) in [
+            ("gen_ai.usage.input_tokens", usage.input_tokens),
+            ("gen_ai.usage.output_tokens", usage.output_tokens),
+            ("gen_ai.usage.total_tokens", usage.total_tokens),
+        ] {
+            if let Some(value) = value {
+                attributes.insert(key.to_string(), json!(value));
+            }
+        }
+    }
+
+    attributes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1525,5 +2864,277 @@ mod tests {
             "noop-result"
         });
         assert_eq!(result, "noop-result");
+    }
+
+    #[test]
+    fn open_telemetry_records_generate_text_root_step_and_chat_spans() {
+        let mut recorder = OpenTelemetry::new(OpenTelemetryOptions::new());
+        recorder.on_start(
+            OpenTelemetryStartEvent::new("call-1", "ai.generateText", "openai.chat", "gpt-4o-mini")
+                .with_telemetry(TelemetryOptions::new().with_function_id("weather"))
+                .with_settings(TelemetryAttributes::from([(
+                    "temperature".to_string(),
+                    json!(0.2),
+                )]))
+                .with_system_instructions(format_system_instructions("Be concise"))
+                .with_input_messages(vec![SemConvMessage::input(
+                    "user",
+                    vec![json!({ "type": "text", "content": "Weather?" })],
+                )]),
+        );
+        recorder.on_step_start(OpenTelemetryStepStartEvent::new("call-1", 1));
+        recorder.on_language_model_call_start(OpenTelemetryLanguageModelCallStartEvent::new(
+            "call-1",
+            "openai.chat",
+            "gpt-4o-mini",
+        ));
+        recorder.on_language_model_call_end(
+            OpenTelemetryLanguageModelCallEndEvent::new("call-1", "stop").with_usage(
+                TelemetryTokenUsage {
+                    input_tokens: Some(7),
+                    output_tokens: Some(4),
+                    total_tokens: Some(11),
+                },
+            ),
+        );
+        recorder.on_step_finish("call-1");
+        recorder.on_end(
+            OpenTelemetryEndEvent::new("call-1", "stop").with_output_messages(vec![
+                SemConvMessage::output(
+                    vec![json!({ "type": "text", "content": "Sunny." })],
+                    "stop",
+                ),
+            ]),
+        );
+
+        assert_eq!(recorder.active_call_count(), 0);
+        let tracer = recorder.into_tracer();
+        assert_eq!(tracer.spans.len(), 3);
+        assert_eq!(tracer.spans[0].name, "invoke_agent gpt-4o-mini");
+        assert_eq!(tracer.spans[1].name, "step 1");
+        assert_eq!(tracer.spans[2].name, "chat gpt-4o-mini");
+        assert!(tracer.spans.iter().all(|span| span.ended));
+        assert_eq!(
+            tracer.spans[0].attributes.get("gen_ai.operation.name"),
+            Some(&json!("invoke_agent"))
+        );
+        assert_eq!(
+            tracer.spans[0].attributes.get("gen_ai.provider.name"),
+            Some(&json!("openai"))
+        );
+        assert_eq!(
+            tracer.spans[0].attributes.get("gen_ai.request.temperature"),
+            Some(&json!(0.2))
+        );
+        assert_eq!(
+            tracer.spans[2].attributes.get("gen_ai.usage.total_tokens"),
+            Some(&json!(11))
+        );
+        assert!(
+            tracer
+                .spans
+                .iter()
+                .all(|span| span.attributes.keys().all(|key| !key.starts_with("ai.")))
+        );
+    }
+
+    #[test]
+    fn open_telemetry_enrichment_keeps_official_attribute_precedence() {
+        let mut recorder =
+            OpenTelemetry::new(OpenTelemetryOptions::new().with_enrich_span(|options| {
+                assert_eq!(options.span_type, OpenTelemetrySpanType::Operation);
+                TelemetryAttributes::from([
+                    ("custom.tenant".to_string(), json!("acme")),
+                    ("gen_ai.provider.name".to_string(), json!("wrong")),
+                ])
+            }));
+
+        recorder.on_start(OpenTelemetryStartEvent::new(
+            "call-1",
+            "ai.generateText",
+            "openai.chat",
+            "gpt-4o-mini",
+        ));
+
+        assert_eq!(
+            recorder.tracer().spans[0].attributes.get("custom.tenant"),
+            Some(&json!("acme"))
+        );
+        assert_eq!(
+            recorder.tracer().spans[0]
+                .attributes
+                .get("gen_ai.provider.name"),
+            Some(&json!("openai"))
+        );
+    }
+
+    #[test]
+    fn open_telemetry_records_tool_span_and_wraps_execute_tool() {
+        let mut recorder = OpenTelemetry::new(OpenTelemetryOptions::new());
+        recorder.on_start(OpenTelemetryStartEvent::new(
+            "call-1",
+            "ai.generateText",
+            "openai.chat",
+            "gpt-4o-mini",
+        ));
+        recorder.on_tool_execution_start(OpenTelemetryToolExecutionStartEvent::new(
+            "call-1", "tool-1", "weather",
+        ));
+
+        let output = recorder.execute_tool("call-1", "tool-1", |span| {
+            span.expect("tool span is active")
+                .set_attribute("custom.executed", json!(true));
+            json!({ "temperature": 24 })
+        });
+        recorder.on_tool_execution_end(
+            OpenTelemetryToolExecutionEndEvent::new("call-1", "tool-1").with_output(output),
+        );
+        recorder.on_end(OpenTelemetryEndEvent::new("call-1", "stop"));
+
+        let tracer = recorder.into_tracer();
+        let tool_span = tracer
+            .spans
+            .iter()
+            .find(|span| span.name == "execute_tool weather")
+            .expect("tool span is recorded");
+        assert!(tool_span.ended);
+        assert_eq!(
+            tool_span.attributes.get("gen_ai.tool.name"),
+            Some(&json!("weather"))
+        );
+        assert_eq!(
+            tool_span.attributes.get("custom.executed"),
+            Some(&json!(true))
+        );
+        assert_eq!(
+            tool_span.attributes.get("gen_ai.tool.output"),
+            Some(&json!({ "temperature": 24 }))
+        );
+    }
+
+    #[test]
+    fn open_telemetry_records_error_on_active_spans_and_cleans_state() {
+        let mut recorder = OpenTelemetry::new(OpenTelemetryOptions::new());
+        recorder.on_start(OpenTelemetryStartEvent::new(
+            "call-1",
+            "ai.generateText",
+            "openai.chat",
+            "gpt-4o-mini",
+        ));
+        recorder.on_step_start(OpenTelemetryStepStartEvent::new("call-1", 1));
+        recorder.on_language_model_call_start(OpenTelemetryLanguageModelCallStartEvent::new(
+            "call-1",
+            "openai.chat",
+            "gpt-4o-mini",
+        ));
+        recorder.on_tool_execution_start(OpenTelemetryToolExecutionStartEvent::new(
+            "call-1", "tool-1", "weather",
+        ));
+
+        recorder.on_error(OpenTelemetryErrorEvent::new(
+            "call-1",
+            RecordSpanError::exception("Error", "provider failed"),
+        ));
+
+        assert_eq!(recorder.active_call_count(), 0);
+        let tracer = recorder.into_tracer();
+        assert_eq!(tracer.spans.len(), 4);
+        assert!(tracer.spans.iter().all(|span| span.ended));
+        assert!(tracer.spans.iter().all(|span| {
+            span.status == Some(SpanStatus::error(Some("provider failed".to_string())))
+                && span.events.iter().any(|event| event.name == "exception")
+        }));
+    }
+
+    #[test]
+    fn otlp_http_json_payload_uses_collector_shape() {
+        let mut tracer = MockTracer::new();
+        let span = tracer.start_span(
+            "chat gpt-4o-mini",
+            TelemetryAttributes::from([
+                ("gen_ai.provider.name".to_string(), json!("openai")),
+                ("gen_ai.usage.total_tokens".to_string(), json!(11)),
+            ]),
+        );
+        tracer.spans[span].end();
+
+        let payload = build_otlp_http_trace_json(
+            &tracer,
+            &OtlpHttpTraceExportOptions::new("http://127.0.0.1:4318/v1/traces")
+                .with_service_name("otel-test")
+                .with_resource_attribute("deployment.environment.name", json!("test")),
+        );
+
+        assert_eq!(
+            payload["resourceSpans"][0]["resource"]["attributes"][0]["key"],
+            "deployment.environment.name"
+        );
+        assert_eq!(
+            payload["resourceSpans"][0]["scopeSpans"][0]["scope"]["name"],
+            "ai-sdk-otel"
+        );
+        assert_eq!(
+            payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["name"],
+            "chat gpt-4o-mini"
+        );
+        let attributes = payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["attributes"]
+            .as_array()
+            .expect("span attributes are present");
+        assert!(attributes.iter().any(|attribute| {
+            attribute["key"] == "gen_ai.provider.name"
+                && attribute["value"]["stringValue"] == "openai"
+        }));
+        assert!(attributes.iter().any(|attribute| {
+            attribute["key"] == "gen_ai.usage.total_tokens"
+                && attribute["value"]["intValue"] == "11"
+        }));
+    }
+
+    #[test]
+    fn local_otlp_http_receiver_captures_exported_span_payload() {
+        let receiver = LocalOtlpTraceReceiver::start().expect("OTLP receiver starts");
+        let mut recorder = OpenTelemetry::new(OpenTelemetryOptions::new());
+        recorder.on_start(OpenTelemetryStartEvent::new(
+            "call-1",
+            "ai.generateText",
+            "openai.chat",
+            "gpt-4o-mini",
+        ));
+        recorder.on_end(OpenTelemetryEndEvent::new("call-1", "stop"));
+        let tracer = recorder.into_tracer();
+
+        export_tracer_to_otlp_http_json(
+            &tracer,
+            &OtlpHttpTraceExportOptions::new(receiver.endpoint())
+                .with_service_name("ai-sdk-rust-local-otel"),
+        )
+        .expect("export succeeds");
+
+        let requests = receiver.wait_for_requests(1, std::time::Duration::from_secs(2));
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/v1/traces");
+        assert_eq!(
+            request.headers.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+
+        let body = request.body_json().expect("OTLP body is JSON");
+        assert_eq!(
+            body["resourceSpans"][0]["resource"]["attributes"][0]["value"]["stringValue"],
+            "ai-sdk-rust-local-otel"
+        );
+        assert_eq!(
+            body["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["name"],
+            "invoke_agent gpt-4o-mini"
+        );
+        let attributes = body["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["attributes"]
+            .as_array()
+            .expect("span attributes are present");
+        assert!(attributes.iter().any(|attribute| {
+            attribute["key"] == "gen_ai.provider.name"
+                && attribute["value"]["stringValue"] == "openai"
+        }));
     }
 }
