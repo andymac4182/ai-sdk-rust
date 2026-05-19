@@ -32,7 +32,7 @@ pub use oauth::{
     discover_authorization_server_metadata, discover_oauth_protected_resource_metadata,
     exchange_authorization, extract_resource_metadata_url, parse_oauth_error_response,
     refresh_authorization, register_client, resource_url_from_server_url, resource_url_strip_slash,
-    start_authorization, validate_safe_url,
+    select_resource_url, start_authorization, validate_safe_url,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
