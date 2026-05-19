@@ -11613,6 +11613,198 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_uses_azure_metadata_key_for_function_call_content() {
+        let transport: OpenResponsesTransport =
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_azure_tool_call",
+                        "created_at": 1711115037,
+                        "status": "completed",
+                        "model": "gpt-4o",
+                        "output": [
+                            {
+                                "id": "fc_azure",
+                                "call_id": "call_azure",
+                                "type": "function_call",
+                                "name": "weather",
+                                "arguments": "{\"location\":\"Seattle\"}",
+                                "namespace": "weather_ns",
+                                "status": "completed"
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 10,
+                            "output_tokens": 5
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("azure", "https://api.azure.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+
+        let result = poll_ready(
+            provider.language_model("gpt-4o").do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("What is the weather in Seattle?"),
+                    )]),
+                )])
+                .with_tool(weather_function_tool())
+                .with_tool_choice(LanguageModelToolChoice::Required),
+            ),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::ToolCalls);
+        assert!(result.provider_metadata.as_ref().is_some_and(|metadata| {
+            metadata.contains_key("azure") && !metadata.contains_key("openai")
+        }));
+
+        let tool_call = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .expect("response includes tool call");
+        assert_eq!(
+            tool_call
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("azure"))
+                .and_then(|metadata| metadata.get("itemId"))
+                .and_then(JsonValue::as_str),
+            Some("fc_azure")
+        );
+        assert_eq!(
+            tool_call
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("azure"))
+                .and_then(|metadata| metadata.get("namespace"))
+                .and_then(JsonValue::as_str),
+            Some("weather_ns")
+        );
+        assert!(
+            tool_call
+                .provider_metadata
+                .as_ref()
+                .is_some_and(|metadata| !metadata.contains_key("openai"))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_streams_azure_metadata_key_for_reasoning_and_finish() {
+        let transport: OpenResponsesTransport = Arc::new(
+            move |_request| -> OpenResponsesTransportFuture {
+                let sse = [
+                    r#"data: {"type":"response.created","response":{"id":"resp_azure_stream","created_at":1711115037,"model":"o3-mini"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_azure","type":"reasoning","encrypted_content":null}}"#,
+                    "",
+                    r#"data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_azure","summary_index":0,"delta":"thinking"}}"#,
+                    "",
+                    r#"data: {"type":"response.reasoning_summary_text.done","item_id":"rs_azure","summary_index":0,"text":"thinking"}"#,
+                    "",
+                    r#"data: {"type":"response.completed","response":{"id":"resp_azure_stream","created_at":1711115037,"model":"o3-mini","usage":{"input_tokens":10,"output_tokens":20,"output_tokens_details":{"reasoning_tokens":20}}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("azure", "https://api.azure.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+
+        let result = poll_ready(provider.language_model("o3-mini").do_stream(
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                    LanguageModelTextPart::new("Think briefly"),
+                )]),
+            )]),
+        ));
+
+        let reasoning_start = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ReasoningStart(reasoning_start) => Some(reasoning_start),
+                _ => None,
+            })
+            .expect("stream includes reasoning start");
+        assert_eq!(
+            reasoning_start
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("azure"))
+                .and_then(|metadata| metadata.get("itemId"))
+                .and_then(JsonValue::as_str),
+            Some("rs_azure")
+        );
+        assert!(
+            reasoning_start
+                .provider_metadata
+                .as_ref()
+                .is_some_and(|metadata| !metadata.contains_key("openai"))
+        );
+
+        let reasoning_delta = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ReasoningDelta(reasoning_delta) => Some(reasoning_delta),
+                _ => None,
+            })
+            .expect("stream includes reasoning delta");
+        assert_eq!(
+            reasoning_delta
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("azure"))
+                .and_then(|metadata| metadata.get("itemId"))
+                .and_then(JsonValue::as_str),
+            Some("rs_azure")
+        );
+
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(
+            finish
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("azure"))
+                .and_then(|metadata| metadata.get("responseId"))
+                .and_then(JsonValue::as_str),
+            Some("resp_azure_stream")
+        );
+        assert!(
+            finish
+                .provider_metadata
+                .as_ref()
+                .is_some_and(|metadata| !metadata.contains_key("openai"))
+        );
+    }
+
+    #[test]
     fn open_responses_provider_handles_prompt_file_defaults_and_unsupported_files() {
         let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
         let captured_requests_for_transport = Arc::clone(&captured_requests);
