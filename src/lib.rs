@@ -7,6 +7,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub mod agent;
 pub mod baseten;
 pub mod cerebras;
+pub mod chat_transport;
 pub mod deepinfra;
 pub mod embed;
 pub mod embedding_model;
@@ -70,6 +71,13 @@ pub use baseten::{
 pub use cerebras::{
     CerebrasProvider, CerebrasProviderSettings, DEFAULT_CEREBRAS_BASE_URL, cerebras,
     create_cerebras,
+};
+pub use chat_transport::{
+    ChatRequestOptions, ChatTransport, ChatTransportError, ChatTransportReconnectOptions,
+    ChatTransportSendOptions, ChatTransportTrigger, HttpChatTransport, HttpChatTransportMethod,
+    HttpChatTransportOptions, HttpChatTransportRequest, PrepareReconnectToStreamRequestOptions,
+    PrepareSendMessagesRequestOptions, PreparedReconnectToStreamRequest,
+    PreparedSendMessagesRequest, RequestCredentials,
 };
 pub use deepinfra::{
     DEFAULT_DEEPINFRA_BASE_URL, DeepInfraChatLanguageModel, DeepInfraImageModel, DeepInfraProvider,
