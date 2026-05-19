@@ -4039,13 +4039,14 @@ mod tests {
     use ai_sdk_provider::json::{JsonObject, JsonValue};
     use ai_sdk_provider::language_model::{
         FinishReason, LanguageModel, LanguageModelAssistantContentPart,
-        LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelFilePart,
-        LanguageModelFunctionTool, LanguageModelMessage, LanguageModelProviderTool,
-        LanguageModelReasoningEffort, LanguageModelReasoningPart, LanguageModelResponseFormat,
-        LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelTool,
-        LanguageModelToolCallPart, LanguageModelToolChoice, LanguageModelToolContentPart,
-        LanguageModelToolMessage, LanguageModelToolResultOutput, LanguageModelToolResultPart,
-        LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
+        LanguageModelFilePart, LanguageModelFunctionTool, LanguageModelMessage,
+        LanguageModelProviderTool, LanguageModelReasoningEffort, LanguageModelReasoningPart,
+        LanguageModelResponseFormat, LanguageModelStreamPart, LanguageModelSystemMessage,
+        LanguageModelTextPart, LanguageModelTool, LanguageModelToolCallPart,
+        LanguageModelToolChoice, LanguageModelToolContentPart, LanguageModelToolMessage,
+        LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUserContentPart,
+        LanguageModelUserMessage,
     };
     use ai_sdk_provider::provider::ProviderOptions;
     use ai_sdk_provider::warning::Warning;
@@ -5287,6 +5288,356 @@ mod tests {
     }
 
     #[test]
+    fn openai_compatible_chat_streams_reasoning_raw_chunks_and_parse_errors() {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(|_request| -> OpenAICompatibleTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    sse_body([
+                        json!({
+                            "id": "chatcmpl-stream-test",
+                            "created": 1711357598,
+                            "model": "test-chat-model",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "role": "assistant",
+                                        "reasoning_content": "Let me think"
+                                    },
+                                    "finish_reason": null
+                                }
+                            ]
+                        }),
+                        json!({
+                            "id": "chatcmpl-stream-test",
+                            "created": 1711357598,
+                            "model": "test-chat-model",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "reasoning": " about this"
+                                    },
+                                    "finish_reason": null
+                                }
+                            ]
+                        }),
+                        json!({
+                            "id": "chatcmpl-stream-test",
+                            "created": 1711357598,
+                            "model": "test-chat-model",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "content": "Here's my response"
+                                    },
+                                    "finish_reason": null
+                                }
+                            ]
+                        }),
+                        json!({
+                            "id": "chatcmpl-stream-test",
+                            "created": 1711357598,
+                            "model": "test-chat-model",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": "stop"
+                                }
+                            ],
+                            "usage": {
+                                "prompt_tokens": 2,
+                                "completion_tokens": 3
+                            }
+                        }),
+                    ]),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
+            "test-provider",
+            "https://api.example.com",
+        ))
+        .with_transport(transport)
+        .chat_model("test-chat-model");
+        let result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::System(
+                    LanguageModelSystemMessage::new("Think first"),
+                )])
+                .with_include_raw_chunks(true),
+            ),
+        );
+
+        assert!(matches!(
+            result.stream.first(),
+            Some(LanguageModelStreamPart::StreamStart(_))
+        ));
+        assert!(
+            result
+                .stream
+                .iter()
+                .any(|part| matches!(part, LanguageModelStreamPart::Raw(_)))
+        );
+        assert_eq!(
+            result
+                .stream
+                .iter()
+                .filter_map(|part| match part {
+                    LanguageModelStreamPart::ReasoningDelta(part) => Some(part.delta.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["Let me think", " about this"]
+        );
+        assert_eq!(
+            result
+                .stream
+                .iter()
+                .filter_map(|part| match part {
+                    LanguageModelStreamPart::TextDelta(part) => Some(part.delta.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["Here's my response"]
+        );
+        assert!(matches!(
+            result.stream.last(),
+            Some(LanguageModelStreamPart::Finish(finish))
+                if finish.finish_reason.unified == FinishReason::Stop
+                    && finish.usage.input_tokens.total == Some(2)
+        ));
+
+        let parse_error_transport: OpenAICompatibleTransport =
+            Arc::new(|_request| -> OpenAICompatibleTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    "data: {not json}\n\ndata: [DONE]\n\n",
+                ))))
+            });
+        let parse_error_model = OpenAICompatibleProvider::from_settings(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com"),
+        )
+        .with_transport(parse_error_transport)
+        .chat_model("test-chat-model");
+        let parse_error_result =
+            poll_ready(parse_error_model.do_stream(LanguageModelCallOptions::new(Vec::new())));
+
+        assert!(
+            parse_error_result
+                .stream
+                .iter()
+                .any(|part| matches!(part, LanguageModelStreamPart::Error(_)))
+        );
+        assert!(matches!(
+            parse_error_result.stream.last(),
+            Some(LanguageModelStreamPart::Finish(finish))
+                if finish.finish_reason.unified == FinishReason::Error
+        ));
+    }
+
+    #[test]
+    fn openai_compatible_chat_maps_tool_calls_from_generate() {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(|_request| -> OpenAICompatibleTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "content": null,
+                                    "tool_calls": [
+                                        {
+                                            "id": "call_1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "weather",
+                                                "arguments": "{\"city\":\"Brisbane\"}"
+                                            },
+                                            "extra_content": {
+                                                "google": {
+                                                    "thought_signature": "signature-1"
+                                                }
+                                            }
+                                        }
+                                    ]
+                                },
+                                "finish_reason": "tool_calls"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 2,
+                            "completion_tokens": 1
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
+            "test-provider",
+            "https://api.example.com",
+        ))
+        .with_transport(transport)
+        .chat_model("test-chat-model");
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
+                    "What is the weather?",
+                )),
+            ])),
+        ])));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::ToolCalls);
+        assert!(matches!(
+            result.content.first(),
+            Some(LanguageModelContent::ToolCall(tool_call))
+                if tool_call.tool_call_id == "call_1"
+                    && tool_call.tool_name == "weather"
+                    && tool_call.input == "{\"city\":\"Brisbane\"}"
+                    && tool_call
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("test-provider"))
+                        .and_then(|metadata| metadata.get("thoughtSignature"))
+                        .and_then(JsonValue::as_str)
+                        == Some("signature-1")
+        ));
+    }
+
+    #[test]
+    fn openai_compatible_chat_streams_tool_calls() {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(|_request| -> OpenAICompatibleTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    sse_body([
+                        json!({
+                            "id": "chatcmpl-tool-stream",
+                            "created": 1711115037,
+                            "model": "test-chat-model",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "tool_calls": [
+                                            {
+                                                "index": 0,
+                                                "id": "call_1",
+                                                "type": "function",
+                                                "function": {
+                                                    "name": "weather",
+                                                    "arguments": "{\"city\""
+                                                },
+                                                "extra_content": {
+                                                    "google": {
+                                                        "thought_signature": "signature-1"
+                                                    }
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    "finish_reason": null
+                                }
+                            ]
+                        }),
+                        json!({
+                            "id": "chatcmpl-tool-stream",
+                            "created": 1711115037,
+                            "model": "test-chat-model",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "tool_calls": [
+                                            {
+                                                "index": 0,
+                                                "function": {
+                                                    "arguments": ":\"Brisbane\"}"
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    "finish_reason": "tool_calls"
+                                }
+                            ],
+                            "usage": {
+                                "prompt_tokens": 2,
+                                "completion_tokens": 1
+                            }
+                        }),
+                    ]),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
+            "test-provider",
+            "https://api.example.com",
+        ))
+        .with_transport(transport)
+        .chat_model("test-chat-model");
+        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
+                    "What is the weather?",
+                )),
+            ])),
+        ])));
+
+        assert!(result.stream.iter().any(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::ToolInputStart(start)
+                    if start.id == "call_1" && start.tool_name == "weather"
+            )
+        }));
+        assert_eq!(
+            result
+                .stream
+                .iter()
+                .filter_map(|part| match part {
+                    LanguageModelStreamPart::ToolInputDelta(delta) => Some(delta.delta.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["{\"city\"", ":\"Brisbane\"}"]
+        );
+        assert!(result.stream.iter().any(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::ToolInputEnd(end) if end.id == "call_1"
+            )
+        }));
+        assert!(result.stream.iter().any(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::ToolCall(tool_call)
+                    if tool_call.tool_call_id == "call_1"
+                        && tool_call.tool_name == "weather"
+                        && tool_call.input == "{\"city\":\"Brisbane\"}"
+                        && tool_call
+                            .provider_metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.get("test-provider"))
+                            .and_then(|metadata| metadata.get("thoughtSignature"))
+                            .and_then(JsonValue::as_str)
+                            == Some("signature-1")
+            )
+        }));
+        assert!(matches!(
+            result.stream.last(),
+            Some(LanguageModelStreamPart::Finish(finish))
+                if finish.finish_reason.unified == FinishReason::ToolCalls
+        ));
+    }
+
+    #[test]
     fn openai_compatible_provider_configures_headers_urls_and_model_aliases() {
         let provider = create_openai_compatible(
             OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com/")
@@ -5365,6 +5716,14 @@ mod tests {
                 .and_then(Option::as_deref),
             Some("ai-sdk/openai-compatible/0.1.0")
         );
+    }
+
+    fn sse_body(events: impl IntoIterator<Item = JsonValue>) -> String {
+        events
+            .into_iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .chain(["data: [DONE]\n\n".to_string()])
+            .collect()
     }
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
