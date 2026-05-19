@@ -119,7 +119,15 @@ mod tests {
                 .and_then(|response| response.id.as_deref()),
             Some("resp_open")
         );
-        assert!(result.provider_metadata.is_none());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("openai"))
+                .and_then(|metadata| metadata.get("responseId"))
+                .and_then(JsonValue::as_str),
+            Some("resp_open")
+        );
 
         let request = captured_request
             .lock()
@@ -984,7 +992,15 @@ mod tests {
                 .map(String::as_str),
             Some("req_open_responses_stream")
         );
-        assert!(result.provider_metadata.is_none());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("openai"))
+                .and_then(|metadata| metadata.get("responseId"))
+                .and_then(JsonValue::as_str),
+            Some("resp_stream")
+        );
         assert!(
             result
                 .parts
@@ -1064,7 +1080,15 @@ mod tests {
 
         assert_eq!(result.finish_reason, FinishReason::Error);
         assert_eq!(result.response.id.as_deref(), Some("resp_stream_error"));
-        assert!(result.provider_metadata.is_none());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("openai"))
+                .and_then(|metadata| metadata.get("responseId"))
+                .and_then(JsonValue::as_str),
+            Some("resp_stream_error")
+        );
         let error = result.errors.first().expect("stream error is captured");
         assert_eq!(error.get("type").and_then(JsonValue::as_str), Some("error"));
         assert_eq!(
