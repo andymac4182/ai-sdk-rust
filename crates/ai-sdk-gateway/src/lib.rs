@@ -8,6 +8,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub mod gateway;
 pub mod gateway_error;
 pub mod gateway_tools;
+pub mod vercel_ai_gateway;
 
 pub use gateway::{
     DEFAULT_GATEWAY_BASE_URL, GatewayAuthToken, GatewayCredentialType, GatewayCreditsResponse,
@@ -40,4 +41,11 @@ pub use gateway_tools::{
     PerplexitySearchQuery, PerplexitySearchRecencyFilter, PerplexitySearchResponse,
     PerplexitySearchResult, gateway_tools, parallel_search, parallel_search_tool_factory,
     perplexity_search, perplexity_search_tool_factory,
+};
+pub use vercel_ai_gateway::{
+    VERCEL_AI_GATEWAY_OPENAI_COMPATIBLE_BASE_URL, VercelAiGatewayOpenAICompatibleProvider,
+    VercelAiGatewayOpenAICompatibleSettings, create_vercel_ai_gateway_openai_compatible,
+    vercel_ai_gateway_auth_token_with_env, vercel_ai_gateway_openai_compatible,
+    vercel_ai_gateway_openai_compatible_embedding, vercel_ai_gateway_openai_compatible_image,
+    vercel_ai_gateway_openai_responses,
 };

@@ -19,6 +19,8 @@ unsafe_code = "forbid"
 all = "warn"
 
 [dependencies]
+ai-sdk-open-responses = { path = "../ai-sdk-open-responses" }
+ai-sdk-openai-compatible = { path = "../ai-sdk-openai-compatible" }
 ai-sdk-provider = { path = "../ai-sdk-provider" }
 ai-sdk-provider-utils = { path = "../ai-sdk-provider-utils" }
 serde = { version = "1.0.228", features = ["derive"] }
