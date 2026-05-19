@@ -1783,9 +1783,13 @@ impl OpenTelemetryOptions {
 struct OpenTelemetryCallState {
     operation_id: String,
     telemetry: TelemetryOptions,
+    provider: String,
+    model_id: String,
     root_span: usize,
     step_span: Option<usize>,
     inference_span: Option<usize>,
+    embed_spans: BTreeMap<String, usize>,
+    rerank_span: Option<usize>,
     tool_spans: BTreeMap<String, usize>,
     runtime_context: Option<TelemetryAttributes>,
 }
@@ -1916,6 +1920,182 @@ pub struct TelemetryTokenUsage {
     pub total_tokens: Option<u64>,
 }
 
+/// Embedding usage values for OTel lifecycle events.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OpenTelemetryEmbeddingUsage {
+    pub tokens: Option<u64>,
+}
+
+/// Input value shape for high-level embedding operation telemetry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OpenTelemetryEmbeddingInput {
+    /// One value for `embed`.
+    One(String),
+
+    /// Multiple values for `embedMany`.
+    Many(Vec<String>),
+}
+
+impl OpenTelemetryEmbeddingInput {
+    /// Creates a single embedding input value.
+    pub fn one(value: impl Into<String>) -> Self {
+        Self::One(value.into())
+    }
+
+    /// Creates multiple embedding input values.
+    pub fn many(values: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self::Many(values.into_iter().map(Into::into).collect())
+    }
+}
+
+/// Embedding output shape for high-level embedding operation telemetry.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OpenTelemetryEmbeddingOutput {
+    /// One embedding for `embed`.
+    One(Vec<f64>),
+
+    /// Multiple embeddings for `embedMany`.
+    Many(Vec<Vec<f64>>),
+}
+
+impl OpenTelemetryEmbeddingOutput {
+    /// Creates a single embedding output value.
+    pub fn one(embedding: impl IntoIterator<Item = f64>) -> Self {
+        Self::One(embedding.into_iter().collect())
+    }
+
+    /// Creates multiple embedding output values.
+    pub fn many(embeddings: impl IntoIterator<Item = impl IntoIterator<Item = f64>>) -> Self {
+        Self::Many(
+            embeddings
+                .into_iter()
+                .map(|embedding| embedding.into_iter().collect())
+                .collect(),
+        )
+    }
+}
+
+/// High-level embedding operation start event.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenTelemetryEmbedStartEvent {
+    pub call_id: String,
+    pub operation_id: String,
+    pub provider: String,
+    pub model_id: String,
+    pub input: OpenTelemetryEmbeddingInput,
+    pub telemetry: TelemetryOptions,
+}
+
+impl OpenTelemetryEmbedStartEvent {
+    /// Creates an embedding operation start event.
+    pub fn new(
+        call_id: impl Into<String>,
+        operation_id: impl Into<String>,
+        provider: impl Into<String>,
+        model_id: impl Into<String>,
+        input: OpenTelemetryEmbeddingInput,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            operation_id: operation_id.into(),
+            provider: provider.into(),
+            model_id: model_id.into(),
+            input,
+            telemetry: TelemetryOptions::new(),
+        }
+    }
+
+    /// Sets telemetry recording options.
+    pub fn with_telemetry(mut self, telemetry: TelemetryOptions) -> Self {
+        self.telemetry = telemetry;
+        self
+    }
+}
+
+/// High-level embedding operation end event.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenTelemetryEmbedEndEvent {
+    pub call_id: String,
+    pub embedding: OpenTelemetryEmbeddingOutput,
+    pub usage: OpenTelemetryEmbeddingUsage,
+}
+
+impl OpenTelemetryEmbedEndEvent {
+    /// Creates an embedding operation end event.
+    pub fn new(call_id: impl Into<String>, embedding: OpenTelemetryEmbeddingOutput) -> Self {
+        Self {
+            call_id: call_id.into(),
+            embedding,
+            usage: OpenTelemetryEmbeddingUsage::default(),
+        }
+    }
+
+    /// Sets usage values.
+    pub fn with_usage(mut self, usage: OpenTelemetryEmbeddingUsage) -> Self {
+        self.usage = usage;
+        self
+    }
+}
+
+/// Embedding model call start event accepted by
+/// [`OpenTelemetry::on_embedding_model_call_start`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenTelemetryEmbeddingModelCallStartEvent {
+    pub call_id: String,
+    pub embed_call_id: String,
+    pub values: Vec<String>,
+}
+
+impl OpenTelemetryEmbeddingModelCallStartEvent {
+    /// Creates an embedding model call start event.
+    pub fn new(
+        call_id: impl Into<String>,
+        embed_call_id: impl Into<String>,
+        values: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            embed_call_id: embed_call_id.into(),
+            values: values.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// Embedding model call end event accepted by
+/// [`OpenTelemetry::on_embedding_model_call_end`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenTelemetryEmbeddingModelCallEndEvent {
+    pub call_id: String,
+    pub embed_call_id: String,
+    pub embeddings: Vec<Vec<f64>>,
+    pub usage: OpenTelemetryEmbeddingUsage,
+}
+
+impl OpenTelemetryEmbeddingModelCallEndEvent {
+    /// Creates an embedding model call end event.
+    pub fn new(
+        call_id: impl Into<String>,
+        embed_call_id: impl Into<String>,
+        embeddings: impl IntoIterator<Item = impl IntoIterator<Item = f64>>,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            embed_call_id: embed_call_id.into(),
+            embeddings: embeddings
+                .into_iter()
+                .map(|embedding| embedding.into_iter().collect())
+                .collect(),
+            usage: OpenTelemetryEmbeddingUsage::default(),
+        }
+    }
+
+    /// Sets usage values.
+    pub fn with_usage(mut self, usage: OpenTelemetryEmbeddingUsage) -> Self {
+        self.usage = usage;
+        self
+    }
+}
+
 /// Language model call end event accepted by
 /// [`OpenTelemetry::on_language_model_call_end`].
 #[derive(Clone, Debug, PartialEq)]
@@ -1995,6 +2175,105 @@ impl OpenTelemetryToolExecutionEndEvent {
     pub fn with_output(mut self, output: impl Into<TelemetryAttributeValue>) -> Self {
         self.output = Some(output.into());
         self
+    }
+}
+
+/// High-level rerank operation start event.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenTelemetryRerankStartEvent {
+    pub call_id: String,
+    pub operation_id: String,
+    pub provider: String,
+    pub model_id: String,
+    pub documents: Vec<JsonValue>,
+    pub telemetry: TelemetryOptions,
+}
+
+impl OpenTelemetryRerankStartEvent {
+    /// Creates a rerank operation start event.
+    pub fn new(
+        call_id: impl Into<String>,
+        provider: impl Into<String>,
+        model_id: impl Into<String>,
+        documents: impl IntoIterator<Item = JsonValue>,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            operation_id: "ai.rerank".to_string(),
+            provider: provider.into(),
+            model_id: model_id.into(),
+            documents: documents.into_iter().collect(),
+            telemetry: TelemetryOptions::new(),
+        }
+    }
+
+    /// Sets telemetry recording options.
+    pub fn with_telemetry(mut self, telemetry: TelemetryOptions) -> Self {
+        self.telemetry = telemetry;
+        self
+    }
+}
+
+/// High-level rerank operation end event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenTelemetryRerankEndEvent {
+    pub call_id: String,
+}
+
+impl OpenTelemetryRerankEndEvent {
+    /// Creates a rerank operation end event.
+    pub fn new(call_id: impl Into<String>) -> Self {
+        Self {
+            call_id: call_id.into(),
+        }
+    }
+}
+
+/// Reranking model call start event accepted by
+/// [`OpenTelemetry::on_reranking_model_call_start`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenTelemetryRerankingModelCallStartEvent {
+    pub call_id: String,
+    pub documents: Vec<JsonValue>,
+    pub documents_type: String,
+}
+
+impl OpenTelemetryRerankingModelCallStartEvent {
+    /// Creates a reranking model call start event.
+    pub fn new(
+        call_id: impl Into<String>,
+        documents_type: impl Into<String>,
+        documents: impl IntoIterator<Item = JsonValue>,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            documents: documents.into_iter().collect(),
+            documents_type: documents_type.into(),
+        }
+    }
+}
+
+/// Reranking model call end event accepted by
+/// [`OpenTelemetry::on_reranking_model_call_end`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenTelemetryRerankingModelCallEndEvent {
+    pub call_id: String,
+    pub documents_type: String,
+    pub ranking: Vec<JsonValue>,
+}
+
+impl OpenTelemetryRerankingModelCallEndEvent {
+    /// Creates a reranking model call end event.
+    pub fn new(
+        call_id: impl Into<String>,
+        documents_type: impl Into<String>,
+        ranking: impl IntoIterator<Item = JsonValue>,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            documents_type: documents_type.into(),
+            ranking: ranking.into_iter().collect(),
+        }
     }
 }
 
@@ -2084,6 +2363,295 @@ impl OpenTelemetry {
         self.call_states.len()
     }
 
+    /// Starts a high-level embedding operation span.
+    pub fn on_embed_operation_start(&mut self, event: OpenTelemetryEmbedStartEvent) {
+        let provider_name = map_provider_name(&event.provider);
+        let operation_name = map_operation_name(&event.operation_id);
+        let mut attributes = select_attributes(
+            Some(&event.telemetry),
+            [
+                (
+                    "gen_ai.operation.name".to_string(),
+                    AttributeSpec::value(json!(operation_name)),
+                ),
+                (
+                    "gen_ai.provider.name".to_string(),
+                    AttributeSpec::value(json!(provider_name)),
+                ),
+                (
+                    "gen_ai.request.model".to_string(),
+                    AttributeSpec::value(json!(event.model_id)),
+                ),
+            ],
+        );
+        attributes.extend(select_supplemental_attributes(
+            Some(&event.telemetry),
+            self.options.supplemental_attributes,
+            SupplementalAttributes {
+                embedding: embedding_input_attributes(&event.input),
+                ..SupplementalAttributes::default()
+            },
+        ));
+
+        let span_attributes = self.span_attributes(
+            attributes,
+            OpenTelemetrySpanType::Operation,
+            &event.operation_id,
+            &event.call_id,
+            None,
+        );
+        let span_name = format!(
+            "{} {}",
+            map_operation_name(&event.operation_id),
+            event.model_id
+        );
+        let root_span = self.tracer.start_span(span_name, span_attributes);
+
+        self.call_states.insert(
+            event.call_id.clone(),
+            OpenTelemetryCallState {
+                operation_id: event.operation_id,
+                telemetry: event.telemetry,
+                provider: event.provider,
+                model_id: event.model_id,
+                root_span,
+                step_span: None,
+                inference_span: None,
+                embed_spans: BTreeMap::new(),
+                rerank_span: None,
+                tool_spans: BTreeMap::new(),
+                runtime_context: None,
+            },
+        );
+    }
+
+    /// Finishes a high-level embedding operation span.
+    pub fn on_embed_operation_end(&mut self, event: OpenTelemetryEmbedEndEvent) {
+        let Some(state) = self.call_states.remove(&event.call_id) else {
+            return;
+        };
+        for span in state.embed_spans.into_values() {
+            self.end_span_with_attributes(Some(span), TelemetryAttributes::new());
+        }
+        self.end_span_with_attributes(
+            Some(state.root_span),
+            embedding_end_attributes(
+                &state.telemetry,
+                &event.embedding,
+                event.usage,
+                state.operation_id == "ai.embedMany",
+                self.options.supplemental_attributes,
+            ),
+        );
+    }
+
+    /// Starts an inner embedding model call span.
+    pub fn on_embedding_model_call_start(
+        &mut self,
+        event: OpenTelemetryEmbeddingModelCallStartEvent,
+    ) {
+        let Some((operation_id, telemetry, provider, model_id, runtime_context)) =
+            self.call_states.get(&event.call_id).map(|state| {
+                (
+                    state.operation_id.clone(),
+                    state.telemetry.clone(),
+                    state.provider.clone(),
+                    state.model_id.clone(),
+                    state.runtime_context.clone(),
+                )
+            })
+        else {
+            return;
+        };
+        let attributes = embedding_model_start_attributes(
+            &telemetry,
+            &provider,
+            &model_id,
+            &event.values,
+            self.options.supplemental_attributes,
+        );
+        let span_attributes = self.span_attributes(
+            attributes,
+            OpenTelemetrySpanType::Embedding,
+            &operation_id,
+            &event.call_id,
+            runtime_context.as_ref(),
+        );
+        let span = self
+            .tracer
+            .start_span(format!("embeddings {model_id}"), span_attributes);
+        if let Some(state) = self.call_states.get_mut(&event.call_id) {
+            state.embed_spans.insert(event.embed_call_id, span);
+        }
+    }
+
+    /// Finishes an inner embedding model call span.
+    pub fn on_embedding_model_call_end(&mut self, event: OpenTelemetryEmbeddingModelCallEndEvent) {
+        let Some((span, telemetry)) = self.call_states.get_mut(&event.call_id).and_then(|state| {
+            state
+                .embed_spans
+                .remove(&event.embed_call_id)
+                .map(|span| (span, state.telemetry.clone()))
+        }) else {
+            return;
+        };
+        self.end_span_with_attributes(
+            Some(span),
+            embedding_model_end_attributes(
+                &telemetry,
+                &event.embeddings,
+                event.usage,
+                self.options.supplemental_attributes,
+            ),
+        );
+    }
+
+    /// Starts a high-level rerank operation span.
+    pub fn on_rerank_operation_start(&mut self, event: OpenTelemetryRerankStartEvent) {
+        let provider_name = map_provider_name(&event.provider);
+        let mut attributes = select_attributes(
+            Some(&event.telemetry),
+            [
+                (
+                    "gen_ai.operation.name".to_string(),
+                    AttributeSpec::value(json!("rerank")),
+                ),
+                (
+                    "gen_ai.provider.name".to_string(),
+                    AttributeSpec::value(json!(provider_name)),
+                ),
+                (
+                    "gen_ai.request.model".to_string(),
+                    AttributeSpec::value(json!(event.model_id)),
+                ),
+            ],
+        );
+        attributes.extend(select_supplemental_attributes(
+            Some(&event.telemetry),
+            self.options.supplemental_attributes,
+            SupplementalAttributes {
+                reranking: reranking_document_attributes(&event.documents),
+                ..SupplementalAttributes::default()
+            },
+        ));
+
+        let span_attributes = self.span_attributes(
+            attributes,
+            OpenTelemetrySpanType::Operation,
+            &event.operation_id,
+            &event.call_id,
+            None,
+        );
+        let root_span = self
+            .tracer
+            .start_span(format!("rerank {}", event.model_id), span_attributes);
+
+        self.call_states.insert(
+            event.call_id.clone(),
+            OpenTelemetryCallState {
+                operation_id: event.operation_id,
+                telemetry: event.telemetry,
+                provider: event.provider,
+                model_id: event.model_id,
+                root_span,
+                step_span: None,
+                inference_span: None,
+                embed_spans: BTreeMap::new(),
+                rerank_span: None,
+                tool_spans: BTreeMap::new(),
+                runtime_context: None,
+            },
+        );
+    }
+
+    /// Finishes a high-level rerank operation span.
+    pub fn on_rerank_operation_end(&mut self, event: OpenTelemetryRerankEndEvent) {
+        let Some(state) = self.call_states.remove(&event.call_id) else {
+            return;
+        };
+        self.end_span_with_attributes(state.rerank_span, TelemetryAttributes::new());
+        self.end_span_with_attributes(Some(state.root_span), TelemetryAttributes::new());
+    }
+
+    /// Starts an inner reranking model call span.
+    pub fn on_reranking_model_call_start(
+        &mut self,
+        event: OpenTelemetryRerankingModelCallStartEvent,
+    ) {
+        let Some((operation_id, telemetry, provider, model_id, runtime_context)) =
+            self.call_states.get(&event.call_id).map(|state| {
+                (
+                    state.operation_id.clone(),
+                    state.telemetry.clone(),
+                    state.provider.clone(),
+                    state.model_id.clone(),
+                    state.runtime_context.clone(),
+                )
+            })
+        else {
+            return;
+        };
+        let mut attributes = select_attributes(
+            Some(&telemetry),
+            [
+                (
+                    "gen_ai.operation.name".to_string(),
+                    AttributeSpec::value(json!("rerank")),
+                ),
+                (
+                    "gen_ai.provider.name".to_string(),
+                    AttributeSpec::value(json!(map_provider_name(&provider))),
+                ),
+                (
+                    "gen_ai.request.model".to_string(),
+                    AttributeSpec::value(json!(model_id)),
+                ),
+            ],
+        );
+        attributes.extend(select_supplemental_attributes(
+            Some(&telemetry),
+            self.options.supplemental_attributes,
+            SupplementalAttributes {
+                reranking: reranking_document_attributes(&event.documents),
+                ..SupplementalAttributes::default()
+            },
+        ));
+        let span_attributes = self.span_attributes(
+            attributes,
+            OpenTelemetrySpanType::Reranking,
+            &operation_id,
+            &event.call_id,
+            runtime_context.as_ref(),
+        );
+        let span = self
+            .tracer
+            .start_span(format!("rerank {model_id}"), span_attributes);
+        if let Some(state) = self.call_states.get_mut(&event.call_id) {
+            state.rerank_span = Some(span);
+        }
+    }
+
+    /// Finishes an inner reranking model call span.
+    pub fn on_reranking_model_call_end(&mut self, event: OpenTelemetryRerankingModelCallEndEvent) {
+        let Some((span, telemetry)) = self.call_states.get_mut(&event.call_id).and_then(|state| {
+            state
+                .rerank_span
+                .take()
+                .map(|span| (span, state.telemetry.clone()))
+        }) else {
+            return;
+        };
+        self.end_span_with_attributes(
+            Some(span),
+            reranking_model_end_attributes(
+                &telemetry,
+                &event.documents_type,
+                &event.ranking,
+                self.options.supplemental_attributes,
+            ),
+        );
+    }
+
     /// Starts a root operation span.
     pub fn on_start(&mut self, event: OpenTelemetryStartEvent) {
         let provider_name = map_provider_name(&event.provider);
@@ -2171,9 +2739,13 @@ impl OpenTelemetry {
             OpenTelemetryCallState {
                 operation_id: event.operation_id,
                 telemetry: event.telemetry,
+                provider: event.provider,
+                model_id: event.model_id,
                 root_span,
                 step_span: None,
                 inference_span: None,
+                embed_spans: BTreeMap::new(),
+                rerank_span: None,
                 tool_spans: BTreeMap::new(),
                 runtime_context: event.runtime_context,
             },
@@ -2396,10 +2968,16 @@ impl OpenTelemetry {
         };
         let mut spans = Vec::new();
         spans.extend(state.tool_spans.into_values());
+        spans.extend(state.embed_spans.into_values());
         spans.extend(
-            [state.inference_span, state.step_span, Some(state.root_span)]
-                .into_iter()
-                .flatten(),
+            [
+                state.rerank_span,
+                state.inference_span,
+                state.step_span,
+                Some(state.root_span),
+            ]
+            .into_iter()
+            .flatten(),
         );
         for span in spans {
             if let Some(span) = self.tracer.spans.get_mut(span) {
@@ -2482,6 +3060,186 @@ fn language_model_end_attributes(
     }
 
     attributes
+}
+
+fn embedding_model_start_attributes(
+    telemetry: &TelemetryOptions,
+    provider: &str,
+    model_id: &str,
+    values: &[String],
+    supplemental_attributes: SupplementalAttributeOptions,
+) -> TelemetryAttributes {
+    let mut attributes = select_attributes(
+        Some(telemetry),
+        [
+            (
+                "gen_ai.operation.name".to_string(),
+                AttributeSpec::value(json!("embeddings")),
+            ),
+            (
+                "gen_ai.provider.name".to_string(),
+                AttributeSpec::value(json!(map_provider_name(provider))),
+            ),
+            (
+                "gen_ai.request.model".to_string(),
+                AttributeSpec::value(json!(model_id)),
+            ),
+        ],
+    );
+    attributes.extend(select_supplemental_attributes(
+        Some(telemetry),
+        supplemental_attributes,
+        SupplementalAttributes {
+            embedding: embedding_values_attributes(values),
+            ..SupplementalAttributes::default()
+        },
+    ));
+    attributes
+}
+
+fn embedding_model_end_attributes(
+    telemetry: &TelemetryOptions,
+    embeddings: &[Vec<f64>],
+    usage: OpenTelemetryEmbeddingUsage,
+    supplemental_attributes: SupplementalAttributeOptions,
+) -> TelemetryAttributes {
+    let mut attributes = TelemetryAttributes::new();
+    if let Some(tokens) = usage.tokens {
+        attributes.insert("gen_ai.usage.input_tokens".to_string(), json!(tokens));
+    }
+    attributes.extend(select_supplemental_attributes(
+        Some(telemetry),
+        supplemental_attributes,
+        SupplementalAttributes {
+            embedding: vec![(
+                "ai.embeddings".to_string(),
+                AttributeSpec::output(json!(
+                    embeddings
+                        .iter()
+                        .map(telemetry_json_string)
+                        .collect::<Vec<_>>()
+                )),
+            )],
+            ..SupplementalAttributes::default()
+        },
+    ));
+    attributes
+}
+
+fn embedding_end_attributes(
+    telemetry: &TelemetryOptions,
+    embedding: &OpenTelemetryEmbeddingOutput,
+    usage: OpenTelemetryEmbeddingUsage,
+    is_many: bool,
+    supplemental_attributes: SupplementalAttributeOptions,
+) -> TelemetryAttributes {
+    let mut attributes = TelemetryAttributes::new();
+    if let Some(tokens) = usage.tokens {
+        attributes.insert("gen_ai.usage.input_tokens".to_string(), json!(tokens));
+    }
+    let embedding_attributes = match (is_many, embedding) {
+        (true, OpenTelemetryEmbeddingOutput::Many(embeddings)) => vec![(
+            "ai.embeddings".to_string(),
+            AttributeSpec::output(json!(
+                embeddings
+                    .iter()
+                    .map(telemetry_json_string)
+                    .collect::<Vec<_>>()
+            )),
+        )],
+        (_, OpenTelemetryEmbeddingOutput::One(embedding)) => vec![(
+            "ai.embedding".to_string(),
+            AttributeSpec::output(json!(telemetry_json_string(embedding))),
+        )],
+        (false, OpenTelemetryEmbeddingOutput::Many(embeddings)) => vec![(
+            "ai.embedding".to_string(),
+            AttributeSpec::output(json!(
+                embeddings
+                    .first()
+                    .map(telemetry_json_string)
+                    .unwrap_or_else(|| "[]".to_string())
+            )),
+        )],
+    };
+    attributes.extend(select_supplemental_attributes(
+        Some(telemetry),
+        supplemental_attributes,
+        SupplementalAttributes {
+            embedding: embedding_attributes,
+            ..SupplementalAttributes::default()
+        },
+    ));
+    attributes
+}
+
+fn embedding_input_attributes(input: &OpenTelemetryEmbeddingInput) -> Vec<(String, AttributeSpec)> {
+    match input {
+        OpenTelemetryEmbeddingInput::One(value) => vec![(
+            "ai.value".to_string(),
+            AttributeSpec::input(json!(telemetry_json_string(value))),
+        )],
+        OpenTelemetryEmbeddingInput::Many(values) => vec![(
+            "ai.values".to_string(),
+            AttributeSpec::input(json!(
+                values.iter().map(telemetry_json_string).collect::<Vec<_>>()
+            )),
+        )],
+    }
+}
+
+fn embedding_values_attributes(values: &[String]) -> Vec<(String, AttributeSpec)> {
+    vec![(
+        "ai.values".to_string(),
+        AttributeSpec::input(json!(
+            values.iter().map(telemetry_json_string).collect::<Vec<_>>()
+        )),
+    )]
+}
+
+fn reranking_document_attributes(documents: &[JsonValue]) -> Vec<(String, AttributeSpec)> {
+    vec![(
+        "ai.documents".to_string(),
+        AttributeSpec::input(json!(
+            documents
+                .iter()
+                .map(telemetry_json_string)
+                .collect::<Vec<_>>()
+        )),
+    )]
+}
+
+fn reranking_model_end_attributes(
+    telemetry: &TelemetryOptions,
+    documents_type: &str,
+    ranking: &[JsonValue],
+    supplemental_attributes: SupplementalAttributeOptions,
+) -> TelemetryAttributes {
+    select_supplemental_attributes(
+        Some(telemetry),
+        supplemental_attributes,
+        SupplementalAttributes {
+            reranking: vec![
+                (
+                    "ai.ranking.type".to_string(),
+                    AttributeSpec::value(json!(documents_type)),
+                ),
+                (
+                    "ai.ranking".to_string(),
+                    AttributeSpec::output(json!(
+                        ranking
+                            .iter()
+                            .map(telemetry_json_string)
+                            .collect::<Vec<_>>()
+                    )),
+                ),
+            ],
+            ..SupplementalAttributes::default()
+        },
+    )
+}
+
+fn telemetry_json_string<T: Serialize + ?Sized>(value: &T) -> String {
+    serde_json::to_string(value).expect("telemetry value serialization should not fail")
 }
 
 #[cfg(test)]
@@ -3044,6 +3802,130 @@ mod tests {
             span.status == Some(SpanStatus::error(Some("provider failed".to_string())))
                 && span.events.iter().any(|event| event.name == "exception")
         }));
+    }
+
+    #[test]
+    fn open_telemetry_records_embedding_operation_and_inner_span() {
+        let mut recorder =
+            OpenTelemetry::new(OpenTelemetryOptions::new().with_supplemental_attributes(
+                SupplementalAttributeOptions {
+                    embedding: true,
+                    ..SupplementalAttributeOptions::default()
+                },
+            ));
+
+        recorder.on_embed_operation_start(OpenTelemetryEmbedStartEvent::new(
+            "embed-call",
+            "ai.embedMany",
+            "openai.embedding",
+            "text-embedding-3-small",
+            OpenTelemetryEmbeddingInput::many(["alpha", "beta"]),
+        ));
+        recorder.on_embedding_model_call_start(OpenTelemetryEmbeddingModelCallStartEvent::new(
+            "embed-call",
+            "inner-embed-1",
+            ["alpha", "beta"],
+        ));
+        recorder.on_embedding_model_call_end(
+            OpenTelemetryEmbeddingModelCallEndEvent::new(
+                "embed-call",
+                "inner-embed-1",
+                [vec![0.1, 0.2], vec![0.3, 0.4]],
+            )
+            .with_usage(OpenTelemetryEmbeddingUsage { tokens: Some(6) }),
+        );
+        recorder.on_embed_operation_end(
+            OpenTelemetryEmbedEndEvent::new(
+                "embed-call",
+                OpenTelemetryEmbeddingOutput::many([vec![0.1, 0.2], vec![0.3, 0.4]]),
+            )
+            .with_usage(OpenTelemetryEmbeddingUsage { tokens: Some(6) }),
+        );
+
+        assert_eq!(recorder.active_call_count(), 0);
+        let tracer = recorder.into_tracer();
+        assert_eq!(tracer.spans.len(), 2);
+        assert_eq!(tracer.spans[0].name, "embeddings text-embedding-3-small");
+        assert_eq!(tracer.spans[1].name, "embeddings text-embedding-3-small");
+        assert!(tracer.spans.iter().all(|span| span.ended));
+        assert_eq!(
+            tracer.spans[0].attributes.get("gen_ai.operation.name"),
+            Some(&json!("embeddings"))
+        );
+        assert_eq!(
+            tracer.spans[0].attributes.get("gen_ai.provider.name"),
+            Some(&json!("openai"))
+        );
+        assert_eq!(
+            tracer.spans[0].attributes.get("ai.values"),
+            Some(&json!(["\"alpha\"", "\"beta\""]))
+        );
+        assert_eq!(
+            tracer.spans[0].attributes.get("ai.embeddings"),
+            Some(&json!(["[0.1,0.2]", "[0.3,0.4]"]))
+        );
+        assert_eq!(
+            tracer.spans[1].attributes.get("gen_ai.usage.input_tokens"),
+            Some(&json!(6))
+        );
+    }
+
+    #[test]
+    fn open_telemetry_records_rerank_operation_and_inner_span() {
+        let documents = vec![json!("alpha"), json!({ "id": "beta" })];
+        let ranking = vec![json!({ "index": 1, "score": 0.9 })];
+        let mut recorder =
+            OpenTelemetry::new(OpenTelemetryOptions::new().with_supplemental_attributes(
+                SupplementalAttributeOptions {
+                    reranking: true,
+                    ..SupplementalAttributeOptions::default()
+                },
+            ));
+
+        recorder.on_rerank_operation_start(OpenTelemetryRerankStartEvent::new(
+            "rerank-call",
+            "cohere.rerank",
+            "rerank-v3.5",
+            documents.clone(),
+        ));
+        recorder.on_reranking_model_call_start(OpenTelemetryRerankingModelCallStartEvent::new(
+            "rerank-call",
+            "object",
+            documents,
+        ));
+        recorder.on_reranking_model_call_end(OpenTelemetryRerankingModelCallEndEvent::new(
+            "rerank-call",
+            "object",
+            ranking,
+        ));
+        recorder.on_rerank_operation_end(OpenTelemetryRerankEndEvent::new("rerank-call"));
+
+        assert_eq!(recorder.active_call_count(), 0);
+        let tracer = recorder.into_tracer();
+        assert_eq!(tracer.spans.len(), 2);
+        assert_eq!(tracer.spans[0].name, "rerank rerank-v3.5");
+        assert_eq!(tracer.spans[1].name, "rerank rerank-v3.5");
+        assert!(tracer.spans.iter().all(|span| span.ended));
+        assert_eq!(
+            tracer.spans[0].attributes.get("gen_ai.operation.name"),
+            Some(&json!("rerank"))
+        );
+        assert_eq!(
+            tracer.spans[0].attributes.get("gen_ai.provider.name"),
+            Some(&json!("cohere"))
+        );
+        assert_eq!(
+            tracer.spans[0].attributes.get("ai.documents"),
+            Some(&json!(["\"alpha\"", "{\"id\":\"beta\"}"]))
+        );
+        assert_eq!(
+            tracer.spans[1].attributes.get("ai.ranking.type"),
+            Some(&json!("object"))
+        );
+        assert_eq!(
+            tracer.spans[1].attributes.get("ai.ranking"),
+            Some(&json!(["{\"index\":1,\"score\":0.9}"]))
+        );
     }
 
     #[test]
