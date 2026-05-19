@@ -2,6 +2,9 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -120,6 +123,74 @@ impl fmt::Debug for StreamObjectOnError<'_> {
     }
 }
 
+#[derive(Debug, Default)]
+struct StreamObjectAbortState {
+    aborted: AtomicBool,
+    reason: Mutex<Option<JsonValue>>,
+}
+
+/// Caller-controlled abort signal for Rust `stream_object` calls.
+#[derive(Clone, Debug, Default)]
+pub struct StreamObjectAbortSignal {
+    state: Arc<StreamObjectAbortState>,
+}
+
+impl StreamObjectAbortSignal {
+    /// Returns whether the stream has been aborted.
+    pub fn is_aborted(&self) -> bool {
+        self.state.aborted.load(Ordering::SeqCst)
+    }
+
+    /// Returns the abort reason when one was supplied.
+    pub fn reason(&self) -> Option<JsonValue> {
+        self.state
+            .reason
+            .lock()
+            .expect("stream object abort reason lock is not poisoned")
+            .clone()
+    }
+}
+
+/// Controller used to trigger a [`StreamObjectAbortSignal`].
+#[derive(Clone, Debug, Default)]
+pub struct StreamObjectAbortController {
+    signal: StreamObjectAbortSignal,
+}
+
+impl StreamObjectAbortController {
+    /// Creates a new abort controller.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns a cloneable signal that can be passed to `stream_object`.
+    pub fn signal(&self) -> StreamObjectAbortSignal {
+        self.signal.clone()
+    }
+
+    /// Aborts without a reason.
+    pub fn abort(&self) {
+        self.abort_inner(None);
+    }
+
+    /// Aborts with a reason.
+    pub fn abort_with_reason(&self, reason: impl Into<JsonValue>) {
+        self.abort_inner(Some(reason.into()));
+    }
+
+    fn abort_inner(&self, reason: Option<JsonValue>) {
+        let already_aborted = self.signal.state.aborted.swap(true, Ordering::SeqCst);
+        if !already_aborted {
+            *self
+                .signal
+                .state
+                .reason
+                .lock()
+                .expect("stream object abort reason lock is not poisoned") = reason;
+        }
+    }
+}
+
 /// Final metadata emitted by an object stream.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -196,6 +267,9 @@ pub struct StreamObjectOptions<'a, M: LanguageModel + ?Sized> {
     /// Optional callback invoked for provider stream errors.
     pub on_error: Option<StreamObjectOnError<'a>>,
 
+    /// Optional abort signal checked before and during streamed collection.
+    pub abort_signal: Option<StreamObjectAbortSignal>,
+
     /// Optional telemetry dispatcher settings.
     pub telemetry: Option<TelemetryOptions>,
 
@@ -233,6 +307,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamObjectOptions<'a, M> {
             on_step_finish: None,
             on_finish: None,
             on_error: None,
+            abort_signal: None,
             telemetry: None,
             max_retries: DEFAULT_MAX_RETRIES,
         }
@@ -397,6 +472,12 @@ impl<'a, M: LanguageModel + ?Sized> StreamObjectOptions<'a, M> {
         self
     }
 
+    /// Sets a caller-controlled abort signal for this stream.
+    pub fn with_abort_signal(mut self, abort_signal: StreamObjectAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
+        self
+    }
+
     /// Sets telemetry options for this object streaming operation.
     pub fn with_telemetry(mut self, telemetry: TelemetryOptions) -> Self {
         self.telemetry = Some(telemetry);
@@ -503,6 +584,7 @@ where
         on_step_finish,
         on_finish,
         on_error,
+        abort_signal,
         telemetry,
         max_retries,
     } = options;
@@ -566,6 +648,34 @@ where
         telemetry_dispatcher.on_object_step_start(&step_start_event);
     }
 
+    if let Some(abort_error) = stream_object_abort_error_from_signal(abort_signal.as_ref()) {
+        if let Some(on_error) = &on_error {
+            on_error
+                .error(StreamObjectOnErrorEvent {
+                    error: abort_error.clone(),
+                })
+                .await;
+        }
+
+        return StreamObjectResult {
+            parts: vec![ObjectStreamPart::Error {
+                error: abort_error.clone(),
+            }],
+            partial_object_stream: Vec::new(),
+            element_stream: Vec::new(),
+            text_stream: Vec::new(),
+            text: String::new(),
+            object: None,
+            error: Some(abort_error),
+            finish_reason: FinishReason::Error,
+            usage: LanguageModelUsage::default(),
+            warnings: Vec::new(),
+            request: None,
+            response: StreamObjectResponseMetadata::new(),
+            provider_metadata: None,
+        };
+    }
+
     let stream_started_at = Instant::now();
     let stream_result = do_stream_object_with_retries(model, call_options, max_retries).await;
     let request = stream_result.request;
@@ -589,8 +699,24 @@ where
     let mut provider_metadata = None;
     let mut error = None;
     let mut ms_to_first_chunk = None;
+    let mut aborted = false;
 
     for part in stream_result.stream {
+        if let Some(abort_error) = stream_object_abort_error_from_signal(abort_signal.as_ref()) {
+            if let Some(on_error) = &on_error {
+                on_error
+                    .error(StreamObjectOnErrorEvent {
+                        error: abort_error.clone(),
+                    })
+                    .await;
+            }
+            finish_reason = FinishReason::Error;
+            error = Some(abort_error.clone());
+            parts.push(ObjectStreamPart::Error { error: abort_error });
+            aborted = true;
+            break;
+        }
+
         if ms_to_first_chunk.is_none() && !matches!(&part, LanguageModelStreamPart::StreamStart(_))
         {
             ms_to_first_chunk =
@@ -659,6 +785,24 @@ where
             }
             _ => {}
         }
+    }
+
+    if aborted {
+        return StreamObjectResult {
+            parts,
+            partial_object_stream,
+            element_stream,
+            text_stream,
+            text,
+            object: None,
+            error,
+            finish_reason,
+            usage,
+            warnings,
+            request,
+            response,
+            provider_metadata,
+        };
     }
 
     if output_kind != GenerateObjectOutputKind::Array {
@@ -1105,9 +1249,34 @@ fn stream_object_error_message(error: &JsonValue) -> String {
         .unwrap_or_else(|| error.to_string())
 }
 
+fn stream_object_abort_error_from_signal(
+    abort_signal: Option<&StreamObjectAbortSignal>,
+) -> Option<JsonValue> {
+    let abort_signal = abort_signal?;
+    if !abort_signal.is_aborted() {
+        return None;
+    }
+
+    let mut error = serde_json::Map::new();
+    error.insert(
+        "name".to_string(),
+        JsonValue::String("AbortError".to_string()),
+    );
+    error.insert(
+        "message".to_string(),
+        JsonValue::String("The streamObject request was aborted.".to_string()),
+    );
+
+    if let Some(reason) = abort_signal.reason() {
+        error.insert("reason".to_string(), reason);
+    }
+
+    Some(JsonValue::Object(error))
+}
+
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
+    use std::future::{Future, Ready, ready};
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Waker};
@@ -1117,11 +1286,12 @@ mod tests {
     use super::*;
     use crate::json::JsonSchema;
     use crate::language_model::{
-        InputTokenUsage, LanguageModelErrorStreamPart, LanguageModelFinishReason,
-        LanguageModelMessage, LanguageModelResponseFormat, LanguageModelStreamFinish,
+        InputTokenUsage, LanguageModelContent, LanguageModelErrorStreamPart,
+        LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelMessage,
+        LanguageModelResponseFormat, LanguageModelStreamFinish,
         LanguageModelStreamResponseMetadata, LanguageModelStreamResult, LanguageModelStreamStart,
-        LanguageModelTextDelta, LanguageModelTextPart, LanguageModelUserContentPart,
-        LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelSupportedUrls, LanguageModelTextDelta, LanguageModelTextPart,
+        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::mock_models::MockLanguageModel;
     use crate::provider_utils::{Schema, ValidationResult, json_schema};
@@ -1216,6 +1386,77 @@ mod tests {
                 finish_reason(),
             )),
         ]
+    }
+
+    #[derive(Clone, Debug)]
+    struct AbortingStreamModel {
+        abort_controller: StreamObjectAbortController,
+        stream_calls: Arc<Mutex<Vec<LanguageModelCallOptions>>>,
+    }
+
+    impl AbortingStreamModel {
+        fn new(abort_controller: StreamObjectAbortController) -> Self {
+            Self {
+                abort_controller,
+                stream_calls: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn stream_calls(&self) -> Vec<LanguageModelCallOptions> {
+            self.stream_calls.lock().expect("stream calls lock").clone()
+        }
+    }
+
+    impl LanguageModel for AbortingStreamModel {
+        type SupportedUrlsFuture<'a>
+            = Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a;
+
+        type GenerateFuture<'a>
+            = Ready<LanguageModelGenerateResult>
+        where
+            Self: 'a;
+
+        type Stream = Vec<LanguageModelStreamPart>;
+
+        type StreamFuture<'a>
+            = Ready<LanguageModelStreamResult<Self::Stream>>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "abort-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            "abort-model"
+        }
+
+        fn supported_urls(&self) -> Self::SupportedUrlsFuture<'_> {
+            ready(LanguageModelSupportedUrls::new())
+        }
+
+        fn do_generate(&self, _options: LanguageModelCallOptions) -> Self::GenerateFuture<'_> {
+            ready(LanguageModelGenerateResult::new(
+                Vec::<LanguageModelContent>::new(),
+                LanguageModelFinishReason {
+                    unified: FinishReason::Other,
+                    raw: None,
+                },
+                LanguageModelUsage::default(),
+            ))
+        }
+
+        fn do_stream(&self, options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
+            self.stream_calls
+                .lock()
+                .expect("stream calls lock")
+                .push(options);
+            self.abort_controller
+                .abort_with_reason("client-disconnected");
+            ready(LanguageModelStreamResult::new(object_stream()))
+        }
     }
 
     #[test]
@@ -2042,5 +2283,149 @@ mod tests {
         let chunk_timings = chunk_timings.lock().expect("chunk timings lock");
         assert_eq!(chunk_timings.len(), 1);
         assert!(chunk_timings[0].is_some());
+    }
+
+    #[test]
+    fn stream_object_aborts_before_model_call_and_suppresses_finish() {
+        let model = MockLanguageModel::new();
+        let abort_controller = StreamObjectAbortController::new();
+        abort_controller.abort_with_reason("manual abort");
+
+        let callback_events = Arc::new(Mutex::new(Vec::new()));
+        let error_events = Arc::new(Mutex::new(Vec::new()));
+
+        let on_error_events = Arc::clone(&callback_events);
+        let on_error_payloads = Arc::clone(&error_events);
+        let step_finish_events = Arc::clone(&callback_events);
+        let finish_events = Arc::clone(&callback_events);
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_abort_signal(abort_controller.signal())
+                .with_on_error(move |event| {
+                    let on_error_events = Arc::clone(&on_error_events);
+                    let on_error_payloads = Arc::clone(&on_error_payloads);
+                    async move {
+                        on_error_events
+                            .lock()
+                            .expect("callback events lock")
+                            .push("error".to_string());
+                        on_error_payloads
+                            .lock()
+                            .expect("error events lock")
+                            .push(event.error);
+                    }
+                })
+                .with_on_step_finish(move |_| {
+                    let step_finish_events = Arc::clone(&step_finish_events);
+                    async move {
+                        step_finish_events
+                            .lock()
+                            .expect("callback events lock")
+                            .push("step-finish".to_string());
+                    }
+                })
+                .with_on_finish(move |_| {
+                    let finish_events = Arc::clone(&finish_events);
+                    async move {
+                        finish_events
+                            .lock()
+                            .expect("callback events lock")
+                            .push("finish".to_string());
+                    }
+                }),
+        ));
+
+        let abort_error = json!({
+            "name": "AbortError",
+            "message": "The streamObject request was aborted.",
+            "reason": "manual abort"
+        });
+
+        assert!(model.stream_calls().is_empty());
+        assert_eq!(result.finish_reason, FinishReason::Error);
+        assert_eq!(result.object, None);
+        assert_eq!(result.text, "");
+        assert_eq!(result.error, Some(abort_error.clone()));
+        assert_eq!(
+            result.parts,
+            vec![ObjectStreamPart::Error {
+                error: abort_error.clone()
+            }]
+        );
+        assert_eq!(
+            *callback_events.lock().expect("callback events lock"),
+            vec!["error".to_string()]
+        );
+        assert_eq!(
+            *error_events.lock().expect("error events lock"),
+            vec![abort_error]
+        );
+    }
+
+    #[test]
+    fn stream_object_aborts_after_model_call_and_suppresses_finish() {
+        let abort_controller = StreamObjectAbortController::new();
+        let model = AbortingStreamModel::new(abort_controller.clone());
+
+        let callback_events = Arc::new(Mutex::new(Vec::new()));
+        let on_error_events = Arc::clone(&callback_events);
+        let step_finish_events = Arc::clone(&callback_events);
+        let finish_events = Arc::clone(&callback_events);
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_abort_signal(abort_controller.signal())
+                .with_on_error(move |_| {
+                    let on_error_events = Arc::clone(&on_error_events);
+                    async move {
+                        on_error_events
+                            .lock()
+                            .expect("callback events lock")
+                            .push("error".to_string());
+                    }
+                })
+                .with_on_step_finish(move |_| {
+                    let step_finish_events = Arc::clone(&step_finish_events);
+                    async move {
+                        step_finish_events
+                            .lock()
+                            .expect("callback events lock")
+                            .push("step-finish".to_string());
+                    }
+                })
+                .with_on_finish(move |_| {
+                    let finish_events = Arc::clone(&finish_events);
+                    async move {
+                        finish_events
+                            .lock()
+                            .expect("callback events lock")
+                            .push("finish".to_string());
+                    }
+                }),
+        ));
+
+        let abort_error = json!({
+            "name": "AbortError",
+            "message": "The streamObject request was aborted.",
+            "reason": "client-disconnected"
+        });
+
+        assert_eq!(model.stream_calls().len(), 1);
+        assert_eq!(result.finish_reason, FinishReason::Error);
+        assert_eq!(result.object, None);
+        assert_eq!(result.partial_object_stream, Vec::<JsonValue>::new());
+        assert_eq!(result.text_stream, Vec::<String>::new());
+        assert_eq!(result.error, Some(abort_error.clone()));
+        assert_eq!(
+            result.parts,
+            vec![ObjectStreamPart::Error { error: abort_error }]
+        );
+        assert_eq!(
+            *callback_events.lock().expect("callback events lock"),
+            vec!["error".to_string()]
+        );
     }
 }

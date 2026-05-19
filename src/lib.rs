@@ -399,8 +399,8 @@ pub use speech_model::{
     SpeechModelRequest, SpeechModelResponse, SpeechModelResponseMetadata, SpeechModelResult,
 };
 pub use stream_object::{
-    ObjectStreamFinishPart, ObjectStreamPart, StreamObjectOptions, StreamObjectResponseMetadata,
-    StreamObjectResult, stream_object,
+    ObjectStreamFinishPart, ObjectStreamPart, StreamObjectAbortController, StreamObjectAbortSignal,
+    StreamObjectOptions, StreamObjectResponseMetadata, StreamObjectResult, stream_object,
 };
 pub use stream_text::{
     StreamTextAbortController, StreamTextAbortSignal, StreamTextMessageMetadata,
