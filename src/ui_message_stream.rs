@@ -495,6 +495,85 @@ pub fn get_response_ui_message_id(
     }
 }
 
+/// Checks whether a UI message part is a static tool part.
+///
+/// This mirrors upstream `isStaticToolUIPart`: static tool parts use a
+/// `tool-<name>` part type.
+pub fn is_static_tool_ui_part(part: &JsonValue) -> bool {
+    ui_message_part_type(part).is_some_and(|part_type| part_type.starts_with("tool-"))
+}
+
+/// Checks whether a UI message part is a dynamic tool part.
+pub fn is_dynamic_tool_ui_part(part: &JsonValue) -> bool {
+    ui_message_part_type(part) == Some("dynamic-tool")
+}
+
+/// Checks whether a UI message part is a static or dynamic tool part.
+pub fn is_tool_ui_part(part: &JsonValue) -> bool {
+    is_static_tool_ui_part(part) || is_dynamic_tool_ui_part(part)
+}
+
+/// Checks whether the last assistant message has complete non-provider tool calls.
+///
+/// Mirrors upstream `lastAssistantMessageIsCompleteWithToolCalls`: only the
+/// last step is considered, provider-executed tools are ignored, at least one
+/// non-provider tool must be present, and every considered tool must have an
+/// `output-available` or `output-error` state.
+pub fn last_assistant_message_is_complete_with_tool_calls(messages: &[UiMessage]) -> bool {
+    let Some(message) = messages.last() else {
+        return false;
+    };
+
+    if message.role != UiMessageRole::Assistant {
+        return false;
+    }
+
+    let last_step_start = last_step_part_index(&message.parts).map_or(0, |index| index + 1);
+    let mut has_tool = false;
+    for part in message.parts[last_step_start..]
+        .iter()
+        .filter(|part| is_tool_ui_part(part))
+        .filter(|part| !ui_message_part_provider_executed(part))
+    {
+        has_tool = true;
+        if !ui_message_part_state(part).is_some_and(is_terminal_tool_output_state) {
+            return false;
+        }
+    }
+
+    has_tool
+}
+
+/// Checks whether the last assistant message has complete tool approval responses.
+///
+/// Mirrors upstream `lastAssistantMessageIsCompleteWithApprovalResponses`: only
+/// the last step is considered, at least one tool must have
+/// `approval-responded`, and every tool in the step must be terminal.
+pub fn last_assistant_message_is_complete_with_approval_responses(messages: &[UiMessage]) -> bool {
+    let Some(message) = messages.last() else {
+        return false;
+    };
+
+    if message.role != UiMessageRole::Assistant {
+        return false;
+    }
+
+    let last_step_start = last_step_part_index(&message.parts).map_or(0, |index| index + 1);
+    let mut has_approval_response = false;
+    for part in message.parts[last_step_start..]
+        .iter()
+        .filter(|part| is_tool_ui_part(part))
+    {
+        let state = ui_message_part_state(part);
+        has_approval_response |= state == Some("approval-responded");
+        if !state.is_some_and(is_terminal_approval_state) {
+            return false;
+        }
+    }
+
+    has_approval_response
+}
+
 impl UiMessageChunk {
     /// Creates a stream-start UI-message chunk.
     pub fn start() -> Self {
@@ -1236,6 +1315,37 @@ fn ui_message_part_object_mut(part: &mut JsonValue) -> Option<&mut JsonObject> {
 
 fn provider_metadata_to_json(provider_metadata: ProviderMetadata) -> JsonValue {
     serde_json::to_value(provider_metadata).expect("provider metadata serializes")
+}
+
+fn ui_message_part_type(part: &JsonValue) -> Option<&str> {
+    part.get("type").and_then(JsonValue::as_str)
+}
+
+fn ui_message_part_state(part: &JsonValue) -> Option<&str> {
+    part.get("state").and_then(JsonValue::as_str)
+}
+
+fn ui_message_part_provider_executed(part: &JsonValue) -> bool {
+    part.get("providerExecuted")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false)
+}
+
+fn last_step_part_index(parts: &[JsonValue]) -> Option<usize> {
+    parts
+        .iter()
+        .rposition(|part| ui_message_part_type(part) == Some("step-start"))
+}
+
+fn is_terminal_tool_output_state(state: &str) -> bool {
+    matches!(state, "output-available" | "output-error")
+}
+
+fn is_terminal_approval_state(state: &str) -> bool {
+    matches!(
+        state,
+        "output-available" | "output-error" | "approval-responded"
+    )
 }
 
 /// Response metadata supplied to UI-message stream response helpers.
@@ -2020,6 +2130,359 @@ Ensure a \"text-start\" chunk is sent before any \"text-delta\" chunks."
                 "parts": [{ "type": "text", "text": "hello" }]
             })
         );
+    }
+
+    #[test]
+    fn tool_ui_part_predicates_match_upstream_runtime_shape() {
+        assert!(is_static_tool_ui_part(&json!({
+            "type": "tool-getWeather",
+            "state": "input-available"
+        })));
+        assert!(is_dynamic_tool_ui_part(&json!({
+            "type": "dynamic-tool",
+            "state": "input-available"
+        })));
+        assert!(is_tool_ui_part(&json!({
+            "type": "tool-getWeather",
+            "state": "input-available"
+        })));
+        assert!(is_tool_ui_part(&json!({
+            "type": "dynamic-tool",
+            "state": "input-available"
+        })));
+        assert!(!is_tool_ui_part(&json!({
+            "type": "text",
+            "state": "done"
+        })));
+    }
+
+    #[test]
+    fn last_assistant_message_is_complete_with_tool_calls_matches_upstream_cases() {
+        assert!(!last_assistant_message_is_complete_with_tool_calls(&[]));
+        assert!(!last_assistant_message_is_complete_with_tool_calls(&[
+            UiMessage::new("user-id", UiMessageRole::User)
+        ]));
+        assert!(!last_assistant_message_is_complete_with_tool_calls(&[
+            assistant_message(vec![
+                step_start_json(),
+                tool_part_json(
+                    "tool-getLocation",
+                    "call-location",
+                    "output-available",
+                    json!({}),
+                    Some(json!("New York")),
+                ),
+                step_start_json(),
+                json!({ "type": "text", "text": "The current weather is windy.", "state": "done" }),
+            ])
+        ]));
+        assert!(last_assistant_message_is_complete_with_tool_calls(&[
+            assistant_message(vec![
+                step_start_json(),
+                tool_part_json(
+                    "tool-getWeatherInformation",
+                    "call-weather",
+                    "output-available",
+                    json!({ "city": "New York" }),
+                    Some(json!("windy")),
+                ),
+                json!({ "type": "text", "text": "The current weather is windy.", "state": "done" }),
+            ])
+        ]));
+        assert!(last_assistant_message_is_complete_with_tool_calls(&[
+            assistant_message(vec![
+                step_start_json(),
+                tool_part_json(
+                    "tool-getWeatherInformation",
+                    "call-weather",
+                    "output-error",
+                    json!({ "city": "New York" }),
+                    None,
+                ),
+            ])
+        ]));
+        assert!(last_assistant_message_is_complete_with_tool_calls(&[
+            assistant_message(vec![
+                step_start_json(),
+                dynamic_tool_part_json(
+                    "getDynamicWeather",
+                    "call-dynamic",
+                    "output-available",
+                    json!({ "location": "San Francisco" }),
+                    Some(json!("sunny")),
+                ),
+            ])
+        ]));
+        assert!(!last_assistant_message_is_complete_with_tool_calls(&[
+            assistant_message(vec![
+                step_start_json(),
+                dynamic_tool_part_json(
+                    "getDynamicWeather",
+                    "call-dynamic",
+                    "input-streaming",
+                    json!({ "location": "San Francisco" }),
+                    None,
+                ),
+            ])
+        ]));
+        assert!(!last_assistant_message_is_complete_with_tool_calls(&[
+            assistant_message(vec![
+                step_start_json(),
+                dynamic_tool_part_json(
+                    "getDynamicWeather",
+                    "call-dynamic",
+                    "input-available",
+                    json!({ "location": "San Francisco" }),
+                    None,
+                ),
+            ])
+        ]));
+        assert!(last_assistant_message_is_complete_with_tool_calls(&[
+            assistant_message(vec![
+                step_start_json(),
+                tool_part_json(
+                    "tool-getWeatherInformation",
+                    "call-regular",
+                    "output-available",
+                    json!({ "city": "New York" }),
+                    Some(json!("windy")),
+                ),
+                dynamic_tool_part_json(
+                    "getDynamicWeather",
+                    "call-dynamic",
+                    "output-available",
+                    json!({ "location": "San Francisco" }),
+                    Some(json!("sunny")),
+                ),
+            ])
+        ]));
+        assert!(!last_assistant_message_is_complete_with_tool_calls(&[
+            assistant_message(vec![
+                step_start_json(),
+                tool_part_json(
+                    "tool-getWeatherInformation",
+                    "call-regular",
+                    "output-available",
+                    json!({ "city": "New York" }),
+                    Some(json!("windy")),
+                ),
+                dynamic_tool_part_json(
+                    "getDynamicWeather",
+                    "call-dynamic",
+                    "input-available",
+                    json!({ "location": "San Francisco" }),
+                    None,
+                ),
+            ])
+        ]));
+        assert!(last_assistant_message_is_complete_with_tool_calls(&[
+            assistant_message(vec![
+                step_start_json(),
+                tool_part_json(
+                    "tool-getLocation",
+                    "call-location",
+                    "output-available",
+                    json!({}),
+                    Some(json!("New York")),
+                ),
+                step_start_json(),
+                dynamic_tool_part_json(
+                    "getDynamicWeather",
+                    "call-dynamic",
+                    "output-available",
+                    json!({ "location": "New York" }),
+                    Some(json!("cloudy")),
+                ),
+                json!({ "type": "text", "text": "The current weather is cloudy.", "state": "done" }),
+            ])
+        ]));
+        assert!(!last_assistant_message_is_complete_with_tool_calls(&[
+            assistant_message(vec![
+                step_start_json(),
+                tool_part_json(
+                    "tool-getLocation",
+                    "call-location",
+                    "output-available",
+                    json!({}),
+                    Some(json!("New York")),
+                ),
+                step_start_json(),
+                dynamic_tool_part_json(
+                    "getDynamicWeather",
+                    "call-dynamic",
+                    "input-streaming",
+                    json!({ "location": "New York" }),
+                    None,
+                ),
+            ])
+        ]));
+        assert!(!last_assistant_message_is_complete_with_tool_calls(&[
+            assistant_message(vec![
+                step_start_json(),
+                {
+                    let mut part = tool_part_json(
+                        "tool-web_search",
+                        "srvtoolu-1",
+                        "output-available",
+                        json!({ "query": "New York weather" }),
+                        Some(json!([])),
+                    );
+                    part.as_object_mut()
+                        .expect("tool part is object")
+                        .insert("providerExecuted".to_string(), json!(true));
+                    part
+                },
+                json!({ "type": "text", "text": "The current weather is windy.", "state": "done" }),
+            ])
+        ]));
+    }
+
+    #[test]
+    fn last_assistant_message_is_complete_with_approval_responses_matches_upstream_cases() {
+        assert!(!last_assistant_message_is_complete_with_approval_responses(
+            &[]
+        ));
+        assert!(!last_assistant_message_is_complete_with_approval_responses(
+            &[UiMessage::new("user-id", UiMessageRole::User,)]
+        ));
+        assert!(!last_assistant_message_is_complete_with_approval_responses(
+            &[assistant_message(vec![
+                step_start_json(),
+                json!({ "type": "text", "text": "Hello", "state": "done" })
+            ])]
+        ));
+        assert!(!last_assistant_message_is_complete_with_approval_responses(
+            &[assistant_message(vec![
+                step_start_json(),
+                approval_tool_part_json("tool-getWeather", "call-1", "approval-requested", false),
+            ])]
+        ));
+        assert!(!last_assistant_message_is_complete_with_approval_responses(
+            &[assistant_message(vec![
+                step_start_json(),
+                approval_tool_part_json("tool-getWeather", "call-1", "approval-responded", false),
+                approval_tool_part_json("tool-getWeather", "call-2", "approval-requested", false),
+            ])]
+        ));
+        assert!(last_assistant_message_is_complete_with_approval_responses(
+            &[assistant_message(vec![
+                step_start_json(),
+                approval_tool_part_json("tool-getWeather", "call-1", "approval-responded", false),
+            ])]
+        ));
+        assert!(last_assistant_message_is_complete_with_approval_responses(
+            &[assistant_message(vec![
+                step_start_json(),
+                approval_tool_part_json("dynamic-tool", "call-1", "approval-responded", true),
+            ])]
+        ));
+        assert!(last_assistant_message_is_complete_with_approval_responses(
+            &[assistant_message(vec![
+                step_start_json(),
+                approval_tool_part_json("tool-getWeather", "call-1", "approval-responded", false),
+                tool_part_json(
+                    "tool-getWeather",
+                    "call-2",
+                    "output-available",
+                    json!({ "city": "Paris" }),
+                    Some(json!({ "temperature": 20, "weather": "cloudy" })),
+                ),
+            ])]
+        ));
+        assert!(!last_assistant_message_is_complete_with_approval_responses(
+            &[assistant_message(vec![
+                step_start_json(),
+                approval_tool_part_json("dynamic-tool", "call-1", "approval-responded", true),
+                approval_tool_part_json("tool-getWeather", "call-2", "approval-requested", false),
+            ])]
+        ));
+        assert!(!last_assistant_message_is_complete_with_approval_responses(
+            &[assistant_message(vec![
+                step_start_json(),
+                approval_tool_part_json("tool-getWeather", "call-1", "approval-responded", false),
+                step_start_json(),
+                json!({ "type": "text", "text": "Done.", "state": "done" }),
+            ])]
+        ));
+    }
+
+    fn assistant_message(parts: Vec<JsonValue>) -> UiMessage {
+        let mut message = UiMessage::new("message-id", UiMessageRole::Assistant);
+        message.parts = parts;
+        message
+    }
+
+    fn step_start_json() -> JsonValue {
+        json!({ "type": "step-start" })
+    }
+
+    fn tool_part_json(
+        part_type: &str,
+        tool_call_id: &str,
+        state: &str,
+        input: JsonValue,
+        output: Option<JsonValue>,
+    ) -> JsonValue {
+        let mut part = json!({
+            "type": part_type,
+            "toolCallId": tool_call_id,
+            "state": state,
+            "input": input,
+        });
+        if let Some(output) = output {
+            part.as_object_mut()
+                .expect("tool part is object")
+                .insert("output".to_string(), output);
+        }
+        part
+    }
+
+    fn dynamic_tool_part_json(
+        tool_name: &str,
+        tool_call_id: &str,
+        state: &str,
+        input: JsonValue,
+        output: Option<JsonValue>,
+    ) -> JsonValue {
+        let mut part = tool_part_json("dynamic-tool", tool_call_id, state, input, output);
+        part.as_object_mut()
+            .expect("dynamic tool part is object")
+            .insert("toolName".to_string(), json!(tool_name));
+        part
+    }
+
+    fn approval_tool_part_json(
+        part_type: &str,
+        tool_call_id: &str,
+        state: &str,
+        provider_executed: bool,
+    ) -> JsonValue {
+        let mut part = json!({
+            "type": part_type,
+            "toolCallId": tool_call_id,
+            "state": state,
+            "input": { "city": "Tokyo" },
+            "approval": { "id": format!("approval-{tool_call_id}") },
+        });
+        if part_type == "dynamic-tool" {
+            part.as_object_mut()
+                .expect("approval tool part is object")
+                .insert("toolName".to_string(), json!("mcp.shorten_url"));
+        }
+        if state == "approval-responded" {
+            part.as_object_mut()
+                .expect("approval tool part is object")
+                .insert(
+                    "approval".to_string(),
+                    json!({ "id": format!("approval-{tool_call_id}"), "approved": true }),
+                );
+        }
+        if provider_executed {
+            part.as_object_mut()
+                .expect("approval tool part is object")
+                .insert("providerExecuted".to_string(), json!(true));
+        }
+        part
     }
 
     #[derive(Default)]

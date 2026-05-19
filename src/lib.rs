@@ -418,9 +418,11 @@ pub use ui_message_stream::{
     UI_MESSAGE_STREAM_CONTENT_TYPE, UI_MESSAGE_STREAM_VERSION, UI_MESSAGE_STREAM_VERSION_HEADER,
     UiMessage, UiMessageChunk, UiMessageRole, UiMessageStreamProcessError, UiMessageStreamResponse,
     UiMessageStreamResponseInit, UiMessageStreamResponseOptions, UiMessageStreamResponseWriter,
-    create_ui_message_stream_response, get_response_ui_message_id,
-    pipe_ui_message_stream_to_response, process_ui_message_stream, read_ui_message_stream,
-    transform_text_to_ui_message_stream,
+    create_ui_message_stream_response, get_response_ui_message_id, is_dynamic_tool_ui_part,
+    is_static_tool_ui_part, is_tool_ui_part,
+    last_assistant_message_is_complete_with_approval_responses,
+    last_assistant_message_is_complete_with_tool_calls, pipe_ui_message_stream_to_response,
+    process_ui_message_stream, read_ui_message_stream, transform_text_to_ui_message_stream,
 };
 pub use upload_file::{UploadFileData, UploadFileOptions, UploadFileResult, upload_file};
 pub use upload_skill::{
