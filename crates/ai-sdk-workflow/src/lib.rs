@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod chat_transport;
+pub mod stream_text_iterator;
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -13,6 +14,14 @@ pub use chat_transport::{
     WorkflowChatRequest, WorkflowChatRequestMethod, WorkflowChatResponse, WorkflowChatTransport,
     WorkflowChatTransportClient, WorkflowChatTransportError, WorkflowChatTransportOptions,
     WorkflowChatTransportResult, WorkflowChatTrigger,
+};
+pub use stream_text_iterator::{
+    DoStreamStepOptions, DoStreamStepOutput, ParsedToolCall, ProviderExecutedToolResult,
+    ScriptedStreamTextStepCall, ScriptedStreamTextStepExecutor, StreamFinish, StreamTextIterator,
+    StreamTextIteratorYieldValue, WorkflowGenerationSettings, WorkflowModelInfo, WorkflowPrompt,
+    WorkflowRuntimeContext, WorkflowStreamStep, WorkflowStreamStepContent, WorkflowStreamTextError,
+    WorkflowStreamTextStepExecutor, WorkflowToolsContext, do_stream_step_from_parts,
+    sanitize_provider_metadata_for_tool_call,
 };
 
 use ai_sdk_provider::json::{JsonObject, JsonSchema, JsonValue};
