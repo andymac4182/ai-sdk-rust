@@ -13,6 +13,7 @@ use ai_sdk_provider::{
 };
 use ai_sdk_provider_utils::{
     Base64DecodeError, Tool, ToolExecutionError, ToolModelOutputOptions, convert_base64_to_bytes,
+    with_user_agent_suffix,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -1184,6 +1185,256 @@ fn optional_params_value<T: Serialize>(value: Option<T>) -> McpClientResult<Opti
     value.map(to_json_value).transpose()
 }
 
+/// Streamable HTTP MCP transport.
+///
+/// This synchronous Rust transport covers the portable HTTP request/response
+/// contract: POST JSON-RPC, protocol/session headers, JSON and SSE response
+/// payload parsing, 202 notification acceptance, and DELETE session cleanup.
+#[derive(Clone, Debug)]
+pub struct McpHttpTransport {
+    url: String,
+    headers: BTreeMap<String, String>,
+    session_id: Option<String>,
+    protocol_version: Option<String>,
+    started: bool,
+}
+
+impl McpHttpTransport {
+    /// Creates a Streamable HTTP MCP transport.
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            headers: BTreeMap::new(),
+            session_id: None,
+            protocol_version: None,
+            started: false,
+        }
+    }
+
+    /// Adds a request header sent with transport requests.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(name.into(), value.into());
+        self
+    }
+
+    /// Adds request headers sent with transport requests.
+    pub fn with_headers<K, V, I>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.headers.extend(
+            headers
+                .into_iter()
+                .map(|(key, value)| (key.into(), value.into())),
+        );
+        self
+    }
+
+    /// Returns the current MCP session id, when the server has provided one.
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
+    /// Returns the protocol version used for request headers.
+    pub fn protocol_version(&self) -> &str {
+        self.protocol_version
+            .as_deref()
+            .unwrap_or(LATEST_PROTOCOL_VERSION)
+    }
+
+    fn common_headers(
+        &self,
+        base: impl IntoIterator<Item = (&'static str, &'static str)>,
+    ) -> BTreeMap<String, String> {
+        let mut headers = self.headers.clone();
+        for (key, value) in base {
+            headers.insert(key.to_string(), value.to_string());
+        }
+        headers.insert(
+            "mcp-protocol-version".to_string(),
+            self.protocol_version().to_string(),
+        );
+        if let Some(session_id) = &self.session_id {
+            headers.insert("mcp-session-id".to_string(), session_id.clone());
+        }
+
+        with_user_agent_suffix(
+            Some(headers.into_iter().map(|(key, value)| (key, Some(value)))),
+            [format!("ai-sdk/{}", env!("CARGO_PKG_VERSION"))],
+        )
+        .into_iter()
+        .collect()
+    }
+
+    fn execute_post(&mut self, message: &JsonRpcMessage) -> McpClientResult<Vec<JsonRpcMessage>> {
+        let body = serde_json::to_string(message).map_err(|error| {
+            McpClientError::new(format!("Failed to serialize MCP message: {error}"))
+        })?;
+        let mut builder = ureq::post(&self.url);
+        for (name, value) in self.common_headers([
+            ("Content-Type", "application/json"),
+            ("Accept", "application/json, text/event-stream"),
+        ]) {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+        let response = builder
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .send(body)
+            .map_err(|error| {
+                McpClientError::new(format!("MCP HTTP Transport Error: fetch failed: {error}"))
+            })?;
+
+        self.handle_post_response(message, response)
+    }
+
+    fn handle_post_response(
+        &mut self,
+        message: &JsonRpcMessage,
+        mut response: ureq::http::Response<ureq::Body>,
+    ) -> McpClientResult<Vec<JsonRpcMessage>> {
+        if let Some(session_id) = response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+        {
+            self.session_id = Some(session_id.to_string());
+        }
+
+        let status = response.status().as_u16();
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let body = response.body_mut().read_to_string().map_err(|error| {
+            McpClientError::new(format!(
+                "MCP HTTP Transport Error: failed to read response body: {error}"
+            ))
+        })?;
+
+        if status == 202 {
+            return Ok(Vec::new());
+        }
+
+        if !(200..300).contains(&status) {
+            let mut message =
+                format!("MCP HTTP Transport Error: POSTing to endpoint (HTTP {status}): {body}");
+            if status == 404 {
+                message.push_str(
+                    ". This server does not support HTTP transport. Try using `sse` transport instead",
+                );
+            }
+            return Err(McpClientError::new(message));
+        }
+
+        let is_notification = matches!(message, JsonRpcMessage::Notification(_));
+        if is_notification {
+            return Ok(Vec::new());
+        }
+
+        if content_type.contains("application/json") || content_type.is_empty() {
+            parse_json_rpc_http_body(&body)
+        } else if content_type.contains("text/event-stream") {
+            parse_json_rpc_sse_body(&body)
+        } else {
+            Err(McpClientError::new(format!(
+                "MCP HTTP Transport Error: unsupported response content-type: {content_type}"
+            )))
+        }
+    }
+}
+
+impl McpTransport for McpHttpTransport {
+    fn start(&mut self) -> McpClientResult<()> {
+        if self.started {
+            return Err(McpClientError::new(
+                "MCP HTTP Transport Error: Transport already started",
+            ));
+        }
+        self.started = true;
+        Ok(())
+    }
+
+    fn send(&mut self, message: JsonRpcMessage) -> McpClientResult<Vec<JsonRpcMessage>> {
+        if !self.started {
+            self.start()?;
+        }
+        self.execute_post(&message)
+    }
+
+    fn close(&mut self) -> McpClientResult<()> {
+        if let Some(session_id) = self.session_id.clone() {
+            let mut builder = ureq::delete(&self.url);
+            for (name, value) in self.common_headers([]) {
+                builder = builder.header(name.as_str(), value.as_str());
+            }
+            builder = builder.header("mcp-session-id", session_id.as_str());
+            let _ = builder.config().http_status_as_error(false).build().call();
+        }
+        self.started = false;
+        Ok(())
+    }
+
+    fn set_protocol_version(&mut self, protocol_version: String) {
+        self.protocol_version = Some(protocol_version);
+    }
+}
+
+fn parse_json_rpc_http_body(body: &str) -> McpClientResult<Vec<JsonRpcMessage>> {
+    let value = serde_json::from_str::<JsonValue>(body).map_err(|error| {
+        McpClientError::new(format!(
+            "MCP HTTP Transport Error: Failed to parse JSON response: {error}"
+        ))
+    })?;
+    if let Some(messages) = value.as_array() {
+        messages
+            .iter()
+            .cloned()
+            .map(parse_json_rpc_value)
+            .collect::<McpClientResult<Vec<_>>>()
+    } else {
+        Ok(vec![parse_json_rpc_value(value)?])
+    }
+}
+
+fn parse_json_rpc_value(value: JsonValue) -> McpClientResult<JsonRpcMessage> {
+    serde_json::from_value(value).map_err(|error| {
+        McpClientError::new(format!(
+            "MCP HTTP Transport Error: Failed to parse message: {error}"
+        ))
+    })
+}
+
+fn parse_json_rpc_sse_body(body: &str) -> McpClientResult<Vec<JsonRpcMessage>> {
+    let mut messages = Vec::new();
+    let mut event_name = String::new();
+    let mut data_lines = Vec::new();
+
+    for line in body.lines().chain(std::iter::once("")) {
+        if line.is_empty() {
+            if event_name == "message" && !data_lines.is_empty() {
+                messages.push(parse_json_rpc_http_body(&data_lines.join("\n"))?);
+            }
+            event_name.clear();
+            data_lines.clear();
+            continue;
+        }
+
+        if let Some(event) = line.strip_prefix("event:") {
+            event_name = event.trim().to_string();
+        } else if let Some(data) = line.strip_prefix("data:") {
+            data_lines.push(data.trim_start().to_string());
+        }
+    }
+
+    Ok(messages.into_iter().flatten().collect())
+}
+
 /// Deterministic in-process MCP transport used by tests and examples.
 #[derive(Clone)]
 pub struct MockMcpTransport {
@@ -1887,9 +2138,16 @@ pub fn mcp_provider_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::future::Future;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
     use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
+    use std::thread::{self, JoinHandle};
+    use std::time::Duration;
 
     use ai_sdk_provider_utils::ToolExecutionOptions;
 
@@ -1978,6 +2236,111 @@ mod tests {
             restored.tools[0].input_schema["properties"]["foo"]["type"],
             "string"
         );
+    }
+
+    #[test]
+    fn mcp_http_transport_posts_json_and_cleans_up_session() {
+        let server = LocalHttpServer::new(vec![
+            LocalHttpResponse::json(json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "result": {
+                    "protocolVersion": LATEST_PROTOCOL_VERSION,
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "http-mcp-server", "version": "1.0.0" }
+                }
+            }))
+            .with_header("mcp-session-id", "session-123"),
+            LocalHttpResponse::empty(202),
+            LocalHttpResponse::empty(200),
+        ]);
+
+        let client = create_mcp_client(McpClientConfig::new(
+            McpHttpTransport::new(server.url()).with_header("x-custom-header", "test-value"),
+        ))
+        .expect("client initializes over HTTP");
+        assert_eq!(
+            client.server_info().expect("server info").name,
+            "http-mcp-server"
+        );
+        client.close().expect("client closes");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(
+            requests[0].headers.get("mcp-protocol-version"),
+            Some(&LATEST_PROTOCOL_VERSION.to_string())
+        );
+        assert_eq!(
+            requests[0].headers.get("accept"),
+            Some(&"application/json, text/event-stream".to_string())
+        );
+        assert_eq!(
+            requests[0].headers.get("x-custom-header"),
+            Some(&"test-value".to_string())
+        );
+        assert_eq!(requests[0].body["method"], "initialize");
+        assert_eq!(
+            requests[1].body["method"], "notifications/initialized",
+            "client sends initialized notification"
+        );
+        assert_eq!(requests[2].method, "DELETE");
+        assert_eq!(
+            requests[2].headers.get("mcp-session-id"),
+            Some(&"session-123".to_string())
+        );
+    }
+
+    #[test]
+    fn mcp_http_transport_parses_sse_message_responses() {
+        let server = LocalHttpServer::new(vec![LocalHttpResponse::new(
+            200,
+            [("content-type", "text/event-stream")],
+            format!(
+                "event: message\ndata: {}\n\n",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 7,
+                    "result": { "ok": true }
+                })
+            ),
+        )]);
+        let mut transport = McpHttpTransport::new(server.url());
+        transport.start().expect("transport starts");
+
+        let messages = transport
+            .send(JsonRpcMessage::Request(JsonRpcRequest::new(
+                json!(7),
+                "tools/list",
+            )))
+            .expect("SSE response parses");
+
+        assert_eq!(
+            serde_json::to_value(&messages).expect("messages serialize"),
+            json!([{ "jsonrpc": "2.0", "id": 7, "result": { "ok": true } }])
+        );
+    }
+
+    #[test]
+    fn mcp_http_transport_reports_http_errors_with_sse_hint() {
+        let server = LocalHttpServer::new(vec![LocalHttpResponse::new(
+            404,
+            [("content-type", "text/plain")],
+            "missing",
+        )]);
+        let mut transport = McpHttpTransport::new(server.url());
+        transport.start().expect("transport starts");
+
+        let error = transport
+            .send(JsonRpcMessage::Request(JsonRpcRequest::new(
+                json!(1),
+                "initialize",
+            )))
+            .expect_err("HTTP error is reported");
+
+        assert!(error.message.contains("POSTing to endpoint (HTTP 404)"));
+        assert!(error.message.contains("Try using `sse` transport instead"));
     }
 
     #[test]
@@ -2453,5 +2816,188 @@ mod tests {
             Poll::Ready(output) => output,
             Poll::Pending => panic!("test future unexpectedly pending"),
         }
+    }
+
+    #[derive(Clone, Debug)]
+    struct LocalHttpRequest {
+        method: String,
+        headers: BTreeMap<String, String>,
+        body: JsonValue,
+    }
+
+    struct LocalHttpResponse {
+        status: u16,
+        headers: BTreeMap<String, String>,
+        body: String,
+    }
+
+    impl LocalHttpResponse {
+        fn new<K, V, I>(status: u16, headers: I, body: impl Into<String>) -> Self
+        where
+            I: IntoIterator<Item = (K, V)>,
+            K: Into<String>,
+            V: Into<String>,
+        {
+            Self {
+                status,
+                headers: headers
+                    .into_iter()
+                    .map(|(key, value)| (key.into(), value.into()))
+                    .collect(),
+                body: body.into(),
+            }
+        }
+
+        fn json(body: JsonValue) -> Self {
+            Self::new(
+                200,
+                [("content-type", "application/json")],
+                body.to_string(),
+            )
+        }
+
+        fn empty(status: u16) -> Self {
+            Self::new(status, [("content-type", "text/plain")], "")
+        }
+
+        fn with_header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+            self.headers.insert(key.into(), value.into());
+            self
+        }
+    }
+
+    struct LocalHttpServer {
+        url: String,
+        requests: Arc<Mutex<Vec<LocalHttpRequest>>>,
+        stop: Arc<AtomicBool>,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl LocalHttpServer {
+        fn new(responses: Vec<LocalHttpResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind local HTTP server");
+            listener
+                .set_nonblocking(true)
+                .expect("set local HTTP server nonblocking");
+            let url = format!("http://{}", listener.local_addr().expect("local address"));
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let responses = Arc::new(Mutex::new(VecDeque::from(responses)));
+            let stop = Arc::new(AtomicBool::new(false));
+            let handle_requests = Arc::clone(&requests);
+            let handle_responses = Arc::clone(&responses);
+            let handle_stop = Arc::clone(&stop);
+
+            let handle = thread::spawn(move || {
+                while !handle_stop.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            handle_local_connection(stream, &handle_requests, &handle_responses);
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            Self {
+                url,
+                requests,
+                stop,
+                handle: Some(handle),
+            }
+        }
+
+        fn url(&self) -> String {
+            self.url.clone()
+        }
+
+        fn requests(&self) -> Vec<LocalHttpRequest> {
+            self.requests.lock().expect("local requests lock").clone()
+        }
+    }
+
+    impl Drop for LocalHttpServer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            let _ = TcpStream::connect(
+                self.url
+                    .strip_prefix("http://")
+                    .expect("local server URL has prefix"),
+            );
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn handle_local_connection(
+        mut stream: TcpStream,
+        requests: &Arc<Mutex<Vec<LocalHttpRequest>>>,
+        responses: &Arc<Mutex<VecDeque<LocalHttpResponse>>>,
+    ) {
+        let mut buffer = Vec::new();
+        let mut chunk = [0; 1024];
+        let request = loop {
+            let read = stream.read(&mut chunk).expect("read request");
+            if read == 0 {
+                return;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+            if let Some(request) = parse_local_request(&buffer) {
+                break request;
+            }
+        };
+        requests.lock().expect("local requests lock").push(request);
+
+        let response = responses
+            .lock()
+            .expect("local responses lock")
+            .pop_front()
+            .unwrap_or_else(|| LocalHttpResponse::empty(200));
+        let body = response.body;
+        let mut response_text = format!(
+            "HTTP/1.1 {} OK\r\ncontent-length: {}\r\nconnection: close\r\n",
+            response.status,
+            body.len()
+        );
+        for (key, value) in response.headers {
+            response_text.push_str(&format!("{key}: {value}\r\n"));
+        }
+        response_text.push_str("\r\n");
+        response_text.push_str(&body);
+        stream
+            .write_all(response_text.as_bytes())
+            .expect("write response");
+    }
+
+    fn parse_local_request(buffer: &[u8]) -> Option<LocalHttpRequest> {
+        let header_end = buffer.windows(4).position(|window| window == b"\r\n\r\n")?;
+        let head = String::from_utf8_lossy(&buffer[..header_end]);
+        let mut lines = head.lines();
+        let request_line = lines.next()?;
+        let method = request_line.split_whitespace().next()?.to_string();
+        let mut headers = BTreeMap::new();
+        for line in lines {
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
+            headers.insert(key.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+        let content_length = headers
+            .get("content-length")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let body_start = header_end + 4;
+        if buffer.len() < body_start + content_length {
+            return None;
+        }
+        let body = String::from_utf8_lossy(&buffer[body_start..body_start + content_length]);
+        Some(LocalHttpRequest {
+            method,
+            headers,
+            body: serde_json::from_str(&body).unwrap_or(JsonValue::Null),
+        })
     }
 }
