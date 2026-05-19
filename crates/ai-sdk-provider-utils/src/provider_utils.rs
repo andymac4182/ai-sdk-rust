@@ -4272,6 +4272,13 @@ pub struct Tool {
     /// JSON Schema 7 object describing the tool input.
     pub input_schema: JsonSchema,
 
+    /// Optional JSON Schema 7 object describing the tool output.
+    ///
+    /// Function and dynamic tools keep this as high-level SDK metadata for
+    /// local execution validation. Provider-facing function tool shapes do not
+    /// serialize it today.
+    pub output_schema: Option<JsonSchema>,
+
     /// Optional schema describing the tool-specific execution context.
     ///
     /// This context is not sent to the provider. It validates and normalizes
@@ -4316,6 +4323,7 @@ impl Tool {
             description: None,
             description_resolver: None,
             input_schema,
+            output_schema: None,
             context_schema: None,
             input_examples: None,
             strict: None,
@@ -4341,6 +4349,7 @@ impl Tool {
             description: None,
             description_resolver: None,
             input_schema,
+            output_schema: None,
             context_schema: None,
             input_examples: None,
             strict: None,
@@ -4377,6 +4386,7 @@ impl Tool {
             description: None,
             description_resolver: None,
             input_schema,
+            output_schema: None,
             context_schema: None,
             input_examples: None,
             strict: None,
@@ -4413,6 +4423,7 @@ impl Tool {
             description: None,
             description_resolver: None,
             input_schema,
+            output_schema: None,
             context_schema: None,
             input_examples: None,
             strict: None,
@@ -4476,14 +4487,18 @@ impl Tool {
         self
     }
 
-    /// Sets the expected output schema for provider-defined tools.
+    /// Sets the expected output schema.
     pub fn with_output_schema(mut self, output_schema: JsonSchema) -> Self {
-        if let ToolKind::Provider {
-            output_schema: stored_output_schema,
-            ..
-        } = &mut self.kind
-        {
-            *stored_output_schema = Some(output_schema);
+        match &mut self.kind {
+            ToolKind::Provider {
+                output_schema: stored_output_schema,
+                ..
+            } => {
+                *stored_output_schema = Some(output_schema);
+            }
+            ToolKind::Function | ToolKind::Dynamic => {
+                self.output_schema = Some(output_schema);
+            }
         }
 
         self
@@ -4608,11 +4623,11 @@ impl Tool {
         }
     }
 
-    /// Returns the expected output schema for provider tools when one is configured.
+    /// Returns the expected output schema when one is configured.
     pub fn output_schema(&self) -> Option<&JsonSchema> {
         match &self.kind {
             ToolKind::Provider { output_schema, .. } => output_schema.as_ref(),
-            ToolKind::Function | ToolKind::Dynamic => None,
+            ToolKind::Function | ToolKind::Dynamic => self.output_schema.as_ref(),
         }
     }
 
@@ -4766,6 +4781,7 @@ impl fmt::Debug for Tool {
             )
             .field("has_to_model_output", &self.to_model_output.is_some())
             .field("input_schema", &self.input_schema)
+            .field("output_schema", &self.output_schema)
             .field("context_schema", &self.context_schema)
             .field("input_examples", &self.input_examples)
             .field("strict", &self.strict)
@@ -13515,6 +13531,37 @@ mod tests {
                     "required": ["city"]
                 },
                 "strict": true
+            })
+        );
+    }
+
+    #[test]
+    fn function_tool_retains_output_schema_without_provider_serialization() {
+        let output_schema = json!({
+            "type": "object",
+            "properties": {
+                "forecast": { "type": "string" }
+            },
+            "required": ["forecast"]
+        })
+        .as_object()
+        .expect("output schema is an object")
+        .clone();
+        let tool = tool("weather", object_schema()).with_output_schema(output_schema.clone());
+
+        assert_eq!(tool.output_schema(), Some(&output_schema));
+        assert_eq!(
+            serde_json::to_value(tool.to_language_model_tool()).expect("tool serializes"),
+            json!({
+                "type": "function",
+                "name": "weather",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    },
+                    "required": ["city"]
+                }
             })
         );
     }

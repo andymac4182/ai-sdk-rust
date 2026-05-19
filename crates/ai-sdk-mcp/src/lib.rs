@@ -15,8 +15,9 @@ use ai_sdk_provider::{
     LanguageModelTextPart, LanguageModelToolResultContentPart, LanguageModelToolResultOutput,
 };
 use ai_sdk_provider_utils::{
-    Base64DecodeError, Tool, ToolExecutionError, ToolModelOutputOptions, convert_base64_to_bytes,
-    with_user_agent_suffix,
+    Base64DecodeError, FlexibleSchema, ParseJsonResult, Tool, ToolExecutionError,
+    ToolModelOutputOptions, ValidateTypesResult, convert_base64_to_bytes,
+    safe_parse_json_with_schema, safe_validate_types, with_user_agent_suffix,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -1117,6 +1118,38 @@ impl McpGetPromptRequest {
     }
 }
 
+/// Optional schema overrides used when creating AI SDK tools from MCP tools.
+#[derive(Clone, Debug, Default)]
+pub struct McpToolSchema {
+    pub input_schema: Option<JsonSchema>,
+    pub output_schema: Option<FlexibleSchema<JsonValue>>,
+}
+
+impl McpToolSchema {
+    /// Creates an empty MCP tool schema override.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the input schema used for the generated AI SDK tool.
+    pub fn with_input_schema(mut self, input_schema: JsonSchema) -> Self {
+        self.input_schema = Some(input_schema);
+        self
+    }
+
+    /// Sets the output schema used to validate successful MCP tool results.
+    pub fn with_output_schema(
+        mut self,
+        output_schema: impl Into<FlexibleSchema<JsonValue>>,
+    ) -> Self {
+        self.output_schema = Some(output_schema.into());
+        self
+    }
+}
+
+/// Tool schema overrides keyed by MCP tool name.
+pub type McpToolSchemas = BTreeMap<String, McpToolSchema>;
+
 /// AI SDK tools created from MCP tool definitions.
 pub type McpToolSet = BTreeMap<String, Tool>;
 
@@ -1202,16 +1235,53 @@ impl McpClient {
         self.tools_from_definitions(&definitions)
     }
 
+    /// Creates executable AI SDK tools with explicit schema overrides.
+    ///
+    /// When schema overrides are supplied, only tools listed in `schemas` are
+    /// returned, matching upstream `tools({ schemas })` filtering.
+    pub fn tools_with_schemas(&self, schemas: &McpToolSchemas) -> McpClientResult<McpToolSet> {
+        let definitions = self.list_tools(None)?;
+        self.tools_from_definitions_with_schemas(&definitions, schemas)
+    }
+
     /// Creates executable dynamic AI SDK tools from cached MCP tool definitions.
     pub fn tools_from_definitions(
         &self,
         definitions: &ListToolsResult,
     ) -> McpClientResult<McpToolSet> {
+        self.tools_from_definitions_inner(definitions, None)
+    }
+
+    /// Creates executable AI SDK tools from cached MCP definitions with schema overrides.
+    pub fn tools_from_definitions_with_schemas(
+        &self,
+        definitions: &ListToolsResult,
+        schemas: &McpToolSchemas,
+    ) -> McpClientResult<McpToolSet> {
+        self.tools_from_definitions_inner(definitions, Some(schemas))
+    }
+
+    fn tools_from_definitions_inner(
+        &self,
+        definitions: &ListToolsResult,
+        schemas: Option<&McpToolSchemas>,
+    ) -> McpClientResult<McpToolSet> {
         let client_name = self.with_inner(|inner| Ok(inner.client_info.name.clone()))?;
         let mut tools = BTreeMap::new();
 
         for definition in &definitions.tools {
-            let mut input_schema = definition.input_schema.clone();
+            let schema = schemas.and_then(|schemas| schemas.get(&definition.name));
+            if schemas.is_some() && schema.is_none() {
+                continue;
+            }
+
+            let output_schema = schema.and_then(|schema| schema.output_schema.clone());
+            let output_json_schema = output_schema
+                .as_ref()
+                .map(|schema| schema.as_schema().json_schema().clone());
+            let mut input_schema = schema
+                .and_then(|schema| schema.input_schema.clone())
+                .unwrap_or_else(|| definition.input_schema.clone());
             input_schema
                 .entry("properties".to_string())
                 .or_insert_with(|| json!({}));
@@ -1227,12 +1297,25 @@ impl McpClient {
                 .with_execute(move |input, _options| {
                     let client = client.clone();
                     let tool_name = tool_name.clone();
+                    let output_schema = output_schema.clone();
                     async move {
                         let result = client
-                            .call_tool(McpCallToolRequest::new(tool_name).with_arguments(input))
+                            .call_tool(
+                                McpCallToolRequest::new(tool_name.clone()).with_arguments(input),
+                            )
                             .map_err(|error| ToolExecutionError::new(error.to_string()))?;
-                        to_json_value(result)
-                            .map_err(|error| ToolExecutionError::new(error.message))
+                        if result.is_error == Some(true) {
+                            return to_json_value(result)
+                                .map_err(|error| ToolExecutionError::new(error.message));
+                        }
+                        match output_schema {
+                            Some(output_schema) => {
+                                extract_mcp_structured_content(&result, output_schema, &tool_name)
+                                    .map_err(|error| ToolExecutionError::new(error.message))
+                            }
+                            None => to_json_value(result)
+                                .map_err(|error| ToolExecutionError::new(error.message)),
+                        }
                     }
                 })
                 .with_to_model_output(|options: ToolModelOutputOptions| async move {
@@ -1247,6 +1330,9 @@ impl McpClient {
 
             if let Some(description) = &definition.description {
                 tool = tool.with_description(description.clone());
+            }
+            if let Some(output_json_schema) = output_json_schema {
+                tool = tool.with_output_schema(output_json_schema);
             }
             if let Some(title) = definition.title.clone().or_else(|| {
                 definition
@@ -1550,6 +1636,41 @@ fn to_json_value(value: impl Serialize) -> McpClientResult<JsonValue> {
 
 fn optional_params_value<T: Serialize>(value: Option<T>) -> McpClientResult<Option<JsonValue>> {
     value.map(to_json_value).transpose()
+}
+
+fn extract_mcp_structured_content(
+    result: &CallToolResult,
+    output_schema: FlexibleSchema<JsonValue>,
+    tool_name: &str,
+) -> McpClientResult<JsonValue> {
+    if let Some(structured_content) = &result.structured_content {
+        return match safe_validate_types(structured_content.clone(), output_schema, None) {
+            ValidateTypesResult::Success { value, .. } => Ok(value),
+            ValidateTypesResult::Failure { .. } => Err(McpClientError::new(format!(
+                "Tool \"{tool_name}\" returned structuredContent that does not match the expected outputSchema"
+            ))),
+        };
+    }
+
+    if let Some(content) = &result.content {
+        if let Some(text) = content
+            .iter()
+            .find(|part| part.get("type").and_then(JsonValue::as_str) == Some("text"))
+            .and_then(|part| part.get("text"))
+            .and_then(JsonValue::as_str)
+        {
+            return match safe_parse_json_with_schema(text, output_schema) {
+                ParseJsonResult::Success { value, .. } => Ok(value),
+                ParseJsonResult::Failure { .. } => Err(McpClientError::new(format!(
+                    "Tool \"{tool_name}\" returned content that does not match the expected outputSchema"
+                ))),
+            };
+        }
+    }
+
+    Err(McpClientError::new(format!(
+        "Tool \"{tool_name}\" did not return structuredContent or parseable text content"
+    )))
 }
 
 /// Streamable HTTP MCP transport.
@@ -2516,7 +2637,7 @@ mod tests {
     use std::thread::{self, JoinHandle};
     use std::time::Duration;
 
-    use ai_sdk_provider_utils::ToolExecutionOptions;
+    use ai_sdk_provider_utils::{Schema, ToolExecutionOptions, ValidationResult};
 
     fn object_schema() -> JsonSchema {
         JsonObject::from_iter([
@@ -2528,6 +2649,37 @@ mod tests {
                 }),
             ),
         ])
+    }
+
+    fn weather_output_schema() -> Schema {
+        Schema::new(
+            json!({
+                "type": "object",
+                "properties": {
+                    "temperature": { "type": "number" },
+                    "conditions": { "type": "string" }
+                },
+                "required": ["temperature", "conditions"]
+            })
+            .as_object()
+            .expect("weather output schema is an object")
+            .clone(),
+        )
+        .with_validator(|value| {
+            let valid = value
+                .get("temperature")
+                .and_then(JsonValue::as_f64)
+                .is_some()
+                && value
+                    .get("conditions")
+                    .and_then(JsonValue::as_str)
+                    .is_some();
+            if valid {
+                ValidationResult::success(value.clone())
+            } else {
+                ValidationResult::failure("weather output shape is invalid")
+            }
+        })
     }
 
     fn app_tool(name: &str, visibility: Vec<&str>) -> McpTool {
@@ -3197,6 +3349,223 @@ mod tests {
             json!({
                 "type": "content",
                 "value": [{ "type": "text", "text": "Dashboard ready" }]
+            })
+        );
+    }
+
+    #[test]
+    fn mcp_client_builds_schema_typed_tools_from_structured_content() {
+        let schema = weather_output_schema();
+        let output_json_schema = schema.json_schema().clone();
+        let result = CallToolResult {
+            content: Some(vec![json!({
+                "type": "text",
+                "text": "{\"temperature\": 22.5, \"conditions\": \"Sunny\"}"
+            })]),
+            structured_content: Some(json!({
+                "temperature": 22.5,
+                "conditions": "Sunny"
+            })),
+            ..CallToolResult::default()
+        };
+        let transport = MockMcpTransport::new()
+            .with_tools([
+                McpTool::new("weather-tool", object_schema()),
+                McpTool::new("ignored-tool", object_schema()),
+            ])
+            .with_tool_call_result("weather-tool", result);
+        let client =
+            create_mcp_client(McpClientConfig::new(transport)).expect("client initializes");
+        let schemas = McpToolSchemas::from([(
+            "weather-tool".to_string(),
+            McpToolSchema::new()
+                .with_input_schema(object_schema())
+                .with_output_schema(schema),
+        )]);
+
+        let tools = client
+            .tools_with_schemas(&schemas)
+            .expect("schema tools build");
+
+        assert_eq!(
+            tools.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["weather-tool"]
+        );
+        let tool = tools.get("weather-tool").expect("tool exists");
+        assert_eq!(tool.output_schema(), Some(&output_json_schema));
+
+        let output = block_on(
+            tool.execute(
+                json!({}),
+                ToolExecutionOptions::new("tool-call-1", Vec::new()),
+            )
+            .expect("tool is executable"),
+        )
+        .expect("tool execution succeeds");
+        assert_eq!(
+            output,
+            json!({
+                "temperature": 22.5,
+                "conditions": "Sunny"
+            })
+        );
+    }
+
+    #[test]
+    fn mcp_client_schema_typed_tools_parse_text_content_fallback() {
+        let transport = MockMcpTransport::new()
+            .with_tools([McpTool::new("json-tool", object_schema())])
+            .with_tool_call_result(
+                "json-tool",
+                CallToolResult {
+                    content: Some(vec![json!({
+                        "type": "text",
+                        "text": "{\"temperature\": 18.0, \"conditions\": \"Cloudy\"}"
+                    })]),
+                    ..CallToolResult::default()
+                },
+            );
+        let client =
+            create_mcp_client(McpClientConfig::new(transport)).expect("client initializes");
+        let schemas = McpToolSchemas::from([(
+            "json-tool".to_string(),
+            McpToolSchema::new().with_output_schema(weather_output_schema()),
+        )]);
+        let tools = client
+            .tools_with_schemas(&schemas)
+            .expect("schema tools build");
+
+        let output = block_on(
+            tools["json-tool"]
+                .execute(
+                    json!({}),
+                    ToolExecutionOptions::new("tool-call-1", Vec::new()),
+                )
+                .expect("tool is executable"),
+        )
+        .expect("tool execution succeeds");
+
+        assert_eq!(
+            output,
+            json!({
+                "temperature": 18.0,
+                "conditions": "Cloudy"
+            })
+        );
+    }
+
+    #[test]
+    fn mcp_client_schema_typed_tools_report_output_validation_errors() {
+        let transport = MockMcpTransport::new()
+            .with_tools([
+                McpTool::new("bad-structured-tool", object_schema()),
+                McpTool::new("bad-text-tool", object_schema()),
+                McpTool::new("empty-tool", object_schema()),
+                McpTool::new("error-tool", object_schema()),
+            ])
+            .with_tool_call_result(
+                "bad-structured-tool",
+                CallToolResult {
+                    structured_content: Some(json!({ "wrong": "data" })),
+                    ..CallToolResult::default()
+                },
+            )
+            .with_tool_call_result(
+                "bad-text-tool",
+                CallToolResult {
+                    content: Some(vec![json!({ "type": "text", "text": "not json" })]),
+                    ..CallToolResult::default()
+                },
+            )
+            .with_tool_call_result("empty-tool", CallToolResult::default())
+            .with_tool_call_result(
+                "error-tool",
+                CallToolResult {
+                    content: Some(vec![json!({ "type": "text", "text": "not json" })]),
+                    is_error: Some(true),
+                    ..CallToolResult::default()
+                },
+            );
+        let client =
+            create_mcp_client(McpClientConfig::new(transport)).expect("client initializes");
+        let schemas = McpToolSchemas::from([
+            (
+                "bad-structured-tool".to_string(),
+                McpToolSchema::new().with_output_schema(weather_output_schema()),
+            ),
+            (
+                "bad-text-tool".to_string(),
+                McpToolSchema::new().with_output_schema(weather_output_schema()),
+            ),
+            (
+                "empty-tool".to_string(),
+                McpToolSchema::new().with_output_schema(weather_output_schema()),
+            ),
+            (
+                "error-tool".to_string(),
+                McpToolSchema::new().with_output_schema(weather_output_schema()),
+            ),
+        ]);
+        let tools = client
+            .tools_with_schemas(&schemas)
+            .expect("schema tools build");
+
+        let structured_error = block_on(
+            tools["bad-structured-tool"]
+                .execute(
+                    json!({}),
+                    ToolExecutionOptions::new("tool-call-1", Vec::new()),
+                )
+                .expect("tool is executable"),
+        )
+        .expect_err("structured content validation fails");
+        assert_eq!(
+            structured_error.message(),
+            "Tool \"bad-structured-tool\" returned structuredContent that does not match the expected outputSchema"
+        );
+
+        let text_error = block_on(
+            tools["bad-text-tool"]
+                .execute(
+                    json!({}),
+                    ToolExecutionOptions::new("tool-call-2", Vec::new()),
+                )
+                .expect("tool is executable"),
+        )
+        .expect_err("text content validation fails");
+        assert_eq!(
+            text_error.message(),
+            "Tool \"bad-text-tool\" returned content that does not match the expected outputSchema"
+        );
+
+        let empty_error = block_on(
+            tools["empty-tool"]
+                .execute(
+                    json!({}),
+                    ToolExecutionOptions::new("tool-call-3", Vec::new()),
+                )
+                .expect("tool is executable"),
+        )
+        .expect_err("missing structured content fails");
+        assert_eq!(
+            empty_error.message(),
+            "Tool \"empty-tool\" did not return structuredContent or parseable text content"
+        );
+
+        let error_output = block_on(
+            tools["error-tool"]
+                .execute(
+                    json!({}),
+                    ToolExecutionOptions::new("tool-call-4", Vec::new()),
+                )
+                .expect("tool is executable"),
+        )
+        .expect("error tool result bypasses output validation");
+        assert_eq!(
+            error_output,
+            json!({
+                "content": [{ "type": "text", "text": "not json" }],
+                "isError": true
             })
         );
     }
