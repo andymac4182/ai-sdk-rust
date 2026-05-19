@@ -2,6 +2,7 @@
 members = [
     ".",
     "crates/ai-sdk-gateway",
+    "crates/ai-sdk-mcp",
     "crates/ai-sdk-openai-compatible",
     "crates/ai-sdk-open-responses",
     "crates/ai-sdk-otel",

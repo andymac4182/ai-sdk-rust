@@ -2631,22 +2631,22 @@ impl OpenTelemetry {
 
     /// Starts a high-level object-generation operation span.
     pub fn on_object_operation_start(&mut self, event: OpenTelemetryObjectStartEvent) {
-        let attributes = object_operation_start_attributes(
-            &event.telemetry,
-            &event.operation_id,
-            &event.provider,
-            &event.model_id,
-            &event.settings,
-            event.system_instructions.as_ref(),
-            event.input_messages.as_ref(),
-            ObjectSchemaSupplemental {
+        let attributes = object_operation_start_attributes(ObjectOperationStartAttributeInput {
+            telemetry: &event.telemetry,
+            operation_id: &event.operation_id,
+            provider: &event.provider,
+            model_id: &event.model_id,
+            settings: &event.settings,
+            system_instructions: event.system_instructions.as_ref(),
+            input_messages: event.input_messages.as_ref(),
+            schema: ObjectSchemaSupplemental {
                 schema: event.schema.as_ref(),
                 schema_name: event.schema_name.as_deref(),
                 schema_description: event.schema_description.as_deref(),
                 output_mode: event.output_mode.as_deref(),
             },
-            self.options.supplemental_attributes,
-        );
+            supplemental_attributes: self.options.supplemental_attributes,
+        });
         let span_attributes = self.span_attributes(
             attributes,
             OpenTelemetrySpanType::Operation,
@@ -3450,17 +3450,33 @@ struct ObjectSchemaSupplemental<'a> {
     output_mode: Option<&'a str>,
 }
 
-fn object_operation_start_attributes(
-    telemetry: &TelemetryOptions,
-    operation_id: &str,
-    provider: &str,
-    model_id: &str,
-    settings: &TelemetryAttributes,
-    system_instructions: Option<&Vec<SemConvSystemInstruction>>,
-    input_messages: Option<&Vec<SemConvMessage>>,
-    schema: ObjectSchemaSupplemental<'_>,
+struct ObjectOperationStartAttributeInput<'a> {
+    telemetry: &'a TelemetryOptions,
+    operation_id: &'a str,
+    provider: &'a str,
+    model_id: &'a str,
+    settings: &'a TelemetryAttributes,
+    system_instructions: Option<&'a Vec<SemConvSystemInstruction>>,
+    input_messages: Option<&'a Vec<SemConvMessage>>,
+    schema: ObjectSchemaSupplemental<'a>,
     supplemental_attributes: SupplementalAttributeOptions,
+}
+
+fn object_operation_start_attributes(
+    input: ObjectOperationStartAttributeInput<'_>,
 ) -> TelemetryAttributes {
+    let ObjectOperationStartAttributeInput {
+        telemetry,
+        operation_id,
+        provider,
+        model_id,
+        settings,
+        system_instructions,
+        input_messages,
+        schema,
+        supplemental_attributes,
+    } = input;
+
     let mut attributes = select_attributes(
         Some(telemetry),
         vec![
