@@ -3,8 +3,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -32,12 +31,13 @@ use crate::generate_text::{
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
 use crate::language_model::{
-    FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
-    LanguageModelCustomContent, LanguageModelErrorStreamPart, LanguageModelFile,
-    LanguageModelFileData, LanguageModelFinishReason, LanguageModelGenerateResult,
-    LanguageModelPrompt, LanguageModelRawStreamPart, LanguageModelReasoning,
-    LanguageModelReasoningEnd, LanguageModelReasoningFile, LanguageModelReasoningStart,
-    LanguageModelRequest, LanguageModelResponse, LanguageModelSource, LanguageModelStreamPart,
+    FinishReason, LanguageModel, LanguageModelAbortController, LanguageModelAbortSignal,
+    LanguageModelCallOptions, LanguageModelContent, LanguageModelCustomContent,
+    LanguageModelErrorStreamPart, LanguageModelFile, LanguageModelFileData,
+    LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelPrompt,
+    LanguageModelRawStreamPart, LanguageModelReasoning, LanguageModelReasoningEnd,
+    LanguageModelReasoningFile, LanguageModelReasoningStart, LanguageModelRequest,
+    LanguageModelResponse, LanguageModelSource, LanguageModelStreamPart,
     LanguageModelStreamResponseMetadata, LanguageModelStreamResultResponse, LanguageModelText,
     LanguageModelTextEnd, LanguageModelTextStart, LanguageModelToolApprovalRequest,
     LanguageModelToolChoice, LanguageModelToolInputDelta, LanguageModelToolInputEnd,
@@ -460,73 +460,11 @@ impl Default for TextStreamAbortPart {
     }
 }
 
-#[derive(Debug, Default)]
-struct StreamTextAbortState {
-    aborted: AtomicBool,
-    reason: Mutex<Option<JsonValue>>,
-}
-
 /// Caller-controlled abort signal for Rust `stream_text` calls.
-#[derive(Clone, Debug, Default)]
-pub struct StreamTextAbortSignal {
-    state: Arc<StreamTextAbortState>,
-}
-
-impl StreamTextAbortSignal {
-    /// Returns whether the stream has been aborted.
-    pub fn is_aborted(&self) -> bool {
-        self.state.aborted.load(Ordering::SeqCst)
-    }
-
-    /// Returns the abort reason when one was supplied.
-    pub fn reason(&self) -> Option<JsonValue> {
-        self.state
-            .reason
-            .lock()
-            .expect("stream text abort reason lock is not poisoned")
-            .clone()
-    }
-}
+pub type StreamTextAbortSignal = LanguageModelAbortSignal;
 
 /// Controller used to trigger a [`StreamTextAbortSignal`].
-#[derive(Clone, Debug, Default)]
-pub struct StreamTextAbortController {
-    signal: StreamTextAbortSignal,
-}
-
-impl StreamTextAbortController {
-    /// Creates a new abort controller.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Returns a cloneable signal that can be passed to `stream_text`.
-    pub fn signal(&self) -> StreamTextAbortSignal {
-        self.signal.clone()
-    }
-
-    /// Aborts without a reason.
-    pub fn abort(&self) {
-        self.abort_inner(None);
-    }
-
-    /// Aborts with a reason.
-    pub fn abort_with_reason(&self, reason: impl Into<JsonValue>) {
-        self.abort_inner(Some(reason.into()));
-    }
-
-    fn abort_inner(&self, reason: Option<JsonValue>) {
-        let already_aborted = self.signal.state.aborted.swap(true, Ordering::SeqCst);
-        if !already_aborted {
-            *self
-                .signal
-                .state
-                .reason
-                .lock()
-                .expect("stream text abort reason lock is not poisoned") = reason;
-        }
-    }
-}
+pub type StreamTextAbortController = LanguageModelAbortController;
 
 /// High-level stream part emitted by [`stream_text`].
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -866,6 +804,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
 
     /// Creates stream options from already prepared provider call options.
     pub fn from_call_options(model: &'a M, call_options: LanguageModelCallOptions) -> Self {
+        let abort_signal = call_options.abort_signal.clone();
         Self {
             model,
             call_options,
@@ -889,7 +828,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             max_retries: DEFAULT_MAX_RETRIES,
             on_chunk: None,
             on_error: None,
-            abort_signal: None,
+            abort_signal,
             on_abort: None,
             max_steps: 1,
             stop_conditions: Vec::new(),
@@ -1186,6 +1125,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
 
     /// Sets a caller-controlled abort signal for this stream.
     pub fn with_abort_signal(mut self, abort_signal: StreamTextAbortSignal) -> Self {
+        self.call_options.abort_signal = Some(abort_signal.clone());
         self.abort_signal = Some(abort_signal);
         self
     }
@@ -3876,7 +3816,17 @@ mod tests {
                 }),
         ));
 
-        assert_eq!(model.stream_calls().len(), 1);
+        let stream_calls = model.stream_calls();
+        assert_eq!(stream_calls.len(), 1);
+        let provider_abort_signal = stream_calls[0]
+            .abort_signal
+            .as_ref()
+            .expect("abort signal should propagate to provider call options");
+        assert!(provider_abort_signal.is_aborted());
+        assert_eq!(
+            provider_abort_signal.reason(),
+            Some(json!("client-disconnected"))
+        );
         assert!(result.steps.is_empty());
         assert!(
             !result

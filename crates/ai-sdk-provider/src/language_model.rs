@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -10,6 +13,80 @@ use crate::headers::Headers;
 use crate::json::{JsonObject, JsonSchema, JsonValue, NonNullJsonValue};
 use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
 use crate::warning::Warning;
+
+#[derive(Debug, Default)]
+struct LanguageModelAbortState {
+    aborted: AtomicBool,
+    reason: Mutex<Option<JsonValue>>,
+}
+
+/// Caller-controlled abort signal passed to provider language-model calls.
+#[derive(Clone, Debug, Default)]
+pub struct LanguageModelAbortSignal {
+    state: Arc<LanguageModelAbortState>,
+}
+
+impl LanguageModelAbortSignal {
+    /// Returns whether the model call has been aborted.
+    pub fn is_aborted(&self) -> bool {
+        self.state.aborted.load(Ordering::SeqCst)
+    }
+
+    /// Returns the abort reason when one was supplied.
+    pub fn reason(&self) -> Option<JsonValue> {
+        self.state
+            .reason
+            .lock()
+            .expect("language model abort reason lock is not poisoned")
+            .clone()
+    }
+}
+
+impl PartialEq for LanguageModelAbortSignal {
+    fn eq(&self, other: &Self) -> bool {
+        self.is_aborted() == other.is_aborted() && self.reason() == other.reason()
+    }
+}
+
+/// Controller used to trigger a [`LanguageModelAbortSignal`].
+#[derive(Clone, Debug, Default)]
+pub struct LanguageModelAbortController {
+    signal: LanguageModelAbortSignal,
+}
+
+impl LanguageModelAbortController {
+    /// Creates a new abort controller.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns a cloneable signal that can be passed to model calls.
+    pub fn signal(&self) -> LanguageModelAbortSignal {
+        self.signal.clone()
+    }
+
+    /// Aborts without a reason.
+    pub fn abort(&self) {
+        self.abort_inner(None);
+    }
+
+    /// Aborts with a reason.
+    pub fn abort_with_reason(&self, reason: impl Into<JsonValue>) {
+        self.abort_inner(Some(reason.into()));
+    }
+
+    fn abort_inner(&self, reason: Option<JsonValue>) {
+        let already_aborted = self.signal.state.aborted.swap(true, Ordering::SeqCst);
+        if !already_aborted {
+            *self
+                .signal
+                .state
+                .reason
+                .lock()
+                .expect("language model abort reason lock is not poisoned") = reason;
+        }
+    }
+}
 
 /// Supported URL regular-expression patterns by media type for a language model.
 ///
@@ -1977,6 +2054,10 @@ pub struct LanguageModelCallOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_raw_chunks: Option<bool>,
 
+    /// Abort signal for cancelling the operation.
+    #[serde(default, skip)]
+    pub abort_signal: Option<LanguageModelAbortSignal>,
+
     /// Additional HTTP headers for HTTP-based providers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<Headers>,
@@ -2007,6 +2088,7 @@ impl LanguageModelCallOptions {
             tools: None,
             tool_choice: None,
             include_raw_chunks: None,
+            abort_signal: None,
             headers: None,
             reasoning: None,
             provider_options: None,
@@ -2084,6 +2166,12 @@ impl LanguageModelCallOptions {
     /// Sets whether raw stream chunks should be included.
     pub fn with_include_raw_chunks(mut self, include_raw_chunks: bool) -> Self {
         self.include_raw_chunks = Some(include_raw_chunks);
+        self
+    }
+
+    /// Sets the abort signal for the model call.
+    pub fn with_abort_signal(mut self, abort_signal: LanguageModelAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
         self
     }
 
@@ -2952,29 +3040,29 @@ pub enum LanguageModelToolResultContentPart {
 #[cfg(test)]
 mod tests {
     use super::{
-        FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
-        LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
-        LanguageModelCustomContent, LanguageModelCustomPart, LanguageModelErrorStreamPart,
-        LanguageModelFile, LanguageModelFileData, LanguageModelFilePart, LanguageModelFinishReason,
-        LanguageModelFunctionTool, LanguageModelGenerateResult, LanguageModelMessage,
-        LanguageModelPrompt, LanguageModelProviderTool, LanguageModelRawStreamPart,
-        LanguageModelReasoning, LanguageModelReasoningDelta, LanguageModelReasoningEffort,
-        LanguageModelReasoningEnd, LanguageModelReasoningFile, LanguageModelReasoningPart,
-        LanguageModelReasoningStart, LanguageModelRequest, LanguageModelResponse,
-        LanguageModelResponseFormat, LanguageModelResponseMetadata, LanguageModelSource,
-        LanguageModelStreamFinish, LanguageModelStreamPart, LanguageModelStreamResponseMetadata,
-        LanguageModelStreamResult, LanguageModelStreamResultResponse, LanguageModelStreamStart,
-        LanguageModelSupportedUrls, LanguageModelSystemMessage, LanguageModelText,
-        LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextPart,
-        LanguageModelTextStart, LanguageModelTool, LanguageModelToolApprovalRequest,
-        LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
-        LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolChoice,
-        LanguageModelToolContentPart, LanguageModelToolInputDelta, LanguageModelToolInputEnd,
-        LanguageModelToolInputStart, LanguageModelToolMessage, LanguageModelToolResult,
-        LanguageModelToolResultContentPart, LanguageModelToolResultCustomContent,
-        LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUrlSource,
-        LanguageModelUsage, LanguageModelUserContentPart, LanguageModelUserMessage,
-        OutputTokenUsage,
+        FinishReason, InputTokenUsage, LanguageModel, LanguageModelAbortController,
+        LanguageModelAssistantContentPart, LanguageModelAssistantMessage, LanguageModelCallOptions,
+        LanguageModelContent, LanguageModelCustomContent, LanguageModelCustomPart,
+        LanguageModelErrorStreamPart, LanguageModelFile, LanguageModelFileData,
+        LanguageModelFilePart, LanguageModelFinishReason, LanguageModelFunctionTool,
+        LanguageModelGenerateResult, LanguageModelMessage, LanguageModelPrompt,
+        LanguageModelProviderTool, LanguageModelRawStreamPart, LanguageModelReasoning,
+        LanguageModelReasoningDelta, LanguageModelReasoningEffort, LanguageModelReasoningEnd,
+        LanguageModelReasoningFile, LanguageModelReasoningPart, LanguageModelReasoningStart,
+        LanguageModelRequest, LanguageModelResponse, LanguageModelResponseFormat,
+        LanguageModelResponseMetadata, LanguageModelSource, LanguageModelStreamFinish,
+        LanguageModelStreamPart, LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
+        LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
+        LanguageModelSystemMessage, LanguageModelText, LanguageModelTextDelta,
+        LanguageModelTextEnd, LanguageModelTextPart, LanguageModelTextStart, LanguageModelTool,
+        LanguageModelToolApprovalRequest, LanguageModelToolApprovalRequestPart,
+        LanguageModelToolApprovalResponsePart, LanguageModelToolCall, LanguageModelToolCallPart,
+        LanguageModelToolChoice, LanguageModelToolContentPart, LanguageModelToolInputDelta,
+        LanguageModelToolInputEnd, LanguageModelToolInputStart, LanguageModelToolMessage,
+        LanguageModelToolResult, LanguageModelToolResultContentPart,
+        LanguageModelToolResultCustomContent, LanguageModelToolResultOutput,
+        LanguageModelToolResultPart, LanguageModelUrlSource, LanguageModelUsage,
+        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::file_data::{FileData, FileDataContent};
     use crate::json::NonNullJsonValue;
@@ -4757,6 +4845,38 @@ mod tests {
                 ]
             })
         );
+    }
+
+    #[test]
+    fn call_options_carries_abort_signal_without_serializing_it() {
+        let abort_controller = LanguageModelAbortController::new();
+        let options = LanguageModelCallOptions::new(vec![LanguageModelMessage::System(
+            LanguageModelSystemMessage::new("Be concise."),
+        )])
+        .with_abort_signal(abort_controller.signal());
+
+        assert!(
+            options
+                .abort_signal
+                .as_ref()
+                .is_some_and(|signal| !signal.is_aborted())
+        );
+        assert_eq!(
+            serde_json::to_value(&options).expect("call options serialize"),
+            json!({
+                "prompt": [
+                    {
+                        "role": "system",
+                        "content": "Be concise."
+                    }
+                ]
+            })
+        );
+
+        let cloned_signal = options.abort_signal.clone().expect("abort signal set");
+        abort_controller.abort_with_reason("manual abort");
+        assert!(cloned_signal.is_aborted());
+        assert_eq!(cloned_signal.reason(), Some(json!("manual abort")));
     }
 
     #[test]
