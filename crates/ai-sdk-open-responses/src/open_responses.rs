@@ -6430,7 +6430,7 @@ mod tests {
         OpenResponsesProvider, OpenResponsesProviderSettings, OpenResponsesTransport,
         OpenResponsesTransportFuture, create_open_responses,
     };
-    use ai_sdk_provider::file_data::{FileData, FileDataContent};
+    use ai_sdk_provider::file_data::{FileData, FileDataContent, ProviderReference};
     use ai_sdk_provider::headers::Headers;
     use ai_sdk_provider::json::{JsonObject, JsonValue};
     use ai_sdk_provider::language_model::{
@@ -6450,6 +6450,7 @@ mod tests {
     use ai_sdk_provider::provider::{ModelType, Provider, ProviderMetadata, ProviderOptions};
     use ai_sdk_provider_utils::{ProviderApiRequest, ProviderApiRequestBody, ProviderApiResponse};
     use serde_json::json;
+    use std::collections::BTreeMap;
     use std::future::Future;
     use std::future::ready;
     use std::pin::Pin;
@@ -11460,6 +11461,157 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_resolves_provider_reference_file_parts() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_provider_refs",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Provider references accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 5,
+                            "output_tokens": 3
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("azure", "https://api.azure.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let provider_reference = |entries: &[(&str, &str)]| -> ProviderReference {
+            ProviderReference::try_from(
+                entries
+                    .iter()
+                    .map(|(provider, file_id)| (provider.to_string(), file_id.to_string()))
+                    .collect::<BTreeMap<_, _>>(),
+            )
+            .expect("provider reference is valid")
+        };
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Reference {
+                        reference: provider_reference(&[
+                            ("azure", "assistant-img-abc123"),
+                            ("openai", "file-img-other"),
+                        ]),
+                    },
+                    "image/png",
+                )),
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Reference {
+                        reference: provider_reference(&[
+                            ("azure", "file-pdf-abc123"),
+                            ("google", "doc-123"),
+                        ]),
+                    },
+                    "application/pdf",
+                )),
+            ])),
+        ])));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "file_id": "assistant-img-abc123"
+                        },
+                        {
+                            "type": "input_file",
+                            "file_id": "file-pdf-abc123"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_rejects_missing_provider_reference_file_part() {
+        let transport: OpenResponsesTransport = Arc::new(|_| -> OpenResponsesTransportFuture {
+            panic!("transport should not be used")
+        });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let reference = ProviderReference::try_from(BTreeMap::from([(
+            "anthropic".to_string(),
+            "file-img-abc123".to_string(),
+        )]))
+        .expect("provider reference is valid");
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Reference { reference },
+                    "image/png",
+                )),
+            ])),
+        ])));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Error);
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "errorMessage"),
+            Some(&json!(
+                "No provider reference found for provider 'openai'. Available providers: anthropic"
+            ))
+        );
+        assert_eq!(
+            result
+                .request
+                .as_ref()
+                .and_then(|request| request.body.as_ref()),
+            Some(&json!({ "model": "gpt-4.1-mini" }))
+        );
+    }
+
+    #[test]
     fn open_responses_provider_converts_tool_result_file_content_outputs() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -12892,6 +13044,121 @@ mod tests {
             })
         );
         assert!(request_body.get("allowedTools").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_maps_allowed_tools_required_mode() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_allowed_tools_required",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Required allowed tools accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 6,
+                            "output_tokens": 4
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "allowedTools": {
+                    "toolNames": ["weather", "cityAttractions"],
+                    "mode": "required"
+                }
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Use required allowed tools"),
+                    )]),
+                )])
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "weather",
+                        json_object(json!({
+                            "type": "object",
+                            "properties": {}
+                        })),
+                    )
+                    .with_description("Get weather"),
+                ))
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "cityAttractions",
+                        json_object(json!({
+                            "type": "object",
+                            "properties": {}
+                        })),
+                    )
+                    .with_description("Find city attractions"),
+                ))
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["tool_choice"],
+            json!({
+                "type": "allowed_tools",
+                "mode": "required",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "weather"
+                    },
+                    {
+                        "type": "function",
+                        "name": "cityAttractions"
+                    }
+                ]
+            })
+        );
     }
 
     #[test]
