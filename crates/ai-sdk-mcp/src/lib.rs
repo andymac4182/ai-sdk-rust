@@ -3737,6 +3737,196 @@ mod tests {
     }
 
     #[test]
+    fn mcp_client_runs_authenticated_http_tools_with_output_schema_and_provider_metadata() {
+        let weather_schema = weather_output_schema();
+        let weather_output_json_schema = weather_schema.json_schema().clone();
+
+        let mut weather_tool = McpTool::new("get-weather", object_schema());
+        weather_tool.title = Some("Get Weather".to_string());
+        weather_tool.description = Some("Get weather data for a location.".to_string());
+        weather_tool.output_schema = Some(weather_output_json_schema.clone());
+
+        let mut lookup_order_tool = McpTool::new("lookup-order", object_schema());
+        lookup_order_tool.title = Some("Lookup Order".to_string());
+        lookup_order_tool.description = Some("Look up the status of a customer order.".to_string());
+
+        let server = LocalHttpServer::new(vec![
+            LocalHttpResponse::empty(405),
+            LocalHttpResponse::json(json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "result": {
+                    "protocolVersion": LATEST_PROTOCOL_VERSION,
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "authenticated-http-mcp-server", "version": "1.0.0" }
+                }
+            }))
+            .with_header("mcp-session-id", "auth-session-1"),
+            LocalHttpResponse::empty(200),
+            LocalHttpResponse::json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": ListToolsResult {
+                    tools: vec![weather_tool, lookup_order_tool],
+                    ..ListToolsResult::default()
+                }
+            })),
+            LocalHttpResponse::json(json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": CallToolResult {
+                    content: Some(vec![json!({
+                        "type": "text",
+                        "text": "{\"temperature\":22.5,\"conditions\":\"Sunny\"}"
+                    })]),
+                    structured_content: Some(json!({
+                        "temperature": 22.5,
+                        "conditions": "Sunny"
+                    })),
+                    is_error: Some(false),
+                    ..CallToolResult::default()
+                }
+            })),
+            LocalHttpResponse::json(json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "result": CallToolResult {
+                    content: Some(vec![json!({
+                        "type": "text",
+                        "text": "Order order_123 is packed and ready to ship."
+                    })]),
+                    is_error: Some(false),
+                    ..CallToolResult::default()
+                }
+            })),
+            LocalHttpResponse::empty(200),
+        ]);
+        let client = create_mcp_client(
+            McpClientConfig::new(
+                McpHttpTransport::new(format!("{}/mcp", server.url()))
+                    .with_header("Authorization", "Bearer local-test-token"),
+            )
+            .with_client_name("authenticated-http-test-client"),
+        )
+        .expect("client initializes over authenticated HTTP");
+
+        assert_eq!(
+            client.server_info().expect("server info").name,
+            "authenticated-http-mcp-server"
+        );
+
+        let definitions = client.list_tools(None).expect("tools list");
+        let schemas = McpToolSchemas::from([
+            (
+                "get-weather".to_string(),
+                McpToolSchema::new()
+                    .with_input_schema(object_schema())
+                    .with_output_schema(weather_schema),
+            ),
+            (
+                "lookup-order".to_string(),
+                McpToolSchema::new().with_input_schema(object_schema()),
+            ),
+        ]);
+        let tools = client
+            .tools_from_definitions_with_schemas(&definitions, &schemas)
+            .expect("schema tools build from HTTP definitions");
+
+        assert_eq!(
+            tools.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["get-weather", "lookup-order"]
+        );
+        assert_eq!(
+            tools["get-weather"].output_schema(),
+            Some(&weather_output_json_schema)
+        );
+        assert_eq!(
+            tools["lookup-order"]
+                .metadata()
+                .and_then(|metadata| metadata.get("clientName")),
+            Some(&json!("authenticated-http-test-client"))
+        );
+        assert_eq!(
+            tools["lookup-order"]
+                .metadata()
+                .and_then(|metadata| metadata.get("toolName")),
+            Some(&json!("lookup-order"))
+        );
+        assert_eq!(
+            tools["lookup-order"]
+                .metadata()
+                .and_then(|metadata| metadata.get("title")),
+            Some(&json!("Lookup Order"))
+        );
+
+        let weather = block_on(
+            tools["get-weather"]
+                .execute(
+                    json!({ "location": "New York" }),
+                    ToolExecutionOptions::new("weather-1", Vec::new()),
+                )
+                .expect("weather tool is executable"),
+        )
+        .expect("weather output validates");
+        assert_eq!(
+            weather,
+            json!({
+                "temperature": 22.5,
+                "conditions": "Sunny"
+            })
+        );
+
+        let lookup = block_on(
+            tools["lookup-order"]
+                .execute(
+                    json!({ "orderId": "order_123" }),
+                    ToolExecutionOptions::new("lookup-1", Vec::new()),
+                )
+                .expect("lookup tool is executable"),
+        )
+        .expect("lookup returns raw MCP result");
+        assert_eq!(
+            lookup,
+            json!({
+                "content": [{
+                    "type": "text",
+                    "text": "Order order_123 is packed and ready to ship."
+                }],
+                "isError": false
+            })
+        );
+
+        client.close().expect("client closes");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 7);
+        for request in &requests {
+            assert_eq!(
+                request.headers.get("authorization"),
+                Some(&"Bearer local-test-token".to_string())
+            );
+        }
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].path, "/mcp");
+        assert_eq!(requests[1].body["method"], "initialize");
+        assert_eq!(requests[2].body["method"], "notifications/initialized");
+        assert_eq!(requests[3].body["method"], "tools/list");
+        assert_eq!(requests[4].body["method"], "tools/call");
+        assert_eq!(requests[4].body["params"]["name"], "get-weather");
+        assert_eq!(
+            requests[4].body["params"]["arguments"],
+            json!({ "location": "New York" })
+        );
+        assert_eq!(requests[5].body["method"], "tools/call");
+        assert_eq!(requests[5].body["params"]["name"], "lookup-order");
+        assert_eq!(requests[6].method, "DELETE");
+        assert_eq!(
+            requests[6].headers.get("mcp-session-id"),
+            Some(&"auth-session-1".to_string())
+        );
+    }
+
+    #[test]
     fn stdio_environment_copies_custom_env_and_inherits_safe_defaults() {
         let custom_env = BTreeMap::from([
             ("CUSTOM_VAR".to_string(), "custom_value".to_string()),
