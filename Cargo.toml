@@ -4,6 +4,7 @@ members = [
     "crates/ai-sdk-gateway",
     "crates/ai-sdk-openai-compatible",
     "crates/ai-sdk-open-responses",
+    "crates/ai-sdk-otel",
     "crates/ai-sdk-provider",
     "crates/ai-sdk-provider-utils",
     "crates/ai-sdk-test-server",
