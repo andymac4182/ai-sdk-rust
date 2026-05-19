@@ -245,9 +245,12 @@ that exercises the real upstream service when credentials are present. Run that
 live validation before changing a provider-backed row to `verified`; otherwise
 leave the row `in-progress` and document the missing live proof.
 For OTel/telemetry slices, add or maintain a local OTLP/HTTP receiver/export
-test that captures the actual wire payload. Once provider telemetry wiring is
-available, pair live provider tests with the local OTLP receiver so the same
-run proves both provider behavior and emitted telemetry.
+test that captures the actual wire payload. Use the package-owned
+`LocalOtlpTraceReceiver` for automated tests and
+`cargo run -p ai-sdk-otel --example local_otlp_receiver` for manual
+daemon-style validation. Once provider telemetry wiring is available, pair live
+provider tests with the local OTLP receiver so the same run proves both provider
+behavior and emitted telemetry.
 
 ## Work Loop
 
