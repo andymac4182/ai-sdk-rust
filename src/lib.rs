@@ -8,6 +8,7 @@ pub mod agent;
 pub mod baseten;
 pub mod cerebras;
 pub mod chat_transport;
+pub mod completion_transport;
 pub mod deepinfra;
 pub mod embed;
 pub mod embedding_model;
@@ -80,6 +81,12 @@ pub use chat_transport::{
     PrepareSendMessagesRequestOptions, PreparedReconnectToStreamRequest,
     PreparedSendMessagesRequest, RequestCredentials, TextStreamChatTransport,
     convert_ui_messages_to_model_messages,
+};
+pub use completion_transport::{
+    CompletionRequestOptions, CompletionStreamProtocol, CompletionTransport,
+    CompletionTransportError, CompletionTransportMethod, CompletionTransportOptions,
+    CompletionTransportRequest, process_completion_data_event_stream,
+    process_completion_text_stream,
 };
 pub use deepinfra::{
     DEFAULT_DEEPINFRA_BASE_URL, DeepInfraChatLanguageModel, DeepInfraImageModel, DeepInfraProvider,
