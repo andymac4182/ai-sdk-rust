@@ -5,6 +5,8 @@ use std::fmt;
 
 use ai_sdk_provider::{JsonObject, JsonValue};
 use ai_sdk_provider_utils::convert_bytes_to_base64;
+use ring::digest;
+use ring::rand::{SecureRandom, SystemRandom};
 use serde::de::Error as SerdeError;
 use serde::{Deserialize, Deserializer, Serialize};
 use url::Url;
@@ -484,6 +486,27 @@ impl OAuthPkceChallenge {
             code_challenge: code_challenge.into(),
         }
     }
+
+    /// Derives an S256 PKCE code challenge from a verifier.
+    pub fn from_code_verifier(code_verifier: impl Into<String>) -> Self {
+        let code_verifier = code_verifier.into();
+        let hashed_verifier = digest::digest(&digest::SHA256, code_verifier.as_bytes());
+        Self {
+            code_verifier,
+            code_challenge: base64_url_no_padding(hashed_verifier.as_ref()),
+        }
+    }
+
+    /// Generates random PKCE material using an S256 code challenge.
+    pub fn generate() -> McpOAuthResult<Self> {
+        let mut verifier_bytes = [0u8; 32];
+        SystemRandom::new()
+            .fill(&mut verifier_bytes)
+            .map_err(|_| McpOAuthError::new("failed to generate PKCE code verifier"))?;
+        Ok(Self::from_code_verifier(base64_url_no_padding(
+            &verifier_bytes,
+        )))
+    }
 }
 
 /// Options for constructing an authorization redirect URL.
@@ -514,6 +537,18 @@ impl StartAuthorizationOptions {
             resource: None,
             pkce_challenge,
         }
+    }
+
+    /// Creates authorization options with generated S256 PKCE material.
+    pub fn with_generated_pkce(
+        client_information: OAuthClientInformation,
+        redirect_url: impl Into<String>,
+    ) -> McpOAuthResult<Self> {
+        Ok(Self::new(
+            client_information,
+            redirect_url,
+            OAuthPkceChallenge::generate()?,
+        ))
     }
 
     /// Sets authorization server metadata.
@@ -679,6 +714,14 @@ pub fn resource_url_strip_slash(resource: &Url) -> String {
     }
 }
 
+fn base64_url_no_padding(bytes: &[u8]) -> String {
+    convert_bytes_to_base64(bytes)
+        .replace('+', "-")
+        .replace('/', "_")
+        .trim_end_matches('=')
+        .to_string()
+}
+
 /// Checks whether a requested resource URL is allowed by a configured resource URL.
 pub fn check_resource_allowed(
     requested_resource: impl AsRef<str>,
@@ -700,6 +743,31 @@ pub fn check_resource_allowed(
     let requested_path = path_with_trailing_slash(requested.path());
     let configured_path = path_with_trailing_slash(configured.path());
     Ok(requested_path.starts_with(&configured_path))
+}
+
+/// Selects the RFC 8707 resource URL to include in OAuth requests.
+///
+/// When protected-resource metadata is unavailable, MCP's upstream auth flow
+/// omits the `resource` parameter. When it is available, the configured
+/// protected resource must match the requested server URL by origin and path
+/// prefix.
+pub fn select_resource_url(
+    server_url: impl AsRef<str>,
+    resource_metadata: Option<&OAuthProtectedResourceMetadata>,
+) -> McpOAuthResult<Option<Url>> {
+    let Some(resource_metadata) = resource_metadata else {
+        return Ok(None);
+    };
+    let default_resource = resource_url_from_server_url(server_url)?;
+    if !check_resource_allowed(default_resource.as_str(), &resource_metadata.resource)? {
+        return Err(McpOAuthError::new(format!(
+            "Protected resource {} does not match expected {} (or origin)",
+            resource_metadata.resource, default_resource
+        )));
+    }
+    Url::parse(&resource_metadata.resource)
+        .map(Some)
+        .map_err(|error| McpOAuthError::new(format!("invalid protected resource URL: {error}")))
 }
 
 /// Extracts the protected-resource metadata URL from a `WWW-Authenticate` header value.
@@ -1505,6 +1573,37 @@ mod tests {
     }
 
     #[test]
+    fn oauth_pkce_challenge_derives_s256_challenge_from_verifier() {
+        let challenge = OAuthPkceChallenge::from_code_verifier("test_verifier");
+
+        assert_eq!(challenge.code_verifier, "test_verifier");
+        assert_eq!(
+            challenge.code_challenge,
+            "0Ku4rR8EgR1w3HyHLBCxVLtPsAAks5HOlpmTEt0XhVA"
+        );
+        assert!(!challenge.code_challenge.contains('='));
+        assert!(!challenge.code_challenge.contains('+'));
+        assert!(!challenge.code_challenge.contains('/'));
+    }
+
+    #[test]
+    fn oauth_pkce_challenge_generates_random_url_safe_verifier() {
+        let challenge = OAuthPkceChallenge::generate().expect("PKCE generation succeeds");
+
+        assert_eq!(challenge.code_verifier.len(), 43);
+        assert_eq!(challenge.code_challenge.len(), 43);
+        assert!(
+            challenge
+                .code_verifier
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric()
+                    || character == '-'
+                    || character == '_')
+        );
+        assert_ne!(challenge.code_verifier, challenge.code_challenge);
+    }
+
+    #[test]
     fn resource_url_strip_slash_removes_only_pathless_trailing_slash() {
         assert_eq!(
             resource_url_strip_slash(&Url::parse("https://mcp.example.com").expect("URL")),
@@ -1562,6 +1661,64 @@ mod tests {
             !check_resource_allowed("https://example.com/folder", "https://example.com/folder/")
                 .expect("resource check")
         );
+    }
+
+    #[test]
+    fn select_resource_url_uses_protected_metadata_when_allowed() {
+        let metadata = OAuthProtectedResourceMetadata {
+            resource: "https://api.example.com/mcp".to_string(),
+            authorization_servers: Some(vec!["https://auth.example.com".to_string()]),
+            jwks_uri: None,
+            scopes_supported: None,
+            bearer_methods_supported: None,
+            resource_signing_alg_values_supported: None,
+            resource_name: None,
+            resource_documentation: None,
+            resource_policy_uri: None,
+            resource_tos_uri: None,
+            tls_client_certificate_bound_access_tokens: None,
+            authorization_details_types_supported: None,
+            dpop_signing_alg_values_supported: None,
+            dpop_bound_access_tokens_required: None,
+            extra: JsonObject::new(),
+        };
+
+        let resource = select_resource_url("https://api.example.com/mcp/server", Some(&metadata))
+            .expect("resource selected")
+            .expect("resource metadata is present");
+
+        assert_eq!(resource.as_str(), "https://api.example.com/mcp");
+        assert!(
+            select_resource_url("https://api.example.com/mcp/server", None)
+                .expect("missing metadata is allowed")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn select_resource_url_rejects_mismatched_protected_metadata() {
+        let metadata = OAuthProtectedResourceMetadata {
+            resource: "https://different.example.com/mcp".to_string(),
+            authorization_servers: None,
+            jwks_uri: None,
+            scopes_supported: None,
+            bearer_methods_supported: None,
+            resource_signing_alg_values_supported: None,
+            resource_name: None,
+            resource_documentation: None,
+            resource_policy_uri: None,
+            resource_tos_uri: None,
+            tls_client_certificate_bound_access_tokens: None,
+            authorization_details_types_supported: None,
+            dpop_signing_alg_values_supported: None,
+            dpop_bound_access_tokens_required: None,
+            extra: JsonObject::new(),
+        };
+
+        let error = select_resource_url("https://api.example.com/mcp/server", Some(&metadata))
+            .expect_err("mismatched resource fails");
+
+        assert!(error.message.contains("does not match expected"));
     }
 
     #[test]
@@ -1861,6 +2018,33 @@ mod tests {
             Some("consent")
         );
         assert_eq!(result.code_verifier, "test_verifier");
+    }
+
+    #[test]
+    fn start_authorization_can_generate_pkce_material() {
+        let result = start_authorization(
+            "https://auth.example.com",
+            StartAuthorizationOptions::with_generated_pkce(
+                OAuthClientInformation::new("client123"),
+                "http://localhost:3000/callback",
+            )
+            .expect("generated PKCE options"),
+        )
+        .expect("authorization URL builds");
+
+        assert_eq!(result.code_verifier.len(), 43);
+        assert_eq!(
+            query_param(&result.authorization_url, "code_challenge_method").as_deref(),
+            Some("S256")
+        );
+        assert_eq!(
+            query_param(&result.authorization_url, "redirect_uri").as_deref(),
+            Some("http://localhost:3000/callback")
+        );
+        let code_challenge =
+            query_param(&result.authorization_url, "code_challenge").expect("challenge query");
+        assert_eq!(code_challenge.len(), 43);
+        assert_ne!(code_challenge, result.code_verifier);
     }
 
     #[test]
