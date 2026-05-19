@@ -2800,6 +2800,19 @@ impl CollectedStreamTextStep {
                 TextStreamPart::Error(part) => {
                     errors.push(part.error.clone());
                 }
+                TextStreamPart::FinishStep(part) => {
+                    self.response = part.response.clone();
+                    self.usage = part.usage.clone();
+                    self.performance = part.performance;
+                    self.finish_reason = part.finish_reason.clone();
+                    self.raw_finish_reason = part.raw_finish_reason.clone();
+                    self.provider_metadata = part.provider_metadata.clone();
+                }
+                TextStreamPart::Finish(part) => {
+                    self.finish_reason = part.finish_reason.clone();
+                    self.raw_finish_reason = part.raw_finish_reason.clone();
+                    self.usage = part.total_usage.clone();
+                }
                 _ => {}
             }
         }
@@ -2898,10 +2911,16 @@ where
             continue;
         }
 
-        let attempt_parts = apply_stream_text_transforms(attempt_parts, controls.transforms);
-        if !controls.transforms.is_empty() {
-            collected_step.apply_transformed_parts(&attempt_parts);
-        }
+        let attempt_parts = if controls.transforms.is_empty() {
+            attempt_parts
+        } else {
+            let transformed_parts = apply_stream_text_transforms(
+                stream_text_transform_input_parts(attempt_parts, &collected_step),
+                controls.transforms,
+            );
+            collected_step.apply_transformed_parts(&transformed_parts);
+            strip_stream_text_finish_parts(transformed_parts)
+        };
 
         let attempt_parts = match controls.smooth_stream {
             Some(smooth_stream) => match smooth_stream_parts(attempt_parts, smooth_stream) {
@@ -3311,6 +3330,38 @@ fn apply_stream_text_transforms(
     }
 
     parts
+}
+
+fn stream_text_transform_input_parts(
+    mut parts: Vec<TextStreamPart>,
+    collected_step: &CollectedStreamTextStep,
+) -> Vec<TextStreamPart> {
+    parts.push(TextStreamPart::FinishStep(TextStreamFinishStepPart::new(
+        collected_step.response.clone(),
+        collected_step.usage.clone(),
+        collected_step.performance,
+        collected_step.finish_reason.clone(),
+        collected_step.raw_finish_reason.clone(),
+        collected_step.provider_metadata.clone(),
+    )));
+    parts.push(TextStreamPart::Finish(TextStreamFinishPart::new(
+        collected_step.finish_reason.clone(),
+        collected_step.raw_finish_reason.clone(),
+        collected_step.usage.clone(),
+    )));
+    parts
+}
+
+fn strip_stream_text_finish_parts(parts: Vec<TextStreamPart>) -> Vec<TextStreamPart> {
+    parts
+        .into_iter()
+        .filter(|part| {
+            !matches!(
+                part,
+                TextStreamPart::FinishStep(_) | TextStreamPart::Finish(_)
+            )
+        })
+        .collect()
 }
 
 fn language_model_tool_call_from_stream_text_tool_call(
@@ -4437,6 +4488,190 @@ mod tests {
             json!({ "value": "VALUE" })
         );
         assert_eq!(result.steps[0].tool_results[0].output, json!("RESULT1"));
+    }
+
+    #[test]
+    fn stream_text_transform_updates_finish_metadata_and_usage() {
+        let updated_usage = LanguageModelUsage {
+            input_tokens: InputTokenUsage {
+                total: Some(20),
+                no_cache: Some(20),
+                cache_read: Some(0),
+                cache_write: Some(0),
+            },
+            output_tokens: OutputTokenUsage {
+                total: Some(30),
+                text: Some(30),
+                reasoning: Some(0),
+            },
+            raw: None,
+        };
+        let provider_metadata = ProviderMetadata::from([(
+            "testProvider".to_string(),
+            Map::from_iter([("testKey".to_string(), json!("TEST VALUE"))]),
+        )]);
+        let transform_usage = updated_usage.clone();
+        let transform_metadata = provider_metadata.clone();
+        let transform_finish = StreamTextTransform::new(move |parts| {
+            parts
+                .into_iter()
+                .map(|part| match part {
+                    TextStreamPart::FinishStep(mut part) => {
+                        part.finish_reason = FinishReason::Length;
+                        part.raw_finish_reason = Some("raw-length".to_string());
+                        part.usage = transform_usage.clone();
+                        part.provider_metadata = Some(transform_metadata.clone());
+                        TextStreamPart::FinishStep(part)
+                    }
+                    TextStreamPart::Finish(mut part) => {
+                        part.finish_reason = FinishReason::Length;
+                        part.raw_finish_reason = Some("raw-length".to_string());
+                        part.total_usage = transform_usage.clone();
+                        TextStreamPart::Finish(part)
+                    }
+                    part => part,
+                })
+                .collect()
+        });
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_transform(transform_finish),
+        ));
+
+        assert_eq!(result.finish_reason, FinishReason::Length);
+        assert_eq!(result.raw_finish_reason, Some("raw-length".to_string()));
+        assert_eq!(result.usage, updated_usage);
+        assert_eq!(result.total_usage, updated_usage);
+        assert_eq!(result.provider_metadata, Some(provider_metadata.clone()));
+        assert_eq!(result.steps[0].provider_metadata, Some(provider_metadata));
+        assert!(matches!(
+            result.parts.iter().find_map(|part| match part {
+                TextStreamPart::FinishStep(part) => Some(part),
+                _ => None,
+            }),
+            Some(part) if part.finish_reason == FinishReason::Length
+                && part.usage == updated_usage
+        ));
+    }
+
+    #[test]
+    fn stream_text_transform_can_stop_stream_with_finish_parts() {
+        let step = Arc::new(Mutex::new(None::<GenerateTextStep>));
+        let step_for_callback = Arc::clone(&step);
+        let stop_response = StreamTextResponseMetadata {
+            id: Some("response-id".to_string()),
+            timestamp: Some(time::OffsetDateTime::UNIX_EPOCH),
+            model_id: Some("mock-model-id".to_string()),
+            headers: None,
+        };
+        let stop_usage = LanguageModelUsage::default();
+        let transform_response = stop_response.clone();
+        let transform_usage = stop_usage.clone();
+        let stop_on_token = StreamTextTransform::new(move |parts| {
+            let mut transformed = Vec::new();
+            for part in parts {
+                match part {
+                    TextStreamPart::TextDelta(part) if part.text.contains("STOP") => {
+                        transformed.push(TextStreamPart::FinishStep(
+                            TextStreamFinishStepPart::new(
+                                transform_response.clone(),
+                                transform_usage.clone(),
+                                StreamTextStepPerformance::default(),
+                                FinishReason::Stop,
+                                None,
+                                None,
+                            ),
+                        ));
+                        transformed.push(TextStreamPart::Finish(TextStreamFinishPart::new(
+                            FinishReason::Stop,
+                            None,
+                            transform_usage.clone(),
+                        )));
+                        break;
+                    }
+                    part => transformed.push(part),
+                }
+            }
+            transformed
+        });
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello, ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "STOP")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", " world!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_transform(stop_on_token)
+                .with_on_step_finish(move |event| {
+                    let step = Arc::clone(&step_for_callback);
+                    async move {
+                        *step.lock().expect("step mutex is not poisoned") = Some(event);
+                    }
+                }),
+        ));
+
+        assert_eq!(result.text, "Hello, ");
+        assert_eq!(result.text_stream, vec!["Hello, ".to_string()]);
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.raw_finish_reason, None);
+        assert_eq!(result.usage, stop_usage);
+        assert_eq!(result.total_usage, stop_usage);
+        assert_eq!(result.response, stop_response);
+        assert!(!result.parts.iter().any(|part| {
+            matches!(
+                part,
+                TextStreamPart::TextDelta(part)
+                    if part.text.contains("STOP") || part.text.contains("world")
+            )
+        }));
+        assert_eq!(
+            result
+                .parts
+                .iter()
+                .filter(|part| matches!(part, TextStreamPart::FinishStep(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            result
+                .parts
+                .iter()
+                .filter(|part| matches!(part, TextStreamPart::Finish(_)))
+                .count(),
+            1
+        );
+        let step = step
+            .lock()
+            .expect("step mutex is not poisoned")
+            .clone()
+            .expect("step finish ran");
+        assert_eq!(step.text, "Hello, ");
+        assert_eq!(
+            step.response.expect("step response is present").id,
+            Some("response-id".to_string())
+        );
+        assert_eq!(step.usage, stop_usage);
     }
 
     #[test]
