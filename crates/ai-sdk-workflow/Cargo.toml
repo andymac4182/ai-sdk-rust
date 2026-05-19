@@ -19,6 +19,7 @@ unsafe_code = "forbid"
 all = "warn"
 
 [dependencies]
+ai-sdk-rust = { path = "../.." }
 ai-sdk-provider = { path = "../ai-sdk-provider" }
 ai-sdk-provider-utils = { path = "../ai-sdk-provider-utils" }
 serde = { version = "1.0.228", features = ["derive"] }
