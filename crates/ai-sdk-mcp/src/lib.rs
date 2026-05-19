@@ -4,6 +4,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::string::FromUtf8Error;
 use std::sync::{Arc, Mutex};
 
@@ -829,6 +832,177 @@ pub trait McpTransport: Send {
 
     /// Records the negotiated MCP protocol version on the transport.
     fn set_protocol_version(&mut self, _protocol_version: String) {}
+}
+
+/// Configuration for an MCP stdio child process transport.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StdioConfig {
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: Option<BTreeMap<String, String>>,
+    pub cwd: Option<PathBuf>,
+}
+
+impl StdioConfig {
+    /// Creates stdio transport configuration.
+    pub fn new(command: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+            args: Vec::new(),
+            env: None,
+            cwd: None,
+        }
+    }
+
+    /// Adds one command argument.
+    pub fn with_arg(mut self, arg: impl Into<String>) -> Self {
+        self.args.push(arg.into());
+        self
+    }
+
+    /// Sets command arguments.
+    pub fn with_args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.args = args.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Sets custom environment variables.
+    pub fn with_env(mut self, env: BTreeMap<String, String>) -> Self {
+        self.env = Some(env);
+        self
+    }
+
+    /// Sets the child process working directory.
+    pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(cwd.into());
+        self
+    }
+}
+
+/// MCP stdio transport backed by a child process.
+///
+/// This synchronous Rust version writes one JSON-RPC message per line and, for
+/// requests, reads one response line from stdout. It intentionally keeps
+/// long-running async event handling and stderr policy as later transport
+/// parity work.
+#[derive(Debug)]
+pub struct StdioMcpTransport {
+    config: StdioConfig,
+    child: Option<Child>,
+    stdin: Option<ChildStdin>,
+    stdout: Option<BufReader<ChildStdout>>,
+    protocol_version: Option<String>,
+}
+
+impl StdioMcpTransport {
+    /// Creates a stdio MCP transport.
+    pub fn new(config: StdioConfig) -> Self {
+        Self {
+            config,
+            child: None,
+            stdin: None,
+            stdout: None,
+            protocol_version: None,
+        }
+    }
+
+    /// Returns whether the child process is started.
+    pub fn is_started(&self) -> bool {
+        self.child.is_some()
+    }
+
+    /// Returns the negotiated protocol version, when set by the client.
+    pub fn protocol_version(&self) -> Option<&str> {
+        self.protocol_version.as_deref()
+    }
+}
+
+impl McpTransport for StdioMcpTransport {
+    fn start(&mut self) -> McpClientResult<()> {
+        if self.child.is_some() {
+            return Err(McpClientError::new("StdioMCPTransport already started."));
+        }
+
+        let mut command = Command::new(&self.config.command);
+        command
+            .args(&self.config.args)
+            .env_clear()
+            .envs(get_stdio_environment(self.config.env.clone()))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        if let Some(cwd) = &self.config.cwd {
+            command.current_dir(cwd);
+        }
+
+        let mut child = command.spawn().map_err(|error| {
+            McpClientError::new(format!(
+                "MCP stdio Transport Error: failed to spawn process: {error}"
+            ))
+        })?;
+        self.stdin = Some(child.stdin.take().ok_or_else(|| {
+            McpClientError::new("MCP stdio Transport Error: child stdin is unavailable")
+        })?);
+        self.stdout = Some(BufReader::new(child.stdout.take().ok_or_else(|| {
+            McpClientError::new("MCP stdio Transport Error: child stdout is unavailable")
+        })?));
+        self.child = Some(child);
+        Ok(())
+    }
+
+    fn send(&mut self, message: JsonRpcMessage) -> McpClientResult<Vec<JsonRpcMessage>> {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| McpClientError::new("StdioClientTransport not connected"))?;
+        stdin
+            .write_all(serialize_stdio_message(&message).as_bytes())
+            .and_then(|_| stdin.flush())
+            .map_err(|error| {
+                McpClientError::new(format!(
+                    "MCP stdio Transport Error: failed to write message: {error}"
+                ))
+            })?;
+
+        if matches!(message, JsonRpcMessage::Notification(_)) {
+            return Ok(Vec::new());
+        }
+
+        let stdout = self
+            .stdout
+            .as_mut()
+            .ok_or_else(|| McpClientError::new("StdioClientTransport not connected"))?;
+        let mut line = String::new();
+        let bytes = stdout.read_line(&mut line).map_err(|error| {
+            McpClientError::new(format!(
+                "MCP stdio Transport Error: failed to read message: {error}"
+            ))
+        })?;
+        if bytes == 0 {
+            return Err(McpClientError::new(
+                "MCP stdio Transport Error: child process closed stdout",
+            ));
+        }
+        Ok(vec![deserialize_stdio_message(line.trim_end())?])
+    }
+
+    fn close(&mut self) -> McpClientResult<()> {
+        self.stdin = None;
+        self.stdout = None;
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        Ok(())
+    }
+
+    fn set_protocol_version(&mut self, protocol_version: String) {
+        self.protocol_version = Some(protocol_version);
+    }
 }
 
 /// Configuration used to create an MCP client.
@@ -2503,6 +2677,44 @@ mod tests {
         buffer.append(&framed.as_bytes()[8..]);
         assert_eq!(buffer.read_line(), Some(framed.trim_end().to_string()));
         assert_eq!(buffer.read_line(), None);
+    }
+
+    #[test]
+    fn stdio_transport_errors_when_not_connected() {
+        let mut transport = StdioMcpTransport::new(StdioConfig::new("unused"));
+
+        assert_eq!(
+            transport
+                .send(JsonRpcMessage::Request(JsonRpcRequest::new(
+                    json!(0),
+                    "initialize"
+                )))
+                .expect_err("not connected")
+                .message,
+            "StdioClientTransport not connected"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stdio_transport_writes_message_and_reads_response_line() {
+        let script = r#"while IFS= read -r line; do printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"ok":true}}'; done"#;
+        let mut transport =
+            StdioMcpTransport::new(StdioConfig::new("sh").with_arg("-c").with_arg(script));
+
+        transport.start().expect("stdio transport starts");
+        let messages = transport
+            .send(JsonRpcMessage::Request(JsonRpcRequest::new(
+                json!(0),
+                "initialize",
+            )))
+            .expect("stdio response reads");
+        transport.close().expect("stdio transport closes");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([{ "jsonrpc": "2.0", "id": 0, "result": { "ok": true } }])
+        );
     }
 
     #[test]
