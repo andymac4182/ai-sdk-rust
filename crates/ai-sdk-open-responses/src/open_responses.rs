@@ -6261,10 +6261,10 @@ mod tests {
         LanguageModelCustomPart, LanguageModelFilePart, LanguageModelFunctionTool,
         LanguageModelMessage, LanguageModelProviderTool, LanguageModelReasoningEffort,
         LanguageModelReasoningPart, LanguageModelResponseFormat, LanguageModelSource,
-        LanguageModelStreamPart, LanguageModelTextPart, LanguageModelTool,
-        LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
-        LanguageModelToolCallPart, LanguageModelToolChoice, LanguageModelToolContentPart,
-        LanguageModelToolMessage, LanguageModelToolResultContentPart,
+        LanguageModelStreamPart, LanguageModelSystemMessage, LanguageModelTextPart,
+        LanguageModelTool, LanguageModelToolApprovalRequestPart,
+        LanguageModelToolApprovalResponsePart, LanguageModelToolCallPart, LanguageModelToolChoice,
+        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultContentPart,
         LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUserContentPart,
         LanguageModelUserMessage,
     };
@@ -6358,6 +6358,147 @@ mod tests {
         assert_eq!(
             map_open_responses_finish_reason(Some("unknown"), true).unified,
             FinishReason::ToolCalls
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_message_chain_with_instructions() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_message_chain",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Tokyo is cloudy."
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 12,
+                            "output_tokens": 4
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::System(LanguageModelSystemMessage::new("You are concise.")),
+            LanguageModelMessage::System(LanguageModelSystemMessage::new("Use metric units.")),
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
+                    "What is the weather in Tokyo?",
+                )),
+            ])),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                    "Let me check.",
+                )),
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call_weather",
+                    "weather",
+                    json!({
+                        "location": "Tokyo"
+                    }),
+                )),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call_weather",
+                    "weather",
+                    LanguageModelToolResultOutput::text("25 C and cloudy"),
+                )),
+            ])),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                    "It is 25 C and cloudy in Tokyo.",
+                )),
+            ])),
+        ])));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "gpt-4.1-mini",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "What is the weather in Tokyo?"
+                            }
+                        ]
+                    },
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "Let me check."
+                            }
+                        ]
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_weather",
+                        "name": "weather",
+                        "arguments": "{\"location\":\"Tokyo\"}"
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_weather",
+                        "output": "25 C and cloudy"
+                    },
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "It is 25 C and cloudy in Tokyo."
+                            }
+                        ]
+                    }
+                ],
+                "instructions": "You are concise.\nUse metric units."
+            }))
         );
     }
 
