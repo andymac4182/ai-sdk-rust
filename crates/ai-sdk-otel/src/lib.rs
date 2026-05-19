@@ -833,6 +833,318 @@ fn telemetry_file_data(data: &FileData) -> JsonValue {
     }
 }
 
+/// Span status code used by the dependency-free test tracer.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum SpanStatusCode {
+    /// The span has no explicit status.
+    Unset,
+
+    /// The span completed successfully.
+    Ok,
+
+    /// The span recorded an error.
+    Error,
+}
+
+/// Span status used by the dependency-free test tracer.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SpanStatus {
+    pub code: SpanStatusCode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl SpanStatus {
+    /// Creates an error status.
+    pub fn error(message: Option<String>) -> Self {
+        Self {
+            code: SpanStatusCode::Error,
+            message,
+        }
+    }
+}
+
+/// Span context used by the dependency-free test tracer.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SpanContext {
+    pub trace_id: String,
+    pub span_id: String,
+    pub trace_flags: u8,
+}
+
+impl Default for SpanContext {
+    fn default() -> Self {
+        Self {
+            trace_id: "test-trace-id".to_string(),
+            span_id: "test-span-id".to_string(),
+            trace_flags: 0,
+        }
+    }
+}
+
+/// Exception event recorded on a span.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SpanException {
+    pub name: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stack: Option<String>,
+}
+
+impl SpanException {
+    /// Creates an exception event.
+    pub fn new(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            message: message.into(),
+            stack: None,
+        }
+    }
+
+    /// Adds a stack string.
+    pub fn with_stack(mut self, stack: impl Into<String>) -> Self {
+        self.stack = Some(stack.into());
+        self
+    }
+}
+
+/// Error input for [`record_error_on_span`].
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum RecordSpanError {
+    /// Error-like value with exception details.
+    Exception(SpanException),
+
+    /// Non-error thrown value. Upstream only sets error status for this case.
+    StatusOnly,
+}
+
+impl RecordSpanError {
+    /// Creates an exception-style span error.
+    pub fn exception(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Exception(SpanException::new(name, message))
+    }
+
+    /// Returns the status message, if any.
+    pub fn message(&self) -> Option<&str> {
+        match self {
+            Self::Exception(exception) => Some(&exception.message),
+            Self::StatusOnly => None,
+        }
+    }
+}
+
+/// Event recorded by the dependency-free test span.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SpanEvent {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<TelemetryAttributes>,
+}
+
+/// Span used by [`MockTracer`].
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MockSpan {
+    pub name: String,
+    pub attributes: TelemetryAttributes,
+    pub events: Vec<SpanEvent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<SpanStatus>,
+    pub ended: bool,
+    pub context: SpanContext,
+}
+
+impl MockSpan {
+    /// Creates a mock span.
+    pub fn new(name: impl Into<String>, attributes: TelemetryAttributes) -> Self {
+        Self {
+            name: name.into(),
+            attributes,
+            events: Vec::new(),
+            status: None,
+            ended: false,
+            context: SpanContext::default(),
+        }
+    }
+
+    /// Returns the span context.
+    pub fn span_context(&self) -> &SpanContext {
+        &self.context
+    }
+
+    /// Sets a single span attribute.
+    pub fn set_attribute(
+        &mut self,
+        key: impl Into<String>,
+        value: impl Into<TelemetryAttributeValue>,
+    ) -> &mut Self {
+        self.attributes.insert(key.into(), value.into());
+        self
+    }
+
+    /// Sets multiple span attributes.
+    pub fn set_attributes(&mut self, attributes: TelemetryAttributes) -> &mut Self {
+        self.attributes.extend(attributes);
+        self
+    }
+
+    /// Adds a span event.
+    pub fn add_event(
+        &mut self,
+        name: impl Into<String>,
+        attributes: Option<TelemetryAttributes>,
+    ) -> &mut Self {
+        self.events.push(SpanEvent {
+            name: name.into(),
+            attributes,
+        });
+        self
+    }
+
+    /// Sets the span status.
+    pub fn set_status(&mut self, status: SpanStatus) -> &mut Self {
+        self.status = Some(status);
+        self
+    }
+
+    /// Renames the span.
+    pub fn update_name(&mut self, name: impl Into<String>) -> &mut Self {
+        self.name = name.into();
+        self
+    }
+
+    /// Ends the span.
+    pub fn end(&mut self) -> &mut Self {
+        self.ended = true;
+        self
+    }
+
+    /// Returns whether this span is recording.
+    pub fn is_recording(&self) -> bool {
+        true
+    }
+
+    /// Records an exception event.
+    pub fn record_exception(&mut self, exception: SpanException) -> &mut Self {
+        let mut attributes = TelemetryAttributes::new();
+        attributes.insert("exception.type".to_string(), json!(exception.name));
+        attributes.insert("exception.name".to_string(), json!(exception.name));
+        attributes.insert("exception.message".to_string(), json!(exception.message));
+        if let Some(stack) = exception.stack {
+            attributes.insert("exception.stack".to_string(), json!(stack));
+        }
+        self.add_event("exception", Some(attributes))
+    }
+}
+
+/// Dependency-free tracer for deterministic OTel tests.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MockTracer {
+    pub spans: Vec<MockSpan>,
+}
+
+impl MockTracer {
+    /// Creates an empty mock tracer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Starts a span and returns its index.
+    pub fn start_span(
+        &mut self,
+        name: impl Into<String>,
+        attributes: TelemetryAttributes,
+    ) -> usize {
+        self.spans.push(MockSpan::new(name, attributes));
+        self.spans.len() - 1
+    }
+
+    /// Starts an active span and executes a closure with it.
+    pub fn start_active_span<T>(
+        &mut self,
+        name: impl Into<String>,
+        attributes: TelemetryAttributes,
+        execute: impl FnOnce(&mut MockSpan) -> T,
+    ) -> T {
+        let index = self.start_span(name, attributes);
+        execute(&mut self.spans[index])
+    }
+
+    /// Returns JSON-serializable span summaries.
+    pub fn json_spans(&self) -> Vec<JsonValue> {
+        self.spans
+            .iter()
+            .map(|span| {
+                let mut value = serde_json::Map::new();
+                value.insert("name".to_string(), json!(span.name));
+                value.insert("attributes".to_string(), json!(span.attributes));
+                value.insert("events".to_string(), json!(span.events));
+                if let Some(status) = &span.status {
+                    value.insert("status".to_string(), json!(status));
+                }
+                JsonValue::Object(value)
+            })
+            .collect()
+    }
+}
+
+/// Tracer implementation that records nothing.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NoopTracer;
+
+impl NoopTracer {
+    /// Executes a closure with a throwaway span.
+    pub fn start_active_span<T>(
+        self,
+        name: impl Into<String>,
+        attributes: TelemetryAttributes,
+        execute: impl FnOnce(&mut MockSpan) -> T,
+    ) -> T {
+        let mut span = MockSpan::new(name, attributes);
+        execute(&mut span)
+    }
+}
+
+/// Records an error on a span, matching upstream `recordErrorOnSpan`.
+pub fn record_error_on_span(span: &mut MockSpan, error: RecordSpanError) {
+    match error {
+        RecordSpanError::Exception(exception) => {
+            let message = exception.message.clone();
+            span.record_exception(exception);
+            span.set_status(SpanStatus::error(Some(message)));
+        }
+        RecordSpanError::StatusOnly => {
+            span.set_status(SpanStatus::error(None));
+        }
+    }
+}
+
+/// Starts an active span, runs a closure, records errors, and optionally ends
+/// the span. This is the dependency-free Rust analogue of upstream `recordSpan`.
+pub fn record_span<T>(
+    tracer: &mut MockTracer,
+    name: impl Into<String>,
+    attributes: TelemetryAttributes,
+    end_when_done: bool,
+    execute: impl FnOnce(&mut MockSpan) -> Result<T, RecordSpanError>,
+) -> Result<T, RecordSpanError> {
+    let index = tracer.start_span(name, attributes);
+    let result = execute(&mut tracer.spans[index]);
+
+    match result {
+        Ok(value) => {
+            if end_when_done {
+                tracer.spans[index].end();
+            }
+            Ok(value)
+        }
+        Err(error) => {
+            record_error_on_span(&mut tracer.spans[index], error.clone());
+            tracer.spans[index].end();
+            Err(error)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1107,5 +1419,111 @@ mod tests {
             stringify_for_telemetry(&prompt),
             r#"[{"content":"You are helpful.","role":"system"},{"content":[{"text":"Check this image:","type":"text"},{"data":"iVBOR///","filename":"image.png","mediaType":"image/png","providerOptions":{"anthropic":{"key":"value"}},"type":"file"},{"data":"https://example.com/image.jpg","mediaType":"image/jpeg","type":"file"}],"role":"user"}]"#
         );
+    }
+
+    #[test]
+    fn record_span_executes_function_records_attributes_and_ends_by_default() {
+        let mut tracer = MockTracer::new();
+        let result = record_span(
+            &mut tracer,
+            "test-span",
+            TelemetryAttributes::from([("key".to_string(), json!("value"))]),
+            true,
+            |span| {
+                span.set_attribute("runtime", json!(true));
+                Ok::<_, RecordSpanError>("test-result")
+            },
+        )
+        .expect("span succeeds");
+
+        assert_eq!(result, "test-result");
+        assert_eq!(tracer.spans.len(), 1);
+        assert_eq!(tracer.spans[0].name, "test-span");
+        assert_eq!(tracer.spans[0].attributes.get("key"), Some(&json!("value")));
+        assert_eq!(
+            tracer.spans[0].attributes.get("runtime"),
+            Some(&json!(true))
+        );
+        assert!(tracer.spans[0].ended);
+    }
+
+    #[test]
+    fn record_span_can_leave_successful_span_open() {
+        let mut tracer = MockTracer::new();
+        record_span(
+            &mut tracer,
+            "test-span",
+            TelemetryAttributes::new(),
+            false,
+            |_| Ok::<_, RecordSpanError>(()),
+        )
+        .expect("span succeeds");
+
+        assert_eq!(tracer.spans.len(), 1);
+        assert!(!tracer.spans[0].ended);
+    }
+
+    #[test]
+    fn record_span_records_exception_status_and_ends_on_error() {
+        let mut tracer = MockTracer::new();
+        let error = record_span(
+            &mut tracer,
+            "test-span",
+            TelemetryAttributes::new(),
+            true,
+            |_| Err::<(), _>(RecordSpanError::exception("Error", "Test error")),
+        )
+        .expect_err("span fails");
+
+        assert_eq!(error.message(), Some("Test error"));
+        assert_eq!(tracer.spans.len(), 1);
+        assert!(tracer.spans[0].ended);
+        assert_eq!(
+            tracer.spans[0].status,
+            Some(SpanStatus::error(Some("Test error".to_string())))
+        );
+        assert_eq!(tracer.spans[0].events.len(), 1);
+        assert_eq!(tracer.spans[0].events[0].name, "exception");
+    }
+
+    #[test]
+    fn record_error_on_span_sets_status_only_for_non_error_values() {
+        let mut span = MockSpan::new("test-span", TelemetryAttributes::new());
+        record_error_on_span(&mut span, RecordSpanError::StatusOnly);
+
+        assert_eq!(span.status, Some(SpanStatus::error(None)));
+        assert!(span.events.is_empty());
+    }
+
+    #[test]
+    fn mock_and_noop_tracers_match_upstream_test_shapes() {
+        let mut tracer = MockTracer::new();
+        tracer.start_active_span(
+            "active",
+            TelemetryAttributes::from([("start".to_string(), json!(1))]),
+            |span| {
+                span.add_event(
+                    "event",
+                    Some(TelemetryAttributes::from([("value".to_string(), json!(2))])),
+                );
+            },
+        );
+
+        assert_eq!(
+            tracer.json_spans(),
+            vec![json!({
+                "name": "active",
+                "attributes": { "start": 1 },
+                "events": [
+                    { "name": "event", "attributes": { "value": 2 } }
+                ]
+            })]
+        );
+
+        let result = NoopTracer.start_active_span("ignored", TelemetryAttributes::new(), |span| {
+            assert_eq!(span.name, "ignored");
+            "noop-result"
+        });
+        assert_eq!(result, "noop-result");
     }
 }
