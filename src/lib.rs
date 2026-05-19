@@ -408,10 +408,10 @@ pub use stream_text::{
     StreamTextAbortController, StreamTextAbortSignal, StreamTextMessageMetadata,
     StreamTextMessageMetadataFunction, StreamTextOnAbortEvent, StreamTextOptions,
     StreamTextResponseMetadata, StreamTextResult, StreamTextStep, StreamTextStepPerformance,
-    StreamTextUiMessageStreamOptions, TextStreamFilePart, TextStreamFinishPart,
-    TextStreamFinishStepPart, TextStreamPart, TextStreamReasoningDeltaPart,
-    TextStreamReasoningFilePart, TextStreamStartPart, TextStreamStartStepPart,
-    TextStreamTextDeltaPart, smooth_stream, stream_text,
+    StreamTextTransform, StreamTextTransformFunction, StreamTextUiMessageStreamOptions,
+    TextStreamFilePart, TextStreamFinishPart, TextStreamFinishStepPart, TextStreamPart,
+    TextStreamReasoningDeltaPart, TextStreamReasoningFilePart, TextStreamStartPart,
+    TextStreamStartStepPart, TextStreamTextDeltaPart, smooth_stream, stream_text,
 };
 pub use telemetry::{
     AI_SDK_TELEMETRY_DIAGNOSTIC_CHANNEL, LegacyOpenTelemetryRecorder, OpenTelemetryRecorder,

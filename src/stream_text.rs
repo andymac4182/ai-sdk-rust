@@ -30,7 +30,7 @@ use crate::generate_text::{
     update_pending_deferred_provider_tool_calls,
 };
 use crate::headers::Headers;
-use crate::json::{JsonObject, JsonValue};
+use crate::json::{JsonObject, JsonValue, NonNullJsonValue};
 use crate::language_model::{
     FinishReason, LanguageModel, LanguageModelAbortController, LanguageModelAbortSignal,
     LanguageModelCallOptions, LanguageModelContent, LanguageModelCustomContent,
@@ -41,8 +41,9 @@ use crate::language_model::{
     LanguageModelResponse, LanguageModelSource, LanguageModelStreamPart,
     LanguageModelStreamResponseMetadata, LanguageModelStreamResultResponse, LanguageModelText,
     LanguageModelTextEnd, LanguageModelTextStart, LanguageModelToolApprovalRequest,
-    LanguageModelToolChoice, LanguageModelToolInputDelta, LanguageModelToolInputEnd,
-    LanguageModelToolInputStart, LanguageModelUsage,
+    LanguageModelToolCall, LanguageModelToolChoice, LanguageModelToolInputDelta,
+    LanguageModelToolInputEnd, LanguageModelToolInputStart, LanguageModelToolResult,
+    LanguageModelUsage,
 };
 use crate::prompt::{Prompt, standardize_prompt};
 use crate::provider::{ApiCallError, InvalidPromptError, ProviderMetadata, ProviderOptions};
@@ -648,6 +649,40 @@ pub fn smooth_stream(
     smooth_stream_parts(parts, &options)
 }
 
+/// Function used to transform collected high-level stream parts.
+pub type StreamTextTransformFunction<'a> = dyn Fn(Vec<TextStreamPart>) -> Vec<TextStreamPart> + 'a;
+
+/// Rust-native equivalent of upstream `streamText` `experimental_transform`.
+#[derive(Clone)]
+pub struct StreamTextTransform<'a> {
+    transform: Rc<StreamTextTransformFunction<'a>>,
+}
+
+impl<'a> StreamTextTransform<'a> {
+    /// Creates a stream transform from a function over high-level stream parts.
+    pub fn new<F>(transform: F) -> Self
+    where
+        F: Fn(Vec<TextStreamPart>) -> Vec<TextStreamPart> + 'a,
+    {
+        Self {
+            transform: Rc::new(transform),
+        }
+    }
+
+    /// Applies this transform.
+    pub fn transform(&self, parts: Vec<TextStreamPart>) -> Vec<TextStreamPart> {
+        (self.transform)(parts)
+    }
+}
+
+impl fmt::Debug for StreamTextTransform<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StreamTextTransform")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Event sent for each portable streamed chunk accepted by `onChunk`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -855,6 +890,9 @@ pub struct StreamTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Optional Rust-native smooth stream transform.
     pub smooth_stream: Option<SmoothStreamOptions>,
 
+    /// Optional stream transforms applied before output collection replay.
+    pub transforms: Vec<StreamTextTransform<'a>>,
+
     /// Optional callback invoked for portable stream chunks.
     pub on_chunk: Option<StreamTextOnChunk<'a>>,
 
@@ -899,6 +937,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             telemetry: None,
             max_retries: DEFAULT_MAX_RETRIES,
             smooth_stream: None,
+            transforms: Vec::new(),
             on_chunk: None,
             on_error: None,
             abort_signal: None,
@@ -939,6 +978,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             telemetry: None,
             max_retries: DEFAULT_MAX_RETRIES,
             smooth_stream: None,
+            transforms: Vec::new(),
             on_chunk: None,
             on_error: None,
             abort_signal,
@@ -1219,6 +1259,21 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
     /// Applies upstream-style smooth streaming to text and reasoning deltas.
     pub fn with_smooth_stream(mut self, smooth_stream: SmoothStreamOptions) -> Self {
         self.smooth_stream = Some(smooth_stream);
+        self
+    }
+
+    /// Adds a Rust-native stream transform.
+    pub fn with_transform(mut self, transform: StreamTextTransform<'a>) -> Self {
+        self.transforms.push(transform);
+        self
+    }
+
+    /// Replaces the Rust-native stream transform list.
+    pub fn with_transforms(
+        mut self,
+        transforms: impl IntoIterator<Item = StreamTextTransform<'a>>,
+    ) -> Self {
+        self.transforms = transforms.into_iter().collect();
         self
     }
 
@@ -2097,6 +2152,7 @@ where
         telemetry,
         max_retries,
         smooth_stream,
+        transforms,
         on_chunk,
         on_error,
         abort_signal,
@@ -2234,10 +2290,11 @@ where
             model,
             step_call_options.clone(),
             include_raw_chunks,
-            max_retries,
-            smooth_stream.as_ref(),
             &mut parts,
             StreamTextCollectionControls {
+                max_retries,
+                transforms: &transforms,
+                smooth_stream: smooth_stream.as_ref(),
                 on_chunk: on_chunk.as_ref(),
                 on_error: on_error.as_ref(),
                 abort_signal: abort_signal.as_ref(),
@@ -2629,29 +2686,150 @@ impl CollectedStreamTextStep {
         }
     }
 
-    fn apply_smoothed_parts(&mut self, parts: &[TextStreamPart]) {
+    fn apply_transformed_parts(&mut self, parts: &[TextStreamPart]) {
         let mut text = String::new();
         let mut text_stream = Vec::new();
         let mut reasoning_text = String::new();
         let mut has_reasoning_text = false;
+        let mut sources = Vec::new();
+        let mut files = Vec::new();
+        let mut reasoning_files = Vec::new();
+        let mut tool_calls = Vec::new();
+        let mut tool_results = Vec::new();
+        let mut custom_parts = Vec::new();
+        let mut errors = Vec::new();
+        let mut provider_content = Vec::new();
+        let mut text_blocks = BTreeMap::<String, (String, Option<ProviderMetadata>)>::new();
+        let mut reasoning_blocks = BTreeMap::<String, (String, Option<ProviderMetadata>)>::new();
 
         for part in parts {
             match part {
+                TextStreamPart::TextStart(part) => {
+                    text_blocks.insert(
+                        part.id.clone(),
+                        (String::new(), part.provider_metadata.clone()),
+                    );
+                }
                 TextStreamPart::TextDelta(part) if !part.text.is_empty() => {
                     text.push_str(&part.text);
                     text_stream.push(part.text.clone());
+                    if let Some((block_text, block_metadata)) = text_blocks.get_mut(&part.id) {
+                        block_text.push_str(&part.text);
+                        if block_metadata.is_none() {
+                            *block_metadata = part.provider_metadata.clone();
+                        }
+                    } else {
+                        provider_content.push(text_language_model_content(
+                            part.text.clone(),
+                            part.provider_metadata.clone(),
+                        ));
+                    }
+                }
+                TextStreamPart::TextEnd(part) => {
+                    if let Some((block_text, provider_metadata)) = text_blocks.remove(&part.id)
+                        && !block_text.is_empty()
+                    {
+                        provider_content
+                            .push(text_language_model_content(block_text, provider_metadata));
+                    }
+                }
+                TextStreamPart::ReasoningStart(part) => {
+                    reasoning_blocks.insert(
+                        part.id.clone(),
+                        (String::new(), part.provider_metadata.clone()),
+                    );
                 }
                 TextStreamPart::ReasoningDelta(part) => {
                     has_reasoning_text = true;
                     reasoning_text.push_str(&part.text);
+                    if let Some((block_text, block_metadata)) = reasoning_blocks.get_mut(&part.id) {
+                        block_text.push_str(&part.text);
+                        if block_metadata.is_none() {
+                            *block_metadata = part.provider_metadata.clone();
+                        }
+                    } else {
+                        provider_content.push(reasoning_language_model_content(
+                            part.text.clone(),
+                            part.provider_metadata.clone(),
+                        ));
+                    }
+                }
+                TextStreamPart::ReasoningEnd(part) => {
+                    if let Some((block_text, provider_metadata)) = reasoning_blocks.remove(&part.id)
+                        && !block_text.is_empty()
+                    {
+                        provider_content.push(reasoning_language_model_content(
+                            block_text,
+                            provider_metadata,
+                        ));
+                    }
+                }
+                TextStreamPart::ToolApprovalRequest(part) => {
+                    provider_content.push(LanguageModelContent::ToolApprovalRequest(part.clone()));
+                }
+                TextStreamPart::ToolCall(part) => {
+                    tool_calls.push(part.clone());
+                    provider_content.push(LanguageModelContent::ToolCall(
+                        language_model_tool_call_from_stream_text_tool_call(part),
+                    ));
+                }
+                TextStreamPart::ToolResult(part) => {
+                    tool_results.push(part.clone());
+                    if let Some(tool_result) =
+                        language_model_tool_result_from_stream_text_tool_result(part)
+                    {
+                        provider_content.push(LanguageModelContent::ToolResult(tool_result));
+                    }
+                }
+                TextStreamPart::Custom(part) => {
+                    custom_parts.push(part.clone());
+                    provider_content.push(LanguageModelContent::Custom(part.clone()));
+                }
+                TextStreamPart::File(part) => {
+                    files.push(part.file.clone());
+                    provider_content.push(LanguageModelContent::File(part.file.clone()));
+                }
+                TextStreamPart::ReasoningFile(part) => {
+                    reasoning_files.push(part.file.clone());
+                    provider_content.push(LanguageModelContent::ReasoningFile(part.file.clone()));
+                }
+                TextStreamPart::Source(part) => {
+                    sources.push(part.clone());
+                    provider_content.push(LanguageModelContent::Source(part.clone()));
+                }
+                TextStreamPart::Error(part) => {
+                    errors.push(part.error.clone());
                 }
                 _ => {}
+            }
+        }
+
+        for (_, (block_text, provider_metadata)) in text_blocks {
+            if !block_text.is_empty() {
+                provider_content.push(text_language_model_content(block_text, provider_metadata));
+            }
+        }
+
+        for (_, (block_text, provider_metadata)) in reasoning_blocks {
+            if !block_text.is_empty() {
+                provider_content.push(reasoning_language_model_content(
+                    block_text,
+                    provider_metadata,
+                ));
             }
         }
 
         self.text = text;
         self.text_stream = text_stream;
         self.reasoning_text = has_reasoning_text.then_some(reasoning_text);
+        self.sources = sources;
+        self.files = files;
+        self.reasoning_files = reasoning_files;
+        self.tool_calls = tool_calls;
+        self.tool_results = tool_results;
+        self.custom_parts = custom_parts;
+        self.errors = errors;
+        self.provider_content = provider_content;
     }
 
     fn apply_smooth_stream_error(&mut self, error: &SmoothStreamError) {
@@ -2667,6 +2845,9 @@ impl CollectedStreamTextStep {
 
 #[derive(Clone, Copy)]
 struct StreamTextCollectionControls<'a, 'b> {
+    max_retries: usize,
+    transforms: &'a [StreamTextTransform<'b>],
+    smooth_stream: Option<&'a SmoothStreamOptions>,
     on_chunk: Option<&'a StreamTextOnChunk<'b>>,
     on_error: Option<&'a StreamTextOnError<'b>>,
     abort_signal: Option<&'a StreamTextAbortSignal>,
@@ -2676,8 +2857,6 @@ async fn collect_stream_text_step_with_retries<M>(
     model: &M,
     call_options: LanguageModelCallOptions,
     include_raw_chunks: bool,
-    max_retries: usize,
-    smooth_stream: Option<&SmoothStreamOptions>,
     parts: &mut Vec<TextStreamPart>,
     controls: StreamTextCollectionControls<'_, '_>,
 ) -> CollectedStreamTextStep
@@ -2712,17 +2891,22 @@ where
             return collected_step;
         }
 
-        if retries < max_retries
+        if retries < controls.max_retries
             && stream_text_step_is_retryable_pre_stream_failure(&collected_step, &attempt_parts)
         {
             retries += 1;
             continue;
         }
 
-        let attempt_parts = match smooth_stream {
+        let attempt_parts = apply_stream_text_transforms(attempt_parts, controls.transforms);
+        if !controls.transforms.is_empty() {
+            collected_step.apply_transformed_parts(&attempt_parts);
+        }
+
+        let attempt_parts = match controls.smooth_stream {
             Some(smooth_stream) => match smooth_stream_parts(attempt_parts, smooth_stream) {
                 Ok(attempt_parts) => {
-                    collected_step.apply_smoothed_parts(&attempt_parts);
+                    collected_step.apply_transformed_parts(&attempt_parts);
                     attempt_parts
                 }
                 Err(error) => {
@@ -3116,6 +3300,75 @@ fn stream_text_error_is_retryable(error: &JsonValue) -> bool {
                 .and_then(|status_code| u16::try_from(status_code).ok())
                 .is_some_and(ApiCallError::is_retryable_status_code)
         })
+}
+
+fn apply_stream_text_transforms(
+    mut parts: Vec<TextStreamPart>,
+    transforms: &[StreamTextTransform<'_>],
+) -> Vec<TextStreamPart> {
+    for transform in transforms {
+        parts = transform.transform(parts);
+    }
+
+    parts
+}
+
+fn language_model_tool_call_from_stream_text_tool_call(
+    tool_call: &GenerateTextToolCall,
+) -> LanguageModelToolCall {
+    let input = if tool_call.invalid == Some(true) {
+        tool_call
+            .input
+            .as_str()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| tool_call.input.to_string())
+    } else {
+        serde_json::to_string(&tool_call.input).unwrap_or_else(|_| tool_call.input.to_string())
+    };
+
+    let mut provider_tool_call =
+        LanguageModelToolCall::new(&tool_call.tool_call_id, &tool_call.tool_name, input);
+
+    if let Some(provider_executed) = tool_call.provider_executed {
+        provider_tool_call = provider_tool_call.with_provider_executed(provider_executed);
+    }
+
+    if let Some(dynamic) = tool_call.dynamic {
+        provider_tool_call = provider_tool_call.with_dynamic(dynamic);
+    }
+
+    if let Some(provider_metadata) = &tool_call.provider_metadata {
+        provider_tool_call = provider_tool_call.with_provider_metadata(provider_metadata.clone());
+    }
+
+    provider_tool_call
+}
+
+fn language_model_tool_result_from_stream_text_tool_result(
+    tool_result: &GenerateTextToolResult,
+) -> Option<LanguageModelToolResult> {
+    let result = NonNullJsonValue::new(tool_result.output.clone()).ok()?;
+    let mut provider_tool_result =
+        LanguageModelToolResult::new(&tool_result.tool_call_id, &tool_result.tool_name, result);
+
+    if let Some(is_error) = tool_result.is_error {
+        provider_tool_result = provider_tool_result.with_is_error(is_error);
+    }
+
+    if let Some(preliminary) = tool_result.preliminary {
+        provider_tool_result = provider_tool_result.with_preliminary(preliminary);
+    }
+
+    if let Some(dynamic) = tool_result.dynamic {
+        provider_tool_result = provider_tool_result.with_dynamic(dynamic);
+    }
+
+    if let Some(provider_metadata) = &tool_result.provider_metadata {
+        provider_tool_result =
+            provider_tool_result.with_provider_metadata(provider_metadata.clone());
+    }
+
+    Some(provider_tool_result)
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -3975,6 +4228,215 @@ mod tests {
                 TextStreamPart::TextDelta(part) if part.text == "Hello, "
             )
         }));
+    }
+
+    #[test]
+    fn stream_text_transform_updates_text_response_and_callbacks() {
+        let chunks = Arc::new(Mutex::new(Vec::new()));
+        let chunks_for_callback = Arc::clone(&chunks);
+        let step = Arc::new(Mutex::new(None::<GenerateTextStep>));
+        let step_for_callback = Arc::clone(&step);
+        let finish = Arc::new(Mutex::new(None::<GenerateTextFinishEvent>));
+        let finish_for_callback = Arc::clone(&finish);
+        let uppercase_text = StreamTextTransform::new(|parts| {
+            parts
+                .into_iter()
+                .map(|part| match part {
+                    TextStreamPart::TextDelta(mut part) => {
+                        part.text = part.text.to_uppercase();
+                        TextStreamPart::TextDelta(part)
+                    }
+                    TextStreamPart::ReasoningDelta(mut part) => {
+                        part.text = part.text.to_uppercase();
+                        TextStreamPart::ReasoningDelta(part)
+                    }
+                    part => part,
+                })
+                .collect()
+        });
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", ", ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_transform(uppercase_text)
+                .with_on_chunk(move |event| {
+                    let chunks = Arc::clone(&chunks_for_callback);
+                    async move {
+                        if let TextStreamPart::TextDelta(part) = event.chunk {
+                            chunks
+                                .lock()
+                                .expect("chunks mutex is not poisoned")
+                                .push(part.text);
+                        }
+                    }
+                })
+                .with_on_step_finish(move |event| {
+                    let step = Arc::clone(&step_for_callback);
+                    async move {
+                        *step.lock().expect("step mutex is not poisoned") = Some(event);
+                    }
+                })
+                .with_on_finish(move |event| {
+                    let finish = Arc::clone(&finish_for_callback);
+                    async move {
+                        *finish.lock().expect("finish mutex is not poisoned") = Some(event);
+                    }
+                }),
+        ));
+
+        assert_eq!(result.text, "HELLO, WORLD!");
+        assert_eq!(
+            result.text_stream,
+            vec!["HELLO".to_string(), ", ".to_string(), "WORLD!".to_string()]
+        );
+        assert_eq!(
+            *chunks.lock().expect("chunks mutex is not poisoned"),
+            ["HELLO".to_string(), ", ".to_string(), "WORLD!".to_string()]
+        );
+        let step = step
+            .lock()
+            .expect("step mutex is not poisoned")
+            .clone()
+            .expect("step finish ran");
+        assert_eq!(step.text, "HELLO, WORLD!");
+        assert!(
+            serde_json::to_value(&step.response_messages)
+                .expect("response messages serialize")
+                .to_string()
+                .contains("HELLO, WORLD!")
+        );
+        assert_eq!(
+            finish
+                .lock()
+                .expect("finish mutex is not poisoned")
+                .as_ref()
+                .expect("finish ran")
+                .text,
+            "HELLO, WORLD!"
+        );
+    }
+
+    #[test]
+    fn stream_text_transform_applies_multiple_transforms_in_order() {
+        let uppercase_and_add_comma = StreamTextTransform::new(|parts| {
+            parts
+                .into_iter()
+                .map(|part| match part {
+                    TextStreamPart::TextDelta(mut part) => {
+                        part.text = format!("{},", part.text.to_uppercase());
+                        TextStreamPart::TextDelta(part)
+                    }
+                    part => part,
+                })
+                .collect()
+        });
+        let remove_commas = StreamTextTransform::new(|parts| {
+            parts
+                .into_iter()
+                .map(|part| match part {
+                    TextStreamPart::TextDelta(mut part) => {
+                        part.text = part.text.replace(',', "");
+                        TextStreamPart::TextDelta(part)
+                    }
+                    part => part,
+                })
+                .collect()
+        });
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", ", ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_transform(uppercase_and_add_comma)
+                .with_transform(remove_commas),
+        ));
+
+        assert_eq!(
+            result.text_stream,
+            vec!["HELLO".to_string(), " ".to_string(), "WORLD!".to_string()]
+        );
+        assert_eq!(result.text, "HELLO WORLD!");
+    }
+
+    #[test]
+    fn stream_text_transform_updates_tool_calls_and_tool_results() {
+        let uppercase_tool_data = StreamTextTransform::new(|parts| {
+            parts
+                .into_iter()
+                .map(|part| match part {
+                    TextStreamPart::ToolCall(mut part) => {
+                        if let JsonValue::Object(input) = &mut part.input {
+                            input.insert("value".to_string(), json!("VALUE"));
+                        }
+                        TextStreamPart::ToolCall(part)
+                    }
+                    TextStreamPart::ToolResult(mut part) => {
+                        if let JsonValue::Object(input) = &mut part.input {
+                            input.insert("value".to_string(), json!("VALUE"));
+                        }
+                        part.output = json!("RESULT1");
+                        TextStreamPart::ToolResult(part)
+                    }
+                    part => part,
+                })
+                .collect()
+        });
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::ToolCall(
+                    LanguageModelToolCall::new("call-1", "tool1", r#"{"value":"value"}"#)
+                        .with_provider_executed(true),
+                ),
+                LanguageModelStreamPart::ToolResult(LanguageModelToolResult::new(
+                    "call-1",
+                    "tool1",
+                    NonNullJsonValue::new(json!("result1")).expect("tool result is non-null"),
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Use tool")])
+                .with_transform(uppercase_tool_data),
+        ));
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].input, json!({ "value": "VALUE" }));
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].input, json!({ "value": "VALUE" }));
+        assert_eq!(result.tool_results[0].output, json!("RESULT1"));
+        assert_eq!(
+            result.steps[0].tool_calls[0].input,
+            json!({ "value": "VALUE" })
+        );
+        assert_eq!(result.steps[0].tool_results[0].output, json!("RESULT1"));
     }
 
     #[test]
