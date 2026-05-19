@@ -534,6 +534,8 @@ fn open_responses_request_body(
         provider_options_name,
         provider_options,
     );
+    let system_message_mode =
+        open_responses_system_message_mode(model_id, provider_options_name, provider_options);
     if has_conversation
         && open_responses_previous_response_id_enabled(provider_options_name, provider_options)
     {
@@ -555,6 +557,7 @@ fn open_responses_request_body(
         has_shell_tool,
         has_apply_patch_tool,
         custom_provider_tool_names: &custom_provider_tool_names,
+        system_message_mode,
     };
     let (input, instructions) =
         open_responses_input(&options.prompt, &prompt_input_options, &mut warnings)?;
@@ -678,6 +681,14 @@ struct OpenResponsesModelCapabilities {
     supports_non_reasoning_parameters: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OpenResponsesSystemMessageMode {
+    Instructions,
+    System,
+    Developer,
+    Remove,
+}
+
 fn open_responses_model_capabilities(model_id: &str) -> OpenResponsesModelCapabilities {
     let is_gpt5_reasoning = model_id.starts_with("gpt-5") && !model_id.starts_with("gpt-5-chat");
     let is_reasoning_model = model_id.starts_with("o1")
@@ -705,6 +716,40 @@ fn open_responses_model_capabilities(model_id: &str) -> OpenResponsesModelCapabi
         supports_flex_processing,
         supports_priority_processing,
         supports_non_reasoning_parameters,
+    }
+}
+
+fn open_responses_system_message_mode(
+    model_id: &str,
+    provider_options_name: &str,
+    provider_options: Option<&ProviderOptions>,
+) -> OpenResponsesSystemMessageMode {
+    if !open_responses_uses_openai_model_capability_rules(provider_options_name) {
+        return OpenResponsesSystemMessageMode::Instructions;
+    }
+
+    if let Some(mode) = open_responses_provider_option_value(
+        provider_options_name,
+        provider_options,
+        &["systemMessageMode", "system_message_mode"],
+    )
+    .and_then(JsonValue::as_str)
+    {
+        return match mode {
+            "system" => OpenResponsesSystemMessageMode::System,
+            "developer" => OpenResponsesSystemMessageMode::Developer,
+            "remove" => OpenResponsesSystemMessageMode::Remove,
+            _ => OpenResponsesSystemMessageMode::System,
+        };
+    }
+
+    let capabilities = open_responses_model_capabilities(model_id);
+    if open_responses_force_reasoning(provider_options_name, provider_options).unwrap_or(false)
+        || capabilities.is_reasoning_model
+    {
+        OpenResponsesSystemMessageMode::Developer
+    } else {
+        OpenResponsesSystemMessageMode::System
     }
 }
 
@@ -1235,6 +1280,7 @@ struct OpenResponsesPromptInputOptions<'a> {
     has_shell_tool: bool,
     has_apply_patch_tool: bool,
     custom_provider_tool_names: &'a BTreeSet<String>,
+    system_message_mode: OpenResponsesSystemMessageMode,
 }
 
 fn open_responses_input(
@@ -1252,6 +1298,7 @@ fn open_responses_input(
     let has_shell_tool = options.has_shell_tool;
     let has_apply_patch_tool = options.has_apply_patch_tool;
     let custom_provider_tool_names = options.custom_provider_tool_names;
+    let system_message_mode = options.system_message_mode;
     let mut input = Vec::new();
     let mut system_messages = Vec::new();
     let mut processed_approval_ids = BTreeSet::new();
@@ -1260,9 +1307,28 @@ fn open_responses_input(
 
     for message in prompt {
         match message {
-            LanguageModelMessage::System(message) => {
-                system_messages.push(message.content.clone());
-            }
+            LanguageModelMessage::System(message) => match system_message_mode {
+                OpenResponsesSystemMessageMode::Instructions => {
+                    system_messages.push(message.content.clone());
+                }
+                OpenResponsesSystemMessageMode::System => {
+                    input.push(json!({
+                        "role": "system",
+                        "content": message.content
+                    }));
+                }
+                OpenResponsesSystemMessageMode::Developer => {
+                    input.push(json!({
+                        "role": "developer",
+                        "content": message.content
+                    }));
+                }
+                OpenResponsesSystemMessageMode::Remove => {
+                    warnings.push(Warning::Other {
+                        message: "system messages are removed for this model".to_string(),
+                    });
+                }
+            },
             LanguageModelMessage::User(message) => {
                 let mut content = Vec::new();
 
@@ -6747,6 +6813,76 @@ mod tests {
         ))
     }
 
+    fn open_responses_captured_provider(
+        provider_name: &str,
+        response_model: &str,
+    ) -> (
+        OpenResponsesProvider,
+        Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let response_model = response_model.to_string();
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_captured",
+                        "created_at": 1711115037,
+                        "model": response_model.as_str(),
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Done."
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 1,
+                            "output_tokens": 1
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new(
+                provider_name,
+                format!("https://api.{provider_name}.test/v1/responses"),
+            )
+            .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+
+        (provider, captured_request)
+    }
+
+    fn captured_open_responses_request_body(
+        captured_request: &Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) -> JsonValue {
+        captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON")
+    }
+
     use super::map_open_responses_finish_reason;
 
     #[test]
@@ -6782,7 +6918,7 @@ mod tests {
     }
 
     #[test]
-    fn open_responses_provider_converts_message_chain_with_instructions() {
+    fn open_responses_provider_converts_openai_message_chain_with_system_input_items() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
         let transport: OpenResponsesTransport =
@@ -6876,6 +7012,14 @@ mod tests {
                 "model": "gpt-4.1-mini",
                 "input": [
                     {
+                        "role": "system",
+                        "content": "You are concise."
+                    },
+                    {
+                        "role": "system",
+                        "content": "Use metric units."
+                    },
+                    {
                         "type": "message",
                         "role": "user",
                         "content": [
@@ -6916,10 +7060,124 @@ mod tests {
                             }
                         ]
                     }
-                ],
-                "instructions": "You are concise.\nUse metric units."
+                ]
             }))
         );
+    }
+
+    #[test]
+    fn open_responses_provider_keeps_generic_system_messages_as_instructions() {
+        let (provider, captured_request) =
+            open_responses_captured_provider("lmstudio", "qwen/qwen3");
+        let model = provider.language_model("qwen/qwen3");
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::System(LanguageModelSystemMessage::new("You are concise.")),
+            LanguageModelMessage::System(LanguageModelSystemMessage::new("Use metric units.")),
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
+            ])),
+        ])));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "qwen/qwen3",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "instructions": "You are concise.\nUse metric units."
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_maps_openai_system_message_modes() {
+        let (reasoning_provider, captured_reasoning_request) =
+            open_responses_captured_provider("openai", "gpt-5");
+        let reasoning_model = reasoning_provider.language_model("gpt-5");
+        let reasoning_result = poll_ready(reasoning_model.do_generate(
+            LanguageModelCallOptions::new(vec![
+                LanguageModelMessage::System(LanguageModelSystemMessage::new("You are concise.")),
+                LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                    LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
+                ])),
+            ]),
+        ));
+
+        assert_eq!(reasoning_result.finish_reason.unified, FinishReason::Stop);
+        let reasoning_request_body =
+            captured_open_responses_request_body(&captured_reasoning_request);
+        assert_eq!(
+            reasoning_request_body["input"][0],
+            json!({
+                "role": "developer",
+                "content": "You are concise."
+            })
+        );
+        assert!(reasoning_request_body.get("instructions").is_none());
+
+        let (remove_provider, captured_remove_request) =
+            open_responses_captured_provider("openai", "gpt-4o");
+        let remove_model = remove_provider.language_model("gpt-4o");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "systemMessageMode": "remove"
+            }
+        }))
+        .expect("provider options deserialize");
+        let remove_result = poll_ready(
+            remove_model.do_generate(
+                LanguageModelCallOptions::new(vec![
+                    LanguageModelMessage::System(LanguageModelSystemMessage::new(
+                        "Do not send me.",
+                    )),
+                    LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                        LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
+                    ])),
+                ])
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(
+            remove_result.warnings.iter().any(|warning| {
+                matches!(
+                    warning,
+                    Warning::Other { message }
+                        if message == "system messages are removed for this model"
+                )
+            }),
+            "remove mode should warn"
+        );
+        let remove_request_body = captured_open_responses_request_body(&captured_remove_request);
+        assert_eq!(
+            remove_request_body["input"],
+            json!([
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Hello"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert!(remove_request_body.get("instructions").is_none());
     }
 
     #[test]
