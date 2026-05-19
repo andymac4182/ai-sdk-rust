@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::string::FromUtf8Error;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use ai_sdk_provider::{
     FileData, FileDataContent, JsonObject, JsonSchema, JsonValue, LanguageModelFilePart,
@@ -1737,7 +1738,33 @@ pub struct McpHttpTransport {
     protocol_version: Option<String>,
     last_inbound_event_id: Option<String>,
     pending_inbound_messages: VecDeque<JsonRpcMessage>,
+    inbound_reconnect_attempts: usize,
+    inbound_reconnection_options: McpHttpReconnectionOptions,
     started: bool,
+}
+
+#[derive(Clone, Debug)]
+struct McpHttpReconnectionOptions {
+    initial_reconnection_delay: Duration,
+    max_reconnection_delay: Duration,
+    reconnection_delay_grow_factor: f64,
+    max_retries: usize,
+}
+
+impl Default for McpHttpReconnectionOptions {
+    fn default() -> Self {
+        Self {
+            initial_reconnection_delay: Duration::from_millis(1_000),
+            max_reconnection_delay: Duration::from_millis(30_000),
+            reconnection_delay_grow_factor: 1.5,
+            max_retries: 2,
+        }
+    }
+}
+
+enum InboundSseAttemptError {
+    Retriable,
+    Fatal(McpClientError),
 }
 
 impl McpHttpTransport {
@@ -1750,6 +1777,8 @@ impl McpHttpTransport {
             protocol_version: None,
             last_inbound_event_id: None,
             pending_inbound_messages: VecDeque::new(),
+            inbound_reconnect_attempts: 0,
+            inbound_reconnection_options: McpHttpReconnectionOptions::default(),
             started: false,
         }
     }
@@ -1787,6 +1816,30 @@ impl McpHttpTransport {
             .unwrap_or(LATEST_PROTOCOL_VERSION)
     }
 
+    #[cfg(test)]
+    fn with_inbound_reconnection_options(mut self, options: McpHttpReconnectionOptions) -> Self {
+        self.inbound_reconnection_options = options;
+        self
+    }
+
+    fn next_inbound_reconnection_delay(&self) -> Duration {
+        Duration::from_secs_f64(
+            (self
+                .inbound_reconnection_options
+                .initial_reconnection_delay
+                .as_secs_f64()
+                * self
+                    .inbound_reconnection_options
+                    .reconnection_delay_grow_factor
+                    .powi(self.inbound_reconnect_attempts as i32))
+            .min(
+                self.inbound_reconnection_options
+                    .max_reconnection_delay
+                    .as_secs_f64(),
+            ),
+        )
+    }
+
     fn common_headers(
         &self,
         base: impl IntoIterator<Item = (&'static str, &'static str)>,
@@ -1812,6 +1865,32 @@ impl McpHttpTransport {
     }
 
     fn open_inbound_sse(&mut self) -> McpClientResult<()> {
+        loop {
+            match self.open_inbound_sse_once() {
+                Ok(()) => {
+                    self.inbound_reconnect_attempts = 0;
+                    return Ok(());
+                }
+                Err(InboundSseAttemptError::Fatal(error)) => return Err(error),
+                Err(InboundSseAttemptError::Retriable) => {
+                    let max_retries = self.inbound_reconnection_options.max_retries;
+                    if max_retries > 0 && self.inbound_reconnect_attempts >= max_retries {
+                        return Err(McpClientError::new(format!(
+                            "MCP HTTP Transport Error: Maximum reconnection attempts ({max_retries}) exceeded."
+                        )));
+                    }
+
+                    let delay = self.next_inbound_reconnection_delay();
+                    self.inbound_reconnect_attempts += 1;
+                    if !delay.is_zero() {
+                        std::thread::sleep(delay);
+                    }
+                }
+            }
+        }
+    }
+
+    fn open_inbound_sse_once(&mut self) -> Result<(), InboundSseAttemptError> {
         let mut builder = ureq::get(&self.url);
         for (name, value) in self.common_headers([("Accept", "text/event-stream")]) {
             builder = builder.header(name.as_str(), value.as_str());
@@ -1825,9 +1904,7 @@ impl McpHttpTransport {
             .http_status_as_error(false)
             .build()
             .call()
-            .map_err(|error| {
-                McpClientError::new(format!("MCP HTTP Transport Error: GET SSE failed: {error}"))
-            })?;
+            .map_err(|_error| InboundSseAttemptError::Retriable)?;
 
         if let Some(session_id) = response
             .headers()
@@ -1849,16 +1926,15 @@ impl McpHttpTransport {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        let body = response.body_mut().read_to_string().map_err(|error| {
-            McpClientError::new(format!(
-                "MCP HTTP Transport Error: failed to read inbound SSE body: {error}"
-            ))
-        })?;
+        let body = response
+            .body_mut()
+            .read_to_string()
+            .map_err(|_error| InboundSseAttemptError::Retriable)?;
 
         if !(200..300).contains(&status) {
-            return Err(McpClientError::new(format!(
+            return Err(InboundSseAttemptError::Fatal(McpClientError::new(format!(
                 "MCP HTTP Transport Error: GET SSE failed: {status} {status_text}"
-            )));
+            ))));
         }
 
         if body.is_empty() {
@@ -1866,12 +1942,13 @@ impl McpHttpTransport {
         }
 
         if !content_type.contains("text/event-stream") {
-            return Err(McpClientError::new(format!(
+            return Err(InboundSseAttemptError::Fatal(McpClientError::new(format!(
                 "MCP HTTP Transport Error: Unexpected inbound SSE content type: {content_type}"
-            )));
+            ))));
         }
 
-        let parsed = parse_json_rpc_sse_body_with_last_event_id(&body)?;
+        let parsed = parse_json_rpc_sse_body_with_last_event_id(&body)
+            .map_err(InboundSseAttemptError::Fatal)?;
         if let Some(last_event_id) = parsed.last_event_id {
             self.last_inbound_event_id = Some(last_event_id);
         }
@@ -3113,6 +3190,15 @@ mod tests {
         })
     }
 
+    fn no_delay_inbound_reconnection_options() -> McpHttpReconnectionOptions {
+        McpHttpReconnectionOptions {
+            initial_reconnection_delay: Duration::ZERO,
+            max_reconnection_delay: Duration::ZERO,
+            reconnection_delay_grow_factor: 1.5,
+            max_retries: 2,
+        }
+    }
+
     fn app_tool(name: &str, visibility: Vec<&str>) -> McpTool {
         let mut ui = JsonObject::from_iter([
             (
@@ -3368,6 +3454,135 @@ mod tests {
                 { "jsonrpc": "2.0", "id": 7, "result": { "ok": true } }
             ])
         );
+    }
+
+    #[test]
+    fn mcp_http_transport_retries_inbound_sse_open_failures() {
+        let server = LocalHttpServer::new(vec![
+            LocalHttpResponse::disconnect(),
+            LocalHttpResponse::new(
+                200,
+                [("content-type", "text/event-stream")],
+                format!(
+                    "id: event-1\nevent: message\ndata: {}\n\n",
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": 99,
+                        "result": { "fromInboundRetry": true }
+                    })
+                ),
+            ),
+            LocalHttpResponse::json(json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "result": { "ok": true }
+            })),
+        ]);
+        let mut transport = McpHttpTransport::new(server.url())
+            .with_inbound_reconnection_options(no_delay_inbound_reconnection_options());
+
+        transport.start().expect("transport retries inbound SSE");
+        let messages = transport
+            .send(JsonRpcMessage::Request(JsonRpcRequest::new(
+                json!(7),
+                "tools/list",
+            )))
+            .expect("pending retry message and response are returned");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[1].method, "GET");
+        assert_eq!(
+            serde_json::to_value(&messages).expect("messages serialize"),
+            json!([
+                { "jsonrpc": "2.0", "id": 99, "result": { "fromInboundRetry": true } },
+                { "jsonrpc": "2.0", "id": 7, "result": { "ok": true } }
+            ])
+        );
+    }
+
+    #[test]
+    fn mcp_http_transport_retries_resumed_inbound_sse_after_accepted_post() {
+        let server = LocalHttpServer::new(vec![
+            LocalHttpResponse::new(
+                200,
+                [("content-type", "text/event-stream")],
+                format!(
+                    "id: event-1\nevent: message\ndata: {}\n\n",
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": 99,
+                        "result": { "fromInbound": true }
+                    })
+                ),
+            ),
+            LocalHttpResponse::empty(202),
+            LocalHttpResponse::disconnect(),
+            LocalHttpResponse::new(200, [("content-type", "text/event-stream")], ""),
+        ]);
+        let mut transport = McpHttpTransport::new(server.url())
+            .with_inbound_reconnection_options(no_delay_inbound_reconnection_options());
+
+        transport.start().expect("transport starts");
+        transport
+            .send(JsonRpcMessage::Notification(JsonRpcNotification::new(
+                "notifications/initialized",
+            )))
+            .expect("notification accepted and inbound SSE retried");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[2].method, "GET");
+        assert_eq!(
+            requests[2].headers.get("last-event-id"),
+            Some(&"event-1".to_string())
+        );
+        assert_eq!(requests[3].method, "GET");
+        assert_eq!(
+            requests[3].headers.get("last-event-id"),
+            Some(&"event-1".to_string())
+        );
+    }
+
+    #[test]
+    fn mcp_http_transport_computes_inbound_sse_reconnect_backoff() {
+        let mut transport = McpHttpTransport::new("http://localhost:4000/mcp");
+
+        assert_eq!(
+            transport.next_inbound_reconnection_delay(),
+            Duration::from_millis(1_000)
+        );
+
+        transport.inbound_reconnect_attempts = 1;
+        assert_eq!(
+            transport.next_inbound_reconnection_delay(),
+            Duration::from_millis(1_500)
+        );
+
+        transport.inbound_reconnect_attempts = 20;
+        assert_eq!(
+            transport.next_inbound_reconnection_delay(),
+            Duration::from_millis(30_000)
+        );
+    }
+
+    #[test]
+    fn mcp_http_transport_reports_max_inbound_sse_reconnect_attempts() {
+        let server = LocalHttpServer::new(vec![
+            LocalHttpResponse::disconnect(),
+            LocalHttpResponse::disconnect(),
+            LocalHttpResponse::disconnect(),
+        ]);
+        let mut transport = McpHttpTransport::new(server.url())
+            .with_inbound_reconnection_options(no_delay_inbound_reconnection_options());
+
+        let error = transport
+            .start()
+            .expect_err("transport stops after max retries");
+
+        assert!(error.message.contains("Maximum reconnection attempts (2)"));
+        assert_eq!(server.requests().len(), 3);
     }
 
     #[test]
@@ -4637,6 +4852,7 @@ mod tests {
         status: u16,
         headers: BTreeMap<String, String>,
         body: String,
+        disconnect: bool,
     }
 
     impl LocalHttpResponse {
@@ -4653,6 +4869,7 @@ mod tests {
                     .map(|(key, value)| (key.into(), value.into()))
                     .collect(),
                 body: body.into(),
+                disconnect: false,
             }
         }
 
@@ -4666,6 +4883,15 @@ mod tests {
 
         fn empty(status: u16) -> Self {
             Self::new(status, [("content-type", "text/plain")], "")
+        }
+
+        fn disconnect() -> Self {
+            Self {
+                status: 0,
+                headers: BTreeMap::new(),
+                body: String::new(),
+                disconnect: true,
+            }
         }
 
         fn with_header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
@@ -4767,6 +4993,9 @@ mod tests {
             .expect("local responses lock")
             .pop_front()
             .unwrap_or_else(|| LocalHttpResponse::empty(200));
+        if response.disconnect {
+            return;
+        }
         let body = response.body;
         let mut response_text = format!(
             "HTTP/1.1 {} OK\r\ncontent-length: {}\r\nconnection: close\r\n",
