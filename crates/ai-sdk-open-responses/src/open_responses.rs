@@ -3023,11 +3023,11 @@ fn open_responses_content(
                     .get("arguments")
                     .and_then(JsonValue::as_str)
                     .unwrap_or("{}");
-                content.push(LanguageModelContent::ToolCall(LanguageModelToolCall::new(
-                    tool_call_id,
-                    tool_name,
-                    input,
-                )));
+                let mut tool_call = LanguageModelToolCall::new(tool_call_id, tool_name, input);
+                if let Some(metadata) = open_responses_item_metadata(provider_options_name, part) {
+                    tool_call = tool_call.with_provider_metadata(metadata);
+                }
+                content.push(LanguageModelContent::ToolCall(tool_call));
             }
             Some("custom_tool_call") => {
                 has_tool_calls = true;
@@ -12566,6 +12566,7 @@ mod tests {
                                 "type": "function_call",
                                 "name": "weather",
                                 "arguments": "{\"location\":\"San Francisco\"}",
+                                "namespace": "weather_ns",
                                 "status": "completed"
                             }
                         ],
@@ -12648,6 +12649,24 @@ mod tests {
         assert_eq!(tool_calls[0].tool_name, "weather");
         assert_eq!(tool_calls[0].input, "{\"location\":\"San Francisco\"}");
         assert_eq!(tool_calls[0].provider_executed, None);
+        assert_eq!(
+            tool_calls[0]
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("lmstudio"))
+                .and_then(|metadata| metadata.get("itemId"))
+                .and_then(JsonValue::as_str),
+            Some("fc_tool_1")
+        );
+        assert_eq!(
+            tool_calls[0]
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("lmstudio"))
+                .and_then(|metadata| metadata.get("namespace"))
+                .and_then(JsonValue::as_str),
+            Some("weather_ns")
+        );
     }
 
     #[test]
