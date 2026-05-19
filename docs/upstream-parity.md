@@ -628,23 +628,13 @@ focused tests for each portable behavior before changing rows to `verified`.
    exporter shape and the real Rust `opentelemetry` SDK/exporter path. Once root
    telemetry wiring is available, live provider tests should also assert that
    telemetry export.
-3. Close the remaining first-phase Open Responses structured output/tools
-   matrix, especially the remaining structured-output/tool-call edge cases now
-   that MCP approval continuation, conversation history filtering, assistant
-   text metadata, assistant reasoning, compaction, `tool_search`
-   request/history, assistant execution-denied tool-result filtering,
-   LMStudio tool-call response/stream fixtures, function-call argument defaults,
-   function tool strict modes,
-   web-search-preview/local-shell request tools, code-interpreter and
-   image-generation request options, user file provider references plus
-   missing-provider errors, prompt file defaults/unsupported-file handling,
-   deprecated file id prefixes,
-   unsupported assistant file/reasoning-file prompt part filtering,
-   unsupported standard call-option warnings, no-schema JSON response format
-   routing,
-   `allowedTools` tool-choice override/required mode, shell request/history, apply-patch
-   request/history, and custom provider-tool request/prompt reconstruction are
-   represented.
+3. Continue the remaining first-phase Open Responses/OpenAI Responses audit
+   from current upstream tests instead of the old topic list. The verified rows
+   now cover the previously named request-tool, prompt-file, unsupported-option,
+   no-schema JSON, allowed-tools, shell/apply-patch, assistant filtering, and
+   custom provider-tool slices; the next Open Responses work should compare
+   `packages/openai/src/responses` and OpenAI model-capability tests against the
+   package-owned Rust crate, then add exact missing test names to this ledger.
 4. Keep the next slices Gateway-first within the first-phase queue: close
    the whole common/core plus Vercel AI Gateway first-phase queue before
    expanding to unrelated providers. Continue choosing from `packages/ai`,
@@ -658,8 +648,9 @@ focused tests for each portable behavior before changing rows to `verified`.
    hosted auth variants plus, where credentials are available,
    protected live MCP service validation.
 6. Continue `streamText` parity with remaining retry/backoff edge cases,
-   createUIMessageStream async merge-error details, and remaining smoothStream
-   delay scheduling because Gateway relies on this high-level library surface.
+   true post-return `createUIMessageStream` delayed-merge behavior if a live
+   stream abstraction is introduced, and remaining smoothStream delay
+   scheduling because Gateway relies on this high-level library surface.
 7. Continue `streamObject` parity with remaining retry/backoff edge cases and
    remaining partial-output strategy edge cases after the Gateway
    text/stream/UI path is stronger.
