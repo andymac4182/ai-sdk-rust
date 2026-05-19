@@ -1559,6 +1559,9 @@ pub struct CreateUiMessageStreamOptions {
 
     /// Optional callback invoked after each step finishes.
     pub on_step_finish: Option<UiMessageStreamStepFinishCallback>,
+
+    /// Optional callback used to map execution errors into UI-safe text.
+    pub on_error: Option<UiMessageStreamCreateErrorHandler>,
 }
 
 impl CreateUiMessageStreamOptions {
@@ -1599,6 +1602,49 @@ impl CreateUiMessageStreamOptions {
         self.on_step_finish = Some(UiMessageStreamStepFinishCallback::new(on_step_finish));
         self
     }
+
+    /// Sets a callback that maps create-stream execution errors to UI-message error text.
+    pub fn with_on_error<F>(mut self, on_error: F) -> Self
+    where
+        F: Fn(&str) -> String + Send + Sync + 'static,
+    {
+        self.on_error = Some(UiMessageStreamCreateErrorHandler::new(on_error));
+        self
+    }
+}
+
+/// Callback invoked to mask create-stream execution errors.
+pub type UiMessageStreamCreateErrorFunction = dyn Fn(&str) -> String + Send + Sync + 'static;
+
+/// Callback wrapper for `create_ui_message_stream` error handling.
+#[derive(Clone)]
+pub struct UiMessageStreamCreateErrorHandler {
+    callback: Arc<UiMessageStreamCreateErrorFunction>,
+}
+
+impl UiMessageStreamCreateErrorHandler {
+    /// Creates a create-stream error handler.
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(&str) -> String + Send + Sync + 'static,
+    {
+        Self {
+            callback: Arc::new(callback),
+        }
+    }
+
+    /// Maps an execution error into UI-safe error text.
+    pub fn error_text(&self, error: &str) -> String {
+        (self.callback)(error)
+    }
+}
+
+impl fmt::Debug for UiMessageStreamCreateErrorHandler {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UiMessageStreamCreateErrorHandler")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Writer used by [`create_ui_message_stream`].
@@ -1635,15 +1681,38 @@ pub fn create_ui_message_stream<F>(
 where
     F: FnOnce(&mut UiMessageStreamWriter),
 {
+    create_ui_message_stream_with_result(options, |writer| {
+        execute(writer);
+        Ok::<(), std::convert::Infallible>(())
+    })
+}
+
+/// Creates a UI-message stream from a fallible Rust writer callback.
+pub fn create_ui_message_stream_with_result<F, E>(
+    options: CreateUiMessageStreamOptions,
+    execute: F,
+) -> Result<Vec<UiMessageChunk>, UiMessageStreamProcessError>
+where
+    F: FnOnce(&mut UiMessageStreamWriter) -> Result<(), E>,
+    E: fmt::Display,
+{
     let CreateUiMessageStreamOptions {
         message_id,
         original_messages,
         on_finish,
         on_step_finish,
+        on_error,
     } = options;
 
     let mut writer = UiMessageStreamWriter::default();
-    execute(&mut writer);
+    if let Err(error) = execute(&mut writer) {
+        let error = error.to_string();
+        let error_text = on_error
+            .as_ref()
+            .map(|on_error| on_error.error_text(&error))
+            .unwrap_or(error);
+        writer.write(UiMessageChunk::error(error_text));
+    }
 
     let mut finish_options = HandleUiMessageStreamFinishOptions::new(writer.into_chunks());
     if let Some(message_id) = message_id {
@@ -2642,6 +2711,26 @@ mod tests {
         assert_eq!(
             finish_events[0].response_message,
             step_events[1].response_message
+        );
+    }
+
+    #[test]
+    fn create_ui_message_stream_adds_error_chunk_when_execute_returns_error() {
+        let chunks = create_ui_message_stream_with_result(
+            CreateUiMessageStreamOptions::new().with_on_error(|error| format!("masked {error}")),
+            |writer| {
+                writer.write(UiMessageChunk::text_delta("text-1", "before-error"));
+                Err("execute-error")
+            },
+        )
+        .expect("stream is created");
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                { "type": "text-delta", "id": "text-1", "delta": "before-error" },
+                { "type": "error", "errorText": "masked execute-error" }
+            ])
         );
     }
 
