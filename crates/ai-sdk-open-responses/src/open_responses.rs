@@ -1374,13 +1374,9 @@ fn open_responses_input(
                                 });
                             }
                         }
-                        LanguageModelAssistantContentPart::ToolApprovalRequest(_) => {}
-                        _ => {
-                            return Err(
-                                "Open Responses assistant prompt part is not implemented yet."
-                                    .to_string(),
-                            );
-                        }
+                        LanguageModelAssistantContentPart::ToolApprovalRequest(_)
+                        | LanguageModelAssistantContentPart::File(_)
+                        | LanguageModelAssistantContentPart::ReasoningFile(_) => {}
                     }
                 }
 
@@ -6424,13 +6420,14 @@ mod tests {
     use ai_sdk_provider::language_model::{
         FinishReason, LanguageModel, LanguageModelAssistantContentPart,
         LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
-        LanguageModelCustomPart, LanguageModelFilePart, LanguageModelFunctionTool,
-        LanguageModelMessage, LanguageModelProviderTool, LanguageModelReasoningEffort,
-        LanguageModelReasoningPart, LanguageModelResponseFormat, LanguageModelSource,
-        LanguageModelStreamPart, LanguageModelSystemMessage, LanguageModelTextPart,
-        LanguageModelTool, LanguageModelToolApprovalRequestPart,
-        LanguageModelToolApprovalResponsePart, LanguageModelToolCallPart, LanguageModelToolChoice,
-        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultContentPart,
+        LanguageModelCustomPart, LanguageModelFileData, LanguageModelFilePart,
+        LanguageModelFunctionTool, LanguageModelMessage, LanguageModelProviderTool,
+        LanguageModelReasoningEffort, LanguageModelReasoningFilePart, LanguageModelReasoningPart,
+        LanguageModelResponseFormat, LanguageModelSource, LanguageModelStreamPart,
+        LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelTool,
+        LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
+        LanguageModelToolCallPart, LanguageModelToolChoice, LanguageModelToolContentPart,
+        LanguageModelToolMessage, LanguageModelToolResultContentPart,
         LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUserContentPart,
         LanguageModelUserMessage,
     };
@@ -6665,6 +6662,131 @@ mod tests {
                 ],
                 "instructions": "You are concise.\nUse metric units."
             }))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_ignores_unsupported_assistant_file_parts() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_assistant_file_parts",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Done."
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 9,
+                            "output_tokens": 2
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Continue.")),
+            ])),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                    "I inspected the attachment.",
+                )),
+                LanguageModelAssistantContentPart::File(LanguageModelFilePart::new(
+                    FileData::Url {
+                        url: Url::parse("https://example.com/assistant-image.png")
+                            .expect("valid image URL"),
+                    },
+                    "image/png",
+                )),
+                LanguageModelAssistantContentPart::ReasoningFile(
+                    LanguageModelReasoningFilePart::new(
+                        LanguageModelFileData::Url {
+                            url: Url::parse("https://example.com/reasoning.txt")
+                                .expect("valid reasoning URL"),
+                        },
+                        "text/plain",
+                    ),
+                ),
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call_weather",
+                    "weather",
+                    json!({
+                        "location": "Tokyo"
+                    }),
+                )),
+            ])),
+        ])));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "gpt-4.1-mini",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Continue."
+                            }
+                        ]
+                    },
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "I inspected the attachment."
+                            }
+                        ]
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_weather",
+                        "name": "weather",
+                        "arguments": "{\"location\":\"Tokyo\"}"
+                    }
+                ]
+            })),
         );
     }
 
