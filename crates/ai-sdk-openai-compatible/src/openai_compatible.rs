@@ -4038,10 +4038,13 @@ mod tests {
     use ai_sdk_provider::image_model::{ImageModel, ImageModelCallOptions};
     use ai_sdk_provider::json::{JsonObject, JsonValue};
     use ai_sdk_provider::language_model::{
-        FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelFilePart,
+        FinishReason, LanguageModel, LanguageModelAssistantContentPart,
+        LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelFilePart,
         LanguageModelFunctionTool, LanguageModelMessage, LanguageModelProviderTool,
-        LanguageModelReasoningEffort, LanguageModelResponseFormat, LanguageModelSystemMessage,
-        LanguageModelTextPart, LanguageModelTool, LanguageModelToolChoice,
+        LanguageModelReasoningEffort, LanguageModelReasoningPart, LanguageModelResponseFormat,
+        LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelTool,
+        LanguageModelToolCallPart, LanguageModelToolChoice, LanguageModelToolContentPart,
+        LanguageModelToolMessage, LanguageModelToolResultOutput, LanguageModelToolResultPart,
         LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use ai_sdk_provider::provider::ProviderOptions;
@@ -5142,6 +5145,144 @@ mod tests {
                 .and_then(|metadata| metadata.get("errorMessage"))
                 .and_then(JsonValue::as_str),
             Some("'file part media type video/mp4' functionality not supported")
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_converts_assistant_tool_history() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "ok"
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
+            "test-provider",
+            "https://api.example.com",
+        ))
+        .with_transport(transport)
+        .chat_model("test-chat-model");
+        let assistant_metadata: ProviderOptions = serde_json::from_value(json!({
+            "openaiCompatible": {
+                "globalPriority": "high"
+            }
+        }))
+        .expect("metadata deserializes");
+        let tool_call_metadata: ProviderOptions = serde_json::from_value(json!({
+            "openaiCompatible": {
+                "function_call_reason": "user request"
+            },
+            "google": {
+                "thoughtSignature": "<Signature A>"
+            }
+        }))
+        .expect("metadata deserializes");
+        let tool_result_metadata: ProviderOptions = serde_json::from_value(json!({
+            "openaiCompatible": {
+                "partial": true
+            }
+        }))
+        .expect("metadata deserializes");
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "Checking that now...",
+                    )),
+                    LanguageModelAssistantContentPart::Reasoning(
+                        LanguageModelReasoningPart::new("Need weather data."),
+                    ),
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "call_1",
+                            "weather",
+                            json!({ "city": "Brisbane" }),
+                        )
+                        .with_provider_options(tool_call_metadata),
+                    ),
+                ])
+                .with_provider_options(assistant_metadata),
+            ),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolResult(
+                    LanguageModelToolResultPart::new(
+                        "call_1",
+                        "weather",
+                        LanguageModelToolResultOutput::json(json!({
+                            "temperature": 24
+                        })),
+                    )
+                    .with_provider_options(tool_result_metadata),
+                ),
+            ])),
+        ])));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(
+            captured_request
+                .lock()
+                .expect("captured request mutex is not poisoned")
+                .clone()
+                .expect("request is captured")
+                .body
+                .and_then(|body| body.as_text().map(str::to_string))
+                .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok()),
+            Some(json!({
+                "model": "test-chat-model",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "Checking that now...",
+                        "reasoning_content": "Need weather data.",
+                        "globalPriority": "high",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "weather",
+                                    "arguments": "{\"city\":\"Brisbane\"}"
+                                },
+                                "function_call_reason": "user request",
+                                "extra_content": {
+                                    "google": {
+                                        "thought_signature": "<Signature A>"
+                                    }
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "role": "tool",
+                        "content": "{\"temperature\":24}",
+                        "tool_call_id": "call_1",
+                        "partial": true
+                    }
+                ]
+            }))
         );
     }
 
