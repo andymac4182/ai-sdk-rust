@@ -2,15 +2,19 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::string::FromUtf8Error;
+use std::sync::{Arc, Mutex};
 
 use ai_sdk_provider::{
     FileData, FileDataContent, JsonObject, JsonSchema, JsonValue, LanguageModelFilePart,
     LanguageModelTextPart, LanguageModelToolResultContentPart, LanguageModelToolResultOutput,
 };
-use ai_sdk_provider_utils::{Base64DecodeError, convert_base64_to_bytes};
+use ai_sdk_provider_utils::{
+    Base64DecodeError, Tool, ToolExecutionError, ToolModelOutputOptions, convert_base64_to_bytes,
+};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -134,11 +138,11 @@ pub struct JsonRpcResponse {
 
 impl JsonRpcResponse {
     /// Creates a successful JSON-RPC 2.0 response.
-    pub fn success(id: impl Into<JsonRpcId>, result: impl Into<JsonValue>) -> Self {
+    pub fn success(id: impl Into<JsonRpcId>, result: impl Serialize) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
             id: id.into(),
-            result: Some(result.into()),
+            result: Some(serde_json::to_value(result).expect("JSON-RPC result serializes")),
             error: None,
         }
     }
@@ -315,6 +319,17 @@ pub struct McpResource {
     pub extra: JsonObject,
 }
 
+/// MCP paginated resources result.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListResourcesResult {
+    pub resources: Vec<McpResource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<JsonObject>,
+}
+
 /// MCP resource template definition.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -329,6 +344,15 @@ pub struct McpResourceTemplate {
     pub mime_type: Option<String>,
     #[serde(default, flatten, skip_serializing_if = "JsonObject::is_empty")]
     pub extra: JsonObject,
+}
+
+/// MCP resource templates result.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListResourceTemplatesResult {
+    pub resource_templates: Vec<McpResourceTemplate>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<JsonObject>,
 }
 
 /// MCP resource contents containing text.
@@ -433,6 +457,38 @@ pub struct McpPromptArgument {
     pub required: Option<bool>,
     #[serde(default, flatten, skip_serializing_if = "JsonObject::is_empty")]
     pub extra: JsonObject,
+}
+
+/// MCP paginated prompts result.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListPromptsResult {
+    pub prompts: Vec<McpPrompt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<JsonObject>,
+}
+
+/// MCP prompt message returned by `prompts/get`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpPromptMessage {
+    pub role: String,
+    pub content: JsonValue,
+    #[serde(default, flatten, skip_serializing_if = "JsonObject::is_empty")]
+    pub extra: JsonObject,
+}
+
+/// MCP `prompts/get` result.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetPromptResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub messages: Vec<McpPromptMessage>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<JsonObject>,
 }
 
 /// MCP tool call result.
@@ -604,6 +660,956 @@ impl std::error::Error for McpAppError {
             | Self::UnsupportedResourceContent(_) => None,
         }
     }
+}
+
+/// Error returned by the MCP client.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpClientError {
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<JsonValue>,
+}
+
+impl McpClientError {
+    /// Creates an MCP client error.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            code: None,
+            data: None,
+        }
+    }
+
+    /// Creates an MCP client error from a JSON-RPC error object.
+    pub fn from_json_rpc(error: JsonRpcError) -> Self {
+        Self {
+            message: error.message,
+            code: Some(error.code),
+            data: error.data,
+        }
+    }
+}
+
+impl fmt::Display for McpClientError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.message)
+    }
+}
+
+impl std::error::Error for McpClientError {}
+
+/// Result alias for MCP client operations.
+pub type McpClientResult<T> = Result<T, McpClientError>;
+
+/// Transport interface for MCP JSON-RPC communication.
+///
+/// This is the Rust equivalent of upstream's transport boundary. Concrete
+/// network transports are intentionally separate slices; this trait lets the
+/// client lifecycle be tested against deterministic and custom transports.
+pub trait McpTransport: Send {
+    /// Starts the transport.
+    fn start(&mut self) -> McpClientResult<()> {
+        Ok(())
+    }
+
+    /// Sends one JSON-RPC message and returns messages synchronously produced by the server.
+    fn send(&mut self, message: JsonRpcMessage) -> McpClientResult<Vec<JsonRpcMessage>>;
+
+    /// Closes the transport.
+    fn close(&mut self) -> McpClientResult<()> {
+        Ok(())
+    }
+
+    /// Records the negotiated MCP protocol version on the transport.
+    fn set_protocol_version(&mut self, _protocol_version: String) {}
+}
+
+/// Configuration used to create an MCP client.
+pub struct McpClientConfig {
+    pub transport: Box<dyn McpTransport>,
+    pub client_name: Option<String>,
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub capabilities: Option<ClientCapabilities>,
+}
+
+impl McpClientConfig {
+    /// Creates a client configuration from a transport.
+    pub fn new(transport: impl McpTransport + 'static) -> Self {
+        Self {
+            transport: Box::new(transport),
+            client_name: None,
+            name: None,
+            version: None,
+            capabilities: None,
+        }
+    }
+
+    /// Sets the client name advertised during initialization.
+    pub fn with_client_name(mut self, client_name: impl Into<String>) -> Self {
+        self.client_name = Some(client_name.into());
+        self
+    }
+
+    /// Sets the deprecated client name field.
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Sets the client version advertised during initialization.
+    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+        self.version = Some(version.into());
+        self
+    }
+
+    /// Sets client capabilities advertised during initialization.
+    pub fn with_capabilities(mut self, capabilities: ClientCapabilities) -> Self {
+        self.capabilities = Some(capabilities);
+        self
+    }
+}
+
+/// Parameters for paginated MCP list requests.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaginatedRequestParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<JsonObject>,
+}
+
+/// Arguments passed to `tools/call`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpCallToolRequest {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<JsonValue>,
+}
+
+impl McpCallToolRequest {
+    /// Creates a tool call request.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            arguments: None,
+        }
+    }
+
+    /// Sets the tool call arguments.
+    pub fn with_arguments(mut self, arguments: impl Into<JsonValue>) -> Self {
+        self.arguments = Some(arguments.into());
+        self
+    }
+}
+
+/// Arguments passed to `prompts/get`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpGetPromptRequest {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<JsonValue>,
+}
+
+impl McpGetPromptRequest {
+    /// Creates a prompt request.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            arguments: None,
+        }
+    }
+
+    /// Sets prompt arguments.
+    pub fn with_arguments(mut self, arguments: impl Into<JsonValue>) -> Self {
+        self.arguments = Some(arguments.into());
+        self
+    }
+}
+
+/// AI SDK tools created from MCP tool definitions.
+pub type McpToolSet = BTreeMap<String, Tool>;
+
+/// Creates and initializes an MCP client.
+pub fn create_mcp_client(config: McpClientConfig) -> McpClientResult<McpClient> {
+    let client_name = config
+        .client_name
+        .or(config.name)
+        .unwrap_or_else(|| "ai-sdk-mcp-client".to_string());
+    let version = config.version.unwrap_or_else(|| "1.0.0".to_string());
+    let client = McpClient {
+        inner: Arc::new(Mutex::new(McpClientInner {
+            transport: config.transport,
+            client_info: Configuration::new(client_name, version),
+            client_capabilities: config.capabilities.unwrap_or_default(),
+            request_message_id: 0,
+            server_capabilities: ServerCapabilities::default(),
+            server_info: Configuration::new("", ""),
+            instructions: None,
+            is_closed: true,
+        })),
+    };
+
+    if let Err(error) = client.init() {
+        let _ = client.close();
+        return Err(error);
+    }
+
+    Ok(client)
+}
+
+/// Lightweight MCP client that mirrors upstream request lifecycle behavior.
+#[derive(Clone)]
+pub struct McpClient {
+    inner: Arc<Mutex<McpClientInner>>,
+}
+
+struct McpClientInner {
+    transport: Box<dyn McpTransport>,
+    client_info: Configuration,
+    client_capabilities: ClientCapabilities,
+    request_message_id: u64,
+    server_capabilities: ServerCapabilities,
+    server_info: Configuration,
+    instructions: Option<String>,
+    is_closed: bool,
+}
+
+impl McpClient {
+    /// Creates and initializes an MCP client.
+    pub fn new(config: McpClientConfig) -> McpClientResult<Self> {
+        create_mcp_client(config)
+    }
+
+    /// Returns information about the initialized MCP server.
+    pub fn server_info(&self) -> McpClientResult<Configuration> {
+        self.with_inner(|inner| Ok(inner.server_info.clone()))
+    }
+
+    /// Returns optional instructions provided by the initialized MCP server.
+    pub fn instructions(&self) -> McpClientResult<Option<String>> {
+        self.with_inner(|inner| Ok(inner.instructions.clone()))
+    }
+
+    /// Lists available MCP tools.
+    pub fn list_tools(
+        &self,
+        params: Option<PaginatedRequestParams>,
+    ) -> McpClientResult<ListToolsResult> {
+        self.with_inner(|inner| inner.request("tools/list", optional_params_value(params)?))
+    }
+
+    /// Calls an MCP tool.
+    pub fn call_tool(&self, request: McpCallToolRequest) -> McpClientResult<CallToolResult> {
+        self.with_inner(|inner| inner.request("tools/call", Some(to_json_value(request)?)))
+    }
+
+    /// Creates executable dynamic AI SDK tools from the server's tool list.
+    pub fn tools(&self) -> McpClientResult<McpToolSet> {
+        let definitions = self.list_tools(None)?;
+        self.tools_from_definitions(&definitions)
+    }
+
+    /// Creates executable dynamic AI SDK tools from cached MCP tool definitions.
+    pub fn tools_from_definitions(
+        &self,
+        definitions: &ListToolsResult,
+    ) -> McpClientResult<McpToolSet> {
+        let client_name = self.with_inner(|inner| Ok(inner.client_info.name.clone()))?;
+        let mut tools = BTreeMap::new();
+
+        for definition in &definitions.tools {
+            let mut input_schema = definition.input_schema.clone();
+            input_schema
+                .entry("properties".to_string())
+                .or_insert_with(|| json!({}));
+            input_schema.insert("additionalProperties".to_string(), json!(false));
+
+            let metadata = mcp_provider_metadata(client_name.clone(), definition)
+                .map_err(|error| McpClientError::new(error.to_string()))?;
+            let client = self.clone();
+            let tool_name = definition.name.clone();
+            let output_tool_name = definition.name.clone();
+            let mut tool = Tool::dynamic(definition.name.clone(), input_schema)
+                .with_metadata(metadata)
+                .with_execute(move |input, _options| {
+                    let client = client.clone();
+                    let tool_name = tool_name.clone();
+                    async move {
+                        let result = client
+                            .call_tool(McpCallToolRequest::new(tool_name).with_arguments(input))
+                            .map_err(|error| ToolExecutionError::new(error.to_string()))?;
+                        to_json_value(result)
+                            .map_err(|error| ToolExecutionError::new(error.message))
+                    }
+                })
+                .with_to_model_output(|options: ToolModelOutputOptions| async move {
+                    serde_json::from_value::<CallToolResult>(options.output)
+                        .map(|result| mcp_to_model_output(&result))
+                        .unwrap_or_else(|error| {
+                            LanguageModelToolResultOutput::json(json!({
+                                "error": error.to_string(),
+                            }))
+                        })
+                });
+
+            if let Some(description) = &definition.description {
+                tool = tool.with_description(description.clone());
+            }
+            if let Some(title) = definition.title.clone().or_else(|| {
+                definition
+                    .annotations
+                    .as_ref()
+                    .and_then(|annotations| annotations.title.clone())
+            }) {
+                tool = tool.with_title(title);
+            }
+
+            tools.insert(output_tool_name, tool);
+        }
+
+        Ok(tools)
+    }
+
+    /// Lists MCP resources.
+    pub fn list_resources(
+        &self,
+        params: Option<PaginatedRequestParams>,
+    ) -> McpClientResult<ListResourcesResult> {
+        self.with_inner(|inner| inner.request("resources/list", optional_params_value(params)?))
+    }
+
+    /// Reads one MCP resource.
+    pub fn read_resource(&self, uri: impl Into<String>) -> McpClientResult<ReadResourceResult> {
+        self.with_inner(|inner| inner.request("resources/read", Some(json!({ "uri": uri.into() }))))
+    }
+
+    /// Lists MCP resource templates.
+    pub fn list_resource_templates(&self) -> McpClientResult<ListResourceTemplatesResult> {
+        self.with_inner(|inner| inner.request("resources/templates/list", None))
+    }
+
+    /// Lists MCP prompts.
+    pub fn list_prompts(
+        &self,
+        params: Option<PaginatedRequestParams>,
+    ) -> McpClientResult<ListPromptsResult> {
+        self.with_inner(|inner| inner.request("prompts/list", optional_params_value(params)?))
+    }
+
+    /// Gets one MCP prompt.
+    pub fn get_prompt(&self, request: McpGetPromptRequest) -> McpClientResult<GetPromptResult> {
+        self.with_inner(|inner| inner.request("prompts/get", Some(to_json_value(request)?)))
+    }
+
+    /// Closes the client transport.
+    pub fn close(&self) -> McpClientResult<()> {
+        self.with_inner(|inner| {
+            if inner.is_closed {
+                return Ok(());
+            }
+            inner.transport.close()?;
+            inner.on_close();
+            Ok(())
+        })
+    }
+
+    fn init(&self) -> McpClientResult<()> {
+        self.with_inner(|inner| {
+            inner.transport.start()?;
+            inner.is_closed = false;
+            let result: InitializeResult = inner.request(
+                "initialize",
+                Some(json!({
+                    "protocolVersion": LATEST_PROTOCOL_VERSION,
+                    "capabilities": inner.client_capabilities.clone(),
+                    "clientInfo": inner.client_info.clone(),
+                })),
+            )?;
+
+            if !SUPPORTED_PROTOCOL_VERSIONS.contains(&result.protocol_version.as_str()) {
+                return Err(McpClientError::new(format!(
+                    "Server's protocol version is not supported: {}",
+                    result.protocol_version
+                )));
+            }
+
+            inner.server_capabilities = result.capabilities;
+            inner.server_info = result.server_info;
+            inner.instructions = result.instructions;
+            inner
+                .transport
+                .set_protocol_version(result.protocol_version.clone());
+            inner.notification("notifications/initialized", None)
+        })
+    }
+
+    fn with_inner<T>(
+        &self,
+        action: impl FnOnce(&mut McpClientInner) -> McpClientResult<T>,
+    ) -> McpClientResult<T> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| McpClientError::new("MCP client mutex is poisoned"))?;
+        action(&mut inner)
+    }
+}
+
+impl McpClientInner {
+    fn assert_capability(&self, method: &str) -> McpClientResult<()> {
+        match method {
+            "initialize" => Ok(()),
+            "tools/list" | "tools/call" => {
+                if self.server_capabilities.tools.is_some() {
+                    Ok(())
+                } else {
+                    Err(McpClientError::new("Server does not support tools"))
+                }
+            }
+            "resources/list" | "resources/read" | "resources/templates/list" => {
+                if self.server_capabilities.resources.is_some() {
+                    Ok(())
+                } else {
+                    Err(McpClientError::new("Server does not support resources"))
+                }
+            }
+            "prompts/list" | "prompts/get" => {
+                if self.server_capabilities.prompts.is_some() {
+                    Ok(())
+                } else {
+                    Err(McpClientError::new("Server does not support prompts"))
+                }
+            }
+            _ => Err(McpClientError::new(format!("Unsupported method: {method}"))),
+        }
+    }
+
+    fn request<T: DeserializeOwned>(
+        &mut self,
+        method: &str,
+        params: Option<JsonValue>,
+    ) -> McpClientResult<T> {
+        if self.is_closed {
+            return Err(McpClientError::new(
+                "Attempted to send a request from a closed client",
+            ));
+        }
+        self.assert_capability(method)?;
+
+        let message_id = self.request_message_id;
+        self.request_message_id += 1;
+        let response_id = json!(message_id);
+        let messages = self
+            .transport
+            .send(JsonRpcMessage::Request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: response_id.clone(),
+                method: method.to_string(),
+                params,
+            }))?;
+
+        let Some(message) = messages.into_iter().next() else {
+            return Err(McpClientError::new(format!(
+                "No response received for MCP request: {method}"
+            )));
+        };
+
+        match message {
+            JsonRpcMessage::Response(response) if response.id == response_id => {
+                if let Some(error) = response.error {
+                    return Err(McpClientError::from_json_rpc(error));
+                }
+                let result = response.result.ok_or_else(|| {
+                    McpClientError::new("Server response did not include a result")
+                })?;
+                serde_json::from_value::<T>(result).map_err(|error| {
+                    McpClientError::new(format!("Failed to parse server response: {error}"))
+                })
+            }
+            JsonRpcMessage::Response(response) => Err(McpClientError::new(format!(
+                "Protocol error: Received a response for an unknown message ID: {}",
+                serde_json::to_string(&response).expect("response serializes")
+            ))),
+            JsonRpcMessage::Request(request) => Err(McpClientError::new(format!(
+                "Unsupported request method: {}",
+                request.method
+            ))),
+            JsonRpcMessage::Notification(notification) => Err(McpClientError::new(format!(
+                "Unsupported notification method: {}",
+                notification.method
+            ))),
+        }
+    }
+
+    fn notification(&mut self, method: &str, params: Option<JsonValue>) -> McpClientResult<()> {
+        if self.is_closed {
+            return Err(McpClientError::new(
+                "Attempted to send a notification from a closed client",
+            ));
+        }
+        let messages = self
+            .transport
+            .send(JsonRpcMessage::Notification(JsonRpcNotification {
+                jsonrpc: "2.0".to_string(),
+                method: method.to_string(),
+                params,
+            }))?;
+        if messages.is_empty() {
+            Ok(())
+        } else {
+            Err(McpClientError::new(
+                "Transport returned messages for a notification",
+            ))
+        }
+    }
+
+    fn on_close(&mut self) {
+        self.is_closed = true;
+    }
+}
+
+fn to_json_value(value: impl Serialize) -> McpClientResult<JsonValue> {
+    serde_json::to_value(value)
+        .map_err(|error| McpClientError::new(format!("Failed to serialize MCP value: {error}")))
+}
+
+fn optional_params_value<T: Serialize>(value: Option<T>) -> McpClientResult<Option<JsonValue>> {
+    value.map(to_json_value).transpose()
+}
+
+/// Deterministic in-process MCP transport used by tests and examples.
+#[derive(Clone)]
+pub struct MockMcpTransport {
+    state: Arc<Mutex<MockMcpTransportState>>,
+}
+
+#[derive(Clone, Debug)]
+struct MockMcpTransportState {
+    tools: Vec<McpTool>,
+    resources: Vec<McpResource>,
+    resource_templates: Vec<McpResourceTemplate>,
+    resource_contents: Vec<ResourceContent>,
+    prompts: Vec<McpPrompt>,
+    prompt_results: BTreeMap<String, GetPromptResult>,
+    fail_on_invalid_tool_params: bool,
+    initialize_result: Option<InitializeResult>,
+    send_error: Option<McpClientError>,
+    tool_call_results: BTreeMap<String, CallToolResult>,
+    sent_messages: Vec<JsonRpcMessage>,
+    closed: bool,
+    protocol_version: Option<String>,
+}
+
+impl Default for MockMcpTransport {
+    fn default() -> Self {
+        let prompt_result = GetPromptResult {
+            description: Some("Code review prompt".to_string()),
+            messages: vec![McpPromptMessage {
+                role: "user".to_string(),
+                content: json!({
+                    "type": "text",
+                    "text": "Please review this code:\nfunction add(a, b) { return a + b; }",
+                }),
+                extra: JsonObject::new(),
+            }],
+            meta: None,
+        };
+
+        Self {
+            state: Arc::new(Mutex::new(MockMcpTransportState {
+                tools: vec![
+                    McpTool {
+                        description: Some("A mock tool for testing".to_string()),
+                        ..McpTool::new("mock-tool", default_tool_schema())
+                    },
+                    McpTool {
+                        description: Some("A mock tool for testing".to_string()),
+                        ..McpTool::new(
+                            "mock-tool-no-args",
+                            JsonObject::from_iter([("type".to_string(), json!("object"))]),
+                        )
+                    },
+                ],
+                resources: vec![McpResource {
+                    uri: "file:///mock/resource.txt".to_string(),
+                    name: "resource.txt".to_string(),
+                    title: None,
+                    description: Some("Mock resource".to_string()),
+                    mime_type: Some("text/plain".to_string()),
+                    size: None,
+                    extra: JsonObject::new(),
+                }],
+                resource_templates: vec![McpResourceTemplate {
+                    uri_template: "file:///{path}".to_string(),
+                    name: "mock-template".to_string(),
+                    title: None,
+                    description: Some("Mock template".to_string()),
+                    mime_type: None,
+                    extra: JsonObject::new(),
+                }],
+                resource_contents: vec![ResourceContent::Text(TextResourceContent {
+                    uri: "file:///mock/resource.txt".to_string(),
+                    name: None,
+                    title: None,
+                    mime_type: Some("text/plain".to_string()),
+                    meta: None,
+                    text: "Mock resource content".to_string(),
+                    extra: JsonObject::new(),
+                })],
+                prompts: vec![McpPrompt {
+                    name: "code_review".to_string(),
+                    title: Some("Request Code Review".to_string()),
+                    description: Some(
+                        "Asks the LLM to analyze code quality and suggest improvements".to_string(),
+                    ),
+                    arguments: Some(vec![McpPromptArgument {
+                        name: "code".to_string(),
+                        description: Some("The code to review".to_string()),
+                        required: Some(true),
+                        extra: JsonObject::new(),
+                    }]),
+                    extra: JsonObject::new(),
+                }],
+                prompt_results: BTreeMap::from([("code_review".to_string(), prompt_result)]),
+                fail_on_invalid_tool_params: false,
+                initialize_result: None,
+                send_error: None,
+                tool_call_results: BTreeMap::new(),
+                sent_messages: Vec::new(),
+                closed: false,
+                protocol_version: None,
+            })),
+        }
+    }
+}
+
+impl MockMcpTransport {
+    /// Creates a mock transport with upstream-like default fixtures.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replaces the available tool definitions.
+    pub fn with_tools(self, tools: impl IntoIterator<Item = McpTool>) -> Self {
+        self.state.lock().expect("mock transport state").tools = tools.into_iter().collect();
+        self
+    }
+
+    /// Replaces the available resource definitions.
+    pub fn with_resources(self, resources: impl IntoIterator<Item = McpResource>) -> Self {
+        self.state.lock().expect("mock transport state").resources =
+            resources.into_iter().collect();
+        self
+    }
+
+    /// Replaces resource contents returned by `resources/read`.
+    pub fn with_resource_contents(
+        self,
+        resource_contents: impl IntoIterator<Item = ResourceContent>,
+    ) -> Self {
+        self.state
+            .lock()
+            .expect("mock transport state")
+            .resource_contents = resource_contents.into_iter().collect();
+        self
+    }
+
+    /// Replaces the initialize result returned by the mock server.
+    pub fn with_initialize_result(self, initialize_result: InitializeResult) -> Self {
+        self.state
+            .lock()
+            .expect("mock transport state")
+            .initialize_result = Some(initialize_result);
+        self
+    }
+
+    /// Causes `tools/call` to return invalid-parameters errors.
+    pub fn with_fail_on_invalid_tool_params(self, fail_on_invalid_tool_params: bool) -> Self {
+        self.state
+            .lock()
+            .expect("mock transport state")
+            .fail_on_invalid_tool_params = fail_on_invalid_tool_params;
+        self
+    }
+
+    /// Configures a custom result for a named tool.
+    pub fn with_tool_call_result(
+        self,
+        tool_name: impl Into<String>,
+        result: CallToolResult,
+    ) -> Self {
+        self.state
+            .lock()
+            .expect("mock transport state")
+            .tool_call_results
+            .insert(tool_name.into(), result);
+        self
+    }
+
+    /// Returns messages sent by the client.
+    pub fn sent_messages(&self) -> Vec<JsonRpcMessage> {
+        self.state
+            .lock()
+            .expect("mock transport state")
+            .sent_messages
+            .clone()
+    }
+
+    /// Returns the protocol version negotiated by the client.
+    pub fn negotiated_protocol_version(&self) -> Option<String> {
+        self.state
+            .lock()
+            .expect("mock transport state")
+            .protocol_version
+            .clone()
+    }
+
+    /// Returns whether the transport has been closed.
+    pub fn is_closed(&self) -> bool {
+        self.state.lock().expect("mock transport state").closed
+    }
+}
+
+impl McpTransport for MockMcpTransport {
+    fn send(&mut self, message: JsonRpcMessage) -> McpClientResult<Vec<JsonRpcMessage>> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| McpClientError::new("Mock MCP transport mutex is poisoned"))?;
+        if let Some(error) = &state.send_error {
+            return Err(error.clone());
+        }
+        state.sent_messages.push(message.clone());
+
+        let JsonRpcMessage::Request(request) = message else {
+            return Ok(Vec::new());
+        };
+
+        match request.method.as_str() {
+            "initialize" => Ok(vec![JsonRpcMessage::Response(JsonRpcResponse::success(
+                request.id,
+                state
+                    .initialize_result
+                    .clone()
+                    .unwrap_or_else(|| mock_initialize_result(&state)),
+            ))]),
+            "tools/list" => {
+                if state.tools.is_empty() {
+                    return Ok(vec![JsonRpcMessage::Response(JsonRpcResponse::error(
+                        request.id,
+                        JsonRpcError::new(-32000, "Method not supported"),
+                    ))]);
+                }
+                Ok(vec![JsonRpcMessage::Response(JsonRpcResponse::success(
+                    request.id,
+                    ListToolsResult {
+                        tools: state.tools.clone(),
+                        next_cursor: None,
+                        meta: None,
+                    },
+                ))])
+            }
+            "tools/call" => mock_call_tool_response(request, &state),
+            "resources/list" => Ok(vec![JsonRpcMessage::Response(JsonRpcResponse::success(
+                request.id,
+                ListResourcesResult {
+                    resources: state.resources.clone(),
+                    next_cursor: None,
+                    meta: None,
+                },
+            ))]),
+            "resources/read" => mock_read_resource_response(request, &state),
+            "resources/templates/list" => {
+                Ok(vec![JsonRpcMessage::Response(JsonRpcResponse::success(
+                    request.id,
+                    ListResourceTemplatesResult {
+                        resource_templates: state.resource_templates.clone(),
+                        meta: None,
+                    },
+                ))])
+            }
+            "prompts/list" => Ok(vec![JsonRpcMessage::Response(JsonRpcResponse::success(
+                request.id,
+                ListPromptsResult {
+                    prompts: state.prompts.clone(),
+                    next_cursor: None,
+                    meta: None,
+                },
+            ))]),
+            "prompts/get" => mock_get_prompt_response(request, &state),
+            _ => Ok(vec![JsonRpcMessage::Response(JsonRpcResponse::error(
+                request.id,
+                JsonRpcError::new(-32601, format!("Unsupported method: {}", request.method)),
+            ))]),
+        }
+    }
+
+    fn close(&mut self) -> McpClientResult<()> {
+        self.state
+            .lock()
+            .map_err(|_| McpClientError::new("Mock MCP transport mutex is poisoned"))?
+            .closed = true;
+        Ok(())
+    }
+
+    fn set_protocol_version(&mut self, protocol_version: String) {
+        self.state
+            .lock()
+            .expect("mock transport state")
+            .protocol_version = Some(protocol_version);
+    }
+}
+
+fn default_tool_schema() -> JsonSchema {
+    JsonObject::from_iter([
+        ("type".to_string(), json!("object")),
+        (
+            "properties".to_string(),
+            json!({
+                "foo": { "type": "string" },
+            }),
+        ),
+    ])
+}
+
+fn mock_initialize_result(state: &MockMcpTransportState) -> InitializeResult {
+    let mut capabilities = ServerCapabilities::default();
+    if !state.tools.is_empty() {
+        capabilities.tools = Some(JsonObject::new());
+    }
+    if !state.resources.is_empty() {
+        capabilities.resources = Some(JsonObject::new());
+    }
+    if !state.prompts.is_empty() {
+        capabilities.prompts = Some(JsonObject::new());
+    }
+
+    InitializeResult {
+        protocol_version: LATEST_PROTOCOL_VERSION.to_string(),
+        capabilities,
+        server_info: Configuration::new("mock-mcp-server", "1.0.0"),
+        instructions: None,
+        meta: None,
+    }
+}
+
+fn mock_call_tool_response(
+    request: JsonRpcRequest,
+    state: &MockMcpTransportState,
+) -> McpClientResult<Vec<JsonRpcMessage>> {
+    let tool_name = request
+        .params
+        .as_ref()
+        .and_then(|params| params.get("name"))
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default();
+    if !state.tools.iter().any(|tool| tool.name == tool_name) {
+        return Ok(vec![JsonRpcMessage::Response(JsonRpcResponse::error(
+            request.id,
+            JsonRpcError::new(-32601, format!("Tool {tool_name} not found")).with_data(json!({
+                "availableTools": state.tools.iter().map(|tool| tool.name.clone()).collect::<Vec<_>>(),
+                "requestedTool": tool_name,
+            })),
+        ))]);
+    }
+
+    if state.fail_on_invalid_tool_params {
+        return Ok(vec![JsonRpcMessage::Response(JsonRpcResponse::error(
+            request.id,
+            JsonRpcError::new(
+                -32602,
+                format!(
+                    "Invalid tool inputSchema: {}",
+                    request
+                        .params
+                        .as_ref()
+                        .and_then(|params| params.get("arguments"))
+                        .map(JsonValue::to_string)
+                        .unwrap_or_else(|| "null".to_string())
+                ),
+            ),
+        ))]);
+    }
+
+    let result = state
+        .tool_call_results
+        .get(tool_name)
+        .cloned()
+        .unwrap_or_else(|| CallToolResult {
+            content: Some(vec![json!({
+                "type": "text",
+                "text": "Mock tool call result",
+            })]),
+            is_error: Some(false),
+            ..CallToolResult::default()
+        });
+
+    Ok(vec![JsonRpcMessage::Response(JsonRpcResponse::success(
+        request.id, result,
+    ))])
+}
+
+fn mock_read_resource_response(
+    request: JsonRpcRequest,
+    state: &MockMcpTransportState,
+) -> McpClientResult<Vec<JsonRpcMessage>> {
+    let uri = request
+        .params
+        .as_ref()
+        .and_then(|params| params.get("uri"))
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default();
+    let contents = state
+        .resource_contents
+        .iter()
+        .filter(|content| content.uri() == uri)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if contents.is_empty() {
+        return Ok(vec![JsonRpcMessage::Response(JsonRpcResponse::error(
+            request.id,
+            JsonRpcError::new(-32002, format!("Resource {uri} not found")),
+        ))]);
+    }
+
+    Ok(vec![JsonRpcMessage::Response(JsonRpcResponse::success(
+        request.id,
+        ReadResourceResult {
+            contents,
+            meta: None,
+        },
+    ))])
+}
+
+fn mock_get_prompt_response(
+    request: JsonRpcRequest,
+    state: &MockMcpTransportState,
+) -> McpClientResult<Vec<JsonRpcMessage>> {
+    let name = request
+        .params
+        .as_ref()
+        .and_then(|params| params.get("name"))
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default();
+    let Some(result) = state.prompt_results.get(name) else {
+        return Ok(vec![JsonRpcMessage::Response(JsonRpcResponse::error(
+            request.id,
+            JsonRpcError::new(-32602, format!("Invalid params: Unknown prompt {name}")),
+        ))]);
+    };
+
+    Ok(vec![JsonRpcMessage::Response(JsonRpcResponse::success(
+        request.id,
+        result.clone(),
+    ))])
 }
 
 /// Reads and validates MCP Apps metadata from a tool definition.
@@ -881,6 +1887,11 @@ pub fn mcp_provider_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    use ai_sdk_provider_utils::ToolExecutionOptions;
 
     fn object_schema() -> JsonSchema {
         JsonObject::from_iter([
@@ -966,6 +1977,241 @@ mod tests {
         assert_eq!(
             restored.tools[0].input_schema["properties"]["foo"]["type"],
             "string"
+        );
+    }
+
+    #[test]
+    fn mcp_client_initializes_and_sends_initialized_notification() {
+        let transport = MockMcpTransport::new();
+        let client = create_mcp_client(
+            McpClientConfig::new(transport.clone())
+                .with_client_name("MyMCPClient")
+                .with_version("2.0.0"),
+        )
+        .expect("client initializes");
+
+        assert_eq!(
+            client.server_info().expect("server info").name,
+            "mock-mcp-server"
+        );
+        assert_eq!(
+            transport.negotiated_protocol_version().as_deref(),
+            Some(LATEST_PROTOCOL_VERSION)
+        );
+
+        let sent_messages = transport.sent_messages();
+        assert_eq!(sent_messages.len(), 2);
+        match &sent_messages[0] {
+            JsonRpcMessage::Request(request) => {
+                assert_eq!(request.method, "initialize");
+                assert_eq!(
+                    request
+                        .params
+                        .as_ref()
+                        .and_then(|params| params.get("clientInfo"))
+                        .and_then(|client_info| client_info.get("name")),
+                    Some(&json!("MyMCPClient"))
+                );
+                assert_eq!(
+                    request
+                        .params
+                        .as_ref()
+                        .and_then(|params| params.get("clientInfo"))
+                        .and_then(|client_info| client_info.get("version")),
+                    Some(&json!("2.0.0"))
+                );
+            }
+            _ => panic!("expected initialize request"),
+        }
+        assert!(matches!(
+            &sent_messages[1],
+            JsonRpcMessage::Notification(notification)
+                if notification.method == "notifications/initialized"
+        ));
+
+        client.close().expect("client closes");
+        assert!(transport.is_closed());
+    }
+
+    #[test]
+    fn mcp_client_lists_calls_reads_resources_and_prompts() {
+        let client = create_mcp_client(McpClientConfig::new(MockMcpTransport::new()))
+            .expect("client initializes");
+
+        let definitions = client.list_tools(None).expect("tools list");
+        assert_eq!(
+            definitions
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["mock-tool", "mock-tool-no-args"]
+        );
+        assert_eq!(
+            client
+                .call_tool(
+                    McpCallToolRequest::new("mock-tool").with_arguments(json!({ "foo": "bar" }))
+                )
+                .expect("tool calls")
+                .content,
+            Some(vec![json!({
+                "type": "text",
+                "text": "Mock tool call result",
+            })])
+        );
+
+        assert_eq!(
+            client
+                .list_resources(None)
+                .expect("resources list")
+                .resources[0]
+                .uri,
+            "file:///mock/resource.txt"
+        );
+        let resource = client
+            .read_resource("file:///mock/resource.txt")
+            .expect("resource reads");
+        assert!(matches!(
+            &resource.contents[0],
+            ResourceContent::Text(content) if content.text == "Mock resource content"
+        ));
+        assert_eq!(
+            client
+                .list_resource_templates()
+                .expect("resource templates list")
+                .resource_templates[0]
+                .uri_template,
+            "file:///{path}"
+        );
+        assert_eq!(
+            client.list_prompts(None).expect("prompts list").prompts[0].name,
+            "code_review"
+        );
+        assert_eq!(
+            client
+                .get_prompt(McpGetPromptRequest::new("code_review"))
+                .expect("prompt gets")
+                .messages[0]
+                .role,
+            "user"
+        );
+    }
+
+    #[test]
+    fn mcp_client_reports_capability_protocol_and_json_rpc_errors() {
+        let no_tools = MockMcpTransport::new().with_tools([]);
+        let client = create_mcp_client(McpClientConfig::new(no_tools)).expect("client initializes");
+        assert_eq!(
+            client
+                .list_tools(None)
+                .expect_err("tools capability is missing")
+                .message,
+            "Server does not support tools"
+        );
+
+        let client = create_mcp_client(McpClientConfig::new(MockMcpTransport::new()))
+            .expect("client initializes");
+        let error = client
+            .call_tool(McpCallToolRequest::new("missing"))
+            .expect_err("missing tool fails");
+        assert_eq!(error.code, Some(-32601));
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("requestedTool")),
+            Some(&json!("missing"))
+        );
+
+        let unsupported_protocol = InitializeResult {
+            protocol_version: "1900-01-01".to_string(),
+            capabilities: ServerCapabilities::default(),
+            server_info: Configuration::new("old-server", "0.1.0"),
+            instructions: None,
+            meta: None,
+        };
+        let error = match create_mcp_client(McpClientConfig::new(
+            MockMcpTransport::new().with_initialize_result(unsupported_protocol),
+        )) {
+            Ok(_) => panic!("unsupported protocol should fail"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.message,
+            "Server's protocol version is not supported: 1900-01-01"
+        );
+    }
+
+    #[test]
+    fn mcp_client_builds_executable_dynamic_tools_from_definitions() {
+        let tool = app_tool("showDashboard", vec!["model", "app"]);
+        let result = CallToolResult {
+            content: Some(vec![json!({ "type": "text", "text": "Dashboard ready" })]),
+            is_error: Some(false),
+            ..CallToolResult::default()
+        };
+        let transport = MockMcpTransport::new()
+            .with_tools([tool])
+            .with_tool_call_result("showDashboard", result.clone());
+        let client =
+            create_mcp_client(McpClientConfig::new(transport).with_client_name("MyMCPClient"))
+                .expect("client initializes");
+
+        let tools = client.tools().expect("tools build");
+        let dynamic_tool = tools.get("showDashboard").expect("tool exists");
+        assert!(dynamic_tool.is_dynamic());
+        assert!(dynamic_tool.is_executable());
+        assert!(dynamic_tool.has_to_model_output());
+        assert_eq!(dynamic_tool.title(), Some("Dashboard"));
+        assert_eq!(dynamic_tool.description.as_deref(), Some("Show dashboard"));
+        assert_eq!(
+            dynamic_tool.input_schema.get("additionalProperties"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            dynamic_tool
+                .metadata()
+                .and_then(|metadata| metadata.get("clientName")),
+            Some(&json!("MyMCPClient"))
+        );
+        assert_eq!(
+            dynamic_tool
+                .metadata()
+                .and_then(|metadata| metadata.get("app"))
+                .and_then(JsonValue::as_object)
+                .and_then(|app| app.get("mimeType")),
+            Some(&json!(MCP_APP_MIME_TYPE))
+        );
+
+        let output = block_on(
+            dynamic_tool
+                .execute(
+                    json!({ "topic": "latency" }),
+                    ToolExecutionOptions::new("tool-call-1", Vec::new()),
+                )
+                .expect("tool is executable"),
+        )
+        .expect("tool execution succeeds");
+        assert_eq!(
+            output,
+            serde_json::to_value(result).expect("result serializes")
+        );
+
+        let model_output = block_on(
+            dynamic_tool
+                .model_output(ToolModelOutputOptions::new(
+                    "tool-call-1",
+                    json!({ "topic": "latency" }),
+                    output,
+                ))
+                .expect("model output converter exists"),
+        );
+        assert_eq!(
+            serde_json::to_value(model_output).expect("model output serializes"),
+            json!({
+                "type": "content",
+                "value": [{ "type": "text", "text": "Dashboard ready" }]
+            })
         );
     }
 
@@ -1191,5 +2437,21 @@ mod tests {
                 .and_then(|app| app.get("mimeType")),
             Some(&json!(MCP_APP_MIME_TYPE))
         );
+    }
+
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut context = Context::from_waker(&waker);
+        let mut future = Box::pin(future);
+        match Future::poll(future.as_mut(), &mut context) {
+            Poll::Ready(output) => output,
+            Poll::Pending => panic!("test future unexpectedly pending"),
+        }
     }
 }
