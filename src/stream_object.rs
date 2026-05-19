@@ -29,6 +29,7 @@ use crate::provider_utils::{
 };
 use crate::retry::DEFAULT_MAX_RETRIES;
 use crate::stream_text::StreamTextResponseMetadata;
+use crate::telemetry::{TelemetryOptions, create_telemetry_dispatcher};
 use crate::text_stream_response::{
     TextStreamResponse, TextStreamResponseInit, TextStreamResponseOptions,
     TextStreamResponseWriter, create_text_stream_response, pipe_text_stream_to_response,
@@ -193,6 +194,9 @@ pub struct StreamObjectOptions<'a, M: LanguageModel + ?Sized> {
 
     /// Optional callback invoked for provider stream errors.
     pub on_error: Option<StreamObjectOnError<'a>>,
+
+    /// Optional telemetry dispatcher settings.
+    pub telemetry: Option<TelemetryOptions>,
 }
 
 impl<'a, M: LanguageModel + ?Sized> StreamObjectOptions<'a, M> {
@@ -225,6 +229,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamObjectOptions<'a, M> {
             on_step_finish: None,
             on_finish: None,
             on_error: None,
+            telemetry: None,
         }
     }
 
@@ -386,6 +391,12 @@ impl<'a, M: LanguageModel + ?Sized> StreamObjectOptions<'a, M> {
         self.on_error = Some(StreamObjectOnError::new(on_error));
         self
     }
+
+    /// Sets telemetry options for this object streaming operation.
+    pub fn with_telemetry(mut self, telemetry: TelemetryOptions) -> Self {
+        self.telemetry = Some(telemetry);
+        self
+    }
 }
 
 /// Collected result of a high-level object streaming call.
@@ -481,6 +492,7 @@ where
         on_step_finish,
         on_finish,
         on_error,
+        telemetry,
     } = options;
 
     let output_kind = generate_object_output_kind(&schema, enum_values.as_deref(), array_output);
@@ -496,45 +508,50 @@ where
     call_options.include_raw_chunks = Some(false);
     append_stream_object_user_agent(&mut call_options);
     let call_id = generate_object_call_id();
+    let telemetry_dispatcher = create_telemetry_dispatcher(telemetry);
 
-    if let Some(on_start) = &on_start {
-        on_start
-            .start(GenerateObjectStartEvent {
-                call_id: call_id.clone(),
-                operation_id: "ai.streamObject".to_string(),
-                provider: model.provider().to_string(),
-                model_id: model.model_id().to_string(),
-                messages: call_options.prompt.clone(),
-                max_output_tokens: call_options.max_output_tokens,
-                temperature: call_options.temperature,
-                top_p: call_options.top_p,
-                top_k: call_options.top_k,
-                presence_penalty: call_options.presence_penalty,
-                frequency_penalty: call_options.frequency_penalty,
-                seed: call_options.seed,
-                max_retries: DEFAULT_MAX_RETRIES,
-                headers: call_options.headers.clone(),
-                provider_options: call_options.provider_options.clone(),
-                output: output_kind,
-                schema: event_schema.clone(),
-                schema_name: schema_name.clone(),
-                schema_description: schema_description.clone(),
-            })
-            .await;
+    if on_start.is_some() || telemetry_dispatcher.is_enabled() {
+        let start_event = GenerateObjectStartEvent {
+            call_id: call_id.clone(),
+            operation_id: "ai.streamObject".to_string(),
+            provider: model.provider().to_string(),
+            model_id: model.model_id().to_string(),
+            messages: call_options.prompt.clone(),
+            max_output_tokens: call_options.max_output_tokens,
+            temperature: call_options.temperature,
+            top_p: call_options.top_p,
+            top_k: call_options.top_k,
+            presence_penalty: call_options.presence_penalty,
+            frequency_penalty: call_options.frequency_penalty,
+            seed: call_options.seed,
+            max_retries: DEFAULT_MAX_RETRIES,
+            headers: call_options.headers.clone(),
+            provider_options: call_options.provider_options.clone(),
+            output: output_kind,
+            schema: event_schema.clone(),
+            schema_name: schema_name.clone(),
+            schema_description: schema_description.clone(),
+        };
+        if let Some(on_start) = &on_start {
+            on_start.start(start_event.clone()).await;
+        }
+        telemetry_dispatcher.on_start(&start_event);
     }
 
-    if let Some(on_step_start) = &on_step_start {
-        on_step_start
-            .start(GenerateObjectStepStartEvent {
-                call_id: call_id.clone(),
-                step_number: 0,
-                provider: model.provider().to_string(),
-                model_id: model.model_id().to_string(),
-                provider_options: call_options.provider_options.clone(),
-                headers: call_options.headers.clone(),
-                prompt_messages: call_options.prompt.clone(),
-            })
-            .await;
+    if on_step_start.is_some() || telemetry_dispatcher.is_enabled() {
+        let step_start_event = GenerateObjectStepStartEvent {
+            call_id: call_id.clone(),
+            step_number: 0,
+            provider: model.provider().to_string(),
+            model_id: model.model_id().to_string(),
+            provider_options: call_options.provider_options.clone(),
+            headers: call_options.headers.clone(),
+            prompt_messages: call_options.prompt.clone(),
+        };
+        if let Some(on_step_start) = &on_step_start {
+            on_step_start.start(step_start_event.clone()).await;
+        }
+        telemetry_dispatcher.on_object_step_start(&step_start_event);
     }
 
     let stream_started_at = Instant::now();
@@ -685,41 +702,45 @@ where
 
     let callback_request = stream_object_callback_request(request.clone());
     let callback_response = stream_object_callback_response(&response);
-    if let Some(on_step_finish) = &on_step_finish {
-        on_step_finish
-            .finish(GenerateObjectStepEndEvent {
-                call_id: call_id.clone(),
-                step_number: 0,
-                provider: model.provider().to_string(),
-                model_id: model.model_id().to_string(),
-                finish_reason: finish_reason.clone(),
-                usage: usage.clone(),
-                object_text: text.clone(),
-                reasoning: None,
-                warnings: warnings.clone(),
-                request: callback_request.clone(),
-                response: callback_response.clone(),
-                provider_metadata: provider_metadata.clone(),
-                ms_to_first_chunk,
-            })
-            .await;
+    if on_step_finish.is_some() || telemetry_dispatcher.is_enabled() {
+        let step_finish_event = GenerateObjectStepEndEvent {
+            call_id: call_id.clone(),
+            step_number: 0,
+            provider: model.provider().to_string(),
+            model_id: model.model_id().to_string(),
+            finish_reason: finish_reason.clone(),
+            usage: usage.clone(),
+            object_text: text.clone(),
+            reasoning: None,
+            warnings: warnings.clone(),
+            request: callback_request.clone(),
+            response: callback_response.clone(),
+            provider_metadata: provider_metadata.clone(),
+            ms_to_first_chunk,
+        };
+        if let Some(on_step_finish) = &on_step_finish {
+            on_step_finish.finish(step_finish_event.clone()).await;
+        }
+        telemetry_dispatcher.on_object_step_finish(&step_finish_event);
     }
 
-    if let Some(on_finish) = &on_finish {
-        on_finish
-            .finish(GenerateObjectEndEvent {
-                call_id,
-                object: object.clone(),
-                error: error.as_ref().map(stream_object_error_message),
-                reasoning: None,
-                finish_reason: finish_reason.clone(),
-                usage: usage.clone(),
-                warnings: warnings.clone(),
-                request: callback_request,
-                response: callback_response,
-                provider_metadata: provider_metadata.clone(),
-            })
-            .await;
+    if on_finish.is_some() || telemetry_dispatcher.is_enabled() {
+        let finish_event = GenerateObjectEndEvent {
+            call_id,
+            object: object.clone(),
+            error: error.as_ref().map(stream_object_error_message),
+            reasoning: None,
+            finish_reason: finish_reason.clone(),
+            usage: usage.clone(),
+            warnings: warnings.clone(),
+            request: callback_request,
+            response: callback_response,
+            provider_metadata: provider_metadata.clone(),
+        };
+        if let Some(on_finish) = &on_finish {
+            on_finish.finish(finish_event.clone()).await;
+        }
+        telemetry_dispatcher.on_end(&finish_event);
     }
 
     parts.push(ObjectStreamPart::Finish(Box::new(
@@ -1026,6 +1047,9 @@ mod tests {
     };
     use crate::mock_models::MockLanguageModel;
     use crate::provider_utils::{Schema, ValidationResult, json_schema};
+    use crate::telemetry::{
+        TelemetryEvent, TelemetryEventKind, TelemetryIntegration, TelemetryOptions,
+    };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
         let waker = Waker::noop();
@@ -1769,6 +1793,88 @@ mod tests {
         assert_eq!(call_ids.len(), 4);
         assert!(call_ids[0].starts_with("aiobj-"));
         assert!(call_ids.iter().all(|call_id| call_id == &call_ids[0]));
+    }
+
+    #[test]
+    fn stream_object_dispatches_telemetry_lifecycle_events() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ResponseMetadata(
+                    LanguageModelStreamResponseMetadata::new()
+                        .with_id("id-telemetry")
+                        .with_model_id("mock-model-id"),
+                ),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    r#"{ "content": "Hello, world!" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let events = Arc::new(Mutex::new(Vec::<TelemetryEvent>::new()));
+        let mut integration = TelemetryIntegration::new();
+        for kind in [
+            TelemetryEventKind::OnStart,
+            TelemetryEventKind::OnObjectStepStart,
+            TelemetryEventKind::OnObjectStepFinish,
+            TelemetryEventKind::OnEnd,
+        ] {
+            let captured = Arc::clone(&events);
+            integration = integration.with_callback(kind, move |event| {
+                captured.lock().expect("telemetry event lock").push(event);
+            });
+        }
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_telemetry(
+                    TelemetryOptions::new()
+                        .with_function_id("stream-object-test")
+                        .with_record_inputs(false)
+                        .with_record_outputs(true)
+                        .with_integration(integration),
+                ),
+        ));
+
+        assert_eq!(result.object, Some(json!({ "content": "Hello, world!" })));
+        let events = events.lock().expect("telemetry event lock");
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![
+                TelemetryEventKind::OnStart,
+                TelemetryEventKind::OnObjectStepStart,
+                TelemetryEventKind::OnObjectStepFinish,
+                TelemetryEventKind::OnEnd,
+            ]
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.function_id.as_deref() == Some("stream-object-test"))
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.record_inputs == Some(false))
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.record_outputs == Some(true))
+        );
+        assert_eq!(events[0].event["operationId"], json!("ai.streamObject"));
+        assert_eq!(events[0].event["provider"], json!("mock-provider"));
+        assert_eq!(
+            events[2].event["objectText"],
+            json!(r#"{ "content": "Hello, world!" }"#)
+        );
+        assert_eq!(
+            events[3].event["object"],
+            json!({ "content": "Hello, world!" })
+        );
     }
 
     #[test]
