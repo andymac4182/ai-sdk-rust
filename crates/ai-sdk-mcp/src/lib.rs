@@ -705,6 +705,109 @@ impl std::error::Error for McpClientError {}
 /// Result alias for MCP client operations.
 pub type McpClientResult<T> = Result<T, McpClientError>;
 
+/// Environment variable names inherited by MCP stdio child processes.
+pub fn default_stdio_inherited_environment_keys() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &[
+            "APPDATA",
+            "HOMEDRIVE",
+            "HOMEPATH",
+            "LOCALAPPDATA",
+            "PATH",
+            "PROCESSOR_ARCHITECTURE",
+            "SYSTEMDRIVE",
+            "SYSTEMROOT",
+            "TEMP",
+            "USERNAME",
+            "USERPROFILE",
+        ]
+    } else {
+        &["HOME", "LOGNAME", "PATH", "SHELL", "TERM", "USER"]
+    }
+}
+
+/// Constructs the environment for an MCP stdio child process.
+///
+/// Custom variables are copied first, then the upstream default inherited
+/// variables from the current process are overlaid when present. Function-like
+/// shell values that start with `()` are intentionally skipped.
+pub fn get_stdio_environment(
+    custom_env: Option<BTreeMap<String, String>>,
+) -> BTreeMap<String, String> {
+    get_stdio_environment_from(custom_env, std::env::vars())
+}
+
+fn get_stdio_environment_from<K, V, I>(
+    custom_env: Option<BTreeMap<String, String>>,
+    inherited_env: I,
+) -> BTreeMap<String, String>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<String>,
+    V: Into<String>,
+{
+    let inherited_env = inherited_env
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect::<BTreeMap<String, String>>();
+    let mut env = custom_env.unwrap_or_default();
+
+    for key in default_stdio_inherited_environment_keys() {
+        let Some(value) = inherited_env.get(*key) else {
+            continue;
+        };
+        if value.starts_with("()") {
+            continue;
+        }
+        env.insert((*key).to_string(), value.clone());
+    }
+
+    env
+}
+
+/// Serializes one JSON-RPC message for MCP stdio transport.
+pub fn serialize_stdio_message(message: &JsonRpcMessage) -> String {
+    format!(
+        "{}\n",
+        serde_json::to_string(message).expect("JSON-RPC stdio message serializes")
+    )
+}
+
+/// Deserializes one newline-delimited JSON-RPC message from MCP stdio transport.
+pub fn deserialize_stdio_message(line: &str) -> McpClientResult<JsonRpcMessage> {
+    serde_json::from_str(line).map_err(|error| {
+        McpClientError::new(format!(
+            "MCP stdio Transport Error: Failed to parse message: {error}"
+        ))
+    })
+}
+
+/// Buffer for newline-delimited MCP stdio messages.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct StdioReadBuffer {
+    buffer: Vec<u8>,
+}
+
+impl StdioReadBuffer {
+    /// Appends raw stdout bytes.
+    pub fn append(&mut self, chunk: impl AsRef<[u8]>) {
+        self.buffer.extend_from_slice(chunk.as_ref());
+    }
+
+    /// Reads the next complete line, excluding the trailing newline.
+    pub fn read_line(&mut self) -> Option<String> {
+        let index = self.buffer.iter().position(|byte| *byte == b'\n')?;
+        let line = String::from_utf8_lossy(&self.buffer[..index]).to_string();
+        self.buffer.drain(..=index);
+        Some(line)
+    }
+
+    /// Clears buffered data.
+    pub fn clear(&mut self) {
+        self.buffer.clear();
+    }
+}
+
 /// Transport interface for MCP JSON-RPC communication.
 ///
 /// This is the Rust equivalent of upstream's transport boundary. Concrete
@@ -2341,6 +2444,65 @@ mod tests {
 
         assert!(error.message.contains("POSTing to endpoint (HTTP 404)"));
         assert!(error.message.contains("Try using `sse` transport instead"));
+    }
+
+    #[test]
+    fn stdio_environment_copies_custom_env_and_inherits_safe_defaults() {
+        let custom_env = BTreeMap::from([
+            ("CUSTOM_VAR".to_string(), "custom_value".to_string()),
+            ("PATH".to_string(), "custom_path".to_string()),
+        ]);
+
+        let result = get_stdio_environment_from(
+            Some(custom_env.clone()),
+            [
+                ("HOME", "/home/test"),
+                ("PATH", "/usr/bin"),
+                ("SHELL", "() { ignored; }"),
+                ("UNRELATED", "ignored"),
+            ],
+        );
+
+        assert_eq!(
+            custom_env.get("CUSTOM_VAR").map(String::as_str),
+            Some("custom_value")
+        );
+        assert_eq!(
+            result.get("CUSTOM_VAR").map(String::as_str),
+            Some("custom_value")
+        );
+        assert_eq!(result.get("HOME").map(String::as_str), Some("/home/test"));
+        assert_eq!(
+            result.get("PATH").map(String::as_str),
+            Some("/usr/bin"),
+            "safe inherited defaults overlay custom env values"
+        );
+        assert_eq!(
+            result.get("SHELL"),
+            None,
+            "function-like shell env values are skipped"
+        );
+        assert_eq!(result.get("UNRELATED"), None);
+    }
+
+    #[test]
+    fn stdio_message_framing_serializes_deserializes_and_buffers_lines() {
+        let message =
+            JsonRpcRequest::new(json!(7), "tools/list").with_params(json!({ "cursor": "next" }));
+        let framed = serialize_stdio_message(&JsonRpcMessage::Request(message.clone()));
+
+        assert!(framed.ends_with('\n'));
+        assert_eq!(
+            deserialize_stdio_message(framed.trim_end()).expect("message parses"),
+            JsonRpcMessage::Request(message)
+        );
+
+        let mut buffer = StdioReadBuffer::default();
+        buffer.append(&framed.as_bytes()[..8]);
+        assert_eq!(buffer.read_line(), None);
+        buffer.append(&framed.as_bytes()[8..]);
+        assert_eq!(buffer.read_line(), Some(framed.trim_end().to_string()));
+        assert_eq!(buffer.read_line(), None);
     }
 
     #[test]
