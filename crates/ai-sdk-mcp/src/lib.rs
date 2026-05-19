@@ -708,6 +708,9 @@ impl std::error::Error for McpClientError {}
 /// Result alias for MCP client operations.
 pub type McpClientResult<T> = Result<T, McpClientError>;
 
+type ElicitationRequestHandler =
+    Arc<dyn Fn(ElicitationRequest) -> McpClientResult<ElicitResult> + Send + Sync>;
+
 /// Environment variable names inherited by MCP stdio child processes.
 pub fn default_stdio_inherited_environment_keys() -> &'static [&'static str] {
     if cfg!(windows) {
@@ -968,7 +971,10 @@ impl McpTransport for StdioMcpTransport {
                 ))
             })?;
 
-        if matches!(message, JsonRpcMessage::Notification(_)) {
+        if matches!(
+            message,
+            JsonRpcMessage::Notification(_) | JsonRpcMessage::Response(_)
+        ) {
             return Ok(Vec::new());
         }
 
@@ -1131,6 +1137,7 @@ pub fn create_mcp_client(config: McpClientConfig) -> McpClientResult<McpClient> 
             server_info: Configuration::new("", ""),
             instructions: None,
             is_closed: true,
+            elicitation_request_handler: None,
         })),
     };
 
@@ -1157,6 +1164,7 @@ struct McpClientInner {
     server_info: Configuration,
     instructions: Option<String>,
     is_closed: bool,
+    elicitation_request_handler: Option<ElicitationRequestHandler>,
 }
 
 impl McpClient {
@@ -1286,6 +1294,23 @@ impl McpClient {
         self.with_inner(|inner| inner.request("prompts/get", Some(to_json_value(request)?)))
     }
 
+    /// Registers a handler for server `elicitation/create` requests.
+    ///
+    /// This mirrors upstream `onElicitationRequest` with a synchronous Rust
+    /// callback. The client replies to the server with the returned
+    /// [`ElicitResult`] while continuing to wait for the original request's
+    /// response.
+    pub fn on_elicitation_request(
+        &self,
+        handler: impl Fn(ElicitationRequest) -> McpClientResult<ElicitResult> + Send + Sync + 'static,
+    ) -> McpClientResult<()> {
+        let handler = Arc::new(handler);
+        self.with_inner(|inner| {
+            inner.elicitation_request_handler = Some(handler);
+            Ok(())
+        })
+    }
+
     /// Closes the client transport.
     pub fn close(&self) -> McpClientResult<()> {
         self.with_inner(|inner| {
@@ -1393,36 +1418,101 @@ impl McpClientInner {
                 params,
             }))?;
 
-        let Some(message) = messages.into_iter().next() else {
+        if messages.is_empty() {
             return Err(McpClientError::new(format!(
                 "No response received for MCP request: {method}"
             )));
         };
 
-        match message {
-            JsonRpcMessage::Response(response) if response.id == response_id => {
-                if let Some(error) = response.error {
-                    return Err(McpClientError::from_json_rpc(error));
+        let mut matched_response = None;
+        for message in messages {
+            match message {
+                JsonRpcMessage::Response(response) if response.id == response_id => {
+                    matched_response = Some(Self::parse_response_result(response)?);
                 }
-                let result = response.result.ok_or_else(|| {
-                    McpClientError::new("Server response did not include a result")
-                })?;
-                serde_json::from_value::<T>(result).map_err(|error| {
-                    McpClientError::new(format!("Failed to parse server response: {error}"))
-                })
+                JsonRpcMessage::Response(response) => {
+                    return Err(McpClientError::new(format!(
+                        "Protocol error: Received a response for an unknown message ID: {}",
+                        serde_json::to_string(&response).expect("response serializes")
+                    )));
+                }
+                JsonRpcMessage::Request(request) => self.on_request_message(request)?,
+                JsonRpcMessage::Notification(notification) => {
+                    return Err(McpClientError::new(format!(
+                        "Unsupported notification method: {}",
+                        notification.method
+                    )));
+                }
             }
-            JsonRpcMessage::Response(response) => Err(McpClientError::new(format!(
-                "Protocol error: Received a response for an unknown message ID: {}",
-                serde_json::to_string(&response).expect("response serializes")
-            ))),
-            JsonRpcMessage::Request(request) => Err(McpClientError::new(format!(
-                "Unsupported request method: {}",
-                request.method
-            ))),
-            JsonRpcMessage::Notification(notification) => Err(McpClientError::new(format!(
-                "Unsupported notification method: {}",
-                notification.method
-            ))),
+        }
+
+        matched_response.ok_or_else(|| {
+            McpClientError::new(format!("No response received for MCP request: {method}"))
+        })
+    }
+
+    fn parse_response_result<T: DeserializeOwned>(response: JsonRpcResponse) -> McpClientResult<T> {
+        if let Some(error) = response.error {
+            return Err(McpClientError::from_json_rpc(error));
+        }
+        let result = response
+            .result
+            .ok_or_else(|| McpClientError::new("Server response did not include a result"))?;
+        serde_json::from_value::<T>(result).map_err(|error| {
+            McpClientError::new(format!("Failed to parse server response: {error}"))
+        })
+    }
+
+    fn on_request_message(&mut self, request: JsonRpcRequest) -> McpClientResult<()> {
+        if request.method != "elicitation/create" {
+            return self.send_response(JsonRpcResponse::error(
+                request.id,
+                JsonRpcError::new(
+                    -32601,
+                    format!("Unsupported request method: {}", request.method),
+                ),
+            ));
+        }
+
+        let Some(handler) = self.elicitation_request_handler.clone() else {
+            return self.send_response(JsonRpcResponse::error(
+                request.id,
+                JsonRpcError::new(-32601, "No elicitation handler registered on client"),
+            ));
+        };
+
+        let parsed_request = serde_json::from_value::<ElicitationRequest>(json!({
+            "method": request.method,
+            "params": request.params,
+        }));
+        let parsed_request = match parsed_request {
+            Ok(parsed_request) => parsed_request,
+            Err(error) => {
+                return self.send_response(JsonRpcResponse::error(
+                    request.id,
+                    JsonRpcError::new(-32602, format!("Invalid elicitation request: {error}"))
+                        .with_data(json!({ "error": error.to_string() })),
+                ));
+            }
+        };
+
+        match handler(parsed_request) {
+            Ok(result) => self.send_response(JsonRpcResponse::success(request.id, result)),
+            Err(error) => self.send_response(JsonRpcResponse::error(
+                request.id,
+                JsonRpcError::new(-32603, error.message),
+            )),
+        }
+    }
+
+    fn send_response(&mut self, response: JsonRpcResponse) -> McpClientResult<()> {
+        let messages = self.transport.send(JsonRpcMessage::Response(response))?;
+        if messages.is_empty() {
+            Ok(())
+        } else {
+            Err(McpClientError::new(
+                "Transport returned messages for a response",
+            ))
         }
     }
 
@@ -2880,6 +2970,165 @@ mod tests {
     }
 
     #[test]
+    fn mcp_client_handles_elicitation_request_messages() {
+        let transport = ElicitationScenarioTransport::new(
+            JsonRpcRequest::new(json!(42), "elicitation/create").with_params(json!({
+                "message": "Please provide your GitHub username",
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" }
+                    },
+                    "required": ["name"]
+                }
+            })),
+        );
+        let saw_request = Arc::new(Mutex::new(false));
+        let saw_request_clone = Arc::clone(&saw_request);
+        let client = create_mcp_client(McpClientConfig::new(transport.clone()).with_capabilities(
+            ClientCapabilities {
+                elicitation: Some(ElicitationCapability::default()),
+                ..ClientCapabilities::default()
+            },
+        ))
+        .expect("client initializes");
+
+        client
+            .on_elicitation_request(move |request| {
+                assert_eq!(request.method, "elicitation/create");
+                assert_eq!(
+                    request.params.message,
+                    "Please provide your GitHub username"
+                );
+                assert_eq!(
+                    request
+                        .params
+                        .requested_schema
+                        .get("properties")
+                        .and_then(JsonValue::as_object)
+                        .and_then(|properties| properties.get("name"))
+                        .and_then(|name| name.get("type")),
+                    Some(&json!("string"))
+                );
+                *saw_request_clone.lock().expect("saw request lock") = true;
+                Ok(ElicitResult {
+                    action: ElicitAction::Accept,
+                    content: Some(JsonObject::from_iter([(
+                        "name".to_string(),
+                        json!("octocat"),
+                    )])),
+                    meta: None,
+                })
+            })
+            .expect("handler registers");
+
+        let tools = client.list_tools(None).expect("tools list completes");
+        assert!(tools.tools.is_empty());
+        assert!(*saw_request.lock().expect("saw request lock"));
+
+        let sent_messages = transport.sent_messages();
+        assert!(sent_messages.iter().any(|message| {
+            matches!(
+                message,
+                JsonRpcMessage::Request(request)
+                    if request.method == "initialize"
+                        && request.params.as_ref()
+                            .and_then(|params| params.get("capabilities"))
+                            .and_then(|capabilities| capabilities.get("elicitation"))
+                            .is_some()
+            )
+        }));
+        assert!(sent_messages.iter().any(|message| {
+            matches!(
+                message,
+                JsonRpcMessage::Response(response)
+                    if response.id == json!(42)
+                        && response.result.as_ref()
+                            .and_then(|result| result.get("action"))
+                            == Some(&json!("accept"))
+                        && response.result.as_ref()
+                            .and_then(|result| result.get("content"))
+                            .and_then(|content| content.get("name"))
+                            == Some(&json!("octocat"))
+            )
+        }));
+    }
+
+    #[test]
+    fn mcp_client_reports_elicitation_request_errors_to_server() {
+        let no_handler_transport = ElicitationScenarioTransport::new(
+            JsonRpcRequest::new(json!("no-handler"), "elicitation/create").with_params(json!({
+                "message": "Name?",
+                "requestedSchema": { "type": "object" }
+            })),
+        );
+        let client = create_mcp_client(McpClientConfig::new(no_handler_transport.clone()))
+            .expect("client initializes");
+        client.list_tools(None).expect("tools list completes");
+        assert!(no_handler_transport.sent_messages().iter().any(|message| {
+            matches!(
+                message,
+                JsonRpcMessage::Response(response)
+                    if response.id == json!("no-handler")
+                        && response.error.as_ref().map(|error| error.code) == Some(-32601)
+                        && response.error.as_ref().map(|error| error.message.as_str())
+                            == Some("No elicitation handler registered on client")
+            )
+        }));
+
+        let invalid_transport = ElicitationScenarioTransport::new(
+            JsonRpcRequest::new(json!("invalid"), "elicitation/create")
+                .with_params(json!({ "requestedSchema": { "type": "object" } })),
+        );
+        let client = create_mcp_client(McpClientConfig::new(invalid_transport.clone()))
+            .expect("client initializes");
+        client
+            .on_elicitation_request(|_| {
+                Ok(ElicitResult {
+                    action: ElicitAction::Accept,
+                    content: None,
+                    meta: None,
+                })
+            })
+            .expect("handler registers");
+        client.list_tools(None).expect("tools list completes");
+        assert!(invalid_transport.sent_messages().iter().any(|message| {
+            matches!(
+                message,
+                JsonRpcMessage::Response(response)
+                    if response.id == json!("invalid")
+                        && response.error.as_ref().map(|error| error.code) == Some(-32602)
+                        && response.error.as_ref()
+                            .map(|error| error.message.starts_with("Invalid elicitation request:"))
+                            == Some(true)
+            )
+        }));
+
+        let failing_transport = ElicitationScenarioTransport::new(
+            JsonRpcRequest::new(json!("failing"), "elicitation/create").with_params(json!({
+                "message": "Name?",
+                "requestedSchema": { "type": "object" }
+            })),
+        );
+        let client = create_mcp_client(McpClientConfig::new(failing_transport.clone()))
+            .expect("client initializes");
+        client
+            .on_elicitation_request(|_| Err(McpClientError::new("user declined in host UI")))
+            .expect("handler registers");
+        client.list_tools(None).expect("tools list completes");
+        assert!(failing_transport.sent_messages().iter().any(|message| {
+            matches!(
+                message,
+                JsonRpcMessage::Response(response)
+                    if response.id == json!("failing")
+                        && response.error.as_ref().map(|error| error.code) == Some(-32603)
+                        && response.error.as_ref().map(|error| error.message.as_str())
+                            == Some("user declined in host UI")
+            )
+        }));
+    }
+
+    #[test]
     fn mcp_client_builds_executable_dynamic_tools_from_definitions() {
         let tool = app_tool("showDashboard", vec!["model", "app"]);
         let result = CallToolResult {
@@ -3189,6 +3438,85 @@ mod tests {
         match Future::poll(future.as_mut(), &mut context) {
             Poll::Ready(output) => output,
             Poll::Pending => panic!("test future unexpectedly pending"),
+        }
+    }
+
+    #[derive(Clone)]
+    struct ElicitationScenarioTransport {
+        state: Arc<Mutex<ElicitationScenarioState>>,
+    }
+
+    #[derive(Debug)]
+    struct ElicitationScenarioState {
+        server_request: Option<JsonRpcRequest>,
+        sent_messages: Vec<JsonRpcMessage>,
+    }
+
+    impl ElicitationScenarioTransport {
+        fn new(server_request: JsonRpcRequest) -> Self {
+            Self {
+                state: Arc::new(Mutex::new(ElicitationScenarioState {
+                    server_request: Some(server_request),
+                    sent_messages: Vec::new(),
+                })),
+            }
+        }
+
+        fn sent_messages(&self) -> Vec<JsonRpcMessage> {
+            self.state
+                .lock()
+                .expect("elicitation scenario state")
+                .sent_messages
+                .clone()
+        }
+    }
+
+    impl McpTransport for ElicitationScenarioTransport {
+        fn send(&mut self, message: JsonRpcMessage) -> McpClientResult<Vec<JsonRpcMessage>> {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| McpClientError::new("Elicitation scenario transport is poisoned"))?;
+            state.sent_messages.push(message.clone());
+
+            let JsonRpcMessage::Request(request) = message else {
+                return Ok(Vec::new());
+            };
+
+            match request.method.as_str() {
+                "initialize" => Ok(vec![JsonRpcMessage::Response(JsonRpcResponse::success(
+                    request.id,
+                    InitializeResult {
+                        protocol_version: LATEST_PROTOCOL_VERSION.to_string(),
+                        capabilities: ServerCapabilities {
+                            tools: Some(JsonObject::new()),
+                            ..ServerCapabilities::default()
+                        },
+                        server_info: Configuration::new("elicitation-server", "1.0.0"),
+                        instructions: None,
+                        meta: None,
+                    },
+                ))]),
+                "tools/list" => {
+                    let mut messages = Vec::new();
+                    if let Some(server_request) = state.server_request.take() {
+                        messages.push(JsonRpcMessage::Request(server_request));
+                    }
+                    messages.push(JsonRpcMessage::Response(JsonRpcResponse::success(
+                        request.id,
+                        ListToolsResult {
+                            tools: Vec::new(),
+                            next_cursor: None,
+                            meta: None,
+                        },
+                    )));
+                    Ok(messages)
+                }
+                _ => Ok(vec![JsonRpcMessage::Response(JsonRpcResponse::error(
+                    request.id,
+                    JsonRpcError::new(-32601, format!("Unsupported method: {}", request.method)),
+                ))]),
+            }
         }
     }
 
