@@ -11358,6 +11358,109 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_maps_function_call_response_and_usage() {
+        let transport: OpenResponsesTransport =
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_tool_call",
+                        "created_at": 1769005553,
+                        "status": "completed",
+                        "model": "mistralai/ministral-3-14b-reasoning",
+                        "output": [
+                            {
+                                "id": "fc_tool_1",
+                                "call_id": "call_weather",
+                                "type": "function_call",
+                                "name": "weather",
+                                "arguments": "{\"location\":\"San Francisco\"}",
+                                "status": "completed"
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 1189,
+                            "output_tokens": 11,
+                            "total_tokens": 1200,
+                            "input_tokens_details": {
+                                "cached_tokens": 891
+                            },
+                            "output_tokens_details": {
+                                "reasoning_tokens": 0
+                            }
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("lmstudio", "https://localhost:1234/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gemma-7b-it");
+        let schema = json_object(json!({
+            "type": "object",
+            "properties": {
+                "location": {
+                    "type": "string",
+                    "description": "The location to get the weather for"
+                }
+            },
+            "required": ["location"],
+            "additionalProperties": false
+        }));
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("What is the weather in San Francisco?"),
+                    )]),
+                )])
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new("weather", schema)
+                        .with_description("Get the weather in a location"),
+                ))
+                .with_tool_choice(LanguageModelToolChoice::Required),
+            ),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::ToolCalls);
+        assert_eq!(result.finish_reason.raw, None);
+        assert_eq!(result.usage.input_tokens.total, Some(1189));
+        assert_eq!(result.usage.input_tokens.no_cache, Some(298));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(891));
+        assert_eq!(result.usage.output_tokens.total, Some(11));
+        assert_eq!(result.usage.output_tokens.text, Some(11));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(0));
+        assert_eq!(
+            result
+                .usage
+                .raw
+                .as_ref()
+                .and_then(|usage| usage.get("total_tokens"))
+                .and_then(JsonValue::as_u64),
+            Some(1200)
+        );
+
+        let tool_calls = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].tool_call_id, "call_weather");
+        assert_eq!(tool_calls[0].tool_name, "weather");
+        assert_eq!(tool_calls[0].input, "{\"location\":\"San Francisco\"}");
+        assert_eq!(tool_calls[0].provider_executed, None);
+    }
+
+    #[test]
     fn open_responses_provider_maps_additional_response_tool_items() {
         let transport: OpenResponsesTransport =
             Arc::new(move |_request| -> OpenResponsesTransportFuture {
