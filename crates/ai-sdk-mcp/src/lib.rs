@@ -4403,6 +4403,9 @@ mod tests {
         requests: &Arc<Mutex<Vec<LocalHttpRequest>>>,
         responses: &Arc<Mutex<VecDeque<LocalHttpResponse>>>,
     ) {
+        stream
+            .set_nonblocking(false)
+            .expect("local test stream is blocking");
         let mut buffer = Vec::new();
         let mut chunk = [0; 1024];
         let request = loop {
