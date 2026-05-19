@@ -1923,6 +1923,285 @@ fn parse_json_rpc_sse_body(body: &str) -> McpClientResult<Vec<JsonRpcMessage>> {
     Ok(messages.into_iter().flatten().collect())
 }
 
+/// Standalone SSE MCP transport.
+///
+/// This synchronous Rust transport covers the portable SSE handshake and POST
+/// boundary: connect with `Accept: text/event-stream`, parse the `endpoint`
+/// event, reject cross-origin endpoints, parse bounded `message` events, and
+/// POST JSON-RPC messages to the advertised endpoint.
+#[derive(Clone, Debug)]
+pub struct SseMcpTransport {
+    url: String,
+    headers: BTreeMap<String, String>,
+    endpoint: Option<String>,
+    protocol_version: Option<String>,
+    started: bool,
+    pending_messages: Vec<JsonRpcMessage>,
+}
+
+impl SseMcpTransport {
+    /// Creates a standalone SSE MCP transport.
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            headers: BTreeMap::new(),
+            endpoint: None,
+            protocol_version: None,
+            started: false,
+            pending_messages: Vec::new(),
+        }
+    }
+
+    /// Adds a request header sent with transport requests.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(name.into(), value.into());
+        self
+    }
+
+    /// Adds request headers sent with transport requests.
+    pub fn with_headers<K, V, I>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.headers.extend(
+            headers
+                .into_iter()
+                .map(|(key, value)| (key.into(), value.into())),
+        );
+        self
+    }
+
+    /// Returns the endpoint advertised by the SSE server.
+    pub fn endpoint(&self) -> Option<&str> {
+        self.endpoint.as_deref()
+    }
+
+    /// Returns the protocol version used for request headers.
+    pub fn protocol_version(&self) -> &str {
+        self.protocol_version
+            .as_deref()
+            .unwrap_or(LATEST_PROTOCOL_VERSION)
+    }
+
+    fn common_headers(
+        &self,
+        base: impl IntoIterator<Item = (&'static str, &'static str)>,
+    ) -> BTreeMap<String, String> {
+        let mut headers = self.headers.clone();
+        for (key, value) in base {
+            headers.insert(key.to_string(), value.to_string());
+        }
+        headers.insert(
+            "mcp-protocol-version".to_string(),
+            self.protocol_version().to_string(),
+        );
+
+        with_user_agent_suffix(
+            Some(headers.into_iter().map(|(key, value)| (key, Some(value)))),
+            [format!("ai-sdk/{}", env!("CARGO_PKG_VERSION"))],
+        )
+        .into_iter()
+        .collect()
+    }
+
+    fn connect(&mut self) -> McpClientResult<()> {
+        let mut builder = ureq::get(&self.url);
+        for (name, value) in self.common_headers([("Accept", "text/event-stream")]) {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+        let mut response = builder
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .call()
+            .map_err(|error| {
+                McpClientError::new(format!("MCP SSE Transport Error: fetch failed: {error}"))
+            })?;
+        let status = response.status().as_u16();
+        let body = response.body_mut().read_to_string().map_err(|error| {
+            McpClientError::new(format!(
+                "MCP SSE Transport Error: failed to read response body: {error}"
+            ))
+        })?;
+
+        if !(200..300).contains(&status) {
+            let mut message = format!("MCP SSE Transport Error: {status}");
+            if status == 405 {
+                message.push_str(
+                    ". This server does not support SSE transport. Try using `http` transport instead",
+                );
+            }
+            return Err(McpClientError::new(message));
+        }
+
+        let (endpoint, messages) = parse_sse_transport_body(&self.url, &body)?;
+        self.endpoint = Some(endpoint);
+        self.pending_messages = messages;
+        Ok(())
+    }
+
+    fn post_message(&mut self, message: &JsonRpcMessage) -> McpClientResult<Vec<JsonRpcMessage>> {
+        let endpoint = self
+            .endpoint
+            .clone()
+            .ok_or_else(|| McpClientError::new("MCP SSE Transport Error: Not connected"))?;
+        let body = serde_json::to_string(message).map_err(|error| {
+            McpClientError::new(format!("Failed to serialize MCP message: {error}"))
+        })?;
+        let mut builder = ureq::post(&endpoint);
+        for (name, value) in self.common_headers([("Content-Type", "application/json")]) {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+        let mut response = builder
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .send(body)
+            .map_err(|error| {
+                McpClientError::new(format!("MCP SSE Transport Error: fetch failed: {error}"))
+            })?;
+        let status = response.status().as_u16();
+        let body = response.body_mut().read_to_string().map_err(|error| {
+            McpClientError::new(format!(
+                "MCP SSE Transport Error: failed to read response body: {error}"
+            ))
+        })?;
+        if !(200..300).contains(&status) {
+            return Err(McpClientError::new(format!(
+                "MCP SSE Transport Error: POSTing to endpoint (HTTP {status}): {body}"
+            )));
+        }
+
+        Ok(std::mem::take(&mut self.pending_messages))
+    }
+}
+
+impl McpTransport for SseMcpTransport {
+    fn start(&mut self) -> McpClientResult<()> {
+        if self.started {
+            return Ok(());
+        }
+        self.connect()?;
+        self.started = true;
+        Ok(())
+    }
+
+    fn send(&mut self, message: JsonRpcMessage) -> McpClientResult<Vec<JsonRpcMessage>> {
+        if !self.started {
+            self.start()?;
+        }
+        self.post_message(&message)
+    }
+
+    fn close(&mut self) -> McpClientResult<()> {
+        self.started = false;
+        self.endpoint = None;
+        self.pending_messages.clear();
+        Ok(())
+    }
+
+    fn set_protocol_version(&mut self, protocol_version: String) {
+        self.protocol_version = Some(protocol_version);
+    }
+}
+
+fn parse_sse_transport_body(
+    connection_url: &str,
+    body: &str,
+) -> McpClientResult<(String, Vec<JsonRpcMessage>)> {
+    let mut endpoint = None;
+    let mut messages = Vec::new();
+    let mut event_name = String::new();
+    let mut data_lines = Vec::new();
+
+    for line in body.lines().chain(std::iter::once("")) {
+        if line.is_empty() {
+            if !data_lines.is_empty() {
+                let data = data_lines.join("\n");
+                match event_name.as_str() {
+                    "endpoint" => {
+                        endpoint = Some(resolve_sse_endpoint(connection_url, data.trim())?);
+                    }
+                    "message" => {
+                        messages.push(parse_sse_transport_message(&data)?);
+                    }
+                    _ => {}
+                }
+            }
+            event_name.clear();
+            data_lines.clear();
+            continue;
+        }
+
+        if let Some(event) = line.strip_prefix("event:") {
+            event_name = event.trim().to_string();
+        } else if let Some(data) = line.strip_prefix("data:") {
+            data_lines.push(data.trim_start().to_string());
+        }
+    }
+
+    let endpoint = endpoint.ok_or_else(|| {
+        McpClientError::new("MCP SSE Transport Error: Endpoint event was not received")
+    })?;
+    Ok((endpoint, messages))
+}
+
+fn parse_sse_transport_message(data: &str) -> McpClientResult<JsonRpcMessage> {
+    let value = serde_json::from_str::<JsonValue>(data).map_err(|error| {
+        McpClientError::new(format!(
+            "MCP SSE Transport Error: Failed to parse message: {error}"
+        ))
+    })?;
+    serde_json::from_value(value).map_err(|error| {
+        McpClientError::new(format!(
+            "MCP SSE Transport Error: Failed to parse message: {error}"
+        ))
+    })
+}
+
+fn resolve_sse_endpoint(connection_url: &str, endpoint: &str) -> McpClientResult<String> {
+    let connection_origin = http_origin(connection_url).ok_or_else(|| {
+        McpClientError::new(format!(
+            "MCP SSE Transport Error: invalid connection URL: {connection_url}"
+        ))
+    })?;
+    let resolved = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint.to_string()
+    } else if endpoint.starts_with('/') {
+        format!("{connection_origin}{endpoint}")
+    } else {
+        let base = connection_url
+            .rsplit_once('/')
+            .map(|(base, _)| base)
+            .unwrap_or(connection_url);
+        format!("{base}/{endpoint}")
+    };
+    let endpoint_origin = http_origin(&resolved).ok_or_else(|| {
+        McpClientError::new(format!(
+            "MCP SSE Transport Error: invalid endpoint URL: {resolved}"
+        ))
+    })?;
+    if endpoint_origin != connection_origin {
+        return Err(McpClientError::new(format!(
+            "MCP SSE Transport Error: Endpoint origin does not match connection origin: {endpoint_origin}"
+        )));
+    }
+    Ok(resolved)
+}
+
+fn http_origin(url: &str) -> Option<String> {
+    let scheme_end = url.find("://")?;
+    let scheme_authority = &url[..scheme_end + 3];
+    let rest = &url[scheme_end + 3..];
+    let authority = rest.split('/').next()?;
+    if authority.is_empty() {
+        return None;
+    }
+    Some(format!("{scheme_authority}{authority}"))
+}
+
 /// Deterministic in-process MCP transport used by tests and examples.
 #[derive(Clone)]
 pub struct MockMcpTransport {
@@ -2860,6 +3139,121 @@ mod tests {
 
         assert!(error.message.contains("POSTing to endpoint (HTTP 404)"));
         assert!(error.message.contains("Try using `sse` transport instead"));
+    }
+
+    #[test]
+    fn mcp_sse_transport_connects_to_endpoint_and_posts_messages() {
+        let server = LocalHttpServer::new(vec![
+            LocalHttpResponse::new(
+                200,
+                [("content-type", "text/event-stream")],
+                format!(
+                    "event: endpoint\ndata: /messages\n\nevent: message\ndata: {}\n\n",
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": 7,
+                        "result": { "ok": true }
+                    })
+                ),
+            ),
+            LocalHttpResponse::empty(202),
+        ]);
+        let mut transport =
+            SseMcpTransport::new(format!("{}/sse", server.url())).with_header("x-mcp", "test");
+
+        transport.start().expect("SSE transport starts");
+        assert_eq!(
+            transport.endpoint(),
+            Some(format!("{}/messages", server.url()).as_str())
+        );
+
+        let messages = transport
+            .send(JsonRpcMessage::Request(JsonRpcRequest::new(
+                json!(7),
+                "tools/list",
+            )))
+            .expect("SSE endpoint POST succeeds");
+
+        assert_eq!(
+            serde_json::to_value(&messages).expect("messages serialize"),
+            json!([{ "jsonrpc": "2.0", "id": 7, "result": { "ok": true } }])
+        );
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].path, "/sse");
+        assert_eq!(
+            requests[0].headers.get("accept"),
+            Some(&"text/event-stream".to_string())
+        );
+        assert_eq!(requests[0].headers.get("x-mcp"), Some(&"test".to_string()));
+        assert_eq!(requests[1].method, "POST");
+        assert_eq!(requests[1].path, "/messages");
+        assert_eq!(
+            requests[1].headers.get("content-type"),
+            Some(&"application/json".to_string())
+        );
+        assert_eq!(requests[1].body["method"], "tools/list");
+    }
+
+    #[test]
+    fn mcp_sse_transport_rejects_endpoint_origin_mismatch() {
+        let server = LocalHttpServer::new(vec![LocalHttpResponse::new(
+            200,
+            [("content-type", "text/event-stream")],
+            "event: endpoint\ndata: http://example.com/messages\n\n",
+        )]);
+        let mut transport = SseMcpTransport::new(format!("{}/sse", server.url()));
+
+        let error = transport.start().expect_err("cross-origin endpoint fails");
+
+        assert!(
+            error
+                .message
+                .contains("Endpoint origin does not match connection origin")
+        );
+    }
+
+    #[test]
+    fn mcp_sse_transport_reports_http_errors_with_http_hint() {
+        let server = LocalHttpServer::new(vec![LocalHttpResponse::new(
+            405,
+            [("content-type", "text/plain")],
+            "method not allowed",
+        )]);
+        let mut transport = SseMcpTransport::new(format!("{}/sse", server.url()));
+
+        let error = transport.start().expect_err("HTTP error is reported");
+
+        assert!(error.message.contains("MCP SSE Transport Error: 405"));
+        assert!(error.message.contains("Try using `http` transport instead"));
+    }
+
+    #[test]
+    fn mcp_sse_transport_reports_post_errors() {
+        let server = LocalHttpServer::new(vec![
+            LocalHttpResponse::new(
+                200,
+                [("content-type", "text/event-stream")],
+                "event: endpoint\ndata: /messages\n\n",
+            ),
+            LocalHttpResponse::new(500, [("content-type", "text/plain")], "failed"),
+        ]);
+        let mut transport = SseMcpTransport::new(format!("{}/sse", server.url()));
+        transport.start().expect("SSE transport starts");
+
+        let error = transport
+            .send(JsonRpcMessage::Request(JsonRpcRequest::new(
+                json!(1),
+                "initialize",
+            )))
+            .expect_err("POST error is reported");
+
+        assert!(
+            error
+                .message
+                .contains("MCP SSE Transport Error: POSTing to endpoint (HTTP 500): failed")
+        );
     }
 
     #[test]
@@ -3892,6 +4286,7 @@ mod tests {
     #[derive(Clone, Debug)]
     struct LocalHttpRequest {
         method: String,
+        path: String,
         headers: BTreeMap<String, String>,
         body: JsonValue,
     }
@@ -4048,7 +4443,9 @@ mod tests {
         let head = String::from_utf8_lossy(&buffer[..header_end]);
         let mut lines = head.lines();
         let request_line = lines.next()?;
-        let method = request_line.split_whitespace().next()?.to_string();
+        let mut request_parts = request_line.split_whitespace();
+        let method = request_parts.next()?.to_string();
+        let path = request_parts.next()?.to_string();
         let mut headers = BTreeMap::new();
         for line in lines {
             let Some((key, value)) = line.split_once(':') else {
@@ -4067,6 +4464,7 @@ mod tests {
         let body = String::from_utf8_lossy(&buffer[body_start..body_start + content_length]);
         Some(LocalHttpRequest {
             method,
+            path,
             headers,
             body: serde_json::from_str(&body).unwrap_or(JsonValue::Null),
         })
