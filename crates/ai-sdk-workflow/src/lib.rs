@@ -2,9 +2,18 @@
 
 #![forbid(unsafe_code)]
 
+pub mod chat_transport;
+
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
+
+pub use chat_transport::{
+    DEFAULT_WORKFLOW_CHAT_API, ReconnectToStreamOptions, SendMessagesOptions, WorkflowChatEnd,
+    WorkflowChatRequest, WorkflowChatRequestMethod, WorkflowChatResponse, WorkflowChatTransport,
+    WorkflowChatTransportClient, WorkflowChatTransportError, WorkflowChatTransportOptions,
+    WorkflowChatTransportResult, WorkflowChatTrigger,
+};
 
 use ai_sdk_provider::json::{JsonObject, JsonSchema, JsonValue};
 use ai_sdk_provider::{
