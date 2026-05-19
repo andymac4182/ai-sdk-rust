@@ -400,6 +400,14 @@ impl OpenResponsesLanguageModel {
         let mut result = LanguageModelGenerateResult::new(content, finish_reason, usage)
             .with_request(LanguageModelRequest::new().with_body(request_body));
         let mut response_metadata = LanguageModelResponse::new().with_body(raw_body);
+        let provider_metadata = open_responses_response_provider_metadata(
+            &self.config.provider_options_name,
+            &response,
+            open_responses_logprobs_enabled(
+                &self.config.provider_options_name,
+                &options.provider_options,
+            ),
+        );
 
         if let Some(id) = response.get("id").and_then(JsonValue::as_str) {
             response_metadata = response_metadata.with_id(id);
@@ -425,7 +433,9 @@ impl OpenResponsesLanguageModel {
             result = result.with_warning(warning);
         }
 
-        result.with_response(response_metadata)
+        result
+            .with_provider_metadata(provider_metadata)
+            .with_response(response_metadata)
     }
 
     fn generate_result_from_error(
@@ -3326,6 +3336,127 @@ fn open_responses_metadata(provider_name: &str, provider: JsonObject) -> Provide
     metadata
 }
 
+fn open_responses_response_provider_metadata(
+    provider_name: &str,
+    response: &JsonValue,
+    include_logprobs: bool,
+) -> ProviderMetadata {
+    let logprobs = if include_logprobs {
+        open_responses_response_logprobs(response)
+    } else {
+        Vec::new()
+    };
+
+    open_responses_finish_provider_metadata(
+        provider_name,
+        response.get("id").cloned().unwrap_or(JsonValue::Null),
+        open_responses_service_tier(response).as_deref(),
+        &logprobs,
+    )
+}
+
+fn open_responses_stream_finish_provider_metadata(
+    provider_name: &str,
+    response_id: Option<&str>,
+    service_tier: Option<&str>,
+    logprobs: &[JsonValue],
+) -> ProviderMetadata {
+    open_responses_finish_provider_metadata(
+        provider_name,
+        response_id
+            .map(|id| JsonValue::String(id.to_string()))
+            .unwrap_or(JsonValue::Null),
+        service_tier,
+        logprobs,
+    )
+}
+
+fn open_responses_finish_provider_metadata(
+    provider_name: &str,
+    response_id: JsonValue,
+    service_tier: Option<&str>,
+    logprobs: &[JsonValue],
+) -> ProviderMetadata {
+    let mut provider = JsonObject::new();
+    provider.insert("responseId".to_string(), response_id);
+
+    if !logprobs.is_empty() {
+        provider.insert("logprobs".to_string(), JsonValue::Array(logprobs.to_vec()));
+    }
+
+    if let Some(service_tier) = service_tier {
+        provider.insert(
+            "serviceTier".to_string(),
+            JsonValue::String(service_tier.to_string()),
+        );
+    }
+
+    open_responses_metadata(provider_name, provider)
+}
+
+fn open_responses_response_id(response: &JsonValue) -> Option<String> {
+    open_responses_event_response(response)
+        .and_then(|response| response.get("id"))
+        .and_then(JsonValue::as_str)
+        .map(ToString::to_string)
+}
+
+fn open_responses_service_tier(response: &JsonValue) -> Option<String> {
+    response
+        .get("service_tier")
+        .and_then(JsonValue::as_str)
+        .map(ToString::to_string)
+}
+
+fn open_responses_logprobs_enabled(
+    provider_name: &str,
+    provider_options: &Option<ProviderOptions>,
+) -> bool {
+    open_responses_prompt_provider_options(provider_options.as_ref(), provider_name)
+        .and_then(|metadata| metadata.get("logprobs"))
+        .is_some()
+}
+
+fn open_responses_response_logprobs(response: &JsonValue) -> Vec<JsonValue> {
+    let mut logprobs = Vec::new();
+
+    for part in response
+        .get("output")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|part| {
+            matches!(
+                part.get("type").and_then(JsonValue::as_str),
+                Some("message")
+            )
+        })
+    {
+        for content_part in part
+            .get("content")
+            .and_then(JsonValue::as_array)
+            .into_iter()
+            .flatten()
+        {
+            open_responses_push_logprobs(&mut logprobs, content_part.get("logprobs"));
+        }
+    }
+
+    logprobs
+}
+
+fn open_responses_push_logprobs(logprobs: &mut Vec<JsonValue>, value: Option<&JsonValue>) {
+    let Some(entries) = value.and_then(JsonValue::as_array) else {
+        return;
+    };
+
+    if entries.is_empty() {
+        return;
+    }
+
+    logprobs.push(JsonValue::Array(entries.clone()));
+}
+
 fn open_responses_approval_request_tool_call_ids(
     prompt: &[LanguageModelMessage],
     provider_name: &str,
@@ -4004,6 +4135,9 @@ fn open_responses_stream_result_from_response(
         raw: None,
     };
     let mut usage = LanguageModelUsage::default();
+    let mut response_id = None::<String>;
+    let mut service_tier = None::<String>;
+    let mut logprobs = Vec::<JsonValue>::new();
     let mut emitted_response_metadata = false;
     let mut has_tool_calls = false;
     let mut emitted_tool_calls = BTreeSet::<String>::new();
@@ -4034,6 +4168,8 @@ fn open_responses_stream_result_from_response(
         .get("store")
         .and_then(JsonValue::as_bool)
         .unwrap_or(true);
+    let include_logprobs =
+        open_responses_logprobs_enabled(provider_name, &options.provider_options);
 
     for event in events {
         match event {
@@ -4068,6 +4204,9 @@ fn open_responses_stream_result_from_response(
                 }
 
                 match event_type {
+                    Some("response.created") => {
+                        response_id = open_responses_response_id(&value);
+                    }
                     Some("response.output_text.delta") => {
                         if let Some(delta) = value.get("delta").and_then(JsonValue::as_str)
                             && !delta.is_empty()
@@ -4087,6 +4226,9 @@ fn open_responses_stream_result_from_response(
                                     &[],
                                 ),
                             );
+                        }
+                        if include_logprobs {
+                            open_responses_push_logprobs(&mut logprobs, value.get("logprobs"));
                         }
                     }
                     Some("response.output_text.done") => {
@@ -5115,6 +5257,7 @@ fn open_responses_stream_result_from_response(
                                     .and_then(JsonValue::as_str),
                                 has_tool_calls,
                             );
+                            service_tier = open_responses_service_tier(response);
                         }
                     }
                     Some("response.incomplete") => {
@@ -5128,6 +5271,7 @@ fn open_responses_stream_result_from_response(
                                     .and_then(JsonValue::as_str),
                                 has_tool_calls,
                             );
+                            service_tier = open_responses_service_tier(response);
                         }
                     }
                     Some("response.failed") => {
@@ -5137,6 +5281,7 @@ fn open_responses_stream_result_from_response(
                                 unified: FinishReason::Error,
                                 raw: open_responses_failed_raw_finish_reason(response),
                             };
+                            service_tier = open_responses_service_tier(response);
                         }
                     }
                     _ => {}
@@ -5168,7 +5313,14 @@ fn open_responses_stream_result_from_response(
     }
 
     stream.push(LanguageModelStreamPart::Finish(
-        LanguageModelStreamFinish::new(usage, finish_reason),
+        LanguageModelStreamFinish::new(usage, finish_reason).with_provider_metadata(
+            open_responses_stream_finish_provider_metadata(
+                provider_name,
+                response_id.as_deref(),
+                service_tier.as_deref(),
+                &logprobs,
+            ),
+        ),
     ));
 
     let mut result = LanguageModelStreamResult::new(stream)
@@ -9782,11 +9934,24 @@ mod tests {
                                 "content": [
                                     {
                                         "type": "output_text",
-                                        "text": "{\"answer\":\"mapped\"}"
+                                        "text": "{\"answer\":\"mapped\"}",
+                                        "logprobs": [
+                                            {
+                                                "token": "{",
+                                                "logprob": -0.1,
+                                                "top_logprobs": [
+                                                    {
+                                                        "token": "{",
+                                                        "logprob": -0.1
+                                                    }
+                                                ]
+                                            }
+                                        ]
                                     }
                                 ]
                             }
                         ],
+                        "service_tier": "priority",
                         "usage": {
                             "input_tokens": 6,
                             "output_tokens": 4
@@ -9857,6 +10022,33 @@ mod tests {
         );
 
         assert!(result.warnings.is_empty());
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some("resp_openai_options")
+        );
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "serviceTier")
+                .and_then(JsonValue::as_str),
+            Some("priority")
+        );
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "logprobs"),
+            Some(&json!([
+                [
+                    {
+                        "token": "{",
+                        "logprob": -0.1,
+                        "top_logprobs": [
+                            {
+                                "token": "{",
+                                "logprob": -0.1
+                            }
+                        ]
+                    }
+                ]
+            ]))
+        );
 
         let request = captured_request
             .lock()
@@ -13102,7 +13294,7 @@ mod tests {
                     "",
                     r#"data: {"type":"response.output_item.added","output_index":0,"item":{"id":"message_1","type":"message","phase":"final_answer","role":"assistant","content":[]}}"#,
                     "",
-                    r#"data: {"type":"response.output_text.delta","item_id":"message_1","output_index":0,"content_index":0,"delta":"Cited answer"}"#,
+                    r#"data: {"type":"response.output_text.delta","item_id":"message_1","output_index":0,"content_index":0,"delta":"Cited answer","logprobs":[{"token":"Cited","logprob":-0.2,"top_logprobs":[{"token":"Cited","logprob":-0.2}]}]}"#,
                     "",
                     r#"data: {"type":"response.output_text.done","item_id":"message_1","output_index":0,"content_index":0,"text":"Cited answer"}"#,
                     "",
@@ -13120,7 +13312,7 @@ mod tests {
                     "",
                     r#"data: {"type":"response.output_item.done","output_index":2,"item":{"id":"compaction_1","type":"compaction","encrypted_content":"encrypted-context"}}"#,
                     "",
-                    r#"data: {"type":"response.completed","response":{"id":"resp_stream_metadata","created_at":1711115037,"model":"gpt-4.1-mini","usage":{"input_tokens":7,"output_tokens":5}}}"#,
+                    r#"data: {"type":"response.completed","response":{"id":"resp_stream_metadata","created_at":1711115037,"model":"gpt-4.1-mini","service_tier":"flex","usage":{"input_tokens":7,"output_tokens":5}}}"#,
                     "",
                     "data: [DONE]",
                     "",
@@ -13137,11 +13329,22 @@ mod tests {
         .with_transport(transport);
         let model = provider.language_model("gpt-4.1-mini");
 
-        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(vec![
-            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
-                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Use sources")),
-            ])),
-        ])));
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "logprobs": 1
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Use sources"),
+                    )]),
+                )])
+                .with_provider_options(provider_options),
+            ),
+        );
 
         let text_start = result
             .stream
@@ -13262,6 +13465,41 @@ mod tests {
                         .and_then(|metadata| metadata.get("encryptedContent"))
                         .and_then(JsonValue::as_str)
                         == Some("encrypted-context")))
+        );
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish part");
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some("resp_stream_metadata")
+        );
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "serviceTier")
+                .and_then(JsonValue::as_str),
+            Some("flex")
+        );
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "logprobs"),
+            Some(&json!([
+                [
+                    {
+                        "token": "Cited",
+                        "logprob": -0.2,
+                        "top_logprobs": [
+                            {
+                                "token": "Cited",
+                                "logprob": -0.2
+                            }
+                        ]
+                    }
+                ]
+            ]))
         );
     }
 
