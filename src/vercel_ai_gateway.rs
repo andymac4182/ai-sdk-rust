@@ -2357,6 +2357,135 @@ mod tests {
     }
 
     #[test]
+    fn vercel_ai_gateway_openai_responses_streams_object() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    openai_responses_object_stream_body(),
+                )
+                .with_headers(Headers::from([
+                    ("content-type".to_string(), "text/event-stream".to_string()),
+                    (
+                        "x-request-id".to_string(),
+                        "req_vercel_ai_gateway_responses_stream_object".to_string(),
+                    ),
+                ])))))
+            });
+        let provider = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://ai-gateway.test/v1/")
+            .with_header("custom-header", "value")
+            .with_transport(transport);
+        let model = provider.responses("openai/gpt-4.1-mini");
+        let object_schema: JsonObject = serde_json::from_value(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": {
+                "answer": {
+                    "type": "string"
+                },
+                "count": {
+                    "type": "integer"
+                }
+            },
+            "required": ["answer", "count"],
+            "additionalProperties": false
+        }))
+        .expect("schema deserializes");
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::from_prompt(
+                &model,
+                Prompt::from_prompt("Stream a JSON object with answer and count."),
+            )
+            .expect("prompt is valid")
+            .with_schema(json_schema(object_schema.clone()))
+            .with_schema_name("gateway_stream_answer")
+            .with_schema_description("A streamed Gateway Responses answer object.")
+            .with_max_output_tokens(48)
+            .with_temperature(0.0),
+        ));
+
+        assert_eq!(
+            result.text,
+            "{\"answer\":\"Gateway Responses stream object\",\"count\":5}"
+        );
+        assert_eq!(
+            result.object,
+            Some(json!({
+                "answer": "Gateway Responses stream object",
+                "count": 5
+            }))
+        );
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(10));
+        assert_eq!(result.usage.output_tokens.total, Some(8));
+        assert!(result.warnings.is_empty());
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("req_vercel_ai_gateway_responses_stream_object")
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("vercel-ai-gateway"))
+                .and_then(|metadata| metadata.get("responseId"))
+                .and_then(JsonValue::as_str),
+            Some("resp_gateway_stream_object")
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://ai-gateway.test/v1/responses");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+        assert_eq!(request_body["model"], "openai/gpt-4.1-mini");
+        assert_eq!(request_body["max_output_tokens"], 48);
+        assert_eq!(request_body["temperature"], 0.0);
+        assert_eq!(request_body["stream"], true);
+        assert_eq!(
+            request_body["text"]["format"],
+            json!({
+                "type": "json_schema",
+                "name": "gateway_stream_answer",
+                "description": "A streamed Gateway Responses answer object.",
+                "schema": object_schema,
+                "strict": true
+            })
+        );
+    }
+
+    #[test]
     fn vercel_ai_gateway_openai_responses_streams_file_prompt_parts() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -3662,6 +3791,117 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI Responses object call"]
+    fn live_vercel_ai_gateway_openai_responses_generate_object() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!(
+                "skipping live Gateway OpenAI Responses object test because no API key is configured"
+            );
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_AI_GATEWAY_OPENAI_RESPONSES_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_OPENAI_RESPONSES_MODEL"))
+            .or_else(|_| env::var("AI_SDK_RUST_GATEWAY_RESPONSES_MODEL"))
+            .or_else(|_| env::var("AI_GATEWAY_RESPONSES_MODEL"))
+            .unwrap_or_else(|_| "openai/gpt-4.1-mini".to_string());
+        let model = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key(api_key)
+            .responses(model_id);
+        let object_schema: JsonObject = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "marker": {
+                    "type": "string"
+                },
+                "count": {
+                    "type": "integer"
+                }
+            },
+            "required": ["marker", "count"],
+            "additionalProperties": false
+        }))
+        .expect("schema deserializes");
+
+        let result = poll_ready(generate_object(
+            GenerateObjectOptions::from_prompt(
+                &model,
+                Prompt::from_prompt(
+                    "Return a JSON object with marker exactly \"rust-gateway-responses-object-ok\" and count exactly 11.",
+                ),
+            )
+            .expect("prompt is valid")
+            .with_schema(json_schema(object_schema))
+            .with_max_output_tokens(80)
+            .with_temperature(0.0),
+        ))
+        .expect("Gateway OpenAI Responses object generation succeeds");
+
+        assert_eq!(
+            result.object.get("marker").and_then(JsonValue::as_str),
+            Some("rust-gateway-responses-object-ok")
+        );
+        assert_eq!(
+            result.object.get("count").and_then(JsonValue::as_i64),
+            Some(11)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI Responses stream object call"]
+    fn live_vercel_ai_gateway_openai_responses_stream_object() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!(
+                "skipping live Gateway OpenAI Responses stream object test because no API key is configured"
+            );
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_AI_GATEWAY_OPENAI_RESPONSES_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_OPENAI_RESPONSES_MODEL"))
+            .or_else(|_| env::var("AI_SDK_RUST_GATEWAY_RESPONSES_MODEL"))
+            .or_else(|_| env::var("AI_GATEWAY_RESPONSES_MODEL"))
+            .unwrap_or_else(|_| "openai/gpt-4.1-mini".to_string());
+        let model = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key(api_key)
+            .responses(model_id);
+        let object_schema: JsonObject = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "marker": {
+                    "type": "string"
+                },
+                "count": {
+                    "type": "integer"
+                }
+            },
+            "required": ["marker", "count"],
+            "additionalProperties": false
+        }))
+        .expect("schema deserializes");
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::from_prompt(
+                &model,
+                Prompt::from_prompt(
+                    "Return a JSON object with marker exactly \"rust-gateway-responses-stream-object-ok\" and count exactly 12.",
+                ),
+            )
+            .expect("prompt is valid")
+            .with_schema(json_schema(object_schema))
+            .with_max_output_tokens(80)
+            .with_temperature(0.0),
+        ));
+        let object = result
+            .object
+            .expect("Gateway OpenAI Responses stream object is generated");
+
+        assert_eq!(
+            object.get("marker").and_then(JsonValue::as_str),
+            Some("rust-gateway-responses-stream-object-ok")
+        );
+        assert_eq!(object.get("count").and_then(JsonValue::as_i64), Some(12));
+    }
+
+    #[test]
     #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI-compatible tool-loop model call"]
     fn live_vercel_ai_gateway_openai_compatible_generate_text_tool_loop() {
         let Some(api_key) = live_gateway_api_key() else {
@@ -4147,6 +4387,52 @@ mod tests {
                     "usage": {
                         "input_tokens": 5,
                         "output_tokens": 4
+                    }
+                }
+            }),
+        ])
+    }
+
+    fn openai_responses_object_stream_body() -> String {
+        sse_body([
+            json!({
+                "type": "response.created",
+                "response": {
+                    "id": "resp_gateway_stream_object",
+                    "created_at": 1711115037,
+                    "model": "openai/gpt-4.1-mini"
+                }
+            }),
+            json!({
+                "type": "response.output_text.delta",
+                "item_id": "msg_object_1",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": "{\"answer\":\"Gateway Responses "
+            }),
+            json!({
+                "type": "response.output_text.delta",
+                "item_id": "msg_object_1",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": "stream object\",\"count\":5}"
+            }),
+            json!({
+                "type": "response.output_text.done",
+                "item_id": "msg_object_1",
+                "output_index": 0,
+                "content_index": 0,
+                "text": "{\"answer\":\"Gateway Responses stream object\",\"count\":5}"
+            }),
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_gateway_stream_object",
+                    "created_at": 1711115037,
+                    "model": "openai/gpt-4.1-mini",
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 8
                     }
                 }
             }),
