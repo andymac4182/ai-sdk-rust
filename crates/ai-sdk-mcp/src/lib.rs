@@ -2,6 +2,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod oauth;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::{BufRead, BufReader, Write};
@@ -18,6 +20,17 @@ use ai_sdk_provider_utils::{
     Base64DecodeError, FlexibleSchema, ParseJsonResult, Tool, ToolExecutionError,
     ToolModelOutputOptions, ValidateTypesResult, convert_base64_to_bytes,
     safe_parse_json_with_schema, safe_validate_types, with_user_agent_suffix,
+};
+pub use oauth::{
+    AuthorizationServerMetadata, AuthorizationServerMetadataDiscoveryOptions,
+    DiscoveryMetadataType, DiscoveryUrl, McpOAuthError, McpOAuthResult, OAuthClientInformation,
+    OAuthClientInformationFull, OAuthClientMetadata, OAuthErrorResponse, OAuthMetadata,
+    OAuthPkceChallenge, OAuthProtectedResourceMetadata,
+    OAuthProtectedResourceMetadataDiscoveryOptions, OAuthTokens, OpenIdProviderDiscoveryMetadata,
+    StartAuthorizationOptions, StartAuthorizationResult, build_discovery_urls,
+    check_resource_allowed, discover_authorization_server_metadata,
+    discover_oauth_protected_resource_metadata, extract_resource_metadata_url,
+    resource_url_from_server_url, resource_url_strip_slash, start_authorization, validate_safe_url,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
