@@ -997,6 +997,62 @@ pub struct UiMessageStreamFinishEvent {
     pub abort_reason: Option<JsonValue>,
 }
 
+/// Event passed to the upstream-style UI-message stream finish callback.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiMessageStreamFinishCallbackEvent {
+    /// The updated conversation messages after applying the response stream.
+    pub messages: Vec<UiMessage>,
+
+    /// Whether the response continued the last original assistant message.
+    pub is_continuation: bool,
+
+    /// Whether an abort chunk was observed.
+    pub is_aborted: bool,
+
+    /// The response message sent to the client.
+    pub response_message: UiMessage,
+
+    /// Last finish reason observed in the stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<FinishReason>,
+}
+
+/// Callback invoked after a UI-message stream has produced its final message.
+pub type UiMessageStreamFinishCallbackFunction =
+    dyn Fn(UiMessageStreamFinishCallbackEvent) + Send + Sync + 'static;
+
+/// Callback wrapper for upstream `UIMessageStreamOnFinishCallback`.
+#[derive(Clone)]
+pub struct UiMessageStreamFinishCallback {
+    callback: Arc<UiMessageStreamFinishCallbackFunction>,
+}
+
+impl UiMessageStreamFinishCallback {
+    /// Creates a UI-message stream finish callback.
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(UiMessageStreamFinishCallbackEvent) + Send + Sync + 'static,
+    {
+        Self {
+            callback: Arc::new(callback),
+        }
+    }
+
+    /// Runs the finish callback.
+    pub fn finish(&self, event: UiMessageStreamFinishCallbackEvent) {
+        (self.callback)(event);
+    }
+}
+
+impl fmt::Debug for UiMessageStreamFinishCallback {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UiMessageStreamFinishCallback")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Callback invoked after a UI-message stream has been read.
 pub type UiMessageStreamOnFinishFunction =
     dyn Fn(UiMessageStreamFinishEvent) + Send + Sync + 'static;
@@ -1355,6 +1411,132 @@ pub fn read_ui_message_stream(
     }
 
     Ok(message_states)
+}
+
+/// Options for [`handle_ui_message_stream_finish`].
+#[derive(Clone, Debug)]
+pub struct HandleUiMessageStreamFinishOptions {
+    /// UI-message stream chunks to forward.
+    pub stream: Vec<UiMessageChunk>,
+
+    /// Response message id to inject into a start chunk that does not include one.
+    pub message_id: Option<String>,
+
+    /// Original UI messages used to compute continuation state.
+    pub original_messages: Vec<UiMessage>,
+
+    /// Optional callback invoked with the final persisted-message state.
+    pub on_finish: Option<UiMessageStreamFinishCallback>,
+}
+
+impl HandleUiMessageStreamFinishOptions {
+    /// Creates finish-handler options for a UI-message stream.
+    pub fn new<I>(stream: I) -> Self
+    where
+        I: IntoIterator<Item = UiMessageChunk>,
+    {
+        Self {
+            stream: stream.into_iter().collect(),
+            message_id: None,
+            original_messages: Vec::new(),
+            on_finish: None,
+        }
+    }
+
+    /// Sets the response message id used when the stream start chunk has no id.
+    pub fn with_message_id(mut self, message_id: impl Into<String>) -> Self {
+        self.message_id = Some(message_id.into());
+        self
+    }
+
+    /// Sets the original UI messages for persistence/continuation mode.
+    pub fn with_original_messages<I>(mut self, original_messages: I) -> Self
+    where
+        I: IntoIterator<Item = UiMessage>,
+    {
+        self.original_messages = original_messages.into_iter().collect();
+        self
+    }
+
+    /// Sets the upstream-style finish callback.
+    pub fn with_on_finish<F>(mut self, on_finish: F) -> Self
+    where
+        F: Fn(UiMessageStreamFinishCallbackEvent) + Send + Sync + 'static,
+    {
+        self.on_finish = Some(UiMessageStreamFinishCallback::new(on_finish));
+        self
+    }
+
+    /// Sets a pre-built upstream-style finish callback.
+    pub fn with_finish_callback(mut self, on_finish: UiMessageStreamFinishCallback) -> Self {
+        self.on_finish = Some(on_finish);
+        self
+    }
+}
+
+/// Applies upstream-style finish handling to a UI-message stream.
+pub fn handle_ui_message_stream_finish(
+    options: HandleUiMessageStreamFinishOptions,
+) -> Result<Vec<UiMessageChunk>, UiMessageStreamProcessError> {
+    let HandleUiMessageStreamFinishOptions {
+        mut stream,
+        mut message_id,
+        original_messages,
+        on_finish,
+    } = options;
+
+    let last_message = original_messages
+        .last()
+        .filter(|message| message.role == UiMessageRole::Assistant)
+        .cloned();
+
+    if let Some(last_message) = &last_message {
+        message_id = Some(last_message.id.clone());
+    }
+
+    for chunk in &mut stream {
+        if let UiMessageChunk::Start {
+            message_id: chunk_message_id,
+            ..
+        } = chunk
+        {
+            if chunk_message_id.is_none() {
+                *chunk_message_id = message_id.clone();
+            }
+        }
+    }
+
+    if let Some(on_finish) = on_finish {
+        let mut state = StreamingUiMessageState::new(
+            message_id.clone().unwrap_or_default(),
+            last_message.clone(),
+        );
+        process_ui_message_stream(&mut state, stream.clone(), false)?;
+
+        let is_continuation = last_message
+            .as_ref()
+            .is_some_and(|last_message| state.message.id == last_message.id);
+        let mut messages = if is_continuation {
+            original_messages
+                .iter()
+                .take(original_messages.len().saturating_sub(1))
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            original_messages
+        };
+        messages.push(state.message.clone());
+
+        on_finish.finish(UiMessageStreamFinishCallbackEvent {
+            messages,
+            is_continuation,
+            is_aborted: state.aborted,
+            response_message: state.message,
+            finish_reason: state.finish_reason,
+        });
+    }
+
+    Ok(stream)
 }
 
 fn update_ui_message_metadata(message: &mut UiMessage, message_metadata: Option<JsonValue>) {
@@ -2104,6 +2286,53 @@ mod tests {
         assert_eq!(finish_events[0].finish_reason, Some(FinishReason::Stop));
         assert!(!finish_events[0].is_aborted);
         assert_eq!(finish_events[0].abort_reason, None);
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_injects_id_and_calls_on_finish() {
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        let chunks = handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new([
+                UiMessageChunk::start(),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", "Hello"),
+                UiMessageChunk::text_end("text-1"),
+                UiMessageChunk::finish_with_reason(FinishReason::Stop),
+            ])
+            .with_message_id("response-message-id")
+            .with_original_messages([UiMessage::new("user-1", UiMessageRole::User)])
+            .with_on_finish(move |event| {
+                finish_events_for_callback
+                    .lock()
+                    .expect("finish events lock")
+                    .push(event);
+            }),
+        )
+        .expect("stream finish is handled");
+
+        assert_eq!(
+            serde_json::to_value(&chunks[0]).expect("chunk serializes"),
+            json!({ "type": "start", "messageId": "response-message-id" })
+        );
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert!(!finish_events[0].is_continuation);
+        assert!(!finish_events[0].is_aborted);
+        assert_eq!(finish_events[0].finish_reason, Some(FinishReason::Stop));
+        assert_eq!(finish_events[0].messages.len(), 2);
+        assert_eq!(finish_events[0].messages[0].id, "user-1");
+        assert_eq!(finish_events[0].response_message.id, "response-message-id");
+        assert_eq!(
+            finish_events[0].response_message.parts,
+            vec![json!({ "type": "text", "text": "Hello", "state": "done" })]
+        );
+        assert_eq!(
+            finish_events[0].messages[1],
+            finish_events[0].response_message
+        );
     }
 
     #[test]

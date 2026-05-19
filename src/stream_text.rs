@@ -56,9 +56,10 @@ use crate::text_stream_response::{
     TextStreamResponseWriter, create_text_stream_response, pipe_text_stream_to_response,
 };
 use crate::ui_message_stream::{
-    ResponseUiMessageId, UiMessage, UiMessageChunk, UiMessageStreamResponse,
+    HandleUiMessageStreamFinishOptions, ResponseUiMessageId, UiMessage, UiMessageChunk,
+    UiMessageStreamFinishCallback, UiMessageStreamFinishCallbackEvent, UiMessageStreamResponse,
     UiMessageStreamResponseInit, UiMessageStreamResponseOptions, UiMessageStreamResponseWriter,
-    create_ui_message_stream_response, get_response_ui_message_id,
+    create_ui_message_stream_response, get_response_ui_message_id, handle_ui_message_stream_finish,
     pipe_ui_message_stream_to_response,
 };
 use crate::warning::Warning;
@@ -1437,6 +1438,9 @@ pub struct StreamTextUiMessageStreamOptions {
     /// Optional callback used to map stream errors into UI-safe text.
     pub on_error: Option<StreamTextUiMessageErrorHandler>,
 
+    /// Optional callback invoked with final persisted UI-message state.
+    pub on_finish: Option<UiMessageStreamFinishCallback>,
+
     /// Whether reasoning chunks should be included. Defaults to `true`.
     pub send_reasoning: bool,
 
@@ -1498,6 +1502,15 @@ impl StreamTextUiMessageStreamOptions {
         self
     }
 
+    /// Sets a callback that receives the final persisted UI-message state.
+    pub fn with_on_finish<F>(mut self, on_finish: F) -> Self
+    where
+        F: Fn(UiMessageStreamFinishCallbackEvent) + Send + Sync + 'static,
+    {
+        self.on_finish = Some(UiMessageStreamFinishCallback::new(on_finish));
+        self
+    }
+
     /// Sets whether reasoning chunks should be included.
     pub fn with_send_reasoning(mut self, send_reasoning: bool) -> Self {
         self.send_reasoning = send_reasoning;
@@ -1531,6 +1544,7 @@ impl Default for StreamTextUiMessageStreamOptions {
             generate_message_id: None,
             message_metadata: None,
             on_error: None,
+            on_finish: None,
             send_reasoning: true,
             send_sources: false,
             send_start: true,
@@ -1798,7 +1812,19 @@ impl StreamTextResult {
             }
         }
 
-        chunks
+        let mut finish_options = HandleUiMessageStreamFinishOptions::new(chunks);
+        if let Some(message_id) = response_message_id {
+            finish_options = finish_options.with_message_id(message_id);
+        }
+        if let Some(original_messages) = options.original_messages {
+            finish_options = finish_options.with_original_messages(original_messages);
+        }
+        if let Some(on_finish) = options.on_finish {
+            finish_options = finish_options.with_finish_callback(on_finish);
+        }
+
+        handle_ui_message_stream_finish(finish_options)
+            .expect("streamText UI-message stream chunks remain processable")
     }
 
     /// Creates a UI-message stream response from collected stream parts.
@@ -1806,8 +1832,20 @@ impl StreamTextResult {
         &self,
         init: UiMessageStreamResponseInit,
     ) -> UiMessageStreamResponse {
+        self.to_ui_message_stream_response_with_options(
+            init,
+            StreamTextUiMessageStreamOptions::default(),
+        )
+    }
+
+    /// Creates a UI-message stream response from collected stream parts with options.
+    pub fn to_ui_message_stream_response_with_options(
+        &self,
+        init: UiMessageStreamResponseInit,
+        options: StreamTextUiMessageStreamOptions,
+    ) -> UiMessageStreamResponse {
         create_ui_message_stream_response(UiMessageStreamResponseOptions::from_init(
-            self.to_ui_message_stream(),
+            self.to_ui_message_stream_with_options(options),
             init,
         ))
     }
@@ -1821,9 +1859,29 @@ impl StreamTextResult {
     where
         W: UiMessageStreamResponseWriter,
     {
+        self.pipe_ui_message_stream_to_response_with_options(
+            response,
+            init,
+            StreamTextUiMessageStreamOptions::default(),
+        )
+    }
+
+    /// Pipes UI-message stream chunks to a response writer with stream options.
+    pub fn pipe_ui_message_stream_to_response_with_options<W>(
+        &self,
+        response: &mut W,
+        init: UiMessageStreamResponseInit,
+        options: StreamTextUiMessageStreamOptions,
+    ) -> Result<(), W::Error>
+    where
+        W: UiMessageStreamResponseWriter,
+    {
         pipe_ui_message_stream_to_response(
             response,
-            UiMessageStreamResponseOptions::from_init(self.to_ui_message_stream(), init),
+            UiMessageStreamResponseOptions::from_init(
+                self.to_ui_message_stream_with_options(options),
+                init,
+            ),
         )
     }
 
@@ -3488,6 +3546,75 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_result_ui_message_stream_options_on_finish_receives_persisted_messages() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "new")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Say hello")],
+        )));
+
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+        let original_assistant = UiMessage::new("assistant-existing", UiMessageRole::Assistant)
+            .with_part(json!({ "type": "text", "text": "old", "state": "done" }));
+
+        let chunks = result.to_ui_message_stream_with_options(
+            StreamTextUiMessageStreamOptions::new()
+                .with_original_messages([
+                    UiMessage::new("user-1", UiMessageRole::User),
+                    original_assistant.clone(),
+                ])
+                .with_generate_message_id(|| "generated-new".to_string())
+                .with_on_finish(move |event| {
+                    finish_events_for_callback
+                        .lock()
+                        .expect("finish events lock")
+                        .push(event);
+                }),
+        );
+
+        assert_eq!(
+            serde_json::to_value(&chunks[0]).expect("chunk serializes"),
+            json!({ "type": "start", "messageId": "assistant-existing" })
+        );
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert!(finish_events[0].is_continuation);
+        assert!(!finish_events[0].is_aborted);
+        assert_eq!(finish_events[0].finish_reason, Some(FinishReason::Stop));
+        assert_eq!(finish_events[0].messages.len(), 2);
+        assert_eq!(finish_events[0].messages[0].id, "user-1");
+        assert_eq!(
+            serde_json::to_value(&finish_events[0].response_message).expect("message serializes"),
+            json!({
+                "id": "assistant-existing",
+                "role": "assistant",
+                "parts": [
+                    { "type": "text", "text": "old", "state": "done" },
+                    { "type": "step-start" },
+                    { "type": "text", "text": "new", "state": "done" }
+                ]
+            })
+        );
+        assert_eq!(
+            finish_events[0].messages[1],
+            finish_events[0].response_message
+        );
+    }
+
+    #[test]
     fn stream_text_result_ui_message_stream_options_mask_errors_with_on_error() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
@@ -3900,6 +4027,27 @@ mod tests {
                 .to_string(),
                 "data: [DONE]\n\n".to_string()
             ]
+        );
+
+        let response_with_stream_options = result.to_ui_message_stream_response_with_options(
+            UiMessageStreamResponseInit::new().with_header("x-ui-options", "yes"),
+            StreamTextUiMessageStreamOptions::new().with_message_id("response-id"),
+        );
+
+        assert_eq!(
+            response_with_stream_options
+                .headers
+                .get("x-ui-options")
+                .map(String::as_str),
+            Some("yes")
+        );
+        assert_eq!(
+            response_with_stream_options
+                .decoded_body()
+                .expect("response body decodes")[0],
+            r#"data: {"type":"start","messageId":"response-id"}
+
+"#
         );
     }
 
