@@ -403,9 +403,10 @@ pub use stream_object::{
     StreamObjectResult, stream_object,
 };
 pub use stream_text::{
-    StreamTextOptions, StreamTextResponseMetadata, StreamTextResult, StreamTextStep,
-    StreamTextStepPerformance, StreamTextUiMessageStreamOptions, TextStreamFilePart,
-    TextStreamFinishPart, TextStreamFinishStepPart, TextStreamPart, TextStreamReasoningDeltaPart,
+    StreamTextMessageMetadata, StreamTextMessageMetadataFunction, StreamTextOptions,
+    StreamTextResponseMetadata, StreamTextResult, StreamTextStep, StreamTextStepPerformance,
+    StreamTextUiMessageStreamOptions, TextStreamFilePart, TextStreamFinishPart,
+    TextStreamFinishStepPart, TextStreamPart, TextStreamReasoningDeltaPart,
     TextStreamReasoningFilePart, TextStreamStartPart, TextStreamStartStepPart,
     TextStreamTextDeltaPart, stream_text,
 };

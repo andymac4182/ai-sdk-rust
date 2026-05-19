@@ -1218,11 +1218,49 @@ pub struct StreamTextResult {
     pub steps: Vec<StreamTextStep>,
 }
 
+/// Callback invoked while converting stream-text parts to UI-message metadata.
+pub type StreamTextMessageMetadataFunction =
+    dyn Fn(&TextStreamPart) -> Option<JsonValue> + Send + Sync + 'static;
+
+/// Callback wrapper for upstream `toUIMessageStream` `messageMetadata`.
+#[derive(Clone)]
+pub struct StreamTextMessageMetadata {
+    callback: Arc<StreamTextMessageMetadataFunction>,
+}
+
+impl StreamTextMessageMetadata {
+    /// Creates a message-metadata callback.
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(&TextStreamPart) -> Option<JsonValue> + Send + Sync + 'static,
+    {
+        Self {
+            callback: Arc::new(callback),
+        }
+    }
+
+    /// Runs the metadata callback for one stream-text part.
+    pub fn metadata(&self, part: &TextStreamPart) -> Option<JsonValue> {
+        (self.callback)(part)
+    }
+}
+
+impl fmt::Debug for StreamTextMessageMetadata {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StreamTextMessageMetadata")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Options for converting a [`StreamTextResult`] into UI-message stream chunks.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct StreamTextUiMessageStreamOptions {
     /// Optional response message id to include in the stream-start chunk.
     pub message_id: Option<String>,
+
+    /// Optional callback that emits UI message metadata for matching stream parts.
+    pub message_metadata: Option<StreamTextMessageMetadata>,
 
     /// Whether reasoning chunks should be included. Defaults to `true`.
     pub send_reasoning: bool,
@@ -1246,6 +1284,15 @@ impl StreamTextUiMessageStreamOptions {
     /// Sets the response message id included in the stream-start chunk.
     pub fn with_message_id(mut self, message_id: impl Into<String>) -> Self {
         self.message_id = Some(message_id.into());
+        self
+    }
+
+    /// Sets a callback that can emit UI-message metadata for stream parts.
+    pub fn with_message_metadata<F>(mut self, message_metadata: F) -> Self
+    where
+        F: Fn(&TextStreamPart) -> Option<JsonValue> + Send + Sync + 'static,
+    {
+        self.message_metadata = Some(StreamTextMessageMetadata::new(message_metadata));
         self
     }
 
@@ -1278,6 +1325,7 @@ impl Default for StreamTextUiMessageStreamOptions {
     fn default() -> Self {
         Self {
             message_id: None,
+            message_metadata: None,
             send_reasoning: true,
             send_sources: false,
             send_start: true,
@@ -1304,26 +1352,36 @@ impl StreamTextResult {
     ) -> Vec<UiMessageChunk> {
         let mut chunks = Vec::new();
 
-        for part in &self.parts {
-            match part {
+        for stream_part in &self.parts {
+            match stream_part {
                 TextStreamPart::Start(_) => {
                     if options.send_start {
-                        chunks.push(match &options.message_id {
+                        let mut chunk = match &options.message_id {
                             Some(message_id) => {
                                 UiMessageChunk::start_with_message_id(message_id.clone())
                             }
                             None => UiMessageChunk::start(),
-                        });
+                        };
+                        if let Some(message_metadata) =
+                            stream_text_ui_message_metadata(&options, stream_part)
+                        {
+                            chunk = chunk.with_message_metadata(message_metadata);
+                        }
+                        chunks.push(chunk);
+                    } else {
+                        push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                     }
                 }
                 TextStreamPart::StartStep(_) => {
                     chunks.push(UiMessageChunk::start_step());
+                    push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                 }
                 TextStreamPart::TextStart(part) => {
                     chunks.push(UiMessageChunk::TextStart {
                         id: part.id.clone(),
                         provider_metadata: part.provider_metadata.clone(),
                     });
+                    push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                 }
                 TextStreamPart::TextDelta(part) => {
                     chunks.push(UiMessageChunk::TextDelta {
@@ -1331,12 +1389,14 @@ impl StreamTextResult {
                         delta: part.text.clone(),
                         provider_metadata: part.provider_metadata.clone(),
                     });
+                    push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                 }
                 TextStreamPart::TextEnd(part) => {
                     chunks.push(UiMessageChunk::TextEnd {
                         id: part.id.clone(),
                         provider_metadata: part.provider_metadata.clone(),
                     });
+                    push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                 }
                 TextStreamPart::ReasoningStart(part) => {
                     if options.send_reasoning {
@@ -1344,6 +1404,7 @@ impl StreamTextResult {
                             id: part.id.clone(),
                             provider_metadata: part.provider_metadata.clone(),
                         });
+                        push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                     }
                 }
                 TextStreamPart::ReasoningDelta(part) => {
@@ -1353,6 +1414,7 @@ impl StreamTextResult {
                             delta: part.text.clone(),
                             provider_metadata: part.provider_metadata.clone(),
                         });
+                        push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                     }
                 }
                 TextStreamPart::ReasoningEnd(part) => {
@@ -1361,25 +1423,36 @@ impl StreamTextResult {
                             id: part.id.clone(),
                             provider_metadata: part.provider_metadata.clone(),
                         });
+                        push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                     }
                 }
                 TextStreamPart::Error(part) => {
                     chunks.push(UiMessageChunk::error(ui_message_error_text(&part.error)));
+                    push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                 }
                 TextStreamPart::Abort(part) => {
                     chunks.push(match &part.reason {
                         Some(reason) => UiMessageChunk::abort_with_reason(reason.clone()),
                         None => UiMessageChunk::abort(),
                     });
+                    push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                 }
                 TextStreamPart::FinishStep(_) => {
                     chunks.push(UiMessageChunk::finish_step());
+                    push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                 }
                 TextStreamPart::Finish(part) => {
                     if options.send_finish {
-                        chunks.push(UiMessageChunk::finish_with_reason(
-                            part.finish_reason.clone(),
-                        ));
+                        let mut chunk =
+                            UiMessageChunk::finish_with_reason(part.finish_reason.clone());
+                        if let Some(message_metadata) =
+                            stream_text_ui_message_metadata(&options, stream_part)
+                        {
+                            chunk = chunk.with_message_metadata(message_metadata);
+                        }
+                        chunks.push(chunk);
+                    } else {
+                        push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                     }
                 }
                 TextStreamPart::ToolInputStart(part) => {
@@ -1391,20 +1464,25 @@ impl StreamTextResult {
                         dynamic: part.dynamic,
                         title: part.title.clone(),
                     });
+                    push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                 }
                 TextStreamPart::ToolInputDelta(part) => {
                     chunks.push(UiMessageChunk::tool_input_delta(
                         part.id.clone(),
                         part.delta.clone(),
                     ));
+                    push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                 }
-                TextStreamPart::ToolInputEnd(_) => {}
+                TextStreamPart::ToolInputEnd(_) => {
+                    push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
+                }
                 TextStreamPart::ToolApprovalRequest(part) => {
                     chunks.push(UiMessageChunk::ToolApprovalRequest {
                         approval_id: part.approval_id.clone(),
                         tool_call_id: part.tool_call_id.clone(),
                         provider_metadata: part.provider_metadata.clone(),
                     });
+                    push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                 }
                 TextStreamPart::ToolCall(part) => {
                     if part.invalid == Some(true) {
@@ -1434,6 +1512,7 @@ impl StreamTextResult {
                             title: part.title.clone(),
                         });
                     }
+                    push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                 }
                 TextStreamPart::ToolResult(part) => {
                     if part.is_error == Some(true) {
@@ -1456,12 +1535,14 @@ impl StreamTextResult {
                             dynamic: part.dynamic,
                         });
                     }
+                    push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                 }
                 TextStreamPart::Custom(part) => {
                     chunks.push(UiMessageChunk::Custom {
                         kind: part.kind.clone(),
                         provider_metadata: part.provider_metadata.clone(),
                     });
+                    push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                 }
                 TextStreamPart::File(part) => {
                     chunks.push(UiMessageChunk::File {
@@ -1469,6 +1550,7 @@ impl StreamTextResult {
                         url: ui_message_file_url(&part.file.media_type, &part.file.data),
                         provider_metadata: part.provider_metadata.clone(),
                     });
+                    push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                 }
                 TextStreamPart::ReasoningFile(part) => {
                     if options.send_reasoning {
@@ -1477,6 +1559,7 @@ impl StreamTextResult {
                             url: ui_message_file_url(&part.file.media_type, &part.file.data),
                             provider_metadata: part.provider_metadata.clone(),
                         });
+                        push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                     }
                 }
                 TextStreamPart::Source(part) => {
@@ -1500,9 +1583,12 @@ impl StreamTextResult {
                                 });
                             }
                         }
+                        push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                     }
                 }
-                TextStreamPart::Raw(_) => {}
+                TextStreamPart::Raw(_) => {
+                    push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
+                }
             }
         }
 
@@ -1556,6 +1642,26 @@ impl StreamTextResult {
             response,
             TextStreamResponseOptions::from_init(self.text_stream.clone(), init),
         )
+    }
+}
+
+fn stream_text_ui_message_metadata(
+    options: &StreamTextUiMessageStreamOptions,
+    part: &TextStreamPart,
+) -> Option<JsonValue> {
+    options
+        .message_metadata
+        .as_ref()
+        .and_then(|message_metadata| message_metadata.metadata(part))
+}
+
+fn push_stream_text_ui_message_metadata(
+    chunks: &mut Vec<UiMessageChunk>,
+    options: &StreamTextUiMessageStreamOptions,
+    part: &TextStreamPart,
+) {
+    if let Some(message_metadata) = stream_text_ui_message_metadata(options, part) {
+        chunks.push(UiMessageChunk::message_metadata(message_metadata));
     }
 }
 
@@ -2795,6 +2901,55 @@ mod tests {
                 { "type": "text-delta", "id": "1", "delta": "visible" },
                 { "type": "text-end", "id": "1" },
                 { "type": "finish-step" }
+            ])
+        );
+    }
+
+    #[test]
+    fn stream_text_result_applies_ui_message_metadata_callback_in_sequence() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Say hello")],
+        )));
+        let chunks = result.to_ui_message_stream_with_options(
+            StreamTextUiMessageStreamOptions::new().with_message_metadata(|part| match part {
+                TextStreamPart::Start(_) => Some(json!({ "stage": "start" })),
+                TextStreamPart::TextDelta(part) => Some(json!({ "delta": part.text.clone() })),
+                TextStreamPart::Finish(part) => Some(json!({
+                    "stage": "finish",
+                    "finishReason": part.finish_reason.clone()
+                })),
+                _ => None,
+            }),
+        );
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                { "type": "start", "messageMetadata": { "stage": "start" } },
+                { "type": "start-step" },
+                { "type": "text-start", "id": "1" },
+                { "type": "text-delta", "id": "1", "delta": "Hello" },
+                { "type": "message-metadata", "messageMetadata": { "delta": "Hello" } },
+                { "type": "text-end", "id": "1" },
+                { "type": "finish-step" },
+                {
+                    "type": "finish",
+                    "finishReason": "stop",
+                    "messageMetadata": { "stage": "finish", "finishReason": "stop" }
+                }
             ])
         );
     }
