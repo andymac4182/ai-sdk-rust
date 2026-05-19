@@ -2292,6 +2292,12 @@ impl SseMcpTransport {
                 McpClientError::new(format!("MCP SSE Transport Error: fetch failed: {error}"))
             })?;
         let status = response.status().as_u16();
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
         let body = response.body_mut().read_to_string().map_err(|error| {
             McpClientError::new(format!(
                 "MCP SSE Transport Error: failed to read response body: {error}"
@@ -2303,7 +2309,21 @@ impl SseMcpTransport {
             )));
         }
 
-        Ok(std::mem::take(&mut self.pending_messages))
+        let mut messages = std::mem::take(&mut self.pending_messages);
+        if body.trim().is_empty() {
+            return Ok(messages);
+        }
+        if content_type.contains("text/event-stream") {
+            messages.extend(parse_sse_transport_message_body(&body)?);
+        } else if content_type.contains("application/json") || content_type.is_empty() {
+            messages.extend(parse_sse_transport_json_body(&body)?);
+        } else {
+            return Err(McpClientError::new(format!(
+                "MCP SSE Transport Error: unsupported response content-type: {content_type}"
+            )));
+        }
+
+        Ok(messages)
     }
 }
 
@@ -2383,6 +2403,32 @@ fn parse_sse_transport_message(data: &str) -> McpClientResult<JsonRpcMessage> {
             "MCP SSE Transport Error: Failed to parse message: {error}"
         ))
     })?;
+    parse_sse_transport_json_value(value)
+}
+
+fn parse_sse_transport_message_body(body: &str) -> McpClientResult<Vec<JsonRpcMessage>> {
+    parse_json_rpc_sse_body(body)
+        .map_err(|error| McpClientError::new(error.message.replace("MCP HTTP", "MCP SSE")))
+}
+
+fn parse_sse_transport_json_body(body: &str) -> McpClientResult<Vec<JsonRpcMessage>> {
+    let value = serde_json::from_str::<JsonValue>(body).map_err(|error| {
+        McpClientError::new(format!(
+            "MCP SSE Transport Error: Failed to parse message: {error}"
+        ))
+    })?;
+    if let Some(messages) = value.as_array() {
+        messages
+            .iter()
+            .cloned()
+            .map(parse_sse_transport_json_value)
+            .collect::<McpClientResult<Vec<_>>>()
+    } else {
+        Ok(vec![parse_sse_transport_json_value(value)?])
+    }
+}
+
+fn parse_sse_transport_json_value(value: JsonValue) -> McpClientResult<JsonRpcMessage> {
     serde_json::from_value(value).map_err(|error| {
         McpClientError::new(format!(
             "MCP SSE Transport Error: Failed to parse message: {error}"
@@ -3674,6 +3720,48 @@ mod tests {
             Some(&"application/json".to_string())
         );
         assert_eq!(requests[1].body["method"], "tools/list");
+    }
+
+    #[test]
+    fn mcp_sse_transport_parses_post_sse_message_responses() {
+        let server = LocalHttpServer::new(vec![
+            LocalHttpResponse::new(
+                200,
+                [("content-type", "text/event-stream")],
+                "event: endpoint\ndata: /messages\n\n",
+            ),
+            LocalHttpResponse::new(
+                200,
+                [("content-type", "text/event-stream")],
+                format!(
+                    "event: message\ndata: {}\n\n",
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": 11,
+                        "result": { "tools": [] }
+                    })
+                ),
+            ),
+        ]);
+        let mut transport = SseMcpTransport::new(format!("{}/sse", server.url()));
+        transport.start().expect("SSE transport starts");
+
+        let messages = transport
+            .send(JsonRpcMessage::Request(JsonRpcRequest::new(
+                json!(11),
+                "tools/list",
+            )))
+            .expect("SSE endpoint POST response parses");
+
+        assert_eq!(
+            serde_json::to_value(&messages).expect("messages serialize"),
+            json!([{ "jsonrpc": "2.0", "id": 11, "result": { "tools": [] } }])
+        );
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[1].method, "POST");
+        assert_eq!(requests[1].path, "/messages");
     }
 
     #[test]
