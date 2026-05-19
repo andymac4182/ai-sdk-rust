@@ -225,10 +225,12 @@ Repeat this loop until the goal is complete or you hit a real blocker:
 
 1. Pull the latest `main` into your worktree branch.
 2. Re-scan or consult `docs/upstream-parity.md`.
-3. Pick the highest-value unported or unverified upstream package/API/provider,
-   respecting the required ordering: common/core SDK packages together with
-   Vercel AI Gateway first, unrelated standalone providers after those rows are
-   closed.
+3. Pick the highest-value unported or unverified upstream package/API/provider
+   from the first-phase queue until that queue is closed: ALL common/core SDK
+   packages together with Vercel AI Gateway provider coverage, including the
+   Gateway OpenAI-compatible and Open Responses routes. Do not select an
+   unrelated standalone provider slice while any first-phase row is still
+   `not-started` or `in-progress`.
 4. Implement it with tests and docs/examples where useful.
 5. Update `docs/upstream-parity.md` with status, evidence, and next queue.
 6. Run validation.
