@@ -11383,6 +11383,75 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_maps_openai_passthrough_option_edges() {
+        let (provider, captured_request) = open_responses_captured_provider("openai", "gpt-4o");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "instructions": "You are a friendly assistant.",
+                "include": [
+                    "reasoning.encrypted_content",
+                    "file_search_call.results"
+                ],
+                "user": "user_123",
+                "conversation": "conv_123",
+                "metadata": {
+                    "tenant": "acme"
+                },
+                "store": true,
+                "truncation": "auto",
+                "logprobs": 5
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            provider.language_model("gpt-4o").do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Hello"),
+                    )]),
+                )])
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-4o",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "instructions": "You are a friendly assistant.",
+                "include": [
+                    "reasoning.encrypted_content",
+                    "file_search_call.results",
+                    "message.output_text.logprobs"
+                ],
+                "user": "user_123",
+                "conversation": "conv_123",
+                "metadata": {
+                    "tenant": "acme"
+                },
+                "store": true,
+                "truncation": "auto",
+                "top_logprobs": 5
+            })
+        );
+    }
+
+    #[test]
     fn open_responses_provider_handles_prompt_file_defaults_and_unsupported_files() {
         let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
         let captured_requests_for_transport = Arc::clone(&captured_requests);
