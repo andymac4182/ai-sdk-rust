@@ -238,6 +238,22 @@ impl TestRequest {
     }
 }
 
+/// Parsed multipart/form-data request part.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultipartRequestPart {
+    pub name: String,
+    pub filename: Option<String>,
+    pub content_type: Option<String>,
+    pub body: String,
+}
+
+impl MultipartRequestPart {
+    /// Returns the part body as text.
+    pub fn text(&self) -> &str {
+        &self.body
+    }
+}
+
 /// Captured request inspection helper.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TestServerCall {
@@ -255,6 +271,19 @@ impl TestServerCall {
             .body
             .as_deref()
             .and_then(|body| serde_json::from_str(body).ok())
+    }
+
+    /// Parses a `multipart/form-data` request body by part name.
+    pub fn request_body_multipart(&self) -> Option<BTreeMap<String, MultipartRequestPart>> {
+        let content_type = self
+            .request
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            .map(|(_, value)| value.as_str())?;
+        let boundary = multipart_boundary(content_type)?;
+        let body = self.request.body.as_deref()?;
+        parse_multipart_body(body, boundary)
     }
 
     /// Returns captured request headers, excluding `user-agent`.
@@ -384,6 +413,84 @@ pub fn create_test_server(
 /// Rust analogue of upstream `convertArrayToReadableStream`.
 pub fn convert_array_to_readable_stream<T>(values: impl IntoIterator<Item = T>) -> Vec<T> {
     values.into_iter().collect()
+}
+
+fn multipart_boundary(content_type: &str) -> Option<&str> {
+    let mut parameters = content_type.split(';').map(str::trim);
+    let media_type = parameters.next()?;
+    if !media_type.eq_ignore_ascii_case("multipart/form-data") {
+        return None;
+    }
+    parameters.find_map(|parameter| {
+        let (name, value) = parameter.split_once('=')?;
+        if name.trim().eq_ignore_ascii_case("boundary") {
+            Some(value.trim().trim_matches('"'))
+        } else {
+            None
+        }
+    })
+}
+
+fn parse_multipart_body(
+    body: &str,
+    boundary: &str,
+) -> Option<BTreeMap<String, MultipartRequestPart>> {
+    let marker = format!("--{boundary}");
+    let mut parts = BTreeMap::new();
+
+    for section in body.split(&marker).skip(1) {
+        let section = section.trim_start_matches("\r\n");
+        if section.starts_with("--") {
+            break;
+        }
+        let section = section.trim_end_matches("\r\n");
+        if section.is_empty() {
+            continue;
+        }
+        let (raw_headers, part_body) = section.split_once("\r\n\r\n")?;
+        let headers = parse_multipart_headers(raw_headers);
+        let content_disposition = headers.get("content-disposition")?;
+        let disposition_parameters = parse_header_parameters(content_disposition);
+        let name = disposition_parameters.get("name")?.clone();
+        let part = MultipartRequestPart {
+            name: name.clone(),
+            filename: disposition_parameters.get("filename").cloned(),
+            content_type: headers.get("content-type").cloned(),
+            body: part_body.to_string(),
+        };
+        parts.insert(name, part);
+    }
+
+    Some(parts)
+}
+
+fn parse_multipart_headers(raw_headers: &str) -> BTreeMap<String, String> {
+    raw_headers
+        .lines()
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        })
+        .collect()
+}
+
+fn parse_header_parameters(value: &str) -> BTreeMap<String, String> {
+    value
+        .split(';')
+        .skip(1)
+        .filter_map(|parameter| {
+            let (name, value) = parameter.trim().split_once('=')?;
+            Some((name.trim().to_string(), unquote_header_value(value.trim())))
+        })
+        .collect()
+}
+
+fn unquote_header_value(value: &str) -> String {
+    value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(value)
+        .to_string()
 }
 
 /// Controller for deterministic stream tests.
@@ -669,6 +776,51 @@ mod tests {
                 .map(String::as_str),
             Some("rust")
         );
+    }
+
+    #[test]
+    fn create_test_server_parses_multipart_request_body() {
+        let boundary = "----ai-sdk-rust-boundary";
+        let body = format!(
+            "--{boundary}\r\n\
+Content-Disposition: form-data; name=\"prompt\"\r\n\
+\r\n\
+hello\r\n\
+--{boundary}\r\n\
+Content-Disposition: form-data; name=\"file\"; filename=\"note.txt\"\r\n\
+Content-Type: text/plain\r\n\
+\r\n\
+file body\r\n\
+--{boundary}--\r\n"
+        );
+        let mut server = create_test_server([(
+            "https://api.example.com/upload",
+            UrlHandler::new(UrlResponse::empty(200)),
+        )]);
+
+        server.handle(
+            "https://api.example.com/upload",
+            TestRequest::new("POST", "https://api.example.com/upload")
+                .with_header(
+                    "content-type",
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .with_body(body),
+        );
+
+        let call = server.calls.first().expect("call is recorded");
+        let parts = call
+            .request_body_multipart()
+            .expect("multipart body parses");
+        let prompt = parts.get("prompt").expect("prompt part exists");
+        assert_eq!(prompt.filename, None);
+        assert_eq!(prompt.content_type, None);
+        assert_eq!(prompt.text(), "hello");
+
+        let file = parts.get("file").expect("file part exists");
+        assert_eq!(file.filename.as_deref(), Some("note.txt"));
+        assert_eq!(file.content_type.as_deref(), Some("text/plain"));
+        assert_eq!(file.text(), "file body");
     }
 
     #[test]
