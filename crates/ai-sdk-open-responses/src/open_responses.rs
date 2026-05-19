@@ -9241,6 +9241,133 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_maps_request_parameters_and_json_schema_format() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_request_parameters",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "{\"status\":\"ok\"}"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 5,
+                            "output_tokens": 3
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let schema: JsonObject = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string"
+                }
+            },
+            "required": ["status"]
+        }))
+        .expect("schema deserializes");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Hello"),
+                    )]),
+                )])
+                .with_max_output_tokens(100)
+                .with_temperature(0.5)
+                .with_top_p(0.9)
+                .with_presence_penalty(0.1)
+                .with_frequency_penalty(0.2)
+                .with_response_format(
+                    LanguageModelResponseFormat::json()
+                        .with_name("response")
+                        .with_description("Example response schema")
+                        .with_schema(schema.clone()),
+                ),
+            ),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "gpt-4.1-mini",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "max_output_tokens": 100,
+                "temperature": 0.5,
+                "top_p": 0.9,
+                "presence_penalty": 0.1,
+                "frequency_penalty": 0.2,
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "response",
+                        "description": "Example response schema",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "status": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": ["status"]
+                        },
+                        "strict": true
+                    }
+                }
+            }))
+        );
+    }
+
+    #[test]
     fn open_responses_provider_maps_reasoning_effort_and_summary_options() {
         let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
         let captured_requests_for_transport = Arc::clone(&captured_requests);
