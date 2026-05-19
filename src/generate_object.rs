@@ -8,14 +8,16 @@ use time::OffsetDateTime;
 
 use crate::VERSION;
 use crate::headers::Headers;
-use crate::json::{JsonSchema, JsonValue};
+use crate::json::{JsonObject, JsonSchema, JsonValue};
 use crate::language_model::{
     FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
-    LanguageModelPrompt, LanguageModelReasoning, LanguageModelRequest, LanguageModelResponse,
-    LanguageModelResponseFormat, LanguageModelText, LanguageModelUsage,
+    LanguageModelGenerateResult, LanguageModelPrompt, LanguageModelReasoning, LanguageModelRequest,
+    LanguageModelResponse, LanguageModelResponseFormat, LanguageModelText, LanguageModelUsage,
 };
 use crate::prompt::{Prompt, standardize_prompt};
-use crate::provider::{InvalidPromptError, ProviderMetadata, ProviderOptions, TypeValidationError};
+use crate::provider::{
+    ApiCallError, InvalidPromptError, ProviderMetadata, ProviderOptions, TypeValidationError,
+};
 use crate::provider_utils::{
     FlexibleSchema, IdGeneratorOptions, ParseJsonError, ParseJsonResult, ValidateTypesResult,
     create_id_generator, generate_id, safe_parse_json, safe_parse_json_with_schema,
@@ -26,6 +28,10 @@ use crate::telemetry::{TelemetryOptions, create_telemetry_dispatcher};
 use crate::warning::Warning;
 
 pub use crate::generate_text::NoObjectGeneratedError;
+
+const fn default_max_retries() -> usize {
+    DEFAULT_MAX_RETRIES
+}
 
 /// Request metadata returned by high-level object generation.
 ///
@@ -270,6 +276,7 @@ pub struct GenerateObjectStartEvent {
     pub seed: Option<u64>,
 
     /// Maximum number of retries configured for failed requests.
+    #[serde(default = "default_max_retries")]
     pub max_retries: usize,
 
     /// Additional HTTP headers sent to the model.
@@ -700,6 +707,9 @@ pub struct GenerateObjectOptions<'a, M: LanguageModel + ?Sized> {
 
     /// Optional telemetry dispatcher settings.
     pub telemetry: Option<TelemetryOptions>,
+
+    /// Maximum number of retries for failed provider requests.
+    pub max_retries: usize,
 }
 
 impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
@@ -734,6 +744,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
             on_step_finish: None,
             on_finish: None,
             telemetry: None,
+            max_retries: DEFAULT_MAX_RETRIES,
         }
     }
 
@@ -897,6 +908,12 @@ impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
         self
     }
 
+    /// Sets the maximum number of retries for failed provider requests.
+    pub fn with_max_retries(mut self, max_retries: usize) -> Self {
+        self.max_retries = max_retries;
+        self
+    }
+
     /// Adds an HTTP header.
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.call_options
@@ -932,6 +949,7 @@ where
         on_step_finish,
         on_finish,
         telemetry,
+        max_retries,
     } = options;
 
     let output_kind = generate_object_output_kind(&schema, enum_values.as_deref(), array_output);
@@ -962,7 +980,7 @@ where
             presence_penalty: call_options.presence_penalty,
             frequency_penalty: call_options.frequency_penalty,
             seed: call_options.seed,
-            max_retries: DEFAULT_MAX_RETRIES,
+            max_retries,
             headers: call_options.headers.clone(),
             provider_options: call_options.provider_options.clone(),
             output: output_kind,
@@ -992,7 +1010,7 @@ where
         telemetry_dispatcher.on_object_step_start(&step_start_event);
     }
 
-    let generate_result = model.do_generate(call_options).await;
+    let generate_result = do_generate_object_with_retries(model, call_options, max_retries).await;
     let finish_reason = generate_result.finish_reason.unified;
     let usage = generate_result.usage;
     let request = generate_object_request(generate_result.request);
@@ -1077,6 +1095,55 @@ where
     }
 
     Ok(result)
+}
+
+async fn do_generate_object_with_retries<M>(
+    model: &M,
+    call_options: LanguageModelCallOptions,
+    max_retries: usize,
+) -> LanguageModelGenerateResult
+where
+    M: LanguageModel + ?Sized,
+{
+    let mut retries = 0;
+
+    loop {
+        let result = model.do_generate(call_options.clone()).await;
+
+        if retries < max_retries && generate_object_result_is_retryable_pre_content_failure(&result)
+        {
+            retries += 1;
+            continue;
+        }
+
+        return result;
+    }
+}
+
+fn generate_object_result_is_retryable_pre_content_failure(
+    result: &LanguageModelGenerateResult,
+) -> bool {
+    result.finish_reason.unified == FinishReason::Error
+        && result.content.is_empty()
+        && result
+            .provider_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.values().any(provider_metadata_is_retryable))
+}
+
+fn provider_metadata_is_retryable(metadata: &JsonObject) -> bool {
+    metadata
+        .get("isRetryable")
+        .or_else(|| metadata.get("is_retryable"))
+        .and_then(JsonValue::as_bool)
+        .unwrap_or_else(|| {
+            metadata
+                .get("statusCode")
+                .or_else(|| metadata.get("status_code"))
+                .and_then(JsonValue::as_u64)
+                .and_then(|status_code| u16::try_from(status_code).ok())
+                .is_some_and(ApiCallError::is_retryable_status_code)
+        })
 }
 
 pub(crate) fn generate_object_output_kind(
@@ -1472,6 +1539,7 @@ mod tests {
         LanguageModelSystemMessage, LanguageModelText, LanguageModelTextPart, LanguageModelUsage,
         LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
     };
+    use crate::mock_models::MockLanguageModel;
     use crate::prompt::Prompt;
     use crate::provider::ProviderMetadata;
     use crate::provider_utils::{Schema, ValidationResult, json_schema};
@@ -1865,6 +1933,48 @@ mod tests {
             headers.get("user-agent").map(String::as_str),
             Some(format!("ai/{VERSION}").as_str())
         );
+    }
+
+    #[test]
+    fn generate_object_retries_retryable_pre_content_errors() {
+        let retry_metadata: ProviderMetadata = serde_json::from_value(json!({
+            "mock": {
+                "errorMessage": "rate limited",
+                "statusCode": 429,
+                "isRetryable": true
+            }
+        }))
+        .expect("provider metadata deserializes");
+        let retryable_error = LanguageModelGenerateResult::new(
+            Vec::new(),
+            LanguageModelFinishReason {
+                unified: FinishReason::Error,
+                raw: Some("api-error".to_string()),
+            },
+            LanguageModelUsage::default(),
+        )
+        .with_provider_metadata(retry_metadata);
+        let successful_result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"answer\":42}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            LanguageModelUsage::default(),
+        );
+        let model =
+            MockLanguageModel::new().with_generate_results([retryable_error, successful_result]);
+
+        let output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt()).with_max_retries(1),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(model.generate_calls().len(), 2);
+        assert_eq!(output.object, json!({ "answer": 42 }));
+        assert_eq!(output.finish_reason, FinishReason::Stop);
     }
 
     #[test]
