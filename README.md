@@ -31,6 +31,21 @@ Use the package-owned loopback receiver when a telemetry slice needs proof that
 real OTLP/HTTP trace data is emitted:
 
 ```sh
+scripts/check-otel-loopback.sh
+```
+
+That check runs the dependency-free exporter proof and the real Rust
+OpenTelemetry SDK OTLP/HTTP JSON exporter against the loopback receiver. To
+also run the ignored live Vercel AI Gateway telemetry test when `.env.local`
+contains credentials:
+
+```sh
+scripts/check-otel-loopback.sh --live-gateway
+```
+
+To run only the receiver as a local process:
+
+```sh
 cargo run -p ai-sdk-otel --example local_otlp_receiver
 ```
 
