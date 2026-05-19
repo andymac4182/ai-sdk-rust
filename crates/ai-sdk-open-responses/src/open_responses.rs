@@ -6517,6 +6517,160 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_maps_upstream_multi_turn_tool_conversation_fixture() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_multi_turn_tool",
+                        "created_at": 1711115037,
+                        "model": "gemma-7b-it",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "The weather in Tokyo is sunny."
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 18,
+                            "output_tokens": 7
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new(
+                "lmstudio",
+                "https://api.lmstudio.test/v1/responses",
+            )
+            .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gemma-7b-it");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![
+                    LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                        LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
+                            "What is the weather in Tokyo?",
+                        )),
+                    ])),
+                    LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                        LanguageModelAssistantContentPart::ToolCall(
+                            LanguageModelToolCallPart::new(
+                                "call_weather_123",
+                                "get_weather",
+                                json!({
+                                    "location": "Tokyo"
+                                }),
+                            ),
+                        ),
+                    ])),
+                    LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                        LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                            "call_weather_123",
+                            "get_weather",
+                            LanguageModelToolResultOutput::json(json!({
+                                "temperature": 22,
+                                "condition": "sunny",
+                                "humidity": 65
+                            })),
+                        )),
+                    ])),
+                ])
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "get_weather",
+                        json_object(json!({
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": ["location"]
+                        })),
+                    )
+                    .with_description("Get the current weather for a location"),
+                )),
+            ),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "gemma-7b-it",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "What is the weather in Tokyo?"
+                            }
+                        ]
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_weather_123",
+                        "name": "get_weather",
+                        "arguments": "{\"location\":\"Tokyo\"}"
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_weather_123",
+                        "output": "{\"condition\":\"sunny\",\"humidity\":65,\"temperature\":22}"
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "get_weather",
+                        "description": "Get the current weather for a location",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": ["location"]
+                        }
+                    }
+                ]
+            }))
+        );
+    }
+
+    #[test]
     fn open_responses_provider_converts_standard_tool_result_outputs() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -9435,22 +9589,29 @@ mod tests {
                 )],
             ))]
         };
-        let provider_options: ProviderOptions = serde_json::from_value(json!({
-            "lmstudio": {
-                "reasoningSummary": "auto",
-                "store": false,
-                "metadata": {
-                    "trace": "ignored"
-                }
-            }
-        }))
-        .expect("provider options deserialize");
+        let provider_options = |value: JsonValue| -> ProviderOptions {
+            serde_json::from_value(value).expect("provider options deserialize")
+        };
 
+        let high_result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(prompt())
+                    .with_reasoning(LanguageModelReasoningEffort::High),
+            ),
+        );
         let minimal_result = poll_ready(
             model.do_generate(
                 LanguageModelCallOptions::new(prompt())
                     .with_reasoning(LanguageModelReasoningEffort::Minimal)
-                    .with_provider_options(provider_options),
+                    .with_provider_options(provider_options(json!({
+                        "lmstudio": {
+                            "reasoningSummary": "auto",
+                            "store": false,
+                            "metadata": {
+                                "trace": "ignored"
+                            }
+                        }
+                    }))),
             ),
         );
         let none_result = poll_ready(
@@ -9459,10 +9620,51 @@ mod tests {
                     .with_reasoning(LanguageModelReasoningEffort::None),
             ),
         );
+        let xhigh_result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(prompt())
+                    .with_reasoning(LanguageModelReasoningEffort::Xhigh),
+            ),
+        );
         let default_result = poll_ready(
             model.do_generate(
                 LanguageModelCallOptions::new(prompt())
                     .with_reasoning(LanguageModelReasoningEffort::ProviderDefault),
+            ),
+        );
+        let detailed_summary_result = poll_ready(model.do_generate(
+            LanguageModelCallOptions::new(prompt()).with_provider_options(provider_options(
+                json!({
+                    "lmstudio": {
+                        "reasoningSummary": "detailed"
+                    }
+                }),
+            )),
+        ));
+        let combined_result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(prompt())
+                    .with_reasoning(LanguageModelReasoningEffort::High)
+                    .with_provider_options(provider_options(json!({
+                        "lmstudio": {
+                            "reasoningSummary": "auto"
+                        }
+                    }))),
+            ),
+        );
+        let concise_summary_result = poll_ready(model.do_generate(
+            LanguageModelCallOptions::new(prompt()).with_provider_options(provider_options(
+                json!({
+                    "lmstudio": {
+                        "reasoningSummary": "concise"
+                    }
+                }),
+            )),
+        ));
+        let empty_provider_options_result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(prompt())
+                    .with_provider_options(provider_options(json!({ "lmstudio": {} }))),
             ),
         );
 
@@ -9475,13 +9677,23 @@ mod tests {
                         "reasoning \"minimal\" is not directly supported by this model. mapped to effort \"low\"."
                     )
         ));
-        assert!(none_result.warnings.is_empty());
-        assert!(default_result.warnings.is_empty());
+        for result in [
+            &high_result,
+            &none_result,
+            &xhigh_result,
+            &default_result,
+            &detailed_summary_result,
+            &combined_result,
+            &concise_summary_result,
+            &empty_provider_options_result,
+        ] {
+            assert!(result.warnings.is_empty());
+        }
 
         let requests = captured_requests
             .lock()
             .expect("captured requests mutex is not poisoned");
-        assert_eq!(requests.len(), 3);
+        assert_eq!(requests.len(), 9);
         let bodies = requests
             .iter()
             .map(|request| {
@@ -9497,20 +9709,53 @@ mod tests {
         assert_eq!(
             bodies[0]["reasoning"],
             json!({
+                "effort": "high"
+            })
+        );
+        assert_eq!(
+            bodies[1]["reasoning"],
+            json!({
                 "effort": "low",
                 "summary": "auto"
             })
         );
-        assert!(bodies[0].get("reasoningSummary").is_none());
-        assert!(bodies[0].get("store").is_none());
-        assert!(bodies[0].get("metadata").is_none());
+        assert!(bodies[1].get("reasoningSummary").is_none());
+        assert!(bodies[1].get("store").is_none());
+        assert!(bodies[1].get("metadata").is_none());
         assert_eq!(
-            bodies[1]["reasoning"],
+            bodies[2]["reasoning"],
             json!({
                 "effort": "none"
             })
         );
-        assert!(bodies[2].get("reasoning").is_none());
+        assert_eq!(
+            bodies[3]["reasoning"],
+            json!({
+                "effort": "xhigh"
+            })
+        );
+        assert!(bodies[4].get("reasoning").is_none());
+        assert_eq!(
+            bodies[5]["reasoning"],
+            json!({
+                "summary": "detailed"
+            })
+        );
+        assert!(bodies[5].get("reasoningSummary").is_none());
+        assert_eq!(
+            bodies[6]["reasoning"],
+            json!({
+                "effort": "high",
+                "summary": "auto"
+            })
+        );
+        assert_eq!(
+            bodies[7]["reasoning"],
+            json!({
+                "summary": "concise"
+            })
+        );
+        assert!(bodies[8].get("reasoning").is_none());
     }
 
     #[test]
