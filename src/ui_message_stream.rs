@@ -105,6 +105,153 @@ pub enum UiMessageChunk {
         provider_metadata: Option<ProviderMetadata>,
     },
 
+    /// Generated file part.
+    File {
+        /// The IANA media type of the generated file.
+        media_type: String,
+
+        /// URL or data URI for the generated file.
+        url: String,
+    },
+
+    /// URL source part.
+    SourceUrl {
+        /// Source identifier.
+        source_id: String,
+
+        /// Source URL.
+        url: String,
+
+        /// Optional source title.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+
+        /// Provider-specific metadata for the source.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+
+    /// Document source part.
+    SourceDocument {
+        /// Source identifier.
+        source_id: String,
+
+        /// Source document media type.
+        media_type: String,
+
+        /// Source document title.
+        title: String,
+
+        /// Optional source document filename.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
+
+        /// Provider-specific metadata for the source.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+
+    /// Start of streamed input for a tool call.
+    ToolInputStart {
+        /// Tool call identifier.
+        tool_call_id: String,
+
+        /// Tool name.
+        tool_name: String,
+
+        /// Whether the provider executes the tool.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_executed: Option<bool>,
+    },
+
+    /// Delta for streamed input to a tool call.
+    ToolInputDelta {
+        /// Tool call identifier.
+        tool_call_id: String,
+
+        /// Tool input delta.
+        input_text_delta: String,
+    },
+
+    /// Parsed tool input is available.
+    ToolInputAvailable {
+        /// Tool call identifier.
+        tool_call_id: String,
+
+        /// Tool name.
+        tool_name: String,
+
+        /// Parsed tool input.
+        input: JsonValue,
+
+        /// Whether the provider executes the tool.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_executed: Option<bool>,
+
+        /// Provider-specific metadata for the tool call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+
+    /// Tool input could not be parsed or validated.
+    ToolInputError {
+        /// Tool call identifier.
+        tool_call_id: String,
+
+        /// Tool name.
+        tool_name: String,
+
+        /// Raw or partially parsed tool input.
+        input: JsonValue,
+
+        /// Human-readable error text.
+        error_text: String,
+    },
+
+    /// Tool output is available.
+    ToolOutputAvailable {
+        /// Tool call identifier.
+        tool_call_id: String,
+
+        /// Tool output.
+        output: JsonValue,
+    },
+
+    /// Tool execution failed.
+    ToolOutputError {
+        /// Tool call identifier.
+        tool_call_id: String,
+
+        /// Human-readable error text.
+        error_text: String,
+    },
+
+    /// Provider-executed tool approval is requested.
+    ToolApprovalRequest {
+        /// Approval request identifier.
+        approval_id: String,
+
+        /// Tool call identifier.
+        tool_call_id: String,
+    },
+
+    /// Tool output was denied.
+    ToolOutputDenied {
+        /// Tool call identifier.
+        tool_call_id: String,
+
+        /// Tool name.
+        tool_name: String,
+
+        /// Whether the provider would execute the tool.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_executed: Option<bool>,
+
+        /// Whether the tool was dynamically defined.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dynamic: Option<bool>,
+    },
+
     /// Error chunk sent to UI-message stream consumers.
     Error {
         /// Error text visible to the client.
@@ -327,6 +474,135 @@ impl UiMessageChunk {
         Self::ReasoningEnd {
             id: id.into(),
             provider_metadata: None,
+        }
+    }
+
+    /// Creates a file UI-message chunk.
+    pub fn file(media_type: impl Into<String>, url: impl Into<String>) -> Self {
+        Self::File {
+            media_type: media_type.into(),
+            url: url.into(),
+        }
+    }
+
+    /// Creates a URL source UI-message chunk.
+    pub fn source_url(source_id: impl Into<String>, url: impl Into<String>) -> Self {
+        Self::SourceUrl {
+            source_id: source_id.into(),
+            url: url.into(),
+            title: None,
+            provider_metadata: None,
+        }
+    }
+
+    /// Creates a document source UI-message chunk.
+    pub fn source_document(
+        source_id: impl Into<String>,
+        media_type: impl Into<String>,
+        title: impl Into<String>,
+    ) -> Self {
+        Self::SourceDocument {
+            source_id: source_id.into(),
+            media_type: media_type.into(),
+            title: title.into(),
+            filename: None,
+            provider_metadata: None,
+        }
+    }
+
+    /// Creates a tool-input-start UI-message chunk.
+    pub fn tool_input_start(tool_call_id: impl Into<String>, tool_name: impl Into<String>) -> Self {
+        Self::ToolInputStart {
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            provider_executed: None,
+        }
+    }
+
+    /// Creates a tool-input-delta UI-message chunk.
+    pub fn tool_input_delta(
+        tool_call_id: impl Into<String>,
+        input_text_delta: impl Into<String>,
+    ) -> Self {
+        Self::ToolInputDelta {
+            tool_call_id: tool_call_id.into(),
+            input_text_delta: input_text_delta.into(),
+        }
+    }
+
+    /// Creates a tool-input-available UI-message chunk.
+    pub fn tool_input_available(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        input: impl Into<JsonValue>,
+    ) -> Self {
+        Self::ToolInputAvailable {
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            input: input.into(),
+            provider_executed: None,
+            provider_metadata: None,
+        }
+    }
+
+    /// Creates a tool-input-error UI-message chunk.
+    pub fn tool_input_error(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        input: impl Into<JsonValue>,
+        error_text: impl Into<String>,
+    ) -> Self {
+        Self::ToolInputError {
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            input: input.into(),
+            error_text: error_text.into(),
+        }
+    }
+
+    /// Creates a tool-output-available UI-message chunk.
+    pub fn tool_output_available(
+        tool_call_id: impl Into<String>,
+        output: impl Into<JsonValue>,
+    ) -> Self {
+        Self::ToolOutputAvailable {
+            tool_call_id: tool_call_id.into(),
+            output: output.into(),
+        }
+    }
+
+    /// Creates a tool-output-error UI-message chunk.
+    pub fn tool_output_error(
+        tool_call_id: impl Into<String>,
+        error_text: impl Into<String>,
+    ) -> Self {
+        Self::ToolOutputError {
+            tool_call_id: tool_call_id.into(),
+            error_text: error_text.into(),
+        }
+    }
+
+    /// Creates a tool-approval-request UI-message chunk.
+    pub fn tool_approval_request(
+        approval_id: impl Into<String>,
+        tool_call_id: impl Into<String>,
+    ) -> Self {
+        Self::ToolApprovalRequest {
+            approval_id: approval_id.into(),
+            tool_call_id: tool_call_id.into(),
+        }
+    }
+
+    /// Creates a tool-output-denied UI-message chunk.
+    pub fn tool_output_denied(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+    ) -> Self {
+        Self::ToolOutputDenied {
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            provider_executed: None,
+            dynamic: None,
         }
     }
 
@@ -652,6 +928,23 @@ Ensure a \"reasoning-start\" chunk is sent before any \"reasoning-end\" chunks."
                     provider_metadata,
                 );
                 state.active_reasoning_parts.remove(&id);
+                updates.push(state.message.clone());
+            }
+            chunk @ (UiMessageChunk::File { .. }
+            | UiMessageChunk::SourceUrl { .. }
+            | UiMessageChunk::SourceDocument { .. }
+            | UiMessageChunk::ToolInputStart { .. }
+            | UiMessageChunk::ToolInputDelta { .. }
+            | UiMessageChunk::ToolInputAvailable { .. }
+            | UiMessageChunk::ToolInputError { .. }
+            | UiMessageChunk::ToolOutputAvailable { .. }
+            | UiMessageChunk::ToolOutputError { .. }
+            | UiMessageChunk::ToolApprovalRequest { .. }
+            | UiMessageChunk::ToolOutputDenied { .. }) => {
+                state.message.parts.push(
+                    serde_json::to_value(&chunk)
+                        .expect("ui-message stream chunk serializes to a JSON part"),
+                );
                 updates.push(state.message.clone());
             }
             UiMessageChunk::Error { error_text } => {
@@ -1135,6 +1428,94 @@ mod tests {
                 .to_string(),
                 "data: [DONE]\n\n".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn ui_message_chunk_serializes_portable_tool_source_and_file_chunks() {
+        let chunks = vec![
+            UiMessageChunk::file("text/plain", "data:text/plain;base64,aGk="),
+            UiMessageChunk::SourceUrl {
+                source_id: "source-1".to_string(),
+                url: "https://example.com".to_string(),
+                title: Some("Example".to_string()),
+                provider_metadata: None,
+            },
+            UiMessageChunk::tool_input_available(
+                "call-1",
+                "getWeather",
+                json!({ "city": "Brisbane" }),
+            ),
+            UiMessageChunk::tool_output_available("call-1", json!({ "temperature": 22 })),
+            UiMessageChunk::tool_approval_request("approval-1", "call-1"),
+        ];
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                {
+                    "type": "file",
+                    "mediaType": "text/plain",
+                    "url": "data:text/plain;base64,aGk="
+                },
+                {
+                    "type": "source-url",
+                    "sourceId": "source-1",
+                    "url": "https://example.com",
+                    "title": "Example"
+                },
+                {
+                    "type": "tool-input-available",
+                    "toolCallId": "call-1",
+                    "toolName": "getWeather",
+                    "input": { "city": "Brisbane" }
+                },
+                {
+                    "type": "tool-output-available",
+                    "toolCallId": "call-1",
+                    "output": { "temperature": 22 }
+                },
+                {
+                    "type": "tool-approval-request",
+                    "approvalId": "approval-1",
+                    "toolCallId": "call-1"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_preserves_portable_non_text_chunks_as_parts() {
+        let messages = read_ui_message_stream(ReadUiMessageStreamOptions::new([
+            UiMessageChunk::start_with_message_id("msg-123"),
+            UiMessageChunk::start_step(),
+            UiMessageChunk::tool_input_available(
+                "call-1",
+                "getWeather",
+                json!({ "city": "Brisbane" }),
+            ),
+            UiMessageChunk::tool_output_available("call-1", json!({ "temperature": 22 })),
+            UiMessageChunk::finish_step(),
+            UiMessageChunk::finish(),
+        ]))
+        .expect("ui stream reads");
+
+        assert_eq!(
+            messages.last().map(|message| message.parts.clone()),
+            Some(vec![
+                json!({ "type": "step-start" }),
+                json!({
+                    "type": "tool-input-available",
+                    "toolCallId": "call-1",
+                    "toolName": "getWeather",
+                    "input": { "city": "Brisbane" }
+                }),
+                json!({
+                    "type": "tool-output-available",
+                    "toolCallId": "call-1",
+                    "output": { "temperature": 22 }
+                }),
+            ])
         );
     }
 

@@ -6,8 +6,12 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
-use ai_sdk_provider::json::{JsonObject, JsonSchema};
-use ai_sdk_provider_utils::Tool;
+use ai_sdk_provider::json::{JsonObject, JsonSchema, JsonValue};
+use ai_sdk_provider::{
+    FileDataContent, LanguageModelFileData, LanguageModelSource, LanguageModelStreamPart,
+};
+use ai_sdk_provider_utils::{Tool, convert_to_base64};
+use ai_sdk_rust::UiMessageChunk;
 use serde::{Deserialize, Serialize};
 
 /// The workflow crate version compiled into the library.
@@ -171,9 +175,152 @@ pub fn resolve_serializable_tools(
         .collect()
 }
 
+/// Converts one language-model stream part into a UI-message chunk.
+///
+/// This mirrors upstream workflow `toUIMessageChunk`: stream lifecycle and raw
+/// provider chunks do not emit UI chunks, while generated text, reasoning,
+/// files, sources, tool input/output, approval requests, and errors do.
+pub fn to_ui_message_chunk(part: &LanguageModelStreamPart) -> Option<UiMessageChunk> {
+    match part {
+        LanguageModelStreamPart::TextStart(part) => Some(UiMessageChunk::TextStart {
+            id: part.id.clone(),
+            provider_metadata: part.provider_metadata.clone(),
+        }),
+        LanguageModelStreamPart::TextDelta(part) => Some(UiMessageChunk::TextDelta {
+            id: part.id.clone(),
+            delta: part.delta.clone(),
+            provider_metadata: part.provider_metadata.clone(),
+        }),
+        LanguageModelStreamPart::TextEnd(part) => Some(UiMessageChunk::TextEnd {
+            id: part.id.clone(),
+            provider_metadata: part.provider_metadata.clone(),
+        }),
+        LanguageModelStreamPart::ReasoningStart(part) => Some(UiMessageChunk::ReasoningStart {
+            id: part.id.clone(),
+            provider_metadata: part.provider_metadata.clone(),
+        }),
+        LanguageModelStreamPart::ReasoningDelta(part) => Some(UiMessageChunk::ReasoningDelta {
+            id: part.id.clone(),
+            delta: part.delta.clone(),
+            provider_metadata: part.provider_metadata.clone(),
+        }),
+        LanguageModelStreamPart::ReasoningEnd(part) => Some(UiMessageChunk::ReasoningEnd {
+            id: part.id.clone(),
+            provider_metadata: part.provider_metadata.clone(),
+        }),
+        LanguageModelStreamPart::File(part) => Some(UiMessageChunk::File {
+            media_type: part.media_type.clone(),
+            url: language_model_file_url(&part.media_type, &part.data),
+        }),
+        LanguageModelStreamPart::Source(source) => match source {
+            LanguageModelSource::Url(source) => Some(UiMessageChunk::SourceUrl {
+                source_id: source.id.clone(),
+                url: source.url.clone(),
+                title: source.title.clone(),
+                provider_metadata: source.provider_metadata.clone(),
+            }),
+            LanguageModelSource::Document(source) => Some(UiMessageChunk::SourceDocument {
+                source_id: source.id.clone(),
+                media_type: source.media_type.clone(),
+                title: source.title.clone(),
+                filename: source.filename.clone(),
+                provider_metadata: source.provider_metadata.clone(),
+            }),
+        },
+        LanguageModelStreamPart::ToolInputStart(part) => Some(UiMessageChunk::ToolInputStart {
+            tool_call_id: part.id.clone(),
+            tool_name: part.tool_name.clone(),
+            provider_executed: part.provider_executed,
+        }),
+        LanguageModelStreamPart::ToolInputDelta(part) => Some(UiMessageChunk::ToolInputDelta {
+            tool_call_id: part.id.clone(),
+            input_text_delta: part.delta.clone(),
+        }),
+        LanguageModelStreamPart::ToolCall(part) => Some(UiMessageChunk::ToolInputAvailable {
+            tool_call_id: part.tool_call_id.clone(),
+            tool_name: part.tool_name.clone(),
+            input: parse_tool_input(&part.input),
+            provider_executed: part.provider_executed,
+            provider_metadata: part.provider_metadata.clone(),
+        }),
+        LanguageModelStreamPart::ToolResult(part) => Some(UiMessageChunk::ToolOutputAvailable {
+            tool_call_id: part.tool_call_id.clone(),
+            output: part.result.as_value().clone(),
+        }),
+        LanguageModelStreamPart::ToolApprovalRequest(part) => {
+            Some(UiMessageChunk::ToolApprovalRequest {
+                approval_id: part.approval_id.clone(),
+                tool_call_id: part.tool_call_id.clone(),
+            })
+        }
+        LanguageModelStreamPart::Error(part) => Some(UiMessageChunk::Error {
+            error_text: json_error_text(&part.error),
+        }),
+        LanguageModelStreamPart::ToolInputEnd(_)
+        | LanguageModelStreamPart::Custom(_)
+        | LanguageModelStreamPart::ReasoningFile(_)
+        | LanguageModelStreamPart::StreamStart(_)
+        | LanguageModelStreamPart::ResponseMetadata(_)
+        | LanguageModelStreamPart::Finish(_)
+        | LanguageModelStreamPart::Raw(_) => None,
+    }
+}
+
+/// Converts a model-call stream into UI-message chunks with workflow lifecycle
+/// markers around the converted model chunks.
+pub fn model_call_stream_to_ui_chunks(
+    parts: impl IntoIterator<Item = LanguageModelStreamPart>,
+) -> Vec<UiMessageChunk> {
+    let mut chunks = vec![UiMessageChunk::start(), UiMessageChunk::start_step()];
+
+    chunks.extend(
+        parts
+            .into_iter()
+            .filter_map(|part| to_ui_message_chunk(&part)),
+    );
+
+    chunks.push(UiMessageChunk::finish_step());
+    chunks.push(UiMessageChunk::finish());
+    chunks
+}
+
+fn language_model_file_url(media_type: &str, data: &LanguageModelFileData) -> String {
+    match data {
+        LanguageModelFileData::Data { data } => {
+            format!(
+                "data:{media_type};base64,{}",
+                file_data_content_base64(data)
+            )
+        }
+        LanguageModelFileData::Url { url } => url.as_str().to_string(),
+    }
+}
+
+fn file_data_content_base64(data: &FileDataContent) -> String {
+    convert_to_base64(data)
+}
+
+fn parse_tool_input(input: &str) -> JsonValue {
+    serde_json::from_str(input).unwrap_or_else(|_| JsonValue::String(input.to_string()))
+}
+
+fn json_error_text(error: &JsonValue) -> String {
+    error
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ai_sdk_provider::json::NonNullJsonValue;
+    use ai_sdk_provider::{
+        LanguageModelErrorStreamPart, LanguageModelFile, LanguageModelReasoningDelta,
+        LanguageModelStreamStart, LanguageModelTextDelta, LanguageModelTextStart,
+        LanguageModelToolApprovalRequest, LanguageModelToolCall, LanguageModelToolInputDelta,
+        LanguageModelToolInputStart, LanguageModelToolResult, LanguageModelUrlSource,
+    };
     use serde_json::json;
 
     fn weather_schema() -> JsonSchema {
@@ -302,6 +449,181 @@ mod tests {
             SerializableToolError::MissingProviderToolId {
                 tool_name: "webSearch".to_string()
             }
+        );
+    }
+
+    #[test]
+    fn to_ui_message_chunk_maps_text_reasoning_and_tool_call_parts() {
+        let provider_metadata = BTreeMap::from([(
+            "google".to_string(),
+            serde_json::from_value(json!({
+                "thoughtSignature": "sig_abc123"
+            }))
+            .expect("provider metadata is an object"),
+        )]);
+
+        assert_eq!(
+            to_ui_message_chunk(&LanguageModelStreamPart::TextStart(
+                LanguageModelTextStart::new("text-1")
+                    .with_provider_metadata(provider_metadata.clone())
+            )),
+            Some(UiMessageChunk::TextStart {
+                id: "text-1".to_string(),
+                provider_metadata: Some(provider_metadata.clone()),
+            })
+        );
+
+        assert_eq!(
+            to_ui_message_chunk(&LanguageModelStreamPart::ReasoningDelta(
+                LanguageModelReasoningDelta::new("reasoning-1", "checking")
+                    .with_provider_metadata(provider_metadata.clone())
+            )),
+            Some(UiMessageChunk::ReasoningDelta {
+                id: "reasoning-1".to_string(),
+                delta: "checking".to_string(),
+                provider_metadata: Some(provider_metadata.clone()),
+            })
+        );
+
+        assert_eq!(
+            to_ui_message_chunk(&LanguageModelStreamPart::ToolInputStart(
+                LanguageModelToolInputStart::new("call-1", "getWeather")
+                    .with_provider_executed(true)
+            )),
+            Some(UiMessageChunk::ToolInputStart {
+                tool_call_id: "call-1".to_string(),
+                tool_name: "getWeather".to_string(),
+                provider_executed: Some(true),
+            })
+        );
+
+        assert_eq!(
+            to_ui_message_chunk(&LanguageModelStreamPart::ToolInputDelta(
+                LanguageModelToolInputDelta::new("call-1", r#"{"city""#)
+            )),
+            Some(UiMessageChunk::ToolInputDelta {
+                tool_call_id: "call-1".to_string(),
+                input_text_delta: r#"{"city""#.to_string(),
+            })
+        );
+
+        assert_eq!(
+            to_ui_message_chunk(&LanguageModelStreamPart::ToolCall(
+                LanguageModelToolCall::new("call-1", "getWeather", r#"{"city":"Brisbane"}"#)
+                    .with_provider_executed(true)
+                    .with_provider_metadata(provider_metadata.clone())
+            )),
+            Some(UiMessageChunk::ToolInputAvailable {
+                tool_call_id: "call-1".to_string(),
+                tool_name: "getWeather".to_string(),
+                input: json!({ "city": "Brisbane" }),
+                provider_executed: Some(true),
+                provider_metadata: Some(provider_metadata),
+            })
+        );
+    }
+
+    #[test]
+    fn to_ui_message_chunk_maps_files_sources_results_approval_and_errors() {
+        let source_metadata = BTreeMap::from([(
+            "gateway".to_string(),
+            serde_json::from_value(json!({ "source": "search" }))
+                .expect("provider metadata is an object"),
+        )]);
+
+        assert_eq!(
+            to_ui_message_chunk(&LanguageModelStreamPart::File(LanguageModelFile::new(
+                "text/plain",
+                LanguageModelFileData::Data {
+                    data: FileDataContent::Bytes(b"hi".to_vec()),
+                },
+            ))),
+            Some(UiMessageChunk::File {
+                media_type: "text/plain".to_string(),
+                url: "data:text/plain;base64,aGk=".to_string(),
+            })
+        );
+
+        assert_eq!(
+            to_ui_message_chunk(&LanguageModelStreamPart::Source(LanguageModelSource::Url(
+                LanguageModelUrlSource::new("source-1", "https://example.com")
+                    .with_title("Example")
+                    .with_provider_metadata(source_metadata.clone())
+            ))),
+            Some(UiMessageChunk::SourceUrl {
+                source_id: "source-1".to_string(),
+                url: "https://example.com".to_string(),
+                title: Some("Example".to_string()),
+                provider_metadata: Some(source_metadata),
+            })
+        );
+
+        assert_eq!(
+            to_ui_message_chunk(&LanguageModelStreamPart::Source(
+                LanguageModelSource::document("doc-1", "application/pdf", "Spec")
+            )),
+            Some(UiMessageChunk::SourceDocument {
+                source_id: "doc-1".to_string(),
+                media_type: "application/pdf".to_string(),
+                title: "Spec".to_string(),
+                filename: None,
+                provider_metadata: None,
+            })
+        );
+
+        assert_eq!(
+            to_ui_message_chunk(&LanguageModelStreamPart::ToolResult(
+                LanguageModelToolResult::new(
+                    "call-1",
+                    "getWeather",
+                    NonNullJsonValue::new(json!({ "temperature": 22 }))
+                        .expect("tool result is non-null"),
+                )
+            )),
+            Some(UiMessageChunk::ToolOutputAvailable {
+                tool_call_id: "call-1".to_string(),
+                output: json!({ "temperature": 22 }),
+            })
+        );
+
+        assert_eq!(
+            to_ui_message_chunk(&LanguageModelStreamPart::ToolApprovalRequest(
+                LanguageModelToolApprovalRequest::new("approval-1", "call-1")
+            )),
+            Some(UiMessageChunk::ToolApprovalRequest {
+                approval_id: "approval-1".to_string(),
+                tool_call_id: "call-1".to_string(),
+            })
+        );
+
+        assert_eq!(
+            to_ui_message_chunk(&LanguageModelStreamPart::Error(
+                LanguageModelErrorStreamPart::new(json!("model failed"))
+            )),
+            Some(UiMessageChunk::Error {
+                error_text: "model failed".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn model_call_stream_to_ui_chunks_adds_lifecycle_chunks_and_drops_internal_parts() {
+        assert_eq!(
+            model_call_stream_to_ui_chunks([
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "hello")),
+            ]),
+            vec![
+                UiMessageChunk::start(),
+                UiMessageChunk::start_step(),
+                UiMessageChunk::TextDelta {
+                    id: "text-1".to_string(),
+                    delta: "hello".to_string(),
+                    provider_metadata: None,
+                },
+                UiMessageChunk::finish_step(),
+                UiMessageChunk::finish(),
+            ]
         );
     }
 }
