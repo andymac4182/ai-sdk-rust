@@ -579,11 +579,25 @@ fn open_responses_request_body(
     }
 
     if let Some(presence_penalty) = options.presence_penalty {
-        body.insert("presence_penalty".to_string(), json!(presence_penalty));
+        if open_responses_uses_openai_model_capability_rules(provider_options_name) {
+            warnings.push(Warning::Unsupported {
+                feature: "presencePenalty".to_string(),
+                details: None,
+            });
+        } else {
+            body.insert("presence_penalty".to_string(), json!(presence_penalty));
+        }
     }
 
     if let Some(frequency_penalty) = options.frequency_penalty {
-        body.insert("frequency_penalty".to_string(), json!(frequency_penalty));
+        if open_responses_uses_openai_model_capability_rules(provider_options_name) {
+            warnings.push(Warning::Unsupported {
+                feature: "frequencyPenalty".to_string(),
+                details: None,
+            });
+        } else {
+            body.insert("frequency_penalty".to_string(), json!(frequency_penalty));
+        }
     }
 
     if options.stop_sequences.is_some() {
@@ -643,8 +657,191 @@ fn open_responses_request_body(
         &mut warnings,
     );
     apply_open_responses_reasoning_options(options.reasoning.as_ref(), &mut body, &mut warnings);
+    apply_open_responses_model_capability_rules(
+        model_id,
+        provider_options_name,
+        provider_options,
+        store,
+        &mut body,
+        &mut warnings,
+    );
 
     Ok((JsonValue::Object(body), warnings))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OpenResponsesModelCapabilities {
+    is_reasoning_model: bool,
+    supports_flex_processing: bool,
+    supports_priority_processing: bool,
+    supports_non_reasoning_parameters: bool,
+}
+
+fn open_responses_model_capabilities(model_id: &str) -> OpenResponsesModelCapabilities {
+    let is_gpt5_reasoning = model_id.starts_with("gpt-5") && !model_id.starts_with("gpt-5-chat");
+    let is_reasoning_model = model_id.starts_with("o1")
+        || model_id.starts_with("o3")
+        || model_id.starts_with("o4-mini")
+        || is_gpt5_reasoning;
+    let supports_flex_processing = model_id.starts_with("o3")
+        || model_id.starts_with("o4-mini")
+        || (model_id.starts_with("gpt-5") && !model_id.starts_with("gpt-5-chat"));
+    let supports_priority_processing = model_id.starts_with("gpt-4")
+        || (model_id.starts_with("gpt-5")
+            && !model_id.starts_with("gpt-5-nano")
+            && !model_id.starts_with("gpt-5-chat")
+            && !model_id.starts_with("gpt-5.4-nano"))
+        || model_id.starts_with("o3")
+        || model_id.starts_with("o4-mini");
+    let supports_non_reasoning_parameters = model_id.starts_with("gpt-5.1")
+        || model_id.starts_with("gpt-5.2")
+        || model_id.starts_with("gpt-5.3")
+        || model_id.starts_with("gpt-5.4")
+        || model_id.starts_with("gpt-5.5");
+
+    OpenResponsesModelCapabilities {
+        is_reasoning_model,
+        supports_flex_processing,
+        supports_priority_processing,
+        supports_non_reasoning_parameters,
+    }
+}
+
+fn open_responses_uses_openai_model_capability_rules(provider_options_name: &str) -> bool {
+    matches!(
+        provider_options_name
+            .split('.')
+            .next()
+            .unwrap_or(provider_options_name)
+            .trim(),
+        "openai" | "azure" | "vercel-ai-gateway"
+    )
+}
+
+fn apply_open_responses_model_capability_rules(
+    model_id: &str,
+    provider_options_name: &str,
+    provider_options: Option<&ProviderOptions>,
+    store: bool,
+    body: &mut JsonObject,
+    warnings: &mut Vec<Warning>,
+) {
+    if !open_responses_uses_openai_model_capability_rules(provider_options_name) {
+        return;
+    }
+
+    let capabilities = open_responses_model_capabilities(model_id);
+    let is_reasoning_model =
+        open_responses_force_reasoning(provider_options_name, provider_options)
+            .unwrap_or(capabilities.is_reasoning_model);
+
+    if !is_reasoning_model {
+        if open_responses_provider_option_value(
+            provider_options_name,
+            provider_options,
+            &["reasoningEffort", "reasoning_effort"],
+        )
+        .is_some()
+        {
+            warnings.push(Warning::Unsupported {
+                feature: "reasoningEffort".to_string(),
+                details: Some(
+                    "reasoningEffort is not supported for non-reasoning models".to_string(),
+                ),
+            });
+        }
+
+        if open_responses_provider_option_value(
+            provider_options_name,
+            provider_options,
+            &["reasoningSummary", "reasoning_summary"],
+        )
+        .is_some()
+        {
+            warnings.push(Warning::Unsupported {
+                feature: "reasoningSummary".to_string(),
+                details: Some(
+                    "reasoningSummary is not supported for non-reasoning models".to_string(),
+                ),
+            });
+        }
+
+        body.remove("reasoning");
+        validate_open_responses_service_tier(body, capabilities, warnings);
+        return;
+    }
+
+    if !store {
+        open_responses_add_include(body, "reasoning.encrypted_content");
+    }
+
+    let reasoning_effort = body
+        .get("reasoning")
+        .and_then(JsonValue::as_object)
+        .and_then(|reasoning| reasoning.get("effort"))
+        .and_then(JsonValue::as_str);
+    let allow_non_reasoning_parameters =
+        reasoning_effort == Some("none") && capabilities.supports_non_reasoning_parameters;
+
+    if !allow_non_reasoning_parameters {
+        if body.remove("temperature").is_some() {
+            warnings.push(Warning::Unsupported {
+                feature: "temperature".to_string(),
+                details: Some("temperature is not supported for reasoning models".to_string()),
+            });
+        }
+
+        if body.remove("top_p").is_some() {
+            warnings.push(Warning::Unsupported {
+                feature: "topP".to_string(),
+                details: Some("topP is not supported for reasoning models".to_string()),
+            });
+        }
+    }
+
+    validate_open_responses_service_tier(body, capabilities, warnings);
+}
+
+fn open_responses_force_reasoning(
+    provider_options_name: &str,
+    provider_options: Option<&ProviderOptions>,
+) -> Option<bool> {
+    open_responses_provider_option_value(
+        provider_options_name,
+        provider_options,
+        &["forceReasoning", "force_reasoning"],
+    )
+    .and_then(JsonValue::as_bool)
+}
+
+fn validate_open_responses_service_tier(
+    body: &mut JsonObject,
+    capabilities: OpenResponsesModelCapabilities,
+    warnings: &mut Vec<Warning>,
+) {
+    match body.get("service_tier").and_then(JsonValue::as_str) {
+        Some("flex") if !capabilities.supports_flex_processing => {
+            body.remove("service_tier");
+            warnings.push(Warning::Unsupported {
+                feature: "serviceTier".to_string(),
+                details: Some(
+                    "flex processing is only available for o3, o4-mini, and gpt-5 models"
+                        .to_string(),
+                ),
+            });
+        }
+        Some("priority") if !capabilities.supports_priority_processing => {
+            body.remove("service_tier");
+            warnings.push(Warning::Unsupported {
+                feature: "serviceTier".to_string(),
+                details: Some(
+                    "priority processing is only available for supported models (gpt-4, gpt-5, gpt-5-mini, o3, o4-mini) and requires Enterprise access. gpt-5-nano is not supported"
+                        .to_string(),
+                ),
+            });
+        }
+        _ => {}
+    }
 }
 
 fn apply_open_responses_reasoning_options(
@@ -6450,6 +6647,7 @@ mod tests {
         LanguageModelUserMessage,
     };
     use ai_sdk_provider::provider::{ModelType, Provider, ProviderMetadata, ProviderOptions};
+    use ai_sdk_provider::warning::Warning;
     use ai_sdk_provider_utils::{ProviderApiRequest, ProviderApiRequestBody, ProviderApiResponse};
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -6468,6 +6666,16 @@ mod tests {
             .as_ref()
             .and_then(|metadata| metadata.get("openai"))
             .and_then(|metadata| metadata.get(key))
+    }
+
+    fn unsupported_warning_details(warnings: &[Warning]) -> Vec<(&str, Option<&str>)> {
+        warnings
+            .iter()
+            .map(|warning| match warning {
+                Warning::Unsupported { feature, details } => (feature.as_str(), details.as_deref()),
+                other => panic!("expected unsupported warning, got {other:?}"),
+            })
+            .collect()
     }
 
     fn open_responses_test_shell_tool() -> LanguageModelTool {
@@ -9765,8 +9973,6 @@ mod tests {
                 .with_max_output_tokens(100)
                 .with_temperature(0.5)
                 .with_top_p(0.9)
-                .with_presence_penalty(0.1)
-                .with_frequency_penalty(0.2)
                 .with_response_format(
                     LanguageModelResponseFormat::json()
                         .with_name("response")
@@ -9805,8 +10011,6 @@ mod tests {
                 "max_output_tokens": 100,
                 "temperature": 0.5,
                 "top_p": 0.9,
-                "presence_penalty": 0.1,
-                "frequency_penalty": 0.2,
                 "text": {
                     "format": {
                         "type": "json_schema",
@@ -9985,22 +10189,22 @@ mod tests {
                 .with_stop_sequence("</done>")
                 .with_top_k(40)
                 .with_seed(1234)
+                .with_presence_penalty(0.0)
+                .with_frequency_penalty(0.0)
                 .with_abort_signal(abort_controller.signal()),
             ),
         );
 
-        let warning_features = result
-            .warnings
-            .iter()
-            .map(|warning| match warning {
-                ai_sdk_provider::warning::Warning::Unsupported { feature, details } => {
-                    assert!(details.is_none());
-                    feature.as_str()
-                }
-                other => panic!("expected unsupported warning, got {other:?}"),
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(warning_features, vec!["stopSequences", "topK", "seed"]);
+        assert_eq!(
+            unsupported_warning_details(&result.warnings),
+            vec![
+                ("presencePenalty", None),
+                ("frequencyPenalty", None),
+                ("stopSequences", None),
+                ("topK", None),
+                ("seed", None)
+            ]
+        );
 
         let request = captured_request
             .lock()
@@ -10042,6 +10246,8 @@ mod tests {
         assert!(request_body.get("topK").is_none());
         assert!(request_body.get("top_k").is_none());
         assert!(request_body.get("seed").is_none());
+        assert!(request_body.get("presence_penalty").is_none());
+        assert!(request_body.get("frequency_penalty").is_none());
     }
 
     #[test]
@@ -10265,6 +10471,305 @@ mod tests {
             })
         );
         assert!(bodies[8].get("reasoning").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_applies_openai_model_capability_rules() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let captured_requests_for_transport = Arc::clone(&captured_requests);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                captured_requests_for_transport
+                    .lock()
+                    .expect("captured requests mutex is not poisoned")
+                    .push(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_model_capabilities",
+                        "created_at": 1711115037,
+                        "model": "model-capabilities",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 2,
+                            "output_tokens": 1
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let prompt = || {
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::Text(
+                    LanguageModelTextPart::new("Hello"),
+                )],
+            ))]
+        };
+        let provider_options = |value: JsonValue| -> ProviderOptions {
+            serde_json::from_value(value).expect("provider options deserialize")
+        };
+
+        let reasoning_result = poll_ready(
+            provider.language_model("o1").do_generate(
+                LanguageModelCallOptions::new(prompt())
+                    .with_temperature(0.5)
+                    .with_top_p(0.3),
+            ),
+        );
+        let non_reasoning_parameters_result = poll_ready(
+            provider.language_model("gpt-5.1").do_generate(
+                LanguageModelCallOptions::new(prompt())
+                    .with_temperature(0.5)
+                    .with_top_p(0.3)
+                    .with_provider_options(provider_options(json!({
+                        "openai": {
+                            "reasoningEffort": "none"
+                        }
+                    }))),
+            ),
+        );
+        let non_reasoning_result = poll_ready(provider.language_model("gpt-4o").do_generate(
+            LanguageModelCallOptions::new(prompt()).with_provider_options(provider_options(
+                json!({
+                    "openai": {
+                        "reasoningEffort": "low",
+                        "reasoningSummary": "auto"
+                    }
+                }),
+            )),
+        ));
+        let reasoning_store_false_result =
+            poll_ready(provider.language_model("gpt-5-mini").do_generate(
+                LanguageModelCallOptions::new(prompt()).with_provider_options(provider_options(
+                    json!({
+                        "openai": {
+                            "store": false
+                        }
+                    }),
+                )),
+            ));
+        let non_reasoning_store_false_result =
+            poll_ready(provider.language_model("gpt-4o").do_generate(
+                LanguageModelCallOptions::new(prompt()).with_provider_options(provider_options(
+                    json!({
+                        "openai": {
+                            "store": false
+                        }
+                    }),
+                )),
+            ));
+        let forced_reasoning_result = poll_ready(
+            provider
+                .language_model("custom-reasoning-model")
+                .do_generate(
+                    LanguageModelCallOptions::new(prompt())
+                        .with_temperature(0.5)
+                        .with_top_p(0.3)
+                        .with_provider_options(provider_options(json!({
+                            "openai": {
+                                "forceReasoning": true,
+                                "reasoningEffort": "low"
+                            }
+                        }))),
+                ),
+        );
+
+        assert_eq!(
+            unsupported_warning_details(&reasoning_result.warnings),
+            vec![
+                (
+                    "temperature",
+                    Some("temperature is not supported for reasoning models")
+                ),
+                ("topP", Some("topP is not supported for reasoning models"))
+            ]
+        );
+        assert!(non_reasoning_parameters_result.warnings.is_empty());
+        assert_eq!(
+            unsupported_warning_details(&non_reasoning_result.warnings),
+            vec![
+                (
+                    "reasoningEffort",
+                    Some("reasoningEffort is not supported for non-reasoning models")
+                ),
+                (
+                    "reasoningSummary",
+                    Some("reasoningSummary is not supported for non-reasoning models")
+                )
+            ]
+        );
+        assert!(reasoning_store_false_result.warnings.is_empty());
+        assert!(non_reasoning_store_false_result.warnings.is_empty());
+        assert_eq!(
+            unsupported_warning_details(&forced_reasoning_result.warnings),
+            vec![
+                (
+                    "temperature",
+                    Some("temperature is not supported for reasoning models")
+                ),
+                ("topP", Some("topP is not supported for reasoning models"))
+            ]
+        );
+
+        let bodies = captured_requests
+            .lock()
+            .expect("captured requests mutex is not poisoned")
+            .iter()
+            .map(|request| {
+                request
+                    .body
+                    .as_ref()
+                    .and_then(ProviderApiRequestBody::as_text)
+                    .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+                    .expect("request body is JSON")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(bodies.len(), 6);
+        assert!(bodies[0].get("temperature").is_none());
+        assert!(bodies[0].get("top_p").is_none());
+        assert_eq!(bodies[1]["temperature"], json!(0.5));
+        assert_eq!(bodies[1]["top_p"], json!(0.3));
+        assert_eq!(bodies[1]["reasoning"], json!({ "effort": "none" }));
+        assert!(bodies[2].get("reasoning").is_none());
+        assert_eq!(bodies[3]["store"], json!(false));
+        assert_eq!(bodies[3]["include"], json!(["reasoning.encrypted_content"]));
+        assert_eq!(bodies[4]["store"], json!(false));
+        assert!(bodies[4].get("include").is_none());
+        assert_eq!(bodies[5]["reasoning"], json!({ "effort": "low" }));
+        assert!(bodies[5].get("temperature").is_none());
+        assert!(bodies[5].get("top_p").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_validates_openai_service_tier_model_capabilities() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let captured_requests_for_transport = Arc::clone(&captured_requests);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                captured_requests_for_transport
+                    .lock()
+                    .expect("captured requests mutex is not poisoned")
+                    .push(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_service_tier",
+                        "created_at": 1711115037,
+                        "model": "service-tier",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 2,
+                            "output_tokens": 1
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let prompt = || {
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::Text(
+                    LanguageModelTextPart::new("Hello"),
+                )],
+            ))]
+        };
+        let provider_options = |service_tier: &str| -> LanguageModelCallOptions {
+            let options: ProviderOptions = serde_json::from_value(json!({
+                "openai": {
+                    "serviceTier": service_tier
+                }
+            }))
+            .expect("service tier provider options deserialize");
+
+            LanguageModelCallOptions::new(prompt()).with_provider_options(options)
+        };
+
+        let flex_rejected = poll_ready(
+            provider
+                .language_model("gpt-4o")
+                .do_generate(provider_options("flex")),
+        );
+        let priority_rejected = poll_ready(
+            provider
+                .language_model("gpt-5-nano")
+                .do_generate(provider_options("priority")),
+        );
+        let flex_accepted = poll_ready(
+            provider
+                .language_model("gpt-5")
+                .do_generate(provider_options("flex")),
+        );
+
+        assert_eq!(
+            unsupported_warning_details(&flex_rejected.warnings),
+            vec![(
+                "serviceTier",
+                Some("flex processing is only available for o3, o4-mini, and gpt-5 models")
+            )]
+        );
+        assert_eq!(
+            unsupported_warning_details(&priority_rejected.warnings),
+            vec![(
+                "serviceTier",
+                Some(
+                    "priority processing is only available for supported models (gpt-4, gpt-5, gpt-5-mini, o3, o4-mini) and requires Enterprise access. gpt-5-nano is not supported"
+                )
+            )]
+        );
+        assert!(flex_accepted.warnings.is_empty());
+
+        let bodies = captured_requests
+            .lock()
+            .expect("captured requests mutex is not poisoned")
+            .iter()
+            .map(|request| {
+                request
+                    .body
+                    .as_ref()
+                    .and_then(ProviderApiRequestBody::as_text)
+                    .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+                    .expect("request body is JSON")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(bodies.len(), 3);
+        assert!(bodies[0].get("service_tier").is_none());
+        assert!(bodies[1].get("service_tier").is_none());
+        assert_eq!(bodies[2]["service_tier"], json!("flex"));
     }
 
     #[test]
