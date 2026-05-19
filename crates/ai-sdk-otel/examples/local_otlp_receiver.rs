@@ -6,24 +6,41 @@ use ai_sdk_otel::LocalOtlpTraceReceiver;
 use serde_json::Value as JsonValue;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let timeout = env::var("AI_SDK_RUST_OTEL_RECEIVER_SECONDS")
+    let timeout = receiver_timeout();
+    let expected_requests = env::var("AI_SDK_RUST_OTEL_RECEIVER_REQUESTS")
         .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(30));
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1);
     let receiver = LocalOtlpTraceReceiver::start()?;
     println!("OTLP receiver listening at {}", receiver.endpoint());
     println!(
-        "Set OTEL_EXPORTER_OTLP_TRACES_ENDPOINT={} and send one trace export within {} seconds.",
-        receiver.endpoint(),
-        timeout.as_secs()
+        "export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT={}",
+        receiver.endpoint()
     );
+    println!("export OTEL_EXPORTER_OTLP_PROTOCOL=http/json");
+    match timeout {
+        Some(timeout) => println!(
+            "waiting up to {} seconds for {} OTLP trace export(s)",
+            timeout.as_secs(),
+            request_count_label(expected_requests),
+        ),
+        None => println!(
+            "waiting indefinitely for {} OTLP trace export(s); stop with Ctrl-C",
+            request_count_label(expected_requests),
+        ),
+    }
 
-    let deadline = Instant::now() + timeout;
+    let deadline = timeout.map(|timeout| Instant::now() + timeout);
+    let mut printed_requests = 0;
     loop {
-        let requests = receiver.wait_for_requests(1, Duration::from_millis(250));
-        if let Some(request) = requests.first() {
-            println!("received {} {}", request.method, request.path);
+        let requests = receiver.received_requests();
+        for request in requests.iter().skip(printed_requests) {
+            println!(
+                "received request {}: {} {}",
+                printed_requests + 1,
+                request.method,
+                request.path
+            );
             match request.body_json() {
                 Some(body) => {
                     let span_names = otlp_span_names(&body);
@@ -35,12 +52,45 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 None => println!("received non-JSON OTLP body"),
             }
+            printed_requests += 1;
+        }
+        if expected_requests > 0 && printed_requests >= expected_requests {
             return Ok(());
         }
-        if Instant::now() >= deadline {
-            println!("no OTLP trace export received before timeout");
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            if printed_requests == 0 {
+                println!("no OTLP trace export received before timeout");
+            } else {
+                println!(
+                    "received {} OTLP trace export(s) before timeout",
+                    printed_requests
+                );
+            }
             return Ok(());
         }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn receiver_timeout() -> Option<Duration> {
+    env::var("AI_SDK_RUST_OTEL_RECEIVER_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|seconds| {
+            if seconds == 0 {
+                None
+            } else {
+                Some(Duration::from_secs(seconds))
+            }
+        })
+        .unwrap_or_else(|| Some(Duration::from_secs(30)))
+}
+
+fn request_count_label(expected_requests: usize) -> String {
+    if expected_requests == 0 {
+        "unlimited".to_string()
+    } else {
+        expected_requests.to_string()
     }
 }
 

@@ -25,6 +25,25 @@ cargo run --example vercel_ai_gateway_models
 cargo run --example vercel_ai_gateway_image
 ```
 
+## Local OTel Receiver
+
+Use the package-owned loopback receiver when a telemetry slice needs proof that
+real OTLP/HTTP trace data is emitted:
+
+```sh
+cargo run -p ai-sdk-otel --example local_otlp_receiver
+```
+
+The receiver prints a `127.0.0.1` `/v1/traces` endpoint and the matching
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` value. For manual daemon-style checks, keep
+it running until stopped:
+
+```sh
+AI_SDK_RUST_OTEL_RECEIVER_SECONDS=0 \
+AI_SDK_RUST_OTEL_RECEIVER_REQUESTS=0 \
+cargo run -p ai-sdk-otel --example local_otlp_receiver
+```
+
 ## Codex `/goal` Runner
 
 Use the repo-local script to run Codex CLI `/goal` on GPT-5.5 with xhigh
