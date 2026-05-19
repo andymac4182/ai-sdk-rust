@@ -4436,6 +4436,44 @@ impl Tool {
         }
     }
 
+    /// Creates a provider tool with explicit provider-execution state.
+    ///
+    /// This supports workflow step boundaries where upstream serializes only
+    /// the provider tool id, arguments, input schema, and `isProviderExecuted`
+    /// flag, without an output schema.
+    pub fn provider_tool(
+        name: impl Into<String>,
+        id: impl Into<String>,
+        args: JsonObject,
+        input_schema: JsonSchema,
+        provider_executed: bool,
+    ) -> Self {
+        Self {
+            kind: ToolKind::Provider {
+                id: id.into(),
+                args,
+                provider_executed,
+                output_schema: None,
+                supports_deferred_results: None,
+            },
+            name: name.into(),
+            title: None,
+            description: None,
+            description_resolver: None,
+            input_schema,
+            output_schema: None,
+            context_schema: None,
+            input_examples: None,
+            strict: None,
+            provider_options: None,
+            metadata: None,
+            needs_approval: None,
+            needs_approval_resolver: None,
+            execute: None,
+            to_model_output: None,
+        }
+    }
+
     /// Sets the tool description.
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
