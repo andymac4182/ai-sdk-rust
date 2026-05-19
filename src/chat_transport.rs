@@ -1,9 +1,18 @@
 use std::fmt;
 
+use crate::agent::{ToolLoopAgent, ToolLoopAgentCallOptions, ToolLoopAgentModelSettings};
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
+use crate::language_model::{
+    LanguageModel, LanguageModelAssistantContentPart, LanguageModelAssistantMessage,
+    LanguageModelMessage, LanguageModelPrompt, LanguageModelStreamPart, LanguageModelSystemMessage,
+    LanguageModelTextPart, LanguageModelUserContentPart, LanguageModelUserMessage,
+};
+use crate::prompt::Prompt;
+use crate::provider::ProviderOptions;
 use crate::provider_utils::normalize_headers;
-use crate::ui_message_stream::{UiMessage, UiMessageChunk};
+use crate::stream_text::StreamTextUiMessageStreamOptions;
+use crate::ui_message_stream::{UiMessage, UiMessageChunk, UiMessageRole};
 
 /// Credentials mode used by upstream browser fetch transports.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -145,6 +154,8 @@ pub enum ChatTransportError {
     Fetch(String),
     ResponseStatus { status: u16, body: String },
     EmptyBody,
+    InvalidMessage(String),
+    Agent(String),
 }
 
 impl fmt::Display for ChatTransportError {
@@ -155,6 +166,7 @@ impl fmt::Display for ChatTransportError {
                 write!(formatter, "chat transport returned status {status}: {body}")
             }
             Self::EmptyBody => formatter.write_str("The response body is empty."),
+            Self::InvalidMessage(message) | Self::Agent(message) => formatter.write_str(message),
         }
     }
 }
@@ -172,6 +184,250 @@ pub trait ChatTransport {
         &self,
         options: ChatTransportReconnectOptions,
     ) -> Result<Option<Vec<UiMessageChunk>>, ChatTransportError>;
+}
+
+/// Constructor options for the Rust equivalent of upstream `DirectChatTransport`.
+pub struct DirectChatTransportOptions<'transport, 'agent, M: LanguageModel + ?Sized> {
+    pub agent: &'transport ToolLoopAgent<'agent, M>,
+    pub model_settings: ToolLoopAgentModelSettings,
+    pub ui_message_stream_options: StreamTextUiMessageStreamOptions,
+}
+
+impl<'transport, 'agent, M: LanguageModel + ?Sized>
+    DirectChatTransportOptions<'transport, 'agent, M>
+{
+    pub fn new(agent: &'transport ToolLoopAgent<'agent, M>) -> Self {
+        Self {
+            agent,
+            model_settings: ToolLoopAgentModelSettings::default(),
+            ui_message_stream_options: StreamTextUiMessageStreamOptions::default(),
+        }
+    }
+
+    pub fn with_model_settings(mut self, model_settings: ToolLoopAgentModelSettings) -> Self {
+        self.model_settings = model_settings;
+        self
+    }
+
+    pub fn with_ui_message_stream_options(
+        mut self,
+        ui_message_stream_options: StreamTextUiMessageStreamOptions,
+    ) -> Self {
+        self.ui_message_stream_options = ui_message_stream_options;
+        self
+    }
+}
+
+/// In-process chat transport that streams directly from a [`ToolLoopAgent`].
+///
+/// This mirrors upstream `DirectChatTransport` for Rust-native applications:
+/// UI messages are validated and converted into model messages, the configured
+/// agent is streamed in-process, and the result is converted to UI-message
+/// chunks. Browser-only `AbortSignal`, Web `ReadableStream`, and backpressure
+/// semantics are intentionally outside this Rust surface.
+pub struct DirectChatTransport<'transport, 'agent, M: LanguageModel + ?Sized> {
+    agent: &'transport ToolLoopAgent<'agent, M>,
+    model_settings: ToolLoopAgentModelSettings,
+    ui_message_stream_options: StreamTextUiMessageStreamOptions,
+}
+
+impl<'transport, 'agent, M: LanguageModel + ?Sized> DirectChatTransport<'transport, 'agent, M> {
+    pub fn new(agent: &'transport ToolLoopAgent<'agent, M>) -> Self {
+        Self::with_options(DirectChatTransportOptions::new(agent))
+    }
+
+    pub fn with_options(options: DirectChatTransportOptions<'transport, 'agent, M>) -> Self {
+        Self {
+            agent: options.agent,
+            model_settings: options.model_settings,
+            ui_message_stream_options: options.ui_message_stream_options,
+        }
+    }
+
+    pub fn with_model_settings(mut self, model_settings: ToolLoopAgentModelSettings) -> Self {
+        self.model_settings = model_settings;
+        self
+    }
+
+    pub fn with_ui_message_stream_options(
+        mut self,
+        ui_message_stream_options: StreamTextUiMessageStreamOptions,
+    ) -> Self {
+        self.ui_message_stream_options = ui_message_stream_options;
+        self
+    }
+
+    pub async fn send_messages(
+        &self,
+        options: ChatTransportSendOptions,
+    ) -> Result<Vec<UiMessageChunk>, ChatTransportError>
+    where
+        M::Stream: IntoIterator<Item = LanguageModelStreamPart>,
+    {
+        let model_messages = convert_ui_messages_to_model_messages(&options.messages)?;
+        let prompt = Prompt::from_messages(model_messages).with_allow_system_in_messages(true);
+        let call_options =
+            ToolLoopAgentCallOptions::new(prompt).with_model_settings(self.model_settings.clone());
+        let result = self
+            .agent
+            .stream(call_options)
+            .await
+            .map_err(|error| ChatTransportError::Agent(error.to_string()))?;
+
+        Ok(result.to_ui_message_stream_with_options(self.ui_message_stream_options.clone()))
+    }
+
+    pub async fn reconnect_to_stream(
+        &self,
+        _options: ChatTransportReconnectOptions,
+    ) -> Result<Option<Vec<UiMessageChunk>>, ChatTransportError> {
+        Ok(None)
+    }
+}
+
+/// Converts portable UI messages into model messages for in-process transports.
+pub fn convert_ui_messages_to_model_messages(
+    messages: &[UiMessage],
+) -> Result<LanguageModelPrompt, ChatTransportError> {
+    messages
+        .iter()
+        .map(convert_ui_message_to_model_message)
+        .collect()
+}
+
+fn convert_ui_message_to_model_message(
+    message: &UiMessage,
+) -> Result<LanguageModelMessage, ChatTransportError> {
+    if message.id.is_empty() {
+        return Err(ChatTransportError::InvalidMessage(
+            "UI message id must not be empty.".to_string(),
+        ));
+    }
+
+    match message.role {
+        UiMessageRole::System => convert_system_ui_message(message),
+        UiMessageRole::User => convert_user_ui_message(message),
+        UiMessageRole::Assistant => convert_assistant_ui_message(message),
+    }
+}
+
+fn convert_system_ui_message(
+    message: &UiMessage,
+) -> Result<LanguageModelMessage, ChatTransportError> {
+    let mut content = String::new();
+    let mut provider_options = ProviderOptions::new();
+
+    for part in &message.parts {
+        let kind = ui_message_part_type(part)?;
+        if kind != "text" {
+            return Err(unsupported_part_error(message, kind));
+        }
+        content.push_str(ui_message_text(part)?);
+        if let Some(options) = ui_message_provider_options(part)? {
+            provider_options.extend(options);
+        }
+    }
+
+    let mut system_message = LanguageModelSystemMessage::new(content);
+    if !provider_options.is_empty() {
+        system_message = system_message.with_provider_options(provider_options);
+    }
+    Ok(LanguageModelMessage::System(system_message))
+}
+
+fn convert_user_ui_message(
+    message: &UiMessage,
+) -> Result<LanguageModelMessage, ChatTransportError> {
+    let mut content = Vec::new();
+
+    for part in &message.parts {
+        let kind = ui_message_part_type(part)?;
+        if kind != "text" {
+            return Err(unsupported_part_error(message, kind));
+        }
+        let mut text_part = LanguageModelTextPart::new(ui_message_text(part)?);
+        if let Some(provider_options) = ui_message_provider_options(part)? {
+            text_part = text_part.with_provider_options(provider_options);
+        }
+        content.push(LanguageModelUserContentPart::Text(text_part));
+    }
+
+    Ok(LanguageModelMessage::User(LanguageModelUserMessage::new(
+        content,
+    )))
+}
+
+fn convert_assistant_ui_message(
+    message: &UiMessage,
+) -> Result<LanguageModelMessage, ChatTransportError> {
+    let mut content = Vec::new();
+
+    for part in &message.parts {
+        let kind = ui_message_part_type(part)?;
+        if kind == "step-start" {
+            continue;
+        }
+        if kind != "text" {
+            return Err(unsupported_part_error(message, kind));
+        }
+        let mut text_part = LanguageModelTextPart::new(ui_message_text(part)?);
+        if let Some(provider_options) = ui_message_provider_options(part)? {
+            text_part = text_part.with_provider_options(provider_options);
+        }
+        content.push(LanguageModelAssistantContentPart::Text(text_part));
+    }
+
+    Ok(LanguageModelMessage::Assistant(
+        LanguageModelAssistantMessage::new(content),
+    ))
+}
+
+fn ui_message_part_type(part: &JsonValue) -> Result<&str, ChatTransportError> {
+    part.as_object()
+        .and_then(|object| object.get("type"))
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| {
+            ChatTransportError::InvalidMessage(
+                "UI message part must be an object with a string type.".to_string(),
+            )
+        })
+}
+
+fn ui_message_text(part: &JsonValue) -> Result<&str, ChatTransportError> {
+    part.as_object()
+        .and_then(|object| object.get("text"))
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| {
+            ChatTransportError::InvalidMessage(
+                "UI text part must include a string text field.".to_string(),
+            )
+        })
+}
+
+fn ui_message_provider_options(
+    part: &JsonValue,
+) -> Result<Option<ProviderOptions>, ChatTransportError> {
+    let Some(provider_metadata) = part
+        .as_object()
+        .and_then(|object| object.get("providerMetadata"))
+    else {
+        return Ok(None);
+    };
+
+    serde_json::from_value(provider_metadata.clone())
+        .map(Some)
+        .map_err(|error| {
+            ChatTransportError::InvalidMessage(format!(
+                "UI message providerMetadata must match provider options: {error}"
+            ))
+        })
+}
+
+fn unsupported_part_error(message: &UiMessage, kind: &str) -> ChatTransportError {
+    ChatTransportError::InvalidMessage(format!(
+        "Unsupported UI message part type `{kind}` for {:?} message.",
+        message.role
+    ))
 }
 
 /// HTTP method used by deterministic chat transport request builders.
@@ -529,8 +785,99 @@ fn default_send_messages_body(
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
+
     use super::*;
+    use crate::agent::{ToolLoopAgent, ToolLoopAgentSettings};
+    use crate::language_model::{
+        FinishReason, InputTokenUsage, LanguageModelFinishReason, LanguageModelReasoningDelta,
+        LanguageModelReasoningEnd, LanguageModelReasoningStart, LanguageModelStreamFinish,
+        LanguageModelStreamResult, LanguageModelStreamStart, LanguageModelTextDelta,
+        LanguageModelTextEnd, LanguageModelTextStart, LanguageModelUsage, OutputTokenUsage,
+    };
+    use crate::mock_models::MockLanguageModel;
     use serde_json::json;
+
+    fn poll_ready<T>(future: impl Future<Output = T>) -> T {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut future = Box::pin(future);
+
+        match Future::poll(Pin::as_mut(&mut future), &mut context) {
+            Poll::Ready(value) => value,
+            Poll::Pending => panic!("future unexpectedly pending"),
+        }
+    }
+
+    fn usage() -> LanguageModelUsage {
+        LanguageModelUsage {
+            input_tokens: InputTokenUsage {
+                total: Some(3),
+                no_cache: Some(3),
+                cache_read: None,
+                cache_write: None,
+            },
+            output_tokens: OutputTokenUsage {
+                total: Some(10),
+                text: Some(10),
+                reasoning: None,
+            },
+            raw: None,
+        }
+    }
+
+    fn finish_reason() -> LanguageModelFinishReason {
+        LanguageModelFinishReason {
+            unified: FinishReason::Stop,
+            raw: Some("stop".to_string()),
+        }
+    }
+
+    fn text_stream_result(
+        deltas: impl IntoIterator<Item = &'static str>,
+    ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
+        let mut parts = vec![
+            LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+        ];
+        parts.extend(deltas.into_iter().map(|delta| {
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", delta))
+        }));
+        parts.extend([
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+
+        LanguageModelStreamResult::new(parts)
+    }
+
+    fn reasoning_stream_result() -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
+        LanguageModelStreamResult::new(vec![
+            LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+            LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("r1")),
+            LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                "r1",
+                "thinking...",
+            )),
+            LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("r1")),
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "result")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ])
+    }
+
+    fn user_text_message(id: &str, text: &str) -> UiMessage {
+        UiMessage::new(id, UiMessageRole::User).with_part(json!({ "type": "text", "text": text }))
+    }
 
     #[test]
     fn chat_request_options_serialize_upstream_shape() {
@@ -752,5 +1099,160 @@ mod tests {
             request.headers,
             Headers::from([("x-prepared".to_string(), "prepared".to_string())])
         );
+    }
+
+    #[test]
+    fn direct_chat_transport_streams_text_response_from_agent() {
+        let model = MockLanguageModel::new()
+            .with_stream_result(text_stream_result(["Hello", ", ", "world!"]));
+        let agent = ToolLoopAgent::for_model(&model);
+        let transport = DirectChatTransport::new(&agent);
+
+        let chunks = poll_ready(
+            transport.send_messages(
+                ChatTransportSendOptions::new(ChatTransportTrigger::SubmitMessage, "chat-1")
+                    .with_messages([user_text_message("msg-1", "Hello!")]),
+            ),
+        )
+        .expect("direct transport streams");
+
+        let text_deltas = chunks
+            .iter()
+            .filter_map(|chunk| match chunk {
+                UiMessageChunk::TextDelta { delta, .. } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(text_deltas, vec!["Hello", ", ", "world!"]);
+    }
+
+    #[test]
+    fn direct_chat_transport_passes_prepared_agent_options() {
+        let model = MockLanguageModel::new().with_stream_result(text_stream_result(["test"]));
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model));
+        let provider_options = ProviderOptions::from_iter([(
+            "custom".to_string(),
+            JsonObject::from_iter([("value".to_string(), json!("test-value"))]),
+        )]);
+        let transport = DirectChatTransport::new(&agent).with_model_settings(
+            ToolLoopAgentModelSettings::new().with_provider_options(provider_options.clone()),
+        );
+
+        poll_ready(
+            transport.send_messages(
+                ChatTransportSendOptions::new(ChatTransportTrigger::SubmitMessage, "chat-1")
+                    .with_messages([user_text_message("msg-1", "Hello!")]),
+            ),
+        )
+        .expect("direct transport streams");
+
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].provider_options, Some(provider_options));
+    }
+
+    #[test]
+    fn direct_chat_transport_applies_ui_message_stream_options() {
+        let model = MockLanguageModel::new().with_stream_result(reasoning_stream_result());
+        let agent = ToolLoopAgent::for_model(&model);
+        let transport = DirectChatTransport::with_options(
+            DirectChatTransportOptions::new(&agent).with_ui_message_stream_options(
+                StreamTextUiMessageStreamOptions::new()
+                    .with_send_reasoning(false)
+                    .with_send_finish(false),
+            ),
+        );
+
+        let chunks = poll_ready(
+            transport.send_messages(
+                ChatTransportSendOptions::new(ChatTransportTrigger::SubmitMessage, "chat-1")
+                    .with_messages([user_text_message("msg-1", "Hello!")]),
+            ),
+        )
+        .expect("direct transport streams");
+
+        assert!(!chunks.iter().any(|chunk| matches!(
+            chunk,
+            UiMessageChunk::ReasoningStart { .. }
+                | UiMessageChunk::ReasoningDelta { .. }
+                | UiMessageChunk::ReasoningEnd { .. }
+        )));
+        assert!(
+            !chunks
+                .iter()
+                .any(|chunk| matches!(chunk, UiMessageChunk::Finish { .. }))
+        );
+        assert!(chunks.iter().any(
+            |chunk| matches!(chunk, UiMessageChunk::TextDelta { delta, .. } if delta == "result")
+        ));
+    }
+
+    #[test]
+    fn direct_chat_transport_converts_ui_messages_to_model_messages_in_order() {
+        let model = MockLanguageModel::new().with_stream_result(text_stream_result(["response"]));
+        let agent = ToolLoopAgent::for_model(&model);
+        let transport = DirectChatTransport::new(&agent);
+
+        poll_ready(
+            transport.send_messages(
+                ChatTransportSendOptions::new(ChatTransportTrigger::SubmitMessage, "chat-1")
+                    .with_messages([
+                        user_text_message("msg-1", "First message"),
+                        UiMessage::new("msg-2", UiMessageRole::Assistant)
+                            .with_part(json!({ "type": "text", "text": "Assistant reply" })),
+                        user_text_message("msg-3", "Second message"),
+                    ]),
+            ),
+        )
+        .expect("direct transport streams");
+
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&calls[0].prompt).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "First message" }]
+                },
+                {
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "Assistant reply" }]
+                },
+                {
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "Second message" }]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn direct_chat_transport_rejects_invalid_ui_message_part_shape() {
+        let error =
+            convert_ui_messages_to_model_messages(&[
+                UiMessage::new("msg-1", UiMessageRole::User).with_part(json!({ "type": "text" }))
+            ])
+            .expect_err("missing text is invalid");
+
+        assert_eq!(
+            error,
+            ChatTransportError::InvalidMessage(
+                "UI text part must include a string text field.".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn direct_chat_transport_reconnect_returns_none() {
+        let model = MockLanguageModel::new();
+        let agent = ToolLoopAgent::for_model(&model);
+        let transport = DirectChatTransport::new(&agent);
+
+        let result =
+            poll_ready(transport.reconnect_to_stream(ChatTransportReconnectOptions::new("chat-1")))
+                .expect("reconnect succeeds");
+
+        assert_eq!(result, None);
     }
 }
