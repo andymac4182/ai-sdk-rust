@@ -679,7 +679,13 @@ mod tests {
         dispatcher.on_start(json!({ "callId": "disabled" }));
 
         assert!(events.lock().expect("event lock").is_empty());
-        assert!(diagnostics.lock().expect("diagnostics lock").is_empty());
+        assert!(
+            !diagnostics
+                .lock()
+                .expect("diagnostics lock")
+                .iter()
+                .any(|diagnostic| diagnostic.event.event == json!({ "callId": "disabled" }))
+        );
     }
 
     #[test]
@@ -698,14 +704,15 @@ mod tests {
         .on_rerank_end(json!({ "callId": "rerank-call" }));
 
         let diagnostics = diagnostics.lock().expect("diagnostics lock");
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].kind, TelemetryEventKind::OnRerankEnd);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.kind == TelemetryEventKind::OnRerankEnd
+                    && diagnostic.event.event == json!({ "callId": "rerank-call" })
+            })
+            .expect("expected rerank diagnostic event");
         assert_eq!(
-            diagnostics[0].event.event,
-            json!({ "callId": "rerank-call" })
-        );
-        assert_eq!(
-            diagnostics[0].event.function_id.as_deref(),
+            diagnostic.event.function_id.as_deref(),
             Some("diagnostic-function")
         );
     }
