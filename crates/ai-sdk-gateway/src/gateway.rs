@@ -4755,6 +4755,237 @@ mod tests {
     }
 
     #[test]
+    fn gateway_image_model_maps_upstream_request_response_and_metadata() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "images": ["base64-1", "base64-2"],
+                    "warnings": [
+                        {
+                            "type": "unsupported",
+                            "feature": "size",
+                            "details": "Use aspectRatio instead."
+                        },
+                        {
+                            "type": "compatibility",
+                            "feature": "seed",
+                            "details": "Seed support is approximate."
+                        },
+                        {
+                            "type": "other",
+                            "message": "Rate limit approaching."
+                        }
+                    ],
+                    "usage": {
+                        "inputTokens": 27,
+                        "outputTokens": 6240,
+                        "totalTokens": 6267
+                    },
+                    "providerMetadata": {
+                        "vertex": {
+                            "images": [
+                                { "revisedPrompt": "Revised 1" },
+                                { "revisedPrompt": "Revised 2" }
+                            ],
+                            "usage": { "tokens": 150 }
+                        },
+                        "gateway": {
+                            "routing": {
+                                "provider": "vertex",
+                                "attempts": [
+                                    { "provider": "openai", "success": false },
+                                    { "provider": "vertex", "success": true }
+                                ]
+                            },
+                            "generationId": "gen-xyz-789"
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .with_headers(std::collections::BTreeMap::from([(
+                "x-request-id".to_string(),
+                "req_image_123".to_string(),
+            )])))))
+        });
+        let provider_options: ProviderMetadata = serde_json::from_value(json!({
+            "vertex": {
+                "safetySettings": "block_none"
+            },
+            "openai": {
+                "style": "vivid"
+            }
+        }))
+        .expect("provider options deserialize");
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token")
+                .with_header("x-provider-header", "provider-value"),
+        )
+        .with_transport(transport)
+        .image_model("google/imagen-4.0-generate");
+        let bfl_model = GatewayProvider::new().image_model("bfl/flux-pro-1.1");
+
+        assert_eq!(model.provider(), "gateway");
+        assert_eq!(model.model_id(), "google/imagen-4.0-generate");
+        assert_eq!(model.specification_version(), SpecificationVersion::V4);
+        assert_eq!(poll_ready(model.max_images_per_call()), Some(usize::MAX));
+        assert_eq!(
+            poll_ready(bfl_model.max_images_per_call()),
+            Some(usize::MAX)
+        );
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(2)
+                    .with_prompt("A cat playing piano")
+                    .with_size("1024x1024")
+                    .with_aspect_ratio("16:9")
+                    .with_seed(42)
+                    .with_header("x-call-header", "call-value")
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://api.test.com/image-model");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-token")
+        );
+        assert_eq!(
+            request.headers.get("ai-model-id").map(String::as_str),
+            Some("google/imagen-4.0-generate")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-image-model-specification-version")
+                .map(String::as_str),
+            Some("4")
+        );
+        assert_eq!(
+            request.headers.get("x-provider-header").map(String::as_str),
+            Some("provider-value")
+        );
+        assert_eq!(
+            request.headers.get("x-call-header").map(String::as_str),
+            Some("call-value")
+        );
+
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+        assert_eq!(
+            request_body,
+            json!({
+                "prompt": "A cat playing piano",
+                "n": 2,
+                "size": "1024x1024",
+                "aspectRatio": "16:9",
+                "seed": 42,
+                "providerOptions": {
+                    "openai": {
+                        "style": "vivid"
+                    },
+                    "vertex": {
+                        "safetySettings": "block_none"
+                    }
+                }
+            })
+        );
+
+        assert_eq!(
+            result.images,
+            vec![
+                FileDataContent::Base64("base64-1".to_string()),
+                FileDataContent::Base64("base64-2".to_string())
+            ]
+        );
+        assert_eq!(
+            result.warnings,
+            vec![
+                Warning::Unsupported {
+                    feature: "size".to_string(),
+                    details: Some("Use aspectRatio instead.".to_string())
+                },
+                Warning::Compatibility {
+                    feature: "seed".to_string(),
+                    details: Some("Seed support is approximate.".to_string())
+                },
+                Warning::Other {
+                    message: "Rate limit approaching.".to_string()
+                }
+            ]
+        );
+        let usage = result.usage.expect("usage is preserved");
+        assert_eq!(usage.input_tokens, Some(27));
+        assert_eq!(usage.output_tokens, Some(6240));
+        assert_eq!(usage.total_tokens, Some(6267));
+        assert_eq!(result.response.model_id, "google/imagen-4.0-generate");
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("req_image_123")
+        );
+        let metadata = result
+            .provider_metadata
+            .expect("provider metadata is preserved");
+        assert_eq!(
+            metadata
+                .get("vertex")
+                .and_then(|entry| entry.images.first())
+                .and_then(|image| image.get("revisedPrompt"))
+                .and_then(JsonValue::as_str),
+            Some("Revised 1")
+        );
+        assert_eq!(
+            metadata
+                .get("vertex")
+                .and_then(|entry| entry.extra.get("usage"))
+                .and_then(|usage| usage.get("tokens"))
+                .and_then(JsonValue::as_u64),
+            Some(150)
+        );
+        assert_eq!(
+            metadata
+                .get("gateway")
+                .and_then(|entry| entry.extra.get("routing"))
+                .and_then(|routing| routing.get("provider"))
+                .and_then(JsonValue::as_str),
+            Some("vertex")
+        );
+        assert_eq!(
+            metadata
+                .get("gateway")
+                .and_then(|entry| entry.extra.get("generationId"))
+                .and_then(JsonValue::as_str),
+            Some("gen-xyz-789")
+        );
+    }
+
+    #[test]
     fn gateway_image_model_encodes_files_and_mask() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
