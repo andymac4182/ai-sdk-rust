@@ -43,6 +43,7 @@ mod tests {
     };
     use crate::stream_object::{StreamObjectOptions, stream_object};
     use crate::stream_text::{StreamTextOptions, stream_text};
+    use crate::telemetry::{TelemetryOptions, create_open_telemetry_integration};
     use crate::warning::Warning;
     use serde_json::json;
     use std::env;
@@ -3109,6 +3110,90 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a Vercel AI Gateway API key, makes a live OpenAI-compatible model call, and exports OTLP telemetry locally"]
+    fn live_vercel_ai_gateway_openai_compatible_generate_text_with_otel() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!(
+                "skipping live Gateway OpenAI-compatible telemetry test because no API key is configured"
+            );
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_AI_GATEWAY_OPENAI_COMPATIBLE_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_OPENAI_COMPATIBLE_MODEL"))
+            .or_else(|_| env::var("AI_SDK_RUST_GATEWAY_MODEL"))
+            .or_else(|_| env::var("AI_GATEWAY_MODEL"))
+            .unwrap_or_else(|_| "openai/gpt-4.1-mini".to_string());
+        let receiver =
+            ai_sdk_otel::LocalOtlpTraceReceiver::start().expect("local OTLP receiver starts");
+        let recorder = Arc::new(Mutex::new(ai_sdk_otel::OpenTelemetry::new(
+            ai_sdk_otel::OpenTelemetryOptions::new(),
+        )));
+        let model = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key(api_key)
+            .language_model(model_id.clone());
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(
+                &model,
+                Prompt::from_prompt("Reply with exactly: rust-vercel-ai-gateway-otel-ok"),
+            )
+            .expect("prompt is valid")
+            .with_max_output_tokens(24)
+            .with_temperature(0.0)
+            .with_telemetry(
+                TelemetryOptions::new()
+                    .with_function_id("live-gateway-otel")
+                    .with_record_inputs(true)
+                    .with_record_outputs(true)
+                    .with_integration(create_open_telemetry_integration(Arc::clone(&recorder))),
+            ),
+        ));
+
+        assert!(
+            result
+                .text
+                .to_lowercase()
+                .contains("rust-vercel-ai-gateway-otel-ok"),
+            "Gateway OpenAI-compatible telemetry response did not contain expected marker"
+        );
+
+        let tracer = recorder.lock().expect("recorder lock").tracer().clone();
+        assert!(
+            tracer
+                .spans
+                .iter()
+                .any(|span| span.name == format!("invoke_agent {model_id}")),
+            "live Gateway telemetry did not record the operation span"
+        );
+        assert!(
+            tracer
+                .spans
+                .iter()
+                .any(|span| span.attributes.get("gen_ai.agent.name")
+                    == Some(&json!("live-gateway-otel"))),
+            "live Gateway telemetry did not include the configured function id"
+        );
+
+        ai_sdk_otel::export_tracer_to_otlp_http_json(
+            &tracer,
+            &ai_sdk_otel::OtlpHttpTraceExportOptions::new(receiver.endpoint())
+                .with_service_name("ai-sdk-rust-live-gateway-otel"),
+        )
+        .expect("local OTLP export succeeds");
+
+        let requests = receiver.wait_for_requests(1, std::time::Duration::from_secs(2));
+        assert_eq!(requests.len(), 1);
+        let body = requests[0].body_json().expect("OTLP body is JSON");
+        assert!(
+            otlp_has_span_name(&body, &format!("invoke_agent {model_id}")),
+            "local OTLP payload did not include the Gateway operation span"
+        );
+        assert!(
+            otlp_has_string_attribute(&body, "gen_ai.agent.name", "live-gateway-otel"),
+            "local OTLP payload did not include the configured function id"
+        );
+    }
+
+    #[test]
     #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI Responses API call"]
     fn live_vercel_ai_gateway_openai_responses_generate_text() {
         let Some(api_key) = live_gateway_api_key() else {
@@ -3690,6 +3775,63 @@ mod tests {
 
     fn json_object(value: JsonValue) -> JsonObject {
         serde_json::from_value(value).expect("value is a JSON object")
+    }
+
+    fn otlp_has_span_name(body: &JsonValue, expected: &str) -> bool {
+        body.get("resourceSpans")
+            .and_then(JsonValue::as_array)
+            .into_iter()
+            .flatten()
+            .flat_map(|resource_span| {
+                resource_span
+                    .get("scopeSpans")
+                    .and_then(JsonValue::as_array)
+                    .into_iter()
+                    .flatten()
+            })
+            .flat_map(|scope_span| {
+                scope_span
+                    .get("spans")
+                    .and_then(JsonValue::as_array)
+                    .into_iter()
+                    .flatten()
+            })
+            .any(|span| span.get("name").and_then(JsonValue::as_str) == Some(expected))
+    }
+
+    fn otlp_has_string_attribute(body: &JsonValue, key: &str, value: &str) -> bool {
+        body.get("resourceSpans")
+            .and_then(JsonValue::as_array)
+            .into_iter()
+            .flatten()
+            .flat_map(|resource_span| {
+                resource_span
+                    .get("scopeSpans")
+                    .and_then(JsonValue::as_array)
+                    .into_iter()
+                    .flatten()
+            })
+            .flat_map(|scope_span| {
+                scope_span
+                    .get("spans")
+                    .and_then(JsonValue::as_array)
+                    .into_iter()
+                    .flatten()
+            })
+            .flat_map(|span| {
+                span.get("attributes")
+                    .and_then(JsonValue::as_array)
+                    .into_iter()
+                    .flatten()
+            })
+            .any(|attribute| {
+                attribute.get("key").and_then(JsonValue::as_str) == Some(key)
+                    && attribute
+                        .get("value")
+                        .and_then(|value| value.get("stringValue"))
+                        .and_then(JsonValue::as_str)
+                        == Some(value)
+            })
     }
 
     fn live_gateway_api_key() -> Option<String> {
