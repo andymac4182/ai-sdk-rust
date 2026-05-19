@@ -4035,11 +4035,11 @@ mod tests {
     use ai_sdk_provider::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions};
     use ai_sdk_provider::headers::Headers;
     use ai_sdk_provider::image_model::{ImageModel, ImageModelCallOptions};
-    use ai_sdk_provider::json::JsonValue;
+    use ai_sdk_provider::json::{JsonObject, JsonValue};
     use ai_sdk_provider::language_model::{
         FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelMessage,
-        LanguageModelResponseFormat, LanguageModelTextPart, LanguageModelUserContentPart,
-        LanguageModelUserMessage,
+        LanguageModelResponseFormat, LanguageModelSystemMessage, LanguageModelTextPart,
+        LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use ai_sdk_provider::provider::ProviderOptions;
     use ai_sdk_provider::warning::Warning;
@@ -4590,6 +4590,158 @@ mod tests {
                 .and_then(JsonValue::as_str),
             Some("Rate limited")
         );
+    }
+
+    #[test]
+    fn openai_compatible_chat_maps_response_formats_and_warnings() {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(|_request| -> OpenAICompatibleTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "{}",
+                                    "reasoning_content": "reasoning"
+                                },
+                                "finish_reason": "length"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
+            "test-provider",
+            "https://api.example.com",
+        ))
+        .with_transport(transport)
+        .chat_model("test-chat-model");
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::System(
+                    LanguageModelSystemMessage::new("JSON only"),
+                )])
+                .with_top_k(4)
+                .with_response_format(
+                    LanguageModelResponseFormat::json().with_schema(
+                        serde_json::from_value(json!({
+                            "type": "object",
+                            "properties": {}
+                        }))
+                        .expect("schema deserializes"),
+                    ),
+                ),
+            ),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Length);
+        assert_eq!(result.content.len(), 2);
+        assert_eq!(
+            result
+                .warnings
+                .iter()
+                .filter(|warning| matches!(warning, Warning::Unsupported { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_injects_json_instruction_when_response_format_body_is_disabled() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "{\"answer\":\"ok\"}"
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com")
+                .with_supports_json_object_response_format(false),
+        )
+        .with_transport(transport)
+        .chat_model("test-chat-model");
+        let response_schema: JsonObject = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "answer": {
+                    "type": "string"
+                }
+            },
+            "required": ["answer"]
+        }))
+        .expect("schema deserializes");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Return an answer."),
+                    )]),
+                )])
+                .with_response_format(
+                    LanguageModelResponseFormat::json().with_schema(response_schema),
+                ),
+            ),
+        );
+
+        assert!(result.warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Unsupported { feature, .. } if feature == "responseFormat"
+            )
+        }));
+
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .and_then(|body| body.as_text().map(str::to_string))
+            .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok())
+            .expect("request body is JSON");
+        assert!(request_body.get("response_format").is_none());
+        let messages = request_body
+            .get("messages")
+            .and_then(JsonValue::as_array)
+            .expect("messages are sent");
+        assert_eq!(messages[0]["role"], "system");
+        assert!(
+            messages[0]["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("JSON schema:"))
+        );
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "Return an answer.");
     }
 
     #[test]
