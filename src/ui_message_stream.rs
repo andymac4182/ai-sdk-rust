@@ -1651,6 +1651,7 @@ impl fmt::Debug for UiMessageStreamCreateErrorHandler {
 #[derive(Clone, Debug, Default)]
 pub struct UiMessageStreamWriter {
     chunks: Vec<UiMessageChunk>,
+    merge_errors: Vec<String>,
 }
 
 impl UiMessageStreamWriter {
@@ -1667,9 +1668,44 @@ impl UiMessageStreamWriter {
         self.chunks.extend(stream);
     }
 
+    /// Merges a fallible UI-message stream into this writer.
+    pub fn merge_result<I, E>(&mut self, stream: I)
+    where
+        I: IntoIterator<Item = Result<UiMessageChunk, E>>,
+        E: fmt::Display,
+    {
+        for chunk in stream {
+            match chunk {
+                Ok(chunk) => self.chunks.push(chunk),
+                Err(error) => {
+                    self.merge_errors.push(error.to_string());
+                    break;
+                }
+            }
+        }
+    }
+
     /// Returns the written chunks.
     pub fn into_chunks(self) -> Vec<UiMessageChunk> {
-        self.chunks
+        self.into_chunks_with_error_handler(None)
+    }
+
+    fn into_chunks_with_error_handler(
+        self,
+        on_error: Option<&UiMessageStreamCreateErrorHandler>,
+    ) -> Vec<UiMessageChunk> {
+        let Self {
+            mut chunks,
+            merge_errors,
+        } = self;
+        chunks.extend(merge_errors.into_iter().map(|error| {
+            UiMessageChunk::error(
+                on_error
+                    .map(|on_error| on_error.error_text(&error))
+                    .unwrap_or(error),
+            )
+        }));
+        chunks
     }
 }
 
@@ -1714,7 +1750,9 @@ where
         writer.write(UiMessageChunk::error(error_text));
     }
 
-    let mut finish_options = HandleUiMessageStreamFinishOptions::new(writer.into_chunks());
+    let mut finish_options = HandleUiMessageStreamFinishOptions::new(
+        writer.into_chunks_with_error_handler(on_error.as_ref()),
+    );
     if let Some(message_id) = message_id {
         finish_options = finish_options.with_message_id(message_id);
     }
@@ -2730,6 +2768,34 @@ mod tests {
             json!([
                 { "type": "text-delta", "id": "text-1", "delta": "before-error" },
                 { "type": "error", "errorText": "masked execute-error" }
+            ])
+        );
+    }
+
+    #[test]
+    fn create_ui_message_stream_adds_error_chunk_when_merged_stream_errors() {
+        let chunks = create_ui_message_stream(
+            CreateUiMessageStreamOptions::new().with_on_error(|error| format!("masked {error}")),
+            |writer| {
+                writer.merge_result([
+                    Ok(UiMessageChunk::text_delta("text-1", "1a")),
+                    Err("stream-1-error"),
+                ]);
+                writer.merge_result([
+                    Ok::<_, &str>(UiMessageChunk::text_delta("text-2", "2a")),
+                    Ok(UiMessageChunk::text_delta("text-2", "2b")),
+                ]);
+            },
+        )
+        .expect("stream is created");
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                { "type": "text-delta", "id": "text-1", "delta": "1a" },
+                { "type": "text-delta", "id": "text-2", "delta": "2a" },
+                { "type": "text-delta", "id": "text-2", "delta": "2b" },
+                { "type": "error", "errorText": "masked stream-1-error" }
             ])
         );
     }
