@@ -2524,8 +2524,8 @@ mod tests {
             .and_then(JsonValue::as_array)
             .expect("second request input is an array");
         assert!(second_input.iter().any(|item| {
-            item.get("type").and_then(JsonValue::as_str) == Some("function_call")
-                && item.get("call_id").and_then(JsonValue::as_str) == Some("call_gateway_weather")
+            item.get("type").and_then(JsonValue::as_str) == Some("item_reference")
+                && item.get("id").and_then(JsonValue::as_str) == Some("fc_gateway_weather")
         }));
         assert!(second_input.iter().any(|item| {
             item.get("type").and_then(JsonValue::as_str) == Some("function_call_output")
