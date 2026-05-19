@@ -29,10 +29,10 @@ mod tests {
         FinishReason, LanguageModel, LanguageModelAssistantContentPart,
         LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelFileData,
         LanguageModelFilePart, LanguageModelMessage, LanguageModelProviderTool,
-        LanguageModelReasoningPart, LanguageModelTextPart, LanguageModelTool,
-        LanguageModelToolCallPart, LanguageModelToolChoice, LanguageModelToolContentPart,
-        LanguageModelToolMessage, LanguageModelToolResultOutput, LanguageModelToolResultPart,
-        LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelReasoningPart, LanguageModelResponseFormat, LanguageModelTextPart,
+        LanguageModelTool, LanguageModelToolCallPart, LanguageModelToolChoice,
+        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultOutput,
+        LanguageModelToolResultPart, LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
@@ -1658,6 +1658,95 @@ mod tests {
     }
 
     #[test]
+    fn vercel_ai_gateway_openai_responses_maps_no_schema_json_response_format() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_gateway_json_object",
+                        "created_at": 1711115037,
+                        "model": "openai/gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "{\"answer\":\"ok\"}"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 5,
+                            "output_tokens": 4
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://ai-gateway.test/v1/")
+            .with_transport(transport);
+        let model = provider.responses("openai/gpt-4.1-mini");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Return JSON"),
+                    )]),
+                )])
+                .with_response_format(LanguageModelResponseFormat::json()),
+            ),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "openai/gpt-4.1-mini",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Return JSON"
+                            }
+                        ]
+                    }
+                ],
+                "text": {
+                    "format": {
+                        "type": "json_object"
+                    }
+                }
+            }))
+        );
+    }
+
+    #[test]
     fn vercel_ai_gateway_openai_responses_maps_api_error_data_to_gateway_metadata_key() {
         let transport: OpenAICompatibleTransport =
             Arc::new(move |_request| -> OpenAICompatibleTransportFuture {
@@ -3251,6 +3340,42 @@ mod tests {
                 .contains("gateway responses ok"),
             "Gateway OpenAI Responses output did not contain expected marker"
         );
+    }
+
+    #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI Responses JSON response-format call"]
+    fn live_vercel_ai_gateway_openai_responses_no_schema_json_response_format() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!(
+                "skipping live Gateway OpenAI Responses JSON response-format test because no API key is configured"
+            );
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_AI_GATEWAY_OPENAI_RESPONSES_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_OPENAI_RESPONSES_MODEL"))
+            .or_else(|_| env::var("AI_SDK_RUST_GATEWAY_RESPONSES_MODEL"))
+            .or_else(|_| env::var("AI_GATEWAY_RESPONSES_MODEL"))
+            .unwrap_or_else(|_| "openai/gpt-4.1-mini".to_string());
+        let model = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key(api_key)
+            .responses(model_id);
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(
+                &model,
+                Prompt::from_prompt(
+                    "Return only this JSON object, with no markdown: {\"gateway\":\"json\"}",
+                ),
+            )
+            .expect("prompt is valid")
+            .with_response_format(LanguageModelResponseFormat::json())
+            .with_max_output_tokens(40)
+            .with_temperature(0.0),
+        ));
+
+        let output = result.text.trim();
+        let json_output =
+            serde_json::from_str::<JsonValue>(output).expect("Gateway output is valid JSON");
+        assert_eq!(json_output["gateway"], "json");
     }
 
     #[test]
