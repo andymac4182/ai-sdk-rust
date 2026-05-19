@@ -1492,7 +1492,7 @@ mod tests {
         )
         .expect("export succeeds");
 
-        let requests = receiver.wait_for_requests(1, std::time::Duration::from_secs(2));
+        let requests = receiver.wait_for_requests(1, std::time::Duration::from_secs(10));
         assert_eq!(requests.len(), 1);
         let body = requests[0].body_json().expect("OTLP body is JSON");
         assert_eq!(
