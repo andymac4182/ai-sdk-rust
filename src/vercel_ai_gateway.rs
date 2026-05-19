@@ -3286,23 +3286,85 @@ mod tests {
             "live Gateway telemetry did not include the configured function id"
         );
 
-        ai_sdk_otel::export_tracer_to_otlp_http_json(
+        assert_live_gateway_otel_payload(
+            &receiver,
             &tracer,
-            &ai_sdk_otel::OtlpHttpTraceExportOptions::new(receiver.endpoint())
-                .with_service_name("ai-sdk-rust-live-gateway-otel"),
-        )
-        .expect("local OTLP export succeeds");
+            &model_id,
+            "live-gateway-otel",
+            "ai-sdk-rust-live-gateway-otel",
+        );
+    }
 
-        let requests = receiver.wait_for_requests(1, std::time::Duration::from_secs(10));
-        assert_eq!(requests.len(), 1);
-        let body = requests[0].body_json().expect("OTLP body is JSON");
+    #[test]
+    #[ignore = "requires a Vercel AI Gateway API key, makes a live OpenAI-compatible stream call, and exports OTLP telemetry locally"]
+    fn live_vercel_ai_gateway_openai_compatible_stream_text_with_otel() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!(
+                "skipping live Gateway OpenAI-compatible stream telemetry test because no API key is configured"
+            );
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_AI_GATEWAY_OPENAI_COMPATIBLE_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_OPENAI_COMPATIBLE_MODEL"))
+            .or_else(|_| env::var("AI_SDK_RUST_GATEWAY_MODEL"))
+            .or_else(|_| env::var("AI_GATEWAY_MODEL"))
+            .unwrap_or_else(|_| "openai/gpt-4.1-mini".to_string());
+        let receiver =
+            ai_sdk_otel::LocalOtlpTraceReceiver::start().expect("local OTLP receiver starts");
+        let recorder = Arc::new(Mutex::new(ai_sdk_otel::OpenTelemetry::new(
+            ai_sdk_otel::OpenTelemetryOptions::new(),
+        )));
+        let model = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key(api_key)
+            .language_model(model_id.clone());
+        let result = poll_ready(stream_text(
+            StreamTextOptions::from_prompt(
+                &model,
+                Prompt::from_prompt("Reply with exactly: rust-vercel-ai-gateway-stream-otel-ok"),
+            )
+            .expect("prompt is valid")
+            .with_max_output_tokens(24)
+            .with_temperature(0.0)
+            .with_telemetry(
+                TelemetryOptions::new()
+                    .with_function_id("live-gateway-stream-otel")
+                    .with_record_inputs(true)
+                    .with_record_outputs(true)
+                    .with_integration(create_open_telemetry_integration(Arc::clone(&recorder))),
+            ),
+        ));
+
         assert!(
-            otlp_has_span_name(&body, &format!("invoke_agent {model_id}")),
-            "local OTLP payload did not include the Gateway operation span"
+            result
+                .text
+                .to_lowercase()
+                .contains("rust-vercel-ai-gateway-stream-otel-ok"),
+            "Gateway OpenAI-compatible stream telemetry response did not contain expected marker"
+        );
+
+        let tracer = recorder.lock().expect("recorder lock").tracer().clone();
+        assert!(
+            tracer
+                .spans
+                .iter()
+                .any(|span| span.name == format!("invoke_agent {model_id}")),
+            "live Gateway stream telemetry did not record the operation span"
         );
         assert!(
-            otlp_has_string_attribute(&body, "gen_ai.agent.name", "live-gateway-otel"),
-            "local OTLP payload did not include the configured function id"
+            tracer
+                .spans
+                .iter()
+                .any(|span| span.attributes.get("gen_ai.agent.name")
+                    == Some(&json!("live-gateway-stream-otel"))),
+            "live Gateway stream telemetry did not include the configured function id"
+        );
+
+        assert_live_gateway_otel_payload(
+            &receiver,
+            &tracer,
+            &model_id,
+            "live-gateway-stream-otel",
+            "ai-sdk-rust-live-gateway-stream-otel",
         );
     }
 
@@ -3981,6 +4043,33 @@ mod tests {
                         .and_then(JsonValue::as_str)
                         == Some(value)
             })
+    }
+
+    fn assert_live_gateway_otel_payload(
+        receiver: &ai_sdk_otel::LocalOtlpTraceReceiver,
+        tracer: &ai_sdk_otel::MockTracer,
+        model_id: &str,
+        function_id: &str,
+        service_name: &str,
+    ) {
+        ai_sdk_otel::export_tracer_to_otlp_http_json(
+            tracer,
+            &ai_sdk_otel::OtlpHttpTraceExportOptions::new(receiver.endpoint())
+                .with_service_name(service_name),
+        )
+        .expect("local OTLP export succeeds");
+
+        let requests = receiver.wait_for_requests(1, std::time::Duration::from_secs(10));
+        assert_eq!(requests.len(), 1);
+        let body = requests[0].body_json().expect("OTLP body is JSON");
+        assert!(
+            otlp_has_span_name(&body, &format!("invoke_agent {model_id}")),
+            "local OTLP payload did not include the Gateway operation span"
+        );
+        assert!(
+            otlp_has_string_attribute(&body, "gen_ai.agent.name", function_id),
+            "local OTLP payload did not include the configured function id"
+        );
     }
 
     fn live_gateway_api_key() -> Option<String> {
