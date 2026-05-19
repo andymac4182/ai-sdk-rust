@@ -1,11 +1,14 @@
 //! OAuth helpers for upstream `@ai-sdk/mcp` parity.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use ai_sdk_provider::{JsonObject, JsonValue};
+use ai_sdk_provider_utils::convert_bytes_to_base64;
 use serde::de::Error as SerdeError;
 use serde::{Deserialize, Deserializer, Serialize};
 use url::Url;
+use url::form_urlencoded::Serializer as FormUrlEncodedSerializer;
 
 use crate::LATEST_PROTOCOL_VERSION;
 
@@ -16,6 +19,8 @@ pub type McpOAuthResult<T> = Result<T, McpOAuthError>;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct McpOAuthError {
     pub message: String,
+    pub error_code: Option<String>,
+    pub error_uri: Option<String>,
 }
 
 impl McpOAuthError {
@@ -23,6 +28,21 @@ impl McpOAuthError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            error_code: None,
+            error_uri: None,
+        }
+    }
+
+    /// Creates an MCP OAuth error from an OAuth error response body.
+    pub fn from_oauth_response(
+        error_code: impl Into<String>,
+        message: impl Into<String>,
+        error_uri: Option<String>,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            error_code: Some(error_code.into()),
+            error_uri,
         }
     }
 }
@@ -215,6 +235,22 @@ impl AuthorizationServerMetadata {
             Self::OpenId(metadata) => &metadata.code_challenge_methods_supported,
         }
     }
+
+    /// Returns grant types supported by the server, when advertised.
+    pub fn grant_types_supported(&self) -> Option<&[String]> {
+        match self {
+            Self::OAuth(metadata) => metadata.grant_types_supported.as_deref(),
+            Self::OpenId(metadata) => metadata.grant_types_supported.as_deref(),
+        }
+    }
+
+    /// Returns token endpoint authentication methods supported by the server.
+    pub fn token_endpoint_auth_methods_supported(&self) -> Option<&[String]> {
+        match self {
+            Self::OAuth(metadata) => metadata.token_endpoint_auth_methods_supported.as_deref(),
+            Self::OpenId(metadata) => metadata.token_endpoint_auth_methods_supported.as_deref(),
+        }
+    }
 }
 
 impl From<OAuthMetadata> for AuthorizationServerMetadata {
@@ -310,6 +346,42 @@ pub struct OAuthClientMetadata {
     pub software_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub software_statement: Option<String>,
+}
+
+impl OAuthClientMetadata {
+    /// Creates OAuth client metadata for the supplied redirect URIs.
+    pub fn new(redirect_uris: Vec<String>) -> Self {
+        Self {
+            redirect_uris,
+            token_endpoint_auth_method: None,
+            grant_types: None,
+            response_types: None,
+            client_name: None,
+            client_uri: None,
+            logo_uri: None,
+            scope: None,
+            contacts: None,
+            tos_uri: None,
+            policy_uri: None,
+            jwks_uri: None,
+            jwks: None,
+            software_id: None,
+            software_version: None,
+            software_statement: None,
+        }
+    }
+
+    /// Sets the OAuth client display name.
+    pub fn with_client_name(mut self, client_name: impl Into<String>) -> Self {
+        self.client_name = Some(client_name.into());
+        self
+    }
+
+    /// Sets the default requested OAuth scope.
+    pub fn with_scope(mut self, scope: impl Into<String>) -> Self {
+        self.scope = Some(scope.into());
+        self
+    }
 }
 
 /// Dynamic client information combined with client metadata.
@@ -474,6 +546,107 @@ impl StartAuthorizationOptions {
 pub struct StartAuthorizationResult {
     pub authorization_url: Url,
     pub code_verifier: String,
+}
+
+/// Options for exchanging an OAuth authorization code.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExchangeAuthorizationOptions {
+    pub metadata: Option<AuthorizationServerMetadata>,
+    pub client_information: OAuthClientInformation,
+    pub authorization_code: String,
+    pub code_verifier: String,
+    pub redirect_uri: String,
+    pub resource: Option<Url>,
+}
+
+impl ExchangeAuthorizationOptions {
+    /// Creates authorization-code exchange options.
+    pub fn new(
+        client_information: OAuthClientInformation,
+        authorization_code: impl Into<String>,
+        code_verifier: impl Into<String>,
+        redirect_uri: impl Into<String>,
+    ) -> Self {
+        Self {
+            metadata: None,
+            client_information,
+            authorization_code: authorization_code.into(),
+            code_verifier: code_verifier.into(),
+            redirect_uri: redirect_uri.into(),
+            resource: None,
+        }
+    }
+
+    /// Sets authorization server metadata.
+    pub fn with_metadata(mut self, metadata: impl Into<AuthorizationServerMetadata>) -> Self {
+        self.metadata = Some(metadata.into());
+        self
+    }
+
+    /// Sets the RFC 8707 resource parameter.
+    pub fn with_resource(mut self, resource: Url) -> Self {
+        self.resource = Some(resource);
+        self
+    }
+}
+
+/// Options for refreshing OAuth tokens.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RefreshAuthorizationOptions {
+    pub metadata: Option<AuthorizationServerMetadata>,
+    pub client_information: OAuthClientInformation,
+    pub refresh_token: String,
+    pub resource: Option<Url>,
+}
+
+impl RefreshAuthorizationOptions {
+    /// Creates refresh-token exchange options.
+    pub fn new(
+        client_information: OAuthClientInformation,
+        refresh_token: impl Into<String>,
+    ) -> Self {
+        Self {
+            metadata: None,
+            client_information,
+            refresh_token: refresh_token.into(),
+            resource: None,
+        }
+    }
+
+    /// Sets authorization server metadata.
+    pub fn with_metadata(mut self, metadata: impl Into<AuthorizationServerMetadata>) -> Self {
+        self.metadata = Some(metadata.into());
+        self
+    }
+
+    /// Sets the RFC 8707 resource parameter.
+    pub fn with_resource(mut self, resource: Url) -> Self {
+        self.resource = Some(resource);
+        self
+    }
+}
+
+/// Options for OAuth dynamic client registration.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegisterClientOptions {
+    pub metadata: Option<AuthorizationServerMetadata>,
+    pub client_metadata: OAuthClientMetadata,
+}
+
+impl RegisterClientOptions {
+    /// Creates dynamic client registration options.
+    pub fn new(client_metadata: OAuthClientMetadata) -> Self {
+        Self {
+            metadata: None,
+            client_metadata,
+        }
+    }
+
+    /// Sets authorization server metadata.
+    pub fn with_metadata(mut self, metadata: impl Into<AuthorizationServerMetadata>) -> Self {
+        self.metadata = Some(metadata.into());
+        self
+    }
 }
 
 /// Validates that a URL is parseable and does not use a dangerous scheme.
@@ -772,6 +945,150 @@ pub fn start_authorization(
     })
 }
 
+/// Parses an OAuth error response body.
+pub fn parse_oauth_error_response(status: Option<u16>, body: &str) -> McpOAuthError {
+    match serde_json::from_str::<OAuthErrorResponse>(body) {
+        Ok(error) => McpOAuthError::from_oauth_response(
+            error.error,
+            error.error_description.unwrap_or_default(),
+            error.error_uri,
+        ),
+        Err(error) => {
+            let status_prefix =
+                status.map_or_else(String::new, |status| format!("HTTP {status}: "));
+            McpOAuthError::new(format!(
+                "{status_prefix}Invalid OAuth error response: {error}. Raw body: {body}"
+            ))
+        }
+    }
+}
+
+/// Exchanges an authorization code for OAuth tokens.
+pub fn exchange_authorization(
+    authorization_server_url: impl AsRef<str>,
+    options: ExchangeAuthorizationOptions,
+) -> McpOAuthResult<OAuthTokens> {
+    let grant_type = "authorization_code";
+    let token_url =
+        token_endpoint_url(authorization_server_url.as_ref(), options.metadata.as_ref())?;
+    validate_grant_type(options.metadata.as_ref(), grant_type)?;
+
+    let mut params = BTreeMap::from([
+        ("grant_type".to_string(), grant_type.to_string()),
+        ("code".to_string(), options.authorization_code),
+        ("code_verifier".to_string(), options.code_verifier),
+        ("redirect_uri".to_string(), options.redirect_uri),
+    ]);
+    let mut headers = token_request_headers();
+    apply_client_authentication(
+        select_client_auth_method(
+            &options.client_information,
+            supported_auth_methods(options.metadata.as_ref()),
+        ),
+        &options.client_information,
+        &mut headers,
+        &mut params,
+    )?;
+    if let Some(resource) = &options.resource {
+        params.insert("resource".to_string(), resource_url_strip_slash(resource));
+    }
+
+    let response = post_form_urlencoded(&token_url, &headers, &params)?;
+    if !(200..300).contains(&response.status) {
+        return Err(parse_oauth_error_response(
+            Some(response.status),
+            &response.body,
+        ));
+    }
+    serde_json::from_str::<OAuthTokens>(&response.body).map_err(|error| {
+        McpOAuthError::new(format!("Failed to parse OAuth token response: {error}"))
+    })
+}
+
+/// Exchanges a refresh token for updated OAuth tokens.
+pub fn refresh_authorization(
+    authorization_server_url: impl AsRef<str>,
+    options: RefreshAuthorizationOptions,
+) -> McpOAuthResult<OAuthTokens> {
+    let grant_type = "refresh_token";
+    let token_url =
+        token_endpoint_url(authorization_server_url.as_ref(), options.metadata.as_ref())?;
+    validate_grant_type(options.metadata.as_ref(), grant_type)?;
+
+    let original_refresh_token = options.refresh_token.clone();
+    let mut params = BTreeMap::from([
+        ("grant_type".to_string(), grant_type.to_string()),
+        ("refresh_token".to_string(), options.refresh_token),
+    ]);
+    let mut headers = token_request_headers();
+    apply_client_authentication(
+        select_client_auth_method(
+            &options.client_information,
+            supported_auth_methods(options.metadata.as_ref()),
+        ),
+        &options.client_information,
+        &mut headers,
+        &mut params,
+    )?;
+    if let Some(resource) = &options.resource {
+        params.insert("resource".to_string(), resource_url_strip_slash(resource));
+    }
+
+    let response = post_form_urlencoded(&token_url, &headers, &params)?;
+    if !(200..300).contains(&response.status) {
+        return Err(parse_oauth_error_response(
+            Some(response.status),
+            &response.body,
+        ));
+    }
+    let mut tokens = serde_json::from_str::<OAuthTokens>(&response.body).map_err(|error| {
+        McpOAuthError::new(format!(
+            "Failed to parse OAuth refresh token response: {error}"
+        ))
+    })?;
+    if tokens.refresh_token.is_none() {
+        tokens.refresh_token = Some(original_refresh_token);
+    }
+    Ok(tokens)
+}
+
+/// Performs OAuth 2.0 Dynamic Client Registration.
+pub fn register_client(
+    authorization_server_url: impl AsRef<str>,
+    options: RegisterClientOptions,
+) -> McpOAuthResult<OAuthClientInformationFull> {
+    let registration_url = if let Some(metadata) = &options.metadata {
+        let registration_endpoint = metadata.registration_endpoint().ok_or_else(|| {
+            McpOAuthError::new(
+                "Incompatible auth server: does not support dynamic client registration",
+            )
+        })?;
+        Url::parse(registration_endpoint).map_err(|error| {
+            McpOAuthError::new(format!("invalid registration endpoint URL: {error}"))
+        })?
+    } else {
+        Url::parse(authorization_server_url.as_ref())
+            .and_then(|url| url.join("/register"))
+            .map_err(|error| McpOAuthError::new(format!("invalid registration URL: {error}")))?
+    };
+
+    let body = serde_json::to_string(&options.client_metadata).map_err(|error| {
+        McpOAuthError::new(format!("Failed to serialize client metadata: {error}"))
+    })?;
+    let response = post_json(&registration_url, &body)?;
+    if !(200..300).contains(&response.status) {
+        return Err(parse_oauth_error_response(
+            Some(response.status),
+            &response.body,
+        ));
+    }
+    serde_json::from_str::<OAuthClientInformationFull>(&response.body).map_err(|error| {
+        McpOAuthError::new(format!(
+            "Failed to parse OAuth client information response: {error}"
+        ))
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WellKnownType {
     OAuthProtectedResource,
@@ -789,6 +1106,13 @@ impl WellKnownType {
 struct OAuthHttpResponse {
     status: u16,
     body: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClientAuthMethod {
+    ClientSecretBasic,
+    ClientSecretPost,
+    None,
 }
 
 fn discover_metadata_with_fallback(
@@ -843,6 +1167,167 @@ fn fetch_metadata(url: &Url, protocol_version: &str) -> McpOAuthResult<OAuthHttp
     let status = response.status().as_u16();
     let body = response.body_mut().read_to_string().map_err(|error| {
         McpOAuthError::new(format!("OAuth metadata response read failed: {error}"))
+    })?;
+    Ok(OAuthHttpResponse { status, body })
+}
+
+fn token_endpoint_url(
+    authorization_server_url: &str,
+    metadata: Option<&AuthorizationServerMetadata>,
+) -> McpOAuthResult<Url> {
+    if let Some(metadata) = metadata {
+        Url::parse(metadata.token_endpoint())
+            .map_err(|error| McpOAuthError::new(format!("invalid token endpoint URL: {error}")))
+    } else {
+        Url::parse(authorization_server_url)
+            .and_then(|url| url.join("/token"))
+            .map_err(|error| McpOAuthError::new(format!("invalid token URL: {error}")))
+    }
+}
+
+fn validate_grant_type(
+    metadata: Option<&AuthorizationServerMetadata>,
+    grant_type: &str,
+) -> McpOAuthResult<()> {
+    if let Some(grant_types) = metadata.and_then(AuthorizationServerMetadata::grant_types_supported)
+        && !grant_types.iter().any(|supported| supported == grant_type)
+    {
+        return Err(McpOAuthError::new(format!(
+            "Incompatible auth server: does not support grant type {grant_type}"
+        )));
+    }
+    Ok(())
+}
+
+fn supported_auth_methods(metadata: Option<&AuthorizationServerMetadata>) -> &[String] {
+    metadata
+        .and_then(AuthorizationServerMetadata::token_endpoint_auth_methods_supported)
+        .unwrap_or(&[])
+}
+
+fn select_client_auth_method(
+    client_information: &OAuthClientInformation,
+    supported_methods: &[String],
+) -> ClientAuthMethod {
+    let has_client_secret = client_information.client_secret.is_some();
+    if supported_methods.is_empty() {
+        return if has_client_secret {
+            ClientAuthMethod::ClientSecretPost
+        } else {
+            ClientAuthMethod::None
+        };
+    }
+    if has_client_secret
+        && supported_methods
+            .iter()
+            .any(|method| method == "client_secret_basic")
+    {
+        return ClientAuthMethod::ClientSecretBasic;
+    }
+    if has_client_secret
+        && supported_methods
+            .iter()
+            .any(|method| method == "client_secret_post")
+    {
+        return ClientAuthMethod::ClientSecretPost;
+    }
+    if supported_methods.iter().any(|method| method == "none") {
+        return ClientAuthMethod::None;
+    }
+    if has_client_secret {
+        ClientAuthMethod::ClientSecretPost
+    } else {
+        ClientAuthMethod::None
+    }
+}
+
+fn token_request_headers() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "Content-Type".to_string(),
+            "application/x-www-form-urlencoded".to_string(),
+        ),
+        ("Accept".to_string(), "application/json".to_string()),
+    ])
+}
+
+fn apply_client_authentication(
+    method: ClientAuthMethod,
+    client_information: &OAuthClientInformation,
+    headers: &mut BTreeMap<String, String>,
+    params: &mut BTreeMap<String, String>,
+) -> McpOAuthResult<()> {
+    match method {
+        ClientAuthMethod::ClientSecretBasic => {
+            let client_secret = client_information.client_secret.as_ref().ok_or_else(|| {
+                McpOAuthError::new("client_secret_basic authentication requires a client_secret")
+            })?;
+            let credentials = convert_bytes_to_base64(
+                format!("{}:{client_secret}", client_information.client_id).as_bytes(),
+            );
+            headers.insert("Authorization".to_string(), format!("Basic {credentials}"));
+        }
+        ClientAuthMethod::ClientSecretPost => {
+            params.insert(
+                "client_id".to_string(),
+                client_information.client_id.clone(),
+            );
+            if let Some(client_secret) = &client_information.client_secret {
+                params.insert("client_secret".to_string(), client_secret.clone());
+            }
+        }
+        ClientAuthMethod::None => {
+            params.insert(
+                "client_id".to_string(),
+                client_information.client_id.clone(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn post_form_urlencoded(
+    url: &Url,
+    headers: &BTreeMap<String, String>,
+    params: &BTreeMap<String, String>,
+) -> McpOAuthResult<OAuthHttpResponse> {
+    let mut body = FormUrlEncodedSerializer::new(String::new());
+    for (key, value) in params {
+        body.append_pair(key, value);
+    }
+    let body = body.finish();
+    let mut builder = ureq::post(url.as_str());
+    for (key, value) in headers {
+        builder = builder.header(key.as_str(), value.as_str());
+    }
+    let mut response = builder
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .send(body)
+        .map_err(|error| McpOAuthError::new(format!("OAuth token request failed: {error}")))?;
+    let status = response.status().as_u16();
+    let body = response.body_mut().read_to_string().map_err(|error| {
+        McpOAuthError::new(format!("OAuth token response read failed: {error}"))
+    })?;
+    Ok(OAuthHttpResponse { status, body })
+}
+
+fn post_json(url: &Url, body: &str) -> McpOAuthResult<OAuthHttpResponse> {
+    let mut response = ureq::post(url.as_str())
+        .header("Content-Type", "application/json")
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .send(body)
+        .map_err(|error| {
+            McpOAuthError::new(format!("OAuth client registration request failed: {error}"))
+        })?;
+    let status = response.status().as_u16();
+    let body = response.body_mut().read_to_string().map_err(|error| {
+        McpOAuthError::new(format!(
+            "OAuth client registration response read failed: {error}"
+        ))
     })?;
     Ok(OAuthHttpResponse { status, body })
 }
@@ -1464,6 +1949,349 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_oauth_error_response_reads_standard_error_body() {
+        let error = parse_oauth_error_response(
+            Some(400),
+            &json!({
+                "error": "invalid_grant",
+                "error_description": "Token exchange failed",
+                "error_uri": "https://auth.example.com/errors/invalid-grant"
+            })
+            .to_string(),
+        );
+
+        assert_eq!(error.message, "Token exchange failed");
+        assert_eq!(error.error_code.as_deref(), Some("invalid_grant"));
+        assert_eq!(
+            error.error_uri.as_deref(),
+            Some("https://auth.example.com/errors/invalid-grant")
+        );
+
+        let fallback = parse_oauth_error_response(Some(500), "not-json");
+        assert!(fallback.message.contains("HTTP 500"));
+        assert!(fallback.message.contains("Invalid OAuth error response"));
+        assert_eq!(fallback.error_code, None);
+    }
+
+    #[test]
+    fn exchange_authorization_posts_code_verifier_client_secret_and_resource() {
+        let server = LocalOAuthServer::new(vec![LocalOAuthResponse::json(json!({
+            "access_token": "access123",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "refresh_token": "refresh123"
+        }))]);
+
+        let tokens = exchange_authorization(
+            server.url(),
+            ExchangeAuthorizationOptions::new(
+                OAuthClientInformation::new("client123").with_client_secret("secret123"),
+                "code123",
+                "verifier123",
+                "http://localhost:3000/callback",
+            )
+            .with_resource(Url::parse("https://api.example.com/mcp-server").expect("URL")),
+        )
+        .expect("authorization code exchanges");
+
+        assert_eq!(tokens.access_token, "access123");
+        assert_eq!(tokens.refresh_token.as_deref(), Some("refresh123"));
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].path, "/token");
+        assert_eq!(
+            requests[0].headers.get("content-type"),
+            Some(&"application/x-www-form-urlencoded".to_string())
+        );
+        assert_eq!(
+            requests[0].headers.get("accept"),
+            Some(&"application/json".to_string())
+        );
+        let body = form_body(&requests[0].body);
+        assert_eq!(
+            body.get("grant_type").map(String::as_str),
+            Some("authorization_code")
+        );
+        assert_eq!(body.get("code").map(String::as_str), Some("code123"));
+        assert_eq!(
+            body.get("code_verifier").map(String::as_str),
+            Some("verifier123")
+        );
+        assert_eq!(body.get("client_id").map(String::as_str), Some("client123"));
+        assert_eq!(
+            body.get("client_secret").map(String::as_str),
+            Some("secret123")
+        );
+        assert_eq!(
+            body.get("redirect_uri").map(String::as_str),
+            Some("http://localhost:3000/callback")
+        );
+        assert_eq!(
+            body.get("resource").map(String::as_str),
+            Some("https://api.example.com/mcp-server")
+        );
+    }
+
+    #[test]
+    fn exchange_authorization_uses_basic_auth_when_metadata_prefers_it() {
+        let server = LocalOAuthServer::new(vec![LocalOAuthResponse::json(json!({
+            "access_token": "access123",
+            "token_type": "Bearer"
+        }))]);
+        let metadata = oauth_metadata()
+            .with_token_endpoint(format!("{}/custom-token", server.url()))
+            .with_grant_types(["authorization_code"])
+            .with_auth_methods(["client_secret_basic"]);
+
+        let tokens = exchange_authorization(
+            "https://auth.example.com",
+            ExchangeAuthorizationOptions::new(
+                OAuthClientInformation::new("client123").with_client_secret("secret123"),
+                "code123",
+                "verifier123",
+                "http://localhost:3000/callback",
+            )
+            .with_metadata(metadata),
+        )
+        .expect("authorization code exchanges");
+
+        assert_eq!(tokens.access_token, "access123");
+        let requests = server.requests();
+        assert_eq!(requests[0].path, "/custom-token");
+        assert_eq!(
+            requests[0].headers.get("authorization"),
+            Some(&"Basic Y2xpZW50MTIzOnNlY3JldDEyMw==".to_string())
+        );
+        let body = form_body(&requests[0].body);
+        assert_eq!(body.get("client_id"), None);
+        assert_eq!(body.get("client_secret"), None);
+    }
+
+    #[test]
+    fn exchange_authorization_validates_grant_type_and_token_response() {
+        let grant_error = exchange_authorization(
+            "https://auth.example.com",
+            ExchangeAuthorizationOptions::new(
+                OAuthClientInformation::new("client123"),
+                "code123",
+                "verifier123",
+                "http://localhost:3000/callback",
+            )
+            .with_metadata(oauth_metadata().with_grant_types(["refresh_token"])),
+        )
+        .expect_err("unsupported grant type fails");
+        assert!(
+            grant_error
+                .message
+                .contains("does not support grant type authorization_code")
+        );
+
+        let server = LocalOAuthServer::new(vec![LocalOAuthResponse::json(json!({
+            "access_token": "access123"
+        }))]);
+        let parse_error = exchange_authorization(
+            server.url(),
+            ExchangeAuthorizationOptions::new(
+                OAuthClientInformation::new("client123"),
+                "code123",
+                "verifier123",
+                "http://localhost:3000/callback",
+            ),
+        )
+        .expect_err("invalid token response fails");
+        assert!(
+            parse_error
+                .message
+                .contains("Failed to parse OAuth token response")
+        );
+    }
+
+    #[test]
+    fn refresh_authorization_posts_refresh_token_and_preserves_missing_replacement() {
+        let server = LocalOAuthServer::new(vec![LocalOAuthResponse::json(json!({
+            "access_token": "newaccess123",
+            "token_type": "Bearer",
+            "expires_in": 3600
+        }))]);
+
+        let tokens = refresh_authorization(
+            server.url(),
+            RefreshAuthorizationOptions::new(
+                OAuthClientInformation::new("client123").with_client_secret("secret123"),
+                "refresh123",
+            )
+            .with_resource(Url::parse("https://mcp.example.com").expect("URL")),
+        )
+        .expect("refresh succeeds");
+
+        assert_eq!(tokens.access_token, "newaccess123");
+        assert_eq!(tokens.refresh_token.as_deref(), Some("refresh123"));
+        let requests = server.requests();
+        assert_eq!(requests[0].path, "/token");
+        let body = form_body(&requests[0].body);
+        assert_eq!(
+            body.get("grant_type").map(String::as_str),
+            Some("refresh_token")
+        );
+        assert_eq!(
+            body.get("refresh_token").map(String::as_str),
+            Some("refresh123")
+        );
+        assert_eq!(
+            body.get("resource").map(String::as_str),
+            Some("https://mcp.example.com")
+        );
+    }
+
+    #[test]
+    fn refresh_authorization_reports_oauth_error_response() {
+        let server = LocalOAuthServer::new(vec![LocalOAuthResponse::new(
+            400,
+            [("content-type", "application/json")],
+            json!({
+                "error": "server_error",
+                "error_description": "Token refresh failed"
+            })
+            .to_string(),
+        )]);
+
+        let error = refresh_authorization(
+            server.url(),
+            RefreshAuthorizationOptions::new(
+                OAuthClientInformation::new("client123"),
+                "refresh123",
+            ),
+        )
+        .expect_err("refresh error is reported");
+
+        assert_eq!(error.message, "Token refresh failed");
+        assert_eq!(error.error_code.as_deref(), Some("server_error"));
+    }
+
+    #[test]
+    fn register_client_posts_metadata_and_parses_full_information() {
+        let server = LocalOAuthServer::new(vec![LocalOAuthResponse::json(json!({
+            "client_id": "client123",
+            "client_secret": "secret123",
+            "client_id_issued_at": 1612137600_u64,
+            "client_secret_expires_at": 1612224000_u64,
+            "redirect_uris": ["http://localhost:3000/callback"],
+            "client_name": "Test Client"
+        }))]);
+        let client_metadata =
+            OAuthClientMetadata::new(vec!["http://localhost:3000/callback".to_string()])
+                .with_client_name("Test Client");
+
+        let client = register_client(server.url(), RegisterClientOptions::new(client_metadata))
+            .expect("client registers");
+
+        assert_eq!(client.information.client_id, "client123");
+        assert_eq!(
+            client.information.client_secret.as_deref(),
+            Some("secret123")
+        );
+        assert_eq!(
+            client.metadata.redirect_uris,
+            vec!["http://localhost:3000/callback".to_string()]
+        );
+        assert_eq!(client.metadata.client_name.as_deref(), Some("Test Client"));
+        let requests = server.requests();
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].path, "/register");
+        assert_eq!(
+            requests[0].headers.get("content-type"),
+            Some(&"application/json".to_string())
+        );
+        let body = json_body(&requests[0].body);
+        assert_eq!(body["redirect_uris"][0], "http://localhost:3000/callback");
+        assert_eq!(body["client_name"], "Test Client");
+    }
+
+    #[test]
+    fn register_client_uses_metadata_endpoint_and_requires_registration_support() {
+        let server = LocalOAuthServer::new(vec![LocalOAuthResponse::json(json!({
+            "client_id": "client123",
+            "redirect_uris": ["http://localhost:3000/callback"]
+        }))]);
+        let metadata = oauth_metadata()
+            .with_registration_endpoint(format!("{}/register-client", server.url()));
+
+        let client = register_client(
+            "https://auth.example.com",
+            RegisterClientOptions::new(OAuthClientMetadata::new(vec![
+                "http://localhost:3000/callback".to_string(),
+            ]))
+            .with_metadata(metadata),
+        )
+        .expect("client registers through metadata endpoint");
+
+        assert_eq!(client.information.client_id, "client123");
+        assert_eq!(server.requests()[0].path, "/register-client");
+
+        let error = register_client(
+            "https://auth.example.com",
+            RegisterClientOptions::new(OAuthClientMetadata::new(vec![
+                "http://localhost:3000/callback".to_string(),
+            ]))
+            .with_metadata(oauth_metadata()),
+        )
+        .expect_err("missing registration endpoint fails");
+        assert!(
+            error
+                .message
+                .contains("does not support dynamic client registration")
+        );
+    }
+
+    trait OAuthMetadataTestExt {
+        fn with_token_endpoint(self, token_endpoint: String) -> Self;
+        fn with_registration_endpoint(self, registration_endpoint: String) -> Self;
+        fn with_grant_types<const N: usize>(self, grant_types: [&str; N]) -> Self;
+        fn with_auth_methods<const N: usize>(self, auth_methods: [&str; N]) -> Self;
+    }
+
+    impl OAuthMetadataTestExt for OAuthMetadata {
+        fn with_token_endpoint(mut self, token_endpoint: String) -> Self {
+            self.token_endpoint = token_endpoint;
+            self
+        }
+
+        fn with_registration_endpoint(mut self, registration_endpoint: String) -> Self {
+            self.registration_endpoint = Some(registration_endpoint);
+            self
+        }
+
+        fn with_grant_types<const N: usize>(mut self, grant_types: [&str; N]) -> Self {
+            self.grant_types_supported =
+                Some(grant_types.into_iter().map(str::to_string).collect());
+            self
+        }
+
+        fn with_auth_methods<const N: usize>(mut self, auth_methods: [&str; N]) -> Self {
+            self.token_endpoint_auth_methods_supported =
+                Some(auth_methods.into_iter().map(str::to_string).collect());
+            self
+        }
+    }
+
+    fn oauth_metadata() -> OAuthMetadata {
+        OAuthMetadata {
+            issuer: "https://auth.example.com".to_string(),
+            authorization_endpoint: "https://auth.example.com/authorize".to_string(),
+            token_endpoint: "https://auth.example.com/token".to_string(),
+            registration_endpoint: None,
+            scopes_supported: None,
+            response_types_supported: vec!["code".to_string()],
+            grant_types_supported: None,
+            code_challenge_methods_supported: vec!["S256".to_string()],
+            token_endpoint_auth_methods_supported: None,
+            token_endpoint_auth_signing_alg_values_supported: None,
+            extra: JsonObject::new(),
+        }
+    }
+
     fn discovery_url_tuples(urls: &[DiscoveryUrl]) -> Vec<(String, DiscoveryMetadataType)> {
         urls.iter()
             .map(|url| (url.url.as_str().to_string(), url.metadata_type))
@@ -1481,6 +2309,7 @@ mod tests {
         method: String,
         path: String,
         headers: BTreeMap<String, String>,
+        body: String,
     }
 
     struct LocalOAuthResponse {
@@ -1647,10 +2476,31 @@ mod tests {
             };
             headers.insert(key.trim().to_ascii_lowercase(), value.trim().to_string());
         }
+        let content_length = headers
+            .get("content-length")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let body_start = header_end + 4;
+        if buffer.len() < body_start + content_length {
+            return None;
+        }
+        let body =
+            String::from_utf8_lossy(&buffer[body_start..body_start + content_length]).to_string();
         Some(LocalOAuthRequest {
             method,
             path,
             headers,
+            body,
         })
+    }
+
+    fn form_body(body: &str) -> BTreeMap<String, String> {
+        url::form_urlencoded::parse(body.as_bytes())
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect()
+    }
+
+    fn json_body(body: &str) -> JsonValue {
+        serde_json::from_str(body).expect("body is JSON")
     }
 }

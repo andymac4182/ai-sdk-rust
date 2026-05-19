@@ -23,14 +23,16 @@ use ai_sdk_provider_utils::{
 };
 pub use oauth::{
     AuthorizationServerMetadata, AuthorizationServerMetadataDiscoveryOptions,
-    DiscoveryMetadataType, DiscoveryUrl, McpOAuthError, McpOAuthResult, OAuthClientInformation,
-    OAuthClientInformationFull, OAuthClientMetadata, OAuthErrorResponse, OAuthMetadata,
-    OAuthPkceChallenge, OAuthProtectedResourceMetadata,
+    DiscoveryMetadataType, DiscoveryUrl, ExchangeAuthorizationOptions, McpOAuthError,
+    McpOAuthResult, OAuthClientInformation, OAuthClientInformationFull, OAuthClientMetadata,
+    OAuthErrorResponse, OAuthMetadata, OAuthPkceChallenge, OAuthProtectedResourceMetadata,
     OAuthProtectedResourceMetadataDiscoveryOptions, OAuthTokens, OpenIdProviderDiscoveryMetadata,
-    StartAuthorizationOptions, StartAuthorizationResult, build_discovery_urls,
-    check_resource_allowed, discover_authorization_server_metadata,
-    discover_oauth_protected_resource_metadata, extract_resource_metadata_url,
-    resource_url_from_server_url, resource_url_strip_slash, start_authorization, validate_safe_url,
+    RefreshAuthorizationOptions, RegisterClientOptions, StartAuthorizationOptions,
+    StartAuthorizationResult, build_discovery_urls, check_resource_allowed,
+    discover_authorization_server_metadata, discover_oauth_protected_resource_metadata,
+    exchange_authorization, extract_resource_metadata_url, parse_oauth_error_response,
+    refresh_authorization, register_client, resource_url_from_server_url, resource_url_strip_slash,
+    start_authorization, validate_safe_url,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
