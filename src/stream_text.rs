@@ -2405,6 +2405,8 @@ where
             ),
         )
         .await;
+        let local_tool_results =
+            apply_stream_text_transforms_to_tool_results(local_tool_results, &transforms);
         for tool_result in &local_tool_results {
             push_text_stream_part(
                 &mut parts,
@@ -3360,6 +3362,28 @@ fn strip_stream_text_finish_parts(parts: Vec<TextStreamPart>) -> Vec<TextStreamP
                 part,
                 TextStreamPart::FinishStep(_) | TextStreamPart::Finish(_)
             )
+        })
+        .collect()
+}
+
+fn apply_stream_text_transforms_to_tool_results(
+    tool_results: Vec<GenerateTextToolResult>,
+    transforms: &[StreamTextTransform<'_>],
+) -> Vec<GenerateTextToolResult> {
+    if transforms.is_empty() {
+        return tool_results;
+    }
+
+    let parts = tool_results
+        .into_iter()
+        .map(TextStreamPart::ToolResult)
+        .collect();
+
+    apply_stream_text_transforms(parts, transforms)
+        .into_iter()
+        .filter_map(|part| match part {
+            TextStreamPart::ToolResult(part) => Some(part),
+            _ => None,
         })
         .collect()
 }
@@ -4488,6 +4512,116 @@ mod tests {
             json!({ "value": "VALUE" })
         );
         assert_eq!(result.steps[0].tool_results[0].output, json!("RESULT1"));
+    }
+
+    #[test]
+    fn stream_text_transform_updates_local_tool_results_after_execution() {
+        let chunks = Arc::new(Mutex::new(Vec::new()));
+        let chunks_for_callback = Arc::clone(&chunks);
+        let uppercase_tool_data = StreamTextTransform::new(|parts| {
+            parts
+                .into_iter()
+                .map(|part| match part {
+                    TextStreamPart::ToolCall(mut part) => {
+                        if let JsonValue::Object(input) = &mut part.input {
+                            input.insert("city".to_string(), json!("BRISBANE"));
+                        }
+                        TextStreamPart::ToolCall(part)
+                    }
+                    TextStreamPart::ToolResult(mut part) => {
+                        if let JsonValue::Object(input) = &mut part.input {
+                            input.insert("city".to_string(), json!("BRISBANE"));
+                        }
+                        if let JsonValue::Object(output) = &mut part.output {
+                            output.insert("forecast".to_string(), json!("SUNNY"));
+                        }
+                        TextStreamPart::ToolResult(part)
+                    }
+                    part => part,
+                })
+                .collect()
+        });
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "weather",
+                    r#"{"city":"Brisbane"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "Done.")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |input, _options| async move {
+                        assert_eq!(input["city"], json!("BRISBANE"));
+                        Ok(json!({
+                            "forecast": "sunny",
+                            "city": input["city"]
+                        }))
+                    },
+                ))
+                .with_transform(uppercase_tool_data)
+                .with_on_chunk(move |event| {
+                    let chunks = Arc::clone(&chunks_for_callback);
+                    async move {
+                        if let TextStreamPart::ToolResult(part) = event.chunk {
+                            chunks
+                                .lock()
+                                .expect("chunks mutex is not poisoned")
+                                .push(part.output);
+                        }
+                    }
+                })
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(result.tool_calls[0].input, json!({ "city": "BRISBANE" }));
+        assert_eq!(result.tool_results[0].input, json!({ "city": "BRISBANE" }));
+        assert_eq!(
+            result.tool_results[0].output,
+            json!({ "forecast": "SUNNY", "city": "BRISBANE" })
+        );
+        assert_eq!(
+            *chunks.lock().expect("chunks mutex is not poisoned"),
+            [json!({ "forecast": "SUNNY", "city": "BRISBANE" })]
+        );
+        assert!(matches!(
+            &model.stream_calls()[1].prompt[2],
+            LanguageModelMessage::Tool(message)
+                if matches!(
+                    &message.content[0],
+                    LanguageModelToolContentPart::ToolResult(part)
+                        if part.output == LanguageModelToolResultOutput::json(json!({
+                            "forecast": "SUNNY",
+                            "city": "BRISBANE"
+                        }))
+                )
+        ));
     }
 
     #[test]
