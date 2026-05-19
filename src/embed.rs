@@ -15,6 +15,7 @@ use crate::provider::ProviderMetadata;
 use crate::provider::ProviderOptions;
 use crate::provider_utils::{IdGeneratorOptions, create_id_generator, with_user_agent_suffix};
 use crate::retry::DEFAULT_MAX_RETRIES;
+use crate::telemetry::{TelemetryOptions, create_telemetry_dispatcher};
 use crate::warning::Warning;
 
 /// Embedding vector returned by high-level embed operations.
@@ -270,6 +271,9 @@ pub struct EmbedOptions<'a, M: EmbeddingModel + ?Sized> {
 
     /// Callback invoked after the model returns.
     pub on_end: Option<EmbedOnEnd<'a>>,
+
+    /// Optional telemetry dispatcher settings.
+    pub telemetry: Option<TelemetryOptions>,
 }
 
 impl<'a, M: EmbeddingModel + ?Sized> EmbedOptions<'a, M> {
@@ -282,6 +286,7 @@ impl<'a, M: EmbeddingModel + ?Sized> EmbedOptions<'a, M> {
             headers: None,
             on_start: None,
             on_end: None,
+            telemetry: None,
         }
     }
 
@@ -342,6 +347,12 @@ impl<'a, M: EmbeddingModel + ?Sized> EmbedOptions<'a, M> {
     {
         self.with_on_end(on_end)
     }
+
+    /// Sets telemetry options for this embedding operation.
+    pub fn with_telemetry(mut self, telemetry: TelemetryOptions) -> Self {
+        self.telemetry = Some(telemetry);
+        self
+    }
 }
 
 /// Options for a high-level `embedMany` call.
@@ -363,6 +374,9 @@ pub struct EmbedManyOptions<'a, M: EmbeddingModel + ?Sized> {
 
     /// Callback invoked after all model calls return.
     pub on_end: Option<EmbedOnEnd<'a>>,
+
+    /// Optional telemetry dispatcher settings.
+    pub telemetry: Option<TelemetryOptions>,
 }
 
 impl<'a, M: EmbeddingModel + ?Sized> EmbedManyOptions<'a, M> {
@@ -379,6 +393,7 @@ impl<'a, M: EmbeddingModel + ?Sized> EmbedManyOptions<'a, M> {
             headers: None,
             on_start: None,
             on_end: None,
+            telemetry: None,
         }
     }
 
@@ -438,6 +453,12 @@ impl<'a, M: EmbeddingModel + ?Sized> EmbedManyOptions<'a, M> {
         Fut: Future<Output = ()> + 'a,
     {
         self.with_on_end(on_end)
+    }
+
+    /// Sets telemetry options for this embedding operation.
+    pub fn with_telemetry(mut self, telemetry: TelemetryOptions) -> Self {
+        self.telemetry = Some(telemetry);
+        self
     }
 }
 
@@ -507,23 +528,27 @@ pub async fn embed<M: EmbeddingModel + ?Sized>(options: EmbedOptions<'_, M>) -> 
         headers,
         on_start,
         on_end,
+        telemetry,
     } = options;
     let headers = headers_with_ai_user_agent(headers);
     let call_id = embed_call_id();
+    let telemetry_dispatcher = create_telemetry_dispatcher(telemetry);
 
-    if let Some(on_start) = &on_start {
-        on_start
-            .start(EmbedStartEvent {
-                call_id: call_id.clone(),
-                operation_id: "ai.embed".to_string(),
-                provider: model.provider().to_string(),
-                model_id: model.model_id().to_string(),
-                value: EmbedEventValue::One(value.clone()),
-                max_retries: DEFAULT_MAX_RETRIES,
-                headers: Some(headers.clone()),
-                provider_options: provider_options.clone(),
-            })
-            .await;
+    if on_start.is_some() || telemetry_dispatcher.is_enabled() {
+        let start_event = EmbedStartEvent {
+            call_id: call_id.clone(),
+            operation_id: "ai.embed".to_string(),
+            provider: model.provider().to_string(),
+            model_id: model.model_id().to_string(),
+            value: EmbedEventValue::One(value.clone()),
+            max_retries: DEFAULT_MAX_RETRIES,
+            headers: Some(headers.clone()),
+            provider_options: provider_options.clone(),
+        };
+        if let Some(on_start) = &on_start {
+            on_start.start(start_event.clone()).await;
+        }
+        telemetry_dispatcher.on_embed_start(&start_event);
     }
 
     let EmbeddingModelResult {
@@ -549,21 +574,23 @@ pub async fn embed<M: EmbeddingModel + ?Sized>(options: EmbedOptions<'_, M>) -> 
         response,
     };
 
-    if let Some(on_end) = &on_end {
-        on_end
-            .end(EmbedEndEvent {
-                call_id,
-                operation_id: "ai.embed".to_string(),
-                provider: model.provider().to_string(),
-                model_id: model.model_id().to_string(),
-                value: EmbedEventValue::One(result.value.clone()),
-                embedding: EmbedEventEmbedding::One(result.embedding.clone()),
-                usage: result.usage.clone(),
-                warnings: result.warnings.clone(),
-                provider_metadata: result.provider_metadata.clone(),
-                response: result.response.clone().map(EmbedEventResponse::One),
-            })
-            .await;
+    if on_end.is_some() || telemetry_dispatcher.is_enabled() {
+        let end_event = EmbedEndEvent {
+            call_id,
+            operation_id: "ai.embed".to_string(),
+            provider: model.provider().to_string(),
+            model_id: model.model_id().to_string(),
+            value: EmbedEventValue::One(result.value.clone()),
+            embedding: EmbedEventEmbedding::One(result.embedding.clone()),
+            usage: result.usage.clone(),
+            warnings: result.warnings.clone(),
+            provider_metadata: result.provider_metadata.clone(),
+            response: result.response.clone().map(EmbedEventResponse::One),
+        };
+        if let Some(on_end) = &on_end {
+            on_end.end(end_event.clone()).await;
+        }
+        telemetry_dispatcher.on_embed_end(&end_event);
     }
 
     result
@@ -645,23 +672,27 @@ pub async fn embed_many<M: EmbeddingModel + ?Sized>(
         headers,
         on_start,
         on_end,
+        telemetry,
     } = options;
     let headers = headers_with_ai_user_agent(headers);
     let call_id = embed_call_id();
+    let telemetry_dispatcher = create_telemetry_dispatcher(telemetry);
 
-    if let Some(on_start) = &on_start {
-        on_start
-            .start(EmbedStartEvent {
-                call_id: call_id.clone(),
-                operation_id: "ai.embedMany".to_string(),
-                provider: model.provider().to_string(),
-                model_id: model.model_id().to_string(),
-                value: EmbedEventValue::Many(values.clone()),
-                max_retries: DEFAULT_MAX_RETRIES,
-                headers: Some(headers.clone()),
-                provider_options: provider_options.clone(),
-            })
-            .await;
+    if on_start.is_some() || telemetry_dispatcher.is_enabled() {
+        let start_event = EmbedStartEvent {
+            call_id: call_id.clone(),
+            operation_id: "ai.embedMany".to_string(),
+            provider: model.provider().to_string(),
+            model_id: model.model_id().to_string(),
+            value: EmbedEventValue::Many(values.clone()),
+            max_retries: DEFAULT_MAX_RETRIES,
+            headers: Some(headers.clone()),
+            provider_options: provider_options.clone(),
+        };
+        if let Some(on_start) = &on_start {
+            on_start.start(start_event.clone()).await;
+        }
+        telemetry_dispatcher.on_embed_start(&start_event);
     }
 
     let max_embeddings_per_call = model.max_embeddings_per_call().await;
@@ -694,15 +725,13 @@ pub async fn embed_many<M: EmbeddingModel + ?Sized>(
             responses: Some(vec![response]),
         };
 
-        if let Some(on_end) = &on_end {
-            on_end
-                .end(embed_many_end_event(
-                    call_id,
-                    model.provider(),
-                    model.model_id(),
-                    &result,
-                ))
-                .await;
+        if on_end.is_some() || telemetry_dispatcher.is_enabled() {
+            let end_event =
+                embed_many_end_event(call_id, model.provider(), model.model_id(), &result);
+            if let Some(on_end) = &on_end {
+                on_end.end(end_event.clone()).await;
+            }
+            telemetry_dispatcher.on_embed_end(&end_event);
         }
 
         return result;
@@ -748,15 +777,12 @@ pub async fn embed_many<M: EmbeddingModel + ?Sized>(
         responses: Some(responses),
     };
 
-    if let Some(on_end) = &on_end {
-        on_end
-            .end(embed_many_end_event(
-                call_id,
-                model.provider(),
-                model.model_id(),
-                &result,
-            ))
-            .await;
+    if on_end.is_some() || telemetry_dispatcher.is_enabled() {
+        let end_event = embed_many_end_event(call_id, model.provider(), model.model_id(), &result);
+        if let Some(on_end) = &on_end {
+            on_end.end(end_event.clone()).await;
+        }
+        telemetry_dispatcher.on_embed_end(&end_event);
     }
 
     result
@@ -848,6 +874,9 @@ mod tests {
     use crate::headers::Headers;
     use crate::provider::{ProviderMetadata, ProviderOptions};
     use crate::retry::DEFAULT_MAX_RETRIES;
+    use crate::telemetry::{
+        TelemetryEvent, TelemetryEventKind, TelemetryIntegration, TelemetryOptions,
+    };
     use crate::warning::Warning;
     use serde_json::json;
     use std::cell::RefCell;
@@ -855,7 +884,7 @@ mod tests {
     use std::future::{Future, Ready, ready};
     use std::pin::Pin;
     use std::rc::Rc;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Waker};
 
     struct RecordingEmbeddingModel {
@@ -1429,6 +1458,123 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[test]
+    fn embed_dispatches_telemetry_lifecycle_events() {
+        let model = RecordingEmbeddingModel::new(
+            None,
+            true,
+            vec![
+                EmbeddingModelResult::new(vec![vec![0.1, 0.2, 0.3]])
+                    .with_usage(EmbeddingModelUsage::new(7)),
+            ],
+        );
+        let events = Arc::new(Mutex::new(Vec::<TelemetryEvent>::new()));
+        let start_events = Arc::clone(&events);
+        let end_events = Arc::clone(&events);
+        let integration = TelemetryIntegration::new()
+            .with_callback(TelemetryEventKind::OnEmbedStart, move |event| {
+                start_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push(event);
+            })
+            .with_callback(TelemetryEventKind::OnEmbedEnd, move |event| {
+                end_events.lock().expect("telemetry event lock").push(event);
+            });
+
+        let result = poll_ready(super::embed(
+            EmbedOptions::new(&model, "sunrise").with_telemetry(
+                TelemetryOptions::new()
+                    .with_function_id("embed-test")
+                    .with_record_inputs(false)
+                    .with_record_outputs(true)
+                    .with_integration(integration),
+            ),
+        ));
+
+        assert_eq!(result.embedding, vec![0.1, 0.2, 0.3]);
+        let events = events.lock().expect("telemetry event lock");
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![
+                TelemetryEventKind::OnEmbedStart,
+                TelemetryEventKind::OnEmbedEnd,
+            ]
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.function_id.as_deref() == Some("embed-test"))
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.record_inputs == Some(false))
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.record_outputs == Some(true))
+        );
+        assert_eq!(events[0].event["operationId"], json!("ai.embed"));
+        assert_eq!(events[0].event["provider"], json!("test-provider"));
+        assert_eq!(events[0].event["value"], json!("sunrise"));
+        assert_eq!(events[1].event["embedding"], json!([0.1, 0.2, 0.3]));
+        assert_eq!(events[1].event["usage"], json!({ "tokens": 7 }));
+    }
+
+    #[test]
+    fn embed_many_dispatches_telemetry_lifecycle_events() {
+        let model = RecordingEmbeddingModel::new(
+            None,
+            true,
+            vec![
+                EmbeddingModelResult::new(vec![vec![0.1], vec![0.2]])
+                    .with_usage(EmbeddingModelUsage::new(11)),
+            ],
+        );
+        let events = Arc::new(Mutex::new(Vec::<TelemetryEvent>::new()));
+        let start_events = Arc::clone(&events);
+        let end_events = Arc::clone(&events);
+        let integration = TelemetryIntegration::new()
+            .with_callback(TelemetryEventKind::OnEmbedStart, move |event| {
+                start_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push(event);
+            })
+            .with_callback(TelemetryEventKind::OnEmbedEnd, move |event| {
+                end_events.lock().expect("telemetry event lock").push(event);
+            });
+
+        let result = poll_ready(super::embed_many(
+            EmbedManyOptions::new(&model, ["alpha", "beta"]).with_telemetry(
+                TelemetryOptions::new()
+                    .with_function_id("embed-many-test")
+                    .with_integration(integration),
+            ),
+        ));
+
+        assert_eq!(result.embeddings, vec![vec![0.1], vec![0.2]]);
+        let events = events.lock().expect("telemetry event lock");
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![
+                TelemetryEventKind::OnEmbedStart,
+                TelemetryEventKind::OnEmbedEnd,
+            ]
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.function_id.as_deref() == Some("embed-many-test"))
+        );
+        assert_eq!(events[0].event["operationId"], json!("ai.embedMany"));
+        assert_eq!(events[0].event["value"], json!(["alpha", "beta"]));
+        assert_eq!(events[1].event["embedding"], json!([[0.1], [0.2]]));
+        assert_eq!(events[1].event["usage"], json!({ "tokens": 11 }));
     }
 
     #[test]
