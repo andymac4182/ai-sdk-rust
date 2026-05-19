@@ -403,7 +403,8 @@ pub use stream_object::{
     StreamObjectResult, stream_object,
 };
 pub use stream_text::{
-    StreamTextMessageMetadata, StreamTextMessageMetadataFunction, StreamTextOptions,
+    StreamTextAbortController, StreamTextAbortSignal, StreamTextMessageMetadata,
+    StreamTextMessageMetadataFunction, StreamTextOnAbortEvent, StreamTextOptions,
     StreamTextResponseMetadata, StreamTextResult, StreamTextStep, StreamTextStepPerformance,
     StreamTextUiMessageStreamOptions, TextStreamFilePart, TextStreamFinishPart,
     TextStreamFinishStepPart, TextStreamPart, TextStreamReasoningDeltaPart,

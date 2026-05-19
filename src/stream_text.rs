@@ -3,7 +3,8 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -459,6 +460,74 @@ impl Default for TextStreamAbortPart {
     }
 }
 
+#[derive(Debug, Default)]
+struct StreamTextAbortState {
+    aborted: AtomicBool,
+    reason: Mutex<Option<JsonValue>>,
+}
+
+/// Caller-controlled abort signal for Rust `stream_text` calls.
+#[derive(Clone, Debug, Default)]
+pub struct StreamTextAbortSignal {
+    state: Arc<StreamTextAbortState>,
+}
+
+impl StreamTextAbortSignal {
+    /// Returns whether the stream has been aborted.
+    pub fn is_aborted(&self) -> bool {
+        self.state.aborted.load(Ordering::SeqCst)
+    }
+
+    /// Returns the abort reason when one was supplied.
+    pub fn reason(&self) -> Option<JsonValue> {
+        self.state
+            .reason
+            .lock()
+            .expect("stream text abort reason lock is not poisoned")
+            .clone()
+    }
+}
+
+/// Controller used to trigger a [`StreamTextAbortSignal`].
+#[derive(Clone, Debug, Default)]
+pub struct StreamTextAbortController {
+    signal: StreamTextAbortSignal,
+}
+
+impl StreamTextAbortController {
+    /// Creates a new abort controller.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns a cloneable signal that can be passed to `stream_text`.
+    pub fn signal(&self) -> StreamTextAbortSignal {
+        self.signal.clone()
+    }
+
+    /// Aborts without a reason.
+    pub fn abort(&self) {
+        self.abort_inner(None);
+    }
+
+    /// Aborts with a reason.
+    pub fn abort_with_reason(&self, reason: impl Into<JsonValue>) {
+        self.abort_inner(Some(reason.into()));
+    }
+
+    fn abort_inner(&self, reason: Option<JsonValue>) {
+        let already_aborted = self.signal.state.aborted.swap(true, Ordering::SeqCst);
+        if !already_aborted {
+            *self
+                .signal
+                .state
+                .reason
+                .lock()
+                .expect("stream text abort reason lock is not poisoned") = reason;
+        }
+    }
+}
+
 /// High-level stream part emitted by [`stream_text`].
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(untagged)]
@@ -625,6 +694,56 @@ impl fmt::Debug for StreamTextOnError<'_> {
     }
 }
 
+/// Event sent when a stream is aborted before completing another step.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamTextOnAbortEvent {
+    /// Completed generation steps before the abort was observed.
+    pub steps: Vec<GenerateTextStep>,
+
+    /// Optional abort reason supplied by the caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<JsonValue>,
+}
+
+/// Future returned by a stream-text abort callback.
+pub type StreamTextOnAbortFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+/// Callback invoked when `stream_text` observes an abort signal.
+pub type StreamTextOnAbortFunction<'a> =
+    dyn Fn(StreamTextOnAbortEvent) -> StreamTextOnAbortFuture<'a> + 'a;
+
+/// Callback wrapper for upstream `onAbort`.
+pub struct StreamTextOnAbort<'a> {
+    on_abort: Rc<StreamTextOnAbortFunction<'a>>,
+}
+
+impl<'a> StreamTextOnAbort<'a> {
+    /// Creates an abort callback.
+    pub fn new<F, Fut>(on_abort: F) -> Self
+    where
+        F: Fn(StreamTextOnAbortEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        Self {
+            on_abort: Rc::new(move |event| Box::pin(on_abort(event))),
+        }
+    }
+
+    /// Runs the abort callback.
+    pub fn abort(&self, event: StreamTextOnAbortEvent) -> StreamTextOnAbortFuture<'a> {
+        (self.on_abort)(event)
+    }
+}
+
+impl fmt::Debug for StreamTextOnAbort<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StreamTextOnAbort")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Request options for a high-level text streaming call.
 pub struct StreamTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Language model used for the streaming call.
@@ -693,6 +812,12 @@ pub struct StreamTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Optional callback invoked for provider error stream parts.
     pub on_error: Option<StreamTextOnError<'a>>,
 
+    /// Optional abort signal checked before and during streamed collection.
+    pub abort_signal: Option<StreamTextAbortSignal>,
+
+    /// Optional callback invoked when the abort signal is observed.
+    pub on_abort: Option<StreamTextOnAbort<'a>>,
+
     /// Maximum number of model-call steps to run.
     pub max_steps: usize,
 
@@ -726,6 +851,8 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             max_retries: DEFAULT_MAX_RETRIES,
             on_chunk: None,
             on_error: None,
+            abort_signal: None,
+            on_abort: None,
             max_steps: 1,
             stop_conditions: Vec::new(),
         }
@@ -762,6 +889,8 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             max_retries: DEFAULT_MAX_RETRIES,
             on_chunk: None,
             on_error: None,
+            abort_signal: None,
+            on_abort: None,
             max_steps: 1,
             stop_conditions: Vec::new(),
         }
@@ -1052,6 +1181,22 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
         Fut: Future<Output = ()> + 'a,
     {
         self.on_error = Some(StreamTextOnError::new(on_error));
+        self
+    }
+
+    /// Sets a caller-controlled abort signal for this stream.
+    pub fn with_abort_signal(mut self, abort_signal: StreamTextAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
+        self
+    }
+
+    /// Sets a callback that is invoked when streaming is aborted.
+    pub fn with_on_abort<F, Fut>(mut self, on_abort: F) -> Self
+    where
+        F: Fn(StreamTextOnAbortEvent) -> Fut + 'a,
+        Fut: Future<Output = ()> + 'a,
+    {
+        self.on_abort = Some(StreamTextOnAbort::new(on_abort));
         self
     }
 
@@ -1706,6 +1851,8 @@ where
         max_retries,
         on_chunk,
         on_error,
+        abort_signal,
+        on_abort,
         max_steps,
         stop_conditions,
     } = options;
@@ -1722,6 +1869,8 @@ where
     let mut stream_steps = Vec::new();
     let mut generate_steps = Vec::new();
     let mut pending_deferred_provider_tool_call_ids = BTreeSet::new();
+    let mut aborted = false;
+    let mut abort_reason = None;
 
     if on_start.is_some() || telemetry_dispatcher.is_enabled() {
         let mut start_tools = base_language_model_tools.clone().unwrap_or_default();
@@ -1762,6 +1911,18 @@ where
     }
 
     for step_number in 0..max_steps {
+        if let Some(abort_part) = stream_text_abort_part_from_signal(abort_signal.as_ref()) {
+            abort_reason = abort_part.reason.clone();
+            push_text_stream_part(
+                &mut parts,
+                TextStreamPart::Abort(abort_part),
+                on_chunk.as_ref(),
+            )
+            .await;
+            aborted = true;
+            break;
+        }
+
         let step_prompt = current_prompt.clone();
         let step_tools =
             crate::generate_text::filter_active_tools(Some(tools.clone()), active_tools)
@@ -1827,12 +1988,21 @@ where
             include_raw_chunks,
             max_retries,
             &mut parts,
-            on_chunk.as_ref(),
-            on_error.as_ref(),
+            StreamTextCollectionControls {
+                on_chunk: on_chunk.as_ref(),
+                on_error: on_error.as_ref(),
+                abort_signal: abort_signal.as_ref(),
+            },
         )
         .await;
         let response_time_ms =
             u64::try_from(model_call_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+        if collected_step.aborted {
+            abort_reason = collected_step.abort_reason.clone();
+            aborted = true;
+            break;
+        }
 
         mark_unavailable_tool_calls(
             &mut collected_step.tool_calls,
@@ -2013,17 +2183,26 @@ where
         }
     }
 
-    let final_step = stream_steps
-        .last()
-        .expect("stream_text always creates at least one step");
     let total_usage = add_stream_text_step_usage(&stream_steps);
-    parts.push(TextStreamPart::Finish(TextStreamFinishPart::new(
-        final_step.finish_reason.clone(),
-        final_step.raw_finish_reason.clone(),
-        total_usage.clone(),
-    )));
 
-    if on_finish.is_some() || telemetry_dispatcher.is_enabled() {
+    if aborted {
+        if let Some(on_abort) = &on_abort {
+            on_abort
+                .abort(StreamTextOnAbortEvent {
+                    steps: generate_steps.clone(),
+                    reason: abort_reason.clone(),
+                })
+                .await;
+        }
+    } else if let Some(final_step) = stream_steps.last() {
+        parts.push(TextStreamPart::Finish(TextStreamFinishPart::new(
+            final_step.finish_reason.clone(),
+            final_step.raw_finish_reason.clone(),
+            total_usage.clone(),
+        )));
+    }
+
+    if !aborted && (on_finish.is_some() || telemetry_dispatcher.is_enabled()) {
         let finish_event = GenerateTextFinishEvent::from_steps(&[], &generate_steps);
         if let Some(on_finish) = &on_finish {
             on_finish.finish(finish_event.clone()).await;
@@ -2031,11 +2210,15 @@ where
         telemetry_dispatcher.on_end(&finish_event);
     }
 
+    let final_step = stream_steps.last();
+
     StreamTextResult {
         parts,
-        text_stream: final_step.text_stream.clone(),
-        text: final_step.text.clone(),
-        reasoning_text: final_step.reasoning_text.clone(),
+        text_stream: final_step
+            .map(|step| step.text_stream.clone())
+            .unwrap_or_default(),
+        text: final_step.map(|step| step.text.clone()).unwrap_or_default(),
+        reasoning_text: final_step.and_then(|step| step.reasoning_text.clone()),
         sources: stream_steps
             .iter()
             .flat_map(|step| step.sources.iter().cloned())
@@ -2068,13 +2251,19 @@ where
             .iter()
             .flat_map(|step| step.warnings.iter().cloned())
             .collect(),
-        usage: final_step.usage.clone(),
+        usage: final_step
+            .map(|step| step.usage.clone())
+            .unwrap_or_default(),
         total_usage,
-        finish_reason: final_step.finish_reason.clone(),
-        raw_finish_reason: final_step.raw_finish_reason.clone(),
-        request: final_step.request.clone(),
-        response: final_step.response.clone(),
-        provider_metadata: final_step.provider_metadata.clone(),
+        finish_reason: final_step
+            .map(|step| step.finish_reason.clone())
+            .unwrap_or(FinishReason::Other),
+        raw_finish_reason: final_step.and_then(|step| step.raw_finish_reason.clone()),
+        request: final_step.and_then(|step| step.request.clone()),
+        response: final_step
+            .map(|step| step.response.clone())
+            .unwrap_or_default(),
+        provider_metadata: final_step.and_then(|step| step.provider_metadata.clone()),
         steps: stream_steps,
     }
 }
@@ -2100,9 +2289,37 @@ struct CollectedStreamTextStep {
     provider_metadata: Option<ProviderMetadata>,
     performance: StreamTextStepPerformance,
     provider_content: Vec<LanguageModelContent>,
+    aborted: bool,
+    abort_reason: Option<JsonValue>,
 }
 
 impl CollectedStreamTextStep {
+    fn aborted(abort_reason: Option<JsonValue>) -> Self {
+        Self {
+            request: None,
+            response: StreamTextResponseMetadata::new(),
+            warnings: Vec::new(),
+            text: String::new(),
+            text_stream: Vec::new(),
+            reasoning_text: None,
+            sources: Vec::new(),
+            files: Vec::new(),
+            reasoning_files: Vec::new(),
+            tool_calls: Vec::new(),
+            tool_results: Vec::new(),
+            custom_parts: Vec::new(),
+            errors: Vec::new(),
+            usage: LanguageModelUsage::default(),
+            finish_reason: FinishReason::Other,
+            raw_finish_reason: None,
+            provider_metadata: None,
+            performance: StreamTextStepPerformance::default(),
+            provider_content: Vec::new(),
+            aborted: true,
+            abort_reason,
+        }
+    }
+
     fn to_generate_text_step(
         &self,
         call_id: String,
@@ -2164,14 +2381,20 @@ impl CollectedStreamTextStep {
     }
 }
 
+#[derive(Clone, Copy)]
+struct StreamTextCollectionControls<'a, 'b> {
+    on_chunk: Option<&'a StreamTextOnChunk<'b>>,
+    on_error: Option<&'a StreamTextOnError<'b>>,
+    abort_signal: Option<&'a StreamTextAbortSignal>,
+}
+
 async fn collect_stream_text_step_with_retries<M>(
     model: &M,
     call_options: LanguageModelCallOptions,
     include_raw_chunks: bool,
     max_retries: usize,
     parts: &mut Vec<TextStreamPart>,
-    on_chunk: Option<&StreamTextOnChunk<'_>>,
-    on_error: Option<&StreamTextOnError<'_>>,
+    controls: StreamTextCollectionControls<'_, '_>,
 ) -> CollectedStreamTextStep
 where
     M: LanguageModel + ?Sized,
@@ -2188,8 +2411,21 @@ where
             &mut attempt_parts,
             None,
             None,
+            controls.abort_signal,
         )
         .await;
+
+        if collected_step.aborted {
+            let _ = replay_stream_text_attempt_parts(
+                parts,
+                &attempt_parts,
+                controls.on_chunk,
+                controls.on_error,
+                controls.abort_signal,
+            )
+            .await;
+            return collected_step;
+        }
 
         if retries < max_retries
             && stream_text_step_is_retryable_pre_stream_failure(&collected_step, &attempt_parts)
@@ -2198,8 +2434,18 @@ where
             continue;
         }
 
-        replay_stream_text_callbacks(&attempt_parts, on_chunk, on_error).await;
-        parts.extend(attempt_parts);
+        if let Some(abort_reason) = replay_stream_text_attempt_parts(
+            parts,
+            &attempt_parts,
+            controls.on_chunk,
+            controls.on_error,
+            controls.abort_signal,
+        )
+        .await
+        {
+            return CollectedStreamTextStep::aborted(abort_reason);
+        }
+
         return collected_step;
     }
 }
@@ -2211,11 +2457,18 @@ async fn collect_stream_text_step<M>(
     parts: &mut Vec<TextStreamPart>,
     on_chunk: Option<&StreamTextOnChunk<'_>>,
     on_error: Option<&StreamTextOnError<'_>>,
+    abort_signal: Option<&StreamTextAbortSignal>,
 ) -> CollectedStreamTextStep
 where
     M: LanguageModel + ?Sized,
     M::Stream: IntoIterator<Item = LanguageModelStreamPart>,
 {
+    if let Some(abort_part) = stream_text_abort_part_from_signal(abort_signal) {
+        let abort_reason = abort_part.reason.clone();
+        push_text_stream_part(parts, TextStreamPart::Abort(abort_part), on_chunk).await;
+        return CollectedStreamTextStep::aborted(abort_reason);
+    }
+
     let stream_result = model.do_stream(call_options).await;
     let request = stream_result.request;
     let envelope_response = stream_result.response;
@@ -2245,8 +2498,17 @@ where
     let mut provider_content = Vec::new();
     let mut text_blocks = BTreeMap::<String, (String, Option<ProviderMetadata>)>::new();
     let mut reasoning_blocks = BTreeMap::<String, (String, Option<ProviderMetadata>)>::new();
+    let mut aborted = false;
+    let mut abort_reason = None;
 
     for part in stream_result.stream {
+        if let Some(abort_part) = stream_text_abort_part_from_signal(abort_signal) {
+            abort_reason = abort_part.reason.clone();
+            push_text_stream_part(parts, TextStreamPart::Abort(abort_part), on_chunk).await;
+            aborted = true;
+            break;
+        }
+
         match part {
             LanguageModelStreamPart::StreamStart(part) => {
                 warnings = part.warnings;
@@ -2452,6 +2714,13 @@ where
                 }
             }
         }
+
+        if let Some(abort_part) = stream_text_abort_part_from_signal(abort_signal) {
+            abort_reason = abort_part.reason.clone();
+            push_text_stream_part(parts, TextStreamPart::Abort(abort_part), on_chunk).await;
+            aborted = true;
+            break;
+        }
     }
 
     for (_, (block_text, provider_metadata)) in text_blocks {
@@ -2500,6 +2769,8 @@ where
         provider_metadata,
         performance,
         provider_content,
+        aborted,
+        abort_reason,
     }
 }
 
@@ -2546,12 +2817,14 @@ fn stream_text_error_is_retryable(error: &JsonValue) -> bool {
         })
 }
 
-async fn replay_stream_text_callbacks(
-    parts: &[TextStreamPart],
+async fn replay_stream_text_attempt_parts(
+    parts: &mut Vec<TextStreamPart>,
+    attempt_parts: &[TextStreamPart],
     on_chunk: Option<&StreamTextOnChunk<'_>>,
     on_error: Option<&StreamTextOnError<'_>>,
-) {
-    for part in parts {
+    abort_signal: Option<&StreamTextAbortSignal>,
+) -> Option<Option<JsonValue>> {
+    for part in attempt_parts {
         if let Some(on_chunk) = on_chunk
             && is_stream_text_chunk_callback_part(part)
         {
@@ -2571,7 +2844,17 @@ async fn replay_stream_text_callbacks(
                 })
                 .await;
         }
+
+        parts.push(part.clone());
+
+        if let Some(abort_part) = stream_text_abort_part_from_signal(abort_signal) {
+            let abort_reason = abort_part.reason.clone();
+            push_text_stream_part(parts, TextStreamPart::Abort(abort_part), on_chunk).await;
+            return Some(abort_reason);
+        }
     }
+
+    None
 }
 
 async fn push_text_stream_part(
@@ -2590,6 +2873,20 @@ async fn push_text_stream_part(
     }
 
     parts.push(part);
+}
+
+fn stream_text_abort_part_from_signal(
+    abort_signal: Option<&StreamTextAbortSignal>,
+) -> Option<TextStreamAbortPart> {
+    let abort_signal = abort_signal?;
+    if !abort_signal.is_aborted() {
+        return None;
+    }
+
+    Some(match abort_signal.reason() {
+        Some(reason) => TextStreamAbortPart::with_reason(reason),
+        None => TextStreamAbortPart::new(),
+    })
 }
 
 fn is_stream_text_chunk_callback_part(part: &TextStreamPart) -> bool {
@@ -3482,6 +3779,143 @@ mod tests {
                 { "type": "finish", "finishReason": "stop" }
             ])
         );
+    }
+
+    #[test]
+    fn stream_text_aborts_before_model_call_and_invokes_on_abort() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let abort_controller = StreamTextAbortController::new();
+        abort_controller.abort_with_reason("manual abort");
+        let abort_events = Arc::new(Mutex::new(Vec::<StreamTextOnAbortEvent>::new()));
+        let events = Arc::clone(&abort_events);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_abort_signal(abort_controller.signal())
+                .with_on_abort(move |event| {
+                    let events = Arc::clone(&events);
+                    async move {
+                        events.lock().expect("abort events lock").push(event);
+                    }
+                }),
+        ));
+
+        assert!(model.stream_calls().is_empty());
+        assert!(result.steps.is_empty());
+        assert_eq!(result.finish_reason, FinishReason::Other);
+        assert_eq!(
+            serde_json::to_value(&result.parts).expect("parts serialize"),
+            json!([
+                { "type": "start" },
+                { "type": "abort", "reason": "manual abort" }
+            ])
+        );
+        assert_eq!(
+            serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize"),
+            json!([
+                { "type": "start" },
+                { "type": "abort", "reason": "manual abort" }
+            ])
+        );
+
+        let events = abort_events.lock().expect("abort events lock");
+        assert_eq!(events.len(), 1);
+        assert!(events[0].steps.is_empty());
+        assert_eq!(events[0].reason, Some(json!("manual abort")));
+    }
+
+    #[test]
+    fn stream_text_aborts_after_chunk_callback_and_suppresses_finish() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", " World")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let abort_controller = StreamTextAbortController::new();
+        let abort_signal = abort_controller.signal();
+        let chunk_events = Arc::new(Mutex::new(Vec::<JsonValue>::new()));
+        let chunks = Arc::clone(&chunk_events);
+        let abort_events = Arc::new(Mutex::new(Vec::<StreamTextOnAbortEvent>::new()));
+        let events = Arc::clone(&abort_events);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_abort_signal(abort_signal)
+                .with_on_chunk(move |event| {
+                    let abort_controller = abort_controller.clone();
+                    let chunks = Arc::clone(&chunks);
+                    async move {
+                        if let TextStreamPart::TextDelta(part) = &event.chunk
+                            && part.text == "Hello"
+                        {
+                            abort_controller.abort_with_reason("client-disconnected");
+                        }
+                        chunks
+                            .lock()
+                            .expect("chunk events lock")
+                            .push(serde_json::to_value(event.chunk).expect("chunk serializes"));
+                    }
+                })
+                .with_on_abort(move |event| {
+                    let events = Arc::clone(&events);
+                    async move {
+                        events.lock().expect("abort events lock").push(event);
+                    }
+                }),
+        ));
+
+        assert_eq!(model.stream_calls().len(), 1);
+        assert!(result.steps.is_empty());
+        assert!(
+            !result
+                .parts
+                .iter()
+                .any(|part| matches!(part, TextStreamPart::Finish(_)))
+        );
+        assert!(
+            !result
+                .parts
+                .iter()
+                .any(|part| matches!(part, TextStreamPart::FinishStep(_)))
+        );
+        assert_eq!(
+            serde_json::to_value(&result.parts).expect("parts serialize"),
+            json!([
+                { "type": "start" },
+                {
+                    "type": "start-step",
+                    "request": {},
+                    "warnings": []
+                },
+                { "type": "text-start", "id": "1" },
+                { "type": "text-delta", "id": "1", "text": "Hello" },
+                { "type": "abort", "reason": "client-disconnected" }
+            ])
+        );
+        assert_eq!(
+            chunk_events.lock().expect("chunk events lock").as_slice(),
+            [
+                json!({ "type": "text-delta", "id": "1", "text": "Hello" }),
+                json!({ "type": "abort", "reason": "client-disconnected" })
+            ]
+        );
+
+        let events = abort_events.lock().expect("abort events lock");
+        assert_eq!(events.len(), 1);
+        assert!(events[0].steps.is_empty());
+        assert_eq!(events[0].reason, Some(json!("client-disconnected")));
     }
 
     #[test]
