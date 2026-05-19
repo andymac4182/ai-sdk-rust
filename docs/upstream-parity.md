@@ -307,7 +307,8 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 1. Finish ALL common/core SDK packages together with Vercel AI Gateway coverage
    before returning to unrelated standalone providers. This ordering is a hard
-   gate, not a preference, and it covers
+   gate, not a preference: every next eligible slice must come from this
+   first-phase queue until it is closed. The first phase covers
    `packages/ai`, `packages/provider`, `packages/provider-utils`,
    `packages/openai-compatible`, `packages/open-responses`, `packages/gateway`,
    the Vercel AI Gateway OpenAI-compatible and Open Responses routes, and the
@@ -329,9 +330,10 @@ focused tests for each portable behavior before changing rows to `verified`.
    `allowedTools` tool-choice override, shell request/history, apply-patch
    request/history, and custom provider-tool request/prompt reconstruction are
    represented.
-3. Keep the next slices Gateway-first: close broader `packages/gateway`
-   provider-package test gaps and remaining Vercel AI Gateway OpenAI-compatible
-   endpoint coverage before expanding to unrelated providers.
+3. Keep the next slices Gateway-first within the first-phase queue: close
+   broader `packages/gateway` provider-package test gaps and remaining Vercel
+   AI Gateway OpenAI-compatible endpoint coverage before expanding to unrelated
+   providers.
 4. Continue `streamText` parity with aborts/retries, UI response helpers, error
    propagation, and remaining stream transform details because Gateway relies on
    this high-level library surface.
