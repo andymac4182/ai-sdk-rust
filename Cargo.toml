@@ -49,6 +49,7 @@ all = "warn"
 ai-sdk-gateway = { path = "crates/ai-sdk-gateway" }
 ai-sdk-openai-compatible = { path = "crates/ai-sdk-openai-compatible" }
 ai-sdk-open-responses = { path = "crates/ai-sdk-open-responses" }
+ai-sdk-otel = { path = "crates/ai-sdk-otel" }
 ai-sdk-provider = { path = "crates/ai-sdk-provider" }
 ai-sdk-provider-utils = { path = "crates/ai-sdk-provider-utils" }
 regex = "1.12.2"

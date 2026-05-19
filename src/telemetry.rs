@@ -7,6 +7,10 @@ use std::sync::{Arc, LazyLock, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::json::JsonValue;
+use crate::language_model::LanguageModelPrompt;
+
+/// Recorder handle accepted by the OpenTelemetry integration adapter.
+pub type OpenTelemetryRecorder = Arc<Mutex<ai_sdk_otel::OpenTelemetry>>;
 
 /// Diagnostic channel name used by upstream AI SDK telemetry.
 pub const AI_SDK_TELEMETRY_DIAGNOSTIC_CHANNEL: &str = "aisdk:telemetry";
@@ -172,6 +176,553 @@ impl TelemetryIntegration {
     fn execute_tool(&self) -> Option<TelemetryExecuteToolCallback> {
         self.execute_tool.clone()
     }
+}
+
+/// Creates a root telemetry integration backed by `ai-sdk-otel`.
+///
+/// The returned integration translates dispatcher lifecycle events into the
+/// package-owned OpenTelemetry recorder. The recorder can then be exported with
+/// `ai_sdk_otel::export_tracer_to_otlp_http_json` or inspected directly in
+/// tests.
+pub fn create_open_telemetry_integration(recorder: OpenTelemetryRecorder) -> TelemetryIntegration {
+    let mut integration = TelemetryIntegration::new();
+    for kind in [
+        TelemetryEventKind::OnStart,
+        TelemetryEventKind::OnStepStart,
+        TelemetryEventKind::OnLanguageModelCallStart,
+        TelemetryEventKind::OnLanguageModelCallEnd,
+        TelemetryEventKind::OnToolExecutionStart,
+        TelemetryEventKind::OnToolExecutionEnd,
+        TelemetryEventKind::OnStepFinish,
+        TelemetryEventKind::OnObjectStepStart,
+        TelemetryEventKind::OnObjectStepFinish,
+        TelemetryEventKind::OnEmbedStart,
+        TelemetryEventKind::OnEmbedEnd,
+        TelemetryEventKind::OnRerankStart,
+        TelemetryEventKind::OnRerankEnd,
+        TelemetryEventKind::OnEnd,
+        TelemetryEventKind::OnError,
+    ] {
+        let recorder = Arc::clone(&recorder);
+        integration = integration.with_callback(kind, move |event| {
+            dispatch_to_open_telemetry(&recorder, event);
+        });
+    }
+
+    let execute_recorder = Arc::clone(&recorder);
+    integration.with_execute_tool(move |options| {
+        let call_id = options.call_id;
+        let tool_call_id = options.tool_call_id;
+        let execute = options.execute;
+        match execute_recorder.lock() {
+            Ok(mut recorder) => recorder.execute_tool(&call_id, &tool_call_id, |_| execute()),
+            Err(_) => execute(),
+        }
+    })
+}
+
+fn dispatch_to_open_telemetry(recorder: &OpenTelemetryRecorder, event: TelemetryEvent) {
+    let Ok(mut recorder) = recorder.lock() else {
+        return;
+    };
+
+    match event.kind {
+        TelemetryEventKind::OnStart => {
+            if is_object_operation(&event.event) {
+                if let Some(start) = open_telemetry_object_start_event(&event) {
+                    recorder.on_object_operation_start(start);
+                }
+            } else if let Some(start) = open_telemetry_start_event(&event) {
+                recorder.on_start(start);
+            }
+        }
+        TelemetryEventKind::OnStepStart => {
+            if let Some(start) = open_telemetry_step_start_event(&event.event) {
+                recorder.on_step_start(start);
+            }
+        }
+        TelemetryEventKind::OnLanguageModelCallStart => {
+            if let Some(start) = open_telemetry_language_model_call_start_event(&event.event) {
+                recorder.on_language_model_call_start(start);
+            }
+        }
+        TelemetryEventKind::OnLanguageModelCallEnd => {
+            if let Some(end) = open_telemetry_language_model_call_end_event(&event.event) {
+                recorder.on_language_model_call_end(end);
+            }
+        }
+        TelemetryEventKind::OnToolExecutionStart => {
+            if let Some(start) = open_telemetry_tool_execution_start_event(&event.event) {
+                recorder.on_tool_execution_start(start);
+            }
+        }
+        TelemetryEventKind::OnToolExecutionEnd => {
+            if let Some(end) = open_telemetry_tool_execution_end_event(&event.event) {
+                recorder.on_tool_execution_end(end);
+            }
+        }
+        TelemetryEventKind::OnStepFinish => {
+            if let Some(call_id) = string_field(&event.event, "callId") {
+                recorder.on_step_finish(&call_id);
+            }
+        }
+        TelemetryEventKind::OnObjectStepStart => {
+            if let Some(start) = open_telemetry_object_step_start_event(&event.event) {
+                recorder.on_object_step_start(start);
+            }
+        }
+        TelemetryEventKind::OnObjectStepFinish => {
+            if let Some(finish) = open_telemetry_object_step_finish_event(&event.event) {
+                recorder.on_object_step_finish(finish);
+            }
+        }
+        TelemetryEventKind::OnEmbedStart => {
+            if let Some(start) = open_telemetry_embed_start_event(&event) {
+                recorder.on_embed_operation_start(start);
+            }
+        }
+        TelemetryEventKind::OnEmbedEnd => {
+            if let Some(end) = open_telemetry_embed_end_event(&event.event) {
+                recorder.on_embed_operation_end(end);
+            }
+        }
+        TelemetryEventKind::OnRerankStart => {
+            if let Some(start) = open_telemetry_rerank_start_event(&event) {
+                recorder.on_rerank_operation_start(start);
+            }
+        }
+        TelemetryEventKind::OnRerankEnd => {
+            if let Some(call_id) = string_field(&event.event, "callId") {
+                recorder.on_rerank_operation_end(ai_sdk_otel::OpenTelemetryRerankEndEvent::new(
+                    call_id,
+                ));
+            }
+        }
+        TelemetryEventKind::OnEnd => {
+            if event.event.get("object").is_some() || event.event.get("error").is_some() {
+                if let Some(end) = open_telemetry_object_end_event(&event.event) {
+                    recorder.on_object_operation_end(end);
+                }
+            } else if let Some(end) = open_telemetry_end_event(&event.event) {
+                recorder.on_end(end);
+            }
+        }
+        TelemetryEventKind::OnError => {
+            if let Some(error) = open_telemetry_error_event(&event.event) {
+                recorder.on_error(error);
+            }
+        }
+    }
+}
+
+fn open_telemetry_start_event(
+    event: &TelemetryEvent,
+) -> Option<ai_sdk_otel::OpenTelemetryStartEvent> {
+    let payload = &event.event;
+    let mut start = ai_sdk_otel::OpenTelemetryStartEvent::new(
+        string_field(payload, "callId")?,
+        string_field(payload, "operationId")?,
+        string_field(payload, "provider")?,
+        string_field(payload, "modelId")?,
+    )
+    .with_telemetry(open_telemetry_options(event))
+    .with_settings(settings_attributes(payload));
+
+    if let Some(prompt) = prompt_field(payload, "messages") {
+        if let Some(system) = ai_sdk_otel::extract_system_from_prompt(&prompt) {
+            start = start.with_system_instructions(ai_sdk_otel::format_system_instructions(system));
+        }
+        start = start.with_input_messages(ai_sdk_otel::format_input_messages(&prompt));
+    }
+    if let Some(runtime_context) = attributes_field(payload, "runtimeContext") {
+        start = start.with_runtime_context(runtime_context);
+    }
+
+    Some(start)
+}
+
+fn open_telemetry_object_start_event(
+    event: &TelemetryEvent,
+) -> Option<ai_sdk_otel::OpenTelemetryObjectStartEvent> {
+    let payload = &event.event;
+    let mut start = ai_sdk_otel::OpenTelemetryObjectStartEvent::new(
+        string_field(payload, "callId")?,
+        string_field(payload, "operationId")?,
+        string_field(payload, "provider")?,
+        string_field(payload, "modelId")?,
+    )
+    .with_telemetry(open_telemetry_options(event))
+    .with_settings(settings_attributes(payload));
+
+    if let Some(prompt) = prompt_field(payload, "messages") {
+        if let Some(system) = ai_sdk_otel::extract_system_from_prompt(&prompt) {
+            start = start.with_system_instructions(ai_sdk_otel::format_system_instructions(system));
+        }
+        start = start.with_input_messages(ai_sdk_otel::format_input_messages(&prompt));
+    }
+    start.schema = payload
+        .get("schema")
+        .filter(|value| !value.is_null())
+        .cloned();
+    start.schema_name = string_field(payload, "schemaName");
+    start.schema_description = string_field(payload, "schemaDescription");
+    start.output_mode = string_field(payload, "output");
+
+    Some(start)
+}
+
+fn open_telemetry_step_start_event(
+    payload: &JsonValue,
+) -> Option<ai_sdk_otel::OpenTelemetryStepStartEvent> {
+    Some(ai_sdk_otel::OpenTelemetryStepStartEvent::new(
+        string_field(payload, "callId")?,
+        u64_field(payload, "stepNumber")?,
+    ))
+}
+
+fn open_telemetry_language_model_call_start_event(
+    payload: &JsonValue,
+) -> Option<ai_sdk_otel::OpenTelemetryLanguageModelCallStartEvent> {
+    let mut start = ai_sdk_otel::OpenTelemetryLanguageModelCallStartEvent::new(
+        string_field(payload, "callId")?,
+        string_field(payload, "provider")?,
+        string_field(payload, "modelId")?,
+    );
+    if let Some(prompt) = prompt_field(payload, "messages") {
+        start = start.with_input_messages(ai_sdk_otel::format_input_messages(&prompt));
+    }
+    Some(start)
+}
+
+fn open_telemetry_language_model_call_end_event(
+    payload: &JsonValue,
+) -> Option<ai_sdk_otel::OpenTelemetryLanguageModelCallEndEvent> {
+    let mut end = ai_sdk_otel::OpenTelemetryLanguageModelCallEndEvent::new(
+        string_field(payload, "callId")?,
+        finish_reason(payload)?,
+    );
+    if let Some(usage) = token_usage_field(payload, "usage") {
+        end = end.with_usage(usage);
+    }
+    if let Some(output_messages) = output_messages(payload) {
+        end = end.with_output_messages(output_messages);
+    }
+    Some(end)
+}
+
+fn open_telemetry_tool_execution_start_event(
+    payload: &JsonValue,
+) -> Option<ai_sdk_otel::OpenTelemetryToolExecutionStartEvent> {
+    let tool_call = payload.get("toolCall")?;
+    Some(ai_sdk_otel::OpenTelemetryToolExecutionStartEvent::new(
+        string_field(payload, "callId")?,
+        string_field(tool_call, "toolCallId")?,
+        string_field(tool_call, "toolName")?,
+    ))
+}
+
+fn open_telemetry_tool_execution_end_event(
+    payload: &JsonValue,
+) -> Option<ai_sdk_otel::OpenTelemetryToolExecutionEndEvent> {
+    let tool_call = payload.get("toolCall")?;
+    let mut end = ai_sdk_otel::OpenTelemetryToolExecutionEndEvent::new(
+        string_field(payload, "callId")?,
+        string_field(tool_call, "toolCallId")?,
+    );
+    if let Some(output) = payload
+        .get("toolOutput")
+        .and_then(|output| output.get("output"))
+    {
+        end = end.with_output(output.clone());
+    }
+    Some(end)
+}
+
+fn open_telemetry_object_step_start_event(
+    payload: &JsonValue,
+) -> Option<ai_sdk_otel::OpenTelemetryObjectStepStartEvent> {
+    let mut start = ai_sdk_otel::OpenTelemetryObjectStepStartEvent::new(
+        string_field(payload, "callId")?,
+        string_field(payload, "provider")?,
+        string_field(payload, "modelId")?,
+    )
+    .with_settings(settings_attributes(payload));
+    if let Some(prompt) = prompt_field(payload, "promptMessages") {
+        start = start.with_input_messages(ai_sdk_otel::format_input_messages(&prompt));
+    }
+    Some(start)
+}
+
+fn open_telemetry_object_step_finish_event(
+    payload: &JsonValue,
+) -> Option<ai_sdk_otel::OpenTelemetryObjectStepFinishEvent> {
+    let mut finish = ai_sdk_otel::OpenTelemetryObjectStepFinishEvent::new(
+        string_field(payload, "callId")?,
+        finish_reason(payload)?,
+    );
+    if let Some(usage) = token_usage_field(payload, "usage") {
+        finish = finish.with_usage(usage);
+    }
+    if let Some(object_text) = string_field(payload, "objectText") {
+        finish = finish.with_object_text(object_text);
+    }
+    Some(finish)
+}
+
+fn open_telemetry_object_end_event(
+    payload: &JsonValue,
+) -> Option<ai_sdk_otel::OpenTelemetryObjectEndEvent> {
+    let mut end = ai_sdk_otel::OpenTelemetryObjectEndEvent::new(
+        string_field(payload, "callId")?,
+        finish_reason(payload)?,
+    );
+    if let Some(usage) = token_usage_field(payload, "usage") {
+        end = end.with_usage(usage);
+    }
+    if let Some(object) = payload.get("object").filter(|value| !value.is_null()) {
+        end = end.with_object(object.clone());
+    }
+    Some(end)
+}
+
+fn open_telemetry_embed_start_event(
+    event: &TelemetryEvent,
+) -> Option<ai_sdk_otel::OpenTelemetryEmbedStartEvent> {
+    let payload = &event.event;
+    let mut start = ai_sdk_otel::OpenTelemetryEmbedStartEvent::new(
+        string_field(payload, "callId")?,
+        string_field(payload, "operationId")?,
+        string_field(payload, "provider")?,
+        string_field(payload, "modelId")?,
+        embedding_input(payload.get("value")?)?,
+    );
+    start = start.with_telemetry(open_telemetry_options(event));
+    Some(start)
+}
+
+fn open_telemetry_embed_end_event(
+    payload: &JsonValue,
+) -> Option<ai_sdk_otel::OpenTelemetryEmbedEndEvent> {
+    let mut end = ai_sdk_otel::OpenTelemetryEmbedEndEvent::new(
+        string_field(payload, "callId")?,
+        embedding_output(payload.get("embedding")?)?,
+    );
+    if let Some(usage) = embedding_usage(payload) {
+        end = end.with_usage(usage);
+    }
+    Some(end)
+}
+
+fn open_telemetry_rerank_start_event(
+    event: &TelemetryEvent,
+) -> Option<ai_sdk_otel::OpenTelemetryRerankStartEvent> {
+    let payload = &event.event;
+    let mut start = ai_sdk_otel::OpenTelemetryRerankStartEvent::new(
+        string_field(payload, "callId")?,
+        string_field(payload, "provider")?,
+        string_field(payload, "modelId")?,
+        payload
+            .get("documents")
+            .and_then(JsonValue::as_array)
+            .cloned()
+            .unwrap_or_default(),
+    );
+    start.operation_id =
+        string_field(payload, "operationId").unwrap_or_else(|| "ai.rerank".to_string());
+    start = start.with_telemetry(open_telemetry_options(event));
+    Some(start)
+}
+
+fn open_telemetry_end_event(payload: &JsonValue) -> Option<ai_sdk_otel::OpenTelemetryEndEvent> {
+    let mut end = ai_sdk_otel::OpenTelemetryEndEvent::new(
+        string_field(payload, "callId")?,
+        finish_reason(payload)?,
+    );
+    if let Some(usage) =
+        token_usage_field(payload, "totalUsage").or_else(|| token_usage_field(payload, "usage"))
+    {
+        end = end.with_usage(usage);
+    }
+    if let Some(output_messages) = output_messages(payload) {
+        end = end.with_output_messages(output_messages);
+    }
+    Some(end)
+}
+
+fn open_telemetry_error_event(payload: &JsonValue) -> Option<ai_sdk_otel::OpenTelemetryErrorEvent> {
+    Some(ai_sdk_otel::OpenTelemetryErrorEvent::new(
+        string_field(payload, "callId")?,
+        ai_sdk_otel::RecordSpanError::exception(
+            "Error",
+            payload
+                .get("error")
+                .and_then(JsonValue::as_str)
+                .map_or_else(|| payload.to_string(), str::to_string),
+        ),
+    ))
+}
+
+fn is_object_operation(payload: &JsonValue) -> bool {
+    matches!(
+        string_field(payload, "operationId").as_deref(),
+        Some("ai.generateObject" | "ai.streamObject")
+    )
+}
+
+fn open_telemetry_options(event: &TelemetryEvent) -> ai_sdk_otel::TelemetryOptions {
+    let mut options = ai_sdk_otel::TelemetryOptions::new();
+    if let Some(record_inputs) = event.record_inputs {
+        options = options.with_record_inputs(record_inputs);
+    }
+    if let Some(record_outputs) = event.record_outputs {
+        options = options.with_record_outputs(record_outputs);
+    }
+    if let Some(function_id) = &event.function_id {
+        options = options.with_function_id(function_id.clone());
+    }
+    options
+}
+
+fn settings_attributes(payload: &JsonValue) -> ai_sdk_otel::TelemetryAttributes {
+    [
+        "maxOutputTokens",
+        "temperature",
+        "topP",
+        "topK",
+        "presencePenalty",
+        "frequencyPenalty",
+        "stopSequences",
+        "seed",
+        "reasoning",
+        "toolChoice",
+        "activeTools",
+        "output",
+    ]
+    .into_iter()
+    .filter_map(|key| {
+        payload
+            .get(key)
+            .filter(|value| !value.is_null())
+            .map(|value| (key.to_string(), value.clone()))
+    })
+    .collect()
+}
+
+fn attributes_field(payload: &JsonValue, field: &str) -> Option<ai_sdk_otel::TelemetryAttributes> {
+    payload.get(field)?.as_object().map(|object| {
+        object
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    })
+}
+
+fn prompt_field(payload: &JsonValue, field: &str) -> Option<LanguageModelPrompt> {
+    serde_json::from_value(payload.get(field)?.clone()).ok()
+}
+
+fn output_messages(payload: &JsonValue) -> Option<Vec<ai_sdk_otel::SemConvMessage>> {
+    let finish_reason = finish_reason(payload)?;
+    let mut output = ai_sdk_otel::OutputMessages::new(finish_reason);
+    if let Some(text) = string_field(payload, "text") {
+        output = output.with_text(text);
+    }
+    for tool_call in payload
+        .get("toolCalls")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let (Some(tool_call_id), Some(tool_name)) = (
+            string_field(tool_call, "toolCallId"),
+            string_field(tool_call, "toolName"),
+        ) {
+            output = output.with_tool_call(ai_sdk_otel::OutputToolCall::new(
+                tool_call_id,
+                tool_name,
+                tool_call.get("input").cloned().unwrap_or(JsonValue::Null),
+            ));
+        }
+    }
+    Some(ai_sdk_otel::format_output_messages(output))
+}
+
+fn token_usage_field(payload: &JsonValue, field: &str) -> Option<ai_sdk_otel::TelemetryTokenUsage> {
+    let usage = payload.get(field)?;
+    let input_tokens = usage
+        .get("inputTokens")
+        .and_then(|input| input.get("total"))
+        .and_then(JsonValue::as_u64);
+    let output_tokens = usage
+        .get("outputTokens")
+        .and_then(|output| output.get("total"))
+        .and_then(JsonValue::as_u64);
+    Some(ai_sdk_otel::TelemetryTokenUsage {
+        input_tokens,
+        output_tokens,
+        total_tokens: input_tokens
+            .zip(output_tokens)
+            .map(|(input, output)| input + output),
+    })
+}
+
+fn embedding_usage(payload: &JsonValue) -> Option<ai_sdk_otel::OpenTelemetryEmbeddingUsage> {
+    Some(ai_sdk_otel::OpenTelemetryEmbeddingUsage {
+        tokens: payload
+            .get("usage")?
+            .get("tokens")
+            .and_then(JsonValue::as_u64),
+    })
+}
+
+fn embedding_input(value: &JsonValue) -> Option<ai_sdk_otel::OpenTelemetryEmbeddingInput> {
+    match value {
+        JsonValue::String(value) => Some(ai_sdk_otel::OpenTelemetryEmbeddingInput::one(value)),
+        JsonValue::Array(values) => Some(ai_sdk_otel::OpenTelemetryEmbeddingInput::many(
+            values.iter().filter_map(JsonValue::as_str),
+        )),
+        _ => None,
+    }
+}
+
+fn embedding_output(value: &JsonValue) -> Option<ai_sdk_otel::OpenTelemetryEmbeddingOutput> {
+    match value {
+        JsonValue::Array(values) if values.iter().all(JsonValue::is_number) => {
+            Some(ai_sdk_otel::OpenTelemetryEmbeddingOutput::one(
+                values.iter().filter_map(JsonValue::as_f64),
+            ))
+        }
+        JsonValue::Array(values) => Some(ai_sdk_otel::OpenTelemetryEmbeddingOutput::many(
+            values.iter().filter_map(|embedding| {
+                embedding
+                    .as_array()
+                    .map(|values| values.iter().filter_map(JsonValue::as_f64))
+            }),
+        )),
+        _ => None,
+    }
+}
+
+fn finish_reason(payload: &JsonValue) -> Option<String> {
+    string_field(payload, "finishReason").map(|reason| match reason.as_str() {
+        "Stop" | "stop" => "stop".to_string(),
+        "Length" | "length" => "length".to_string(),
+        "ContentFilter" | "content-filter" | "contentFilter" => "content-filter".to_string(),
+        "ToolCalls" | "tool-calls" | "toolCalls" => "tool-calls".to_string(),
+        "Error" | "error" => "error".to_string(),
+        _ => reason,
+    })
+}
+
+fn string_field(payload: &JsonValue, field: &str) -> Option<String> {
+    payload
+        .get(field)
+        .and_then(JsonValue::as_str)
+        .map(str::to_string)
+}
+
+fn u64_field(payload: &JsonValue, field: &str) -> Option<u64> {
+    payload.get(field).and_then(JsonValue::as_u64)
 }
 
 /// Telemetry settings for a single high-level SDK call.
@@ -849,6 +1400,104 @@ mod tests {
                 "execute".to_string(),
                 "local-after".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn open_telemetry_integration_exports_dispatcher_spans_to_local_otlp_receiver() {
+        let _guard = telemetry_test_guard();
+        reset_telemetry_state_for_tests();
+        let receiver = ai_sdk_otel::LocalOtlpTraceReceiver::start().expect("receiver starts");
+        let recorder = Arc::new(Mutex::new(ai_sdk_otel::OpenTelemetry::new(
+            ai_sdk_otel::OpenTelemetryOptions::new(),
+        )));
+        let dispatcher = create_telemetry_dispatcher(Some(
+            TelemetryOptions::new()
+                .with_function_id("weather")
+                .with_record_inputs(true)
+                .with_record_outputs(true)
+                .with_integration(create_open_telemetry_integration(Arc::clone(&recorder))),
+        ));
+
+        dispatcher.on_start(json!({
+            "callId": "call-1",
+            "operationId": "ai.generateText",
+            "provider": "openai.chat",
+            "modelId": "gpt-4o-mini",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "Weather?" }]
+                }
+            ],
+            "temperature": 0.2,
+            "runtimeContext": { "tenant": "acme" }
+        }));
+        dispatcher.on_step_start(json!({
+            "callId": "call-1",
+            "stepNumber": 1
+        }));
+        dispatcher.on_language_model_call_start(json!({
+            "callId": "call-1",
+            "provider": "openai.chat",
+            "modelId": "gpt-4o-mini",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "Weather?" }]
+                }
+            ]
+        }));
+        dispatcher.on_language_model_call_end(json!({
+            "callId": "call-1",
+            "finishReason": "Stop",
+            "usage": {
+                "inputTokens": { "total": 7 },
+                "outputTokens": { "total": 4 }
+            },
+            "text": "Sunny."
+        }));
+        dispatcher.on_step_finish(json!({ "callId": "call-1" }));
+        dispatcher.on_end(json!({
+            "callId": "call-1",
+            "finishReason": "Stop",
+            "totalUsage": {
+                "inputTokens": { "total": 7 },
+                "outputTokens": { "total": 4 }
+            },
+            "text": "Sunny."
+        }));
+
+        let tracer = recorder.lock().expect("recorder lock").tracer().clone();
+        assert_eq!(tracer.spans.len(), 3);
+        assert!(tracer.spans.iter().all(|span| span.ended));
+        assert_eq!(tracer.spans[0].name, "invoke_agent gpt-4o-mini");
+        assert_eq!(
+            tracer.spans[0].attributes.get("gen_ai.agent.name"),
+            Some(&json!("weather"))
+        );
+        assert_eq!(
+            tracer.spans[0].attributes.get("gen_ai.request.temperature"),
+            Some(&json!(0.2))
+        );
+        assert_eq!(
+            tracer.spans[2].attributes.get("gen_ai.usage.total_tokens"),
+            Some(&json!(11))
+        );
+
+        ai_sdk_otel::export_tracer_to_otlp_http_json(
+            &tracer,
+            &ai_sdk_otel::OtlpHttpTraceExportOptions::new(receiver.endpoint())
+                .with_service_name("ai-sdk-rust-dispatcher-otel"),
+        )
+        .expect("export succeeds");
+
+        let requests = receiver.wait_for_requests(1, std::time::Duration::from_secs(2));
+        assert_eq!(requests.len(), 1);
+        let body = requests[0].body_json().expect("OTLP body is JSON");
+        assert_eq!(
+            body["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["name"],
+            "invoke_agent gpt-4o-mini"
         );
     }
 }
