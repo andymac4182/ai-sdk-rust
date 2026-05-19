@@ -25,12 +25,13 @@ use ai_sdk_provider::headers::Headers;
 use ai_sdk_provider::image_model::ImageModelFile;
 use ai_sdk_provider::json::{JsonObject, JsonSchema, JsonValue};
 use ai_sdk_provider::language_model::{
-    LanguageModelFilePart, LanguageModelFunctionTool, LanguageModelMessage, LanguageModelPrompt,
-    LanguageModelProviderTool, LanguageModelReasoningEffort, LanguageModelStreamPart,
-    LanguageModelSupportedUrls, LanguageModelSystemMessage, LanguageModelTool,
-    LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
-    LanguageModelToolCall, LanguageModelToolInputDelta, LanguageModelToolInputEnd,
-    LanguageModelToolInputExample, LanguageModelToolInputStart, LanguageModelToolResultOutput,
+    LanguageModelAbortSignal, LanguageModelFilePart, LanguageModelFunctionTool,
+    LanguageModelMessage, LanguageModelPrompt, LanguageModelProviderTool,
+    LanguageModelReasoningEffort, LanguageModelStreamPart, LanguageModelSupportedUrls,
+    LanguageModelSystemMessage, LanguageModelTool, LanguageModelToolApprovalRequestPart,
+    LanguageModelToolApprovalResponsePart, LanguageModelToolCall, LanguageModelToolInputDelta,
+    LanguageModelToolInputEnd, LanguageModelToolInputExample, LanguageModelToolInputStart,
+    LanguageModelToolResultOutput,
 };
 use ai_sdk_provider::provider::{
     ApiCallError, EmptyResponseBodyError, InvalidArgumentError, InvalidResponseDataError,
@@ -2129,6 +2130,10 @@ pub struct PostJsonToApiOptions {
     /// Runtime indicators used to append the provider-utils user-agent suffix.
     #[serde(default, skip_serializing_if = "RuntimeEnvironment::is_unknown")]
     pub environment: RuntimeEnvironment,
+
+    /// Caller-controlled abort signal for this provider API request.
+    #[serde(default, skip)]
+    pub abort_signal: Option<LanguageModelAbortSignal>,
 }
 
 impl PostJsonToApiOptions {
@@ -2139,6 +2144,7 @@ impl PostJsonToApiOptions {
             headers: BTreeMap::new(),
             body: body.into(),
             environment: RuntimeEnvironment::unknown(),
+            abort_signal: None,
         }
     }
 
@@ -2174,6 +2180,21 @@ impl PostJsonToApiOptions {
         self
     }
 
+    /// Sets a caller-controlled abort signal for the HTTP transport request.
+    pub fn with_abort_signal(mut self, abort_signal: LanguageModelAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
+        self
+    }
+
+    /// Sets an optional caller-controlled abort signal for the HTTP transport request.
+    pub fn with_optional_abort_signal(
+        mut self,
+        abort_signal: Option<LanguageModelAbortSignal>,
+    ) -> Self {
+        self.abort_signal = abort_signal;
+        self
+    }
+
     /// Converts these options into the prepared provider API request.
     pub fn into_request(self) -> ProviderApiRequest {
         let Self {
@@ -2181,9 +2202,12 @@ impl PostJsonToApiOptions {
             headers,
             body,
             environment,
+            abort_signal,
         } = self;
 
-        prepare_post_json_to_api_request(url, Some(headers), body, &environment)
+        let mut request = prepare_post_json_to_api_request(url, Some(headers), body, &environment);
+        request.abort_signal = abort_signal;
+        request
     }
 }
 
@@ -2473,6 +2497,10 @@ pub struct ProviderApiRequest {
 
     /// Values supplied to upstream response handlers as `requestBodyValues`.
     pub request_body_values: JsonValue,
+
+    /// Caller-controlled abort signal for transports that can cancel requests.
+    #[serde(default, skip)]
+    pub abort_signal: Option<LanguageModelAbortSignal>,
 }
 
 impl ProviderApiRequest {
@@ -2490,6 +2518,7 @@ impl ProviderApiRequest {
             headers,
             body,
             request_body_values: request_body_values.into(),
+            abort_signal: None,
         }
     }
 
@@ -2518,6 +2547,12 @@ impl ProviderApiRequest {
             Some(body),
             request_body_values,
         )
+    }
+
+    /// Adds an abort signal to the provider API request.
+    pub fn with_abort_signal(mut self, abort_signal: LanguageModelAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
+        self
     }
 }
 
@@ -6664,6 +6699,33 @@ where
     }
 }
 
+fn provider_api_abort_error() -> FetchErrorInfo {
+    FetchErrorInfo::new("Aborted").with_name("AbortError")
+}
+
+async fn await_provider_api_transport<TransportFuture>(
+    future: TransportFuture,
+    abort_signal: Option<LanguageModelAbortSignal>,
+) -> Result<ProviderApiResponse, FetchErrorInfo>
+where
+    TransportFuture: Future<Output = Result<ProviderApiResponse, FetchErrorInfo>>,
+{
+    let Some(abort_signal) = abort_signal else {
+        return future.await;
+    };
+
+    let mut future = Box::pin(future);
+
+    std::future::poll_fn(move |context| {
+        if abort_signal.poll_aborted(context).is_ready() {
+            return Poll::Ready(Err(provider_api_abort_error()));
+        }
+
+        future.as_mut().poll(context)
+    })
+    .await
+}
+
 /// Executes a prepared provider API request through a caller-supplied transport.
 ///
 /// This is the dependency-free orchestration boundary for upstream
@@ -6689,7 +6751,24 @@ where
         &ProviderApiResponse,
     ) -> Result<ResponseHandlerResult<ApiCallError>, ProviderApiResponseHandlerError>,
 {
-    let response = match transport(request.clone()).await {
+    if request
+        .abort_signal
+        .as_ref()
+        .is_some_and(LanguageModelAbortSignal::is_aborted)
+    {
+        return Err(handle_fetch_error(
+            provider_api_abort_error(),
+            request.url,
+            request.request_body_values,
+        ));
+    }
+
+    let response = match await_provider_api_transport(
+        transport(request.clone()),
+        request.abort_signal.clone(),
+    )
+    .await
+    {
         Ok(response) => response,
         Err(error) => {
             return Err(handle_fetch_error(
@@ -7441,11 +7520,11 @@ mod tests {
     use std::time::Duration;
 
     use ai_sdk_provider::language_model::{
-        LanguageModelFilePart, LanguageModelFunctionTool, LanguageModelMessage,
-        LanguageModelProviderTool, LanguageModelReasoningEffort, LanguageModelSystemMessage,
-        LanguageModelTextPart, LanguageModelTool, LanguageModelToolApprovalRequestPart,
-        LanguageModelToolApprovalResponsePart, LanguageModelToolResultOutput,
-        LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelAbortController, LanguageModelFilePart, LanguageModelFunctionTool,
+        LanguageModelMessage, LanguageModelProviderTool, LanguageModelReasoningEffort,
+        LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelTool,
+        LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
+        LanguageModelToolResultOutput, LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use ai_sdk_provider::{
         ApiCallError, FileData, FileDataContent, ImageModelFile, JsonObject, JsonSchema, JsonValue,
@@ -7511,6 +7590,19 @@ mod tests {
         match Pin::new(&mut future).poll(&mut context) {
             Poll::Ready(value) => value,
             Poll::Pending => unreachable!("test futures should be ready"),
+        }
+    }
+
+    fn poll_until_ready<T>(future: impl Future<Output = T>) -> T {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut future = Box::pin(future);
+
+        loop {
+            match Pin::new(&mut future).poll(&mut context) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => std::thread::yield_now(),
+            }
         }
     }
 
@@ -12217,6 +12309,37 @@ mod tests {
     }
 
     #[test]
+    fn post_json_to_api_options_carries_abort_signal_without_serializing_it() {
+        let abort_controller = LanguageModelAbortController::new();
+        let options =
+            PostJsonToApiOptions::new("https://api.example.com/v1/chat", json!({ "prompt": "Hi" }))
+                .with_abort_signal(abort_controller.signal());
+
+        assert_eq!(
+            serde_json::to_value(&options).expect("post-json options serialize"),
+            json!({
+                "url": "https://api.example.com/v1/chat",
+                "body": {
+                    "prompt": "Hi"
+                }
+            })
+        );
+
+        let request = options.into_request();
+        assert!(
+            request
+                .abort_signal
+                .as_ref()
+                .is_some_and(|signal| !signal.is_aborted())
+        );
+
+        let request_signal = request.abort_signal.clone().expect("request signal set");
+        abort_controller.abort_with_reason("client-disconnected");
+        assert!(request_signal.is_aborted());
+        assert_eq!(request_signal.reason(), Some(json!("client-disconnected")));
+    }
+
+    #[test]
     fn post_json_to_api_prepares_request_and_handles_success() {
         let options =
             PostJsonToApiOptions::new("https://api.example.com/v1/chat", json!({ "prompt": "Hi" }))
@@ -12284,6 +12407,112 @@ mod tests {
             }
         );
         assert_eq!(result.response_headers(), Some(&expected_response_headers));
+    }
+
+    #[test]
+    fn post_json_to_api_aborts_before_transport_call() {
+        let abort_controller = LanguageModelAbortController::new();
+        abort_controller.abort_with_reason("client-disconnected");
+        let transport_calls = Arc::new(AtomicUsize::new(0));
+        let transport_calls_for_request = Arc::clone(&transport_calls);
+
+        let error = poll_ready(post_json_to_api(
+            PostJsonToApiOptions::new("https://api.example.com/v1/chat", json!({ "prompt": "Hi" }))
+                .with_abort_signal(abort_controller.signal()),
+            move |_request| {
+                transport_calls_for_request.fetch_add(1, Ordering::SeqCst);
+                ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    r#"{"name":"Ada","age":36}"#,
+                )))
+            },
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    validate_person,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_status_code_error_response_handler(
+                    response.status_code_error_response_handler_options(request),
+                ))
+            },
+        ))
+        .expect_err("aborted request fails before transport");
+
+        assert_eq!(transport_calls.load(Ordering::SeqCst), 0);
+        let HandledFetchError::Original { error } = error else {
+            panic!("aborted request should preserve the abort error");
+        };
+        assert_eq!(error.name(), Some("AbortError"));
+    }
+
+    #[test]
+    fn post_json_to_api_aborts_pending_transport_when_signal_fires() {
+        struct AbortOnFirstPoll {
+            abort_controller: LanguageModelAbortController,
+            polls: Arc<AtomicUsize>,
+        }
+
+        impl Future for AbortOnFirstPoll {
+            type Output = Result<ProviderApiResponse, FetchErrorInfo>;
+
+            fn poll(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
+                let polls = self.polls.fetch_add(1, Ordering::SeqCst);
+                if polls == 0 {
+                    self.abort_controller
+                        .abort_with_reason("client-disconnected");
+                }
+                Poll::Pending
+            }
+        }
+
+        let abort_controller = LanguageModelAbortController::new();
+        let transport_polls = Arc::new(AtomicUsize::new(0));
+        let transport_polls_for_request = Arc::clone(&transport_polls);
+        let abort_controller_for_request = abort_controller.clone();
+
+        let error = poll_until_ready(post_json_to_api(
+            PostJsonToApiOptions::new("https://api.example.com/v1/chat", json!({ "prompt": "Hi" }))
+                .with_abort_signal(abort_controller.signal()),
+            move |request| {
+                assert!(
+                    request
+                        .abort_signal
+                        .as_ref()
+                        .is_some_and(|signal| !signal.is_aborted())
+                );
+                AbortOnFirstPoll {
+                    abort_controller: abort_controller_for_request,
+                    polls: transport_polls_for_request,
+                }
+            },
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    validate_person,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_status_code_error_response_handler(
+                    response.status_code_error_response_handler_options(request),
+                ))
+            },
+        ))
+        .expect_err("aborted pending transport fails");
+
+        assert_eq!(transport_polls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            abort_controller.signal().reason(),
+            Some(json!("client-disconnected"))
+        );
+        let HandledFetchError::Original { error } = error else {
+            panic!("aborted request should preserve the abort error");
+        };
+        assert_eq!(error.name(), Some("AbortError"));
     }
 
     #[test]

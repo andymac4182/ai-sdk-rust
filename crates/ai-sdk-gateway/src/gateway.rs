@@ -1341,7 +1341,8 @@ impl GatewayLanguageModel {
         let auth_method = parse_gateway_auth_method(&request_headers);
         let post_options = PostJsonToApiOptions::new(self.language_model_url(), request_body)
             .with_headers(request_headers)
-            .with_environment(RuntimeEnvironment::unknown());
+            .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(options.abort_signal.clone());
         let transport = Arc::clone(&self.transport);
 
         match post_json_to_api(
@@ -1389,7 +1390,8 @@ impl GatewayLanguageModel {
         let auth_method = parse_gateway_auth_method(&request_headers);
         let post_options = PostJsonToApiOptions::new(self.language_model_url(), request_body)
             .with_headers(request_headers)
-            .with_environment(RuntimeEnvironment::unknown());
+            .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(options.abort_signal.clone());
         let transport = Arc::clone(&self.transport);
 
         match post_json_to_api(
@@ -3595,12 +3597,12 @@ mod tests {
     use ai_sdk_provider::{
         EmbeddingModel, EmbeddingModelCallOptions, FileData, FileDataContent, FinishReason,
         ImageModel, ImageModelCallOptions, ImageModelFile, JsonObject, JsonValue, LanguageModel,
-        LanguageModelCallOptions, LanguageModelContent, LanguageModelFileData,
-        LanguageModelFilePart, LanguageModelMessage, LanguageModelSource, LanguageModelStreamPart,
-        LanguageModelTextPart, LanguageModelUserContentPart, LanguageModelUserMessage, Provider,
-        ProviderMetadata, ProviderWithRerankingModel, ProviderWithVideoModel, RerankingModel,
-        RerankingModelCallOptions, RerankingModelDocuments, SpecificationVersion, VideoModel,
-        VideoModelCallOptions, VideoModelFile, Warning,
+        LanguageModelAbortController, LanguageModelCallOptions, LanguageModelContent,
+        LanguageModelFileData, LanguageModelFilePart, LanguageModelMessage, LanguageModelSource,
+        LanguageModelStreamPart, LanguageModelTextPart, LanguageModelUserContentPart,
+        LanguageModelUserMessage, Provider, ProviderMetadata, ProviderWithRerankingModel,
+        ProviderWithVideoModel, RerankingModel, RerankingModelCallOptions, RerankingModelDocuments,
+        SpecificationVersion, VideoModel, VideoModelCallOptions, VideoModelFile, Warning,
     };
     use ai_sdk_provider_utils::{
         FetchErrorInfo, ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod,
@@ -3910,6 +3912,7 @@ mod tests {
     fn gateway_model_passes_typed_gateway_provider_options_for_generate() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
+        let abort_controller = LanguageModelAbortController::new();
         let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
             *captured_request_for_transport
                 .lock()
@@ -3945,24 +3948,32 @@ mod tests {
 
         let result = poll_ready(
             model.do_generate(
-                LanguageModelCallOptions::new(Vec::new()).with_provider_options(
-                    GatewayProviderOptions::new()
-                        .with_order(["bedrock", "anthropic"])
-                        .with_zero_data_retention(true)
-                        .with_provider_timeouts(
-                            GatewayProviderTimeouts::new().with_byok_timeout("openai", 5000),
-                        )
-                        .into_provider_options(),
-                ),
+                LanguageModelCallOptions::new(Vec::new())
+                    .with_provider_options(
+                        GatewayProviderOptions::new()
+                            .with_order(["bedrock", "anthropic"])
+                            .with_zero_data_retention(true)
+                            .with_provider_timeouts(
+                                GatewayProviderTimeouts::new().with_byok_timeout("openai", 5000),
+                            )
+                            .into_provider_options(),
+                    )
+                    .with_abort_signal(abort_controller.signal()),
             ),
         );
         assert_eq!(result.finish_reason.unified, FinishReason::Stop);
 
-        let request_body = captured_request
+        let request = captured_request
             .lock()
             .expect("captured request mutex is not poisoned")
             .clone()
-            .expect("request is captured")
+            .expect("request is captured");
+        let request_signal = request.abort_signal.clone().expect("abort signal set");
+        abort_controller.abort_with_reason("client-disconnected");
+        assert!(request_signal.is_aborted());
+        assert_eq!(request_signal.reason(), Some(json!("client-disconnected")));
+
+        let request_body = request
             .body
             .and_then(|body| body.as_text().map(str::to_string))
             .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok())
@@ -3987,6 +3998,7 @@ mod tests {
     fn gateway_model_passes_typed_gateway_provider_options_for_stream() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
+        let abort_controller = LanguageModelAbortController::new();
         let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
             *captured_request_for_transport
                 .lock()
@@ -4025,12 +4037,14 @@ mod tests {
 
         let result = poll_ready(
             model.do_stream(
-                LanguageModelCallOptions::new(Vec::new()).with_provider_options(
-                    GatewayProviderOptions::new()
-                        .with_order(["groq", "openai"])
-                        .with_quota_entity_id("entity-123")
-                        .into_provider_options(),
-                ),
+                LanguageModelCallOptions::new(Vec::new())
+                    .with_provider_options(
+                        GatewayProviderOptions::new()
+                            .with_order(["groq", "openai"])
+                            .with_quota_entity_id("entity-123")
+                            .into_provider_options(),
+                    )
+                    .with_abort_signal(abort_controller.signal()),
             ),
         );
         assert!(matches!(
@@ -4038,11 +4052,17 @@ mod tests {
             Some(LanguageModelStreamPart::Finish(_))
         ));
 
-        let request_body = captured_request
+        let request = captured_request
             .lock()
             .expect("captured request mutex is not poisoned")
             .clone()
-            .expect("request is captured")
+            .expect("request is captured");
+        let request_signal = request.abort_signal.clone().expect("abort signal set");
+        abort_controller.abort_with_reason("client-disconnected");
+        assert!(request_signal.is_aborted());
+        assert_eq!(request_signal.reason(), Some(json!("client-disconnected")));
+
+        let request_body = request
             .body
             .and_then(|body| body.as_text().map(str::to_string))
             .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok())

@@ -512,7 +512,8 @@ impl OpenAICompatibleChatLanguageModel {
         };
         let post_options = PostJsonToApiOptions::new(url, request_body)
             .with_headers(request_headers)
-            .with_environment(RuntimeEnvironment::unknown());
+            .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(options.abort_signal.clone());
         let transport = Arc::clone(&self.config.transport);
 
         match post_json_to_api(
@@ -583,7 +584,8 @@ impl OpenAICompatibleChatLanguageModel {
         };
         let post_options = PostJsonToApiOptions::new(url, request_body)
             .with_headers(request_headers)
-            .with_environment(RuntimeEnvironment::unknown());
+            .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(options.abort_signal.clone());
         let transport = Arc::clone(&self.config.transport);
 
         match post_json_to_api(
@@ -821,7 +823,8 @@ impl OpenAICompatibleCompletionLanguageModel {
         };
         let post_options = PostJsonToApiOptions::new(url, request_body)
             .with_headers(request_headers)
-            .with_environment(RuntimeEnvironment::unknown());
+            .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(options.abort_signal.clone());
         let transport = Arc::clone(&self.config.transport);
 
         match post_json_to_api(
@@ -893,7 +896,8 @@ impl OpenAICompatibleCompletionLanguageModel {
         };
         let post_options = PostJsonToApiOptions::new(url, request_body)
             .with_headers(request_headers)
-            .with_environment(RuntimeEnvironment::unknown());
+            .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(options.abort_signal.clone());
         let transport = Arc::clone(&self.config.transport);
 
         match post_json_to_api(
@@ -4038,15 +4042,15 @@ mod tests {
     use ai_sdk_provider::image_model::{ImageModel, ImageModelCallOptions};
     use ai_sdk_provider::json::{JsonObject, JsonValue};
     use ai_sdk_provider::language_model::{
-        FinishReason, LanguageModel, LanguageModelAssistantContentPart,
-        LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
-        LanguageModelFilePart, LanguageModelFunctionTool, LanguageModelMessage,
-        LanguageModelProviderTool, LanguageModelReasoningEffort, LanguageModelReasoningPart,
-        LanguageModelResponseFormat, LanguageModelStreamPart, LanguageModelSystemMessage,
-        LanguageModelTextPart, LanguageModelTool, LanguageModelToolCallPart,
-        LanguageModelToolChoice, LanguageModelToolContentPart, LanguageModelToolMessage,
-        LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUserContentPart,
-        LanguageModelUserMessage,
+        FinishReason, LanguageModel, LanguageModelAbortController,
+        LanguageModelAssistantContentPart, LanguageModelAssistantMessage, LanguageModelCallOptions,
+        LanguageModelContent, LanguageModelFilePart, LanguageModelFunctionTool,
+        LanguageModelMessage, LanguageModelProviderTool, LanguageModelReasoningEffort,
+        LanguageModelReasoningPart, LanguageModelResponseFormat, LanguageModelStreamPart,
+        LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelTool,
+        LanguageModelToolCallPart, LanguageModelToolChoice, LanguageModelToolContentPart,
+        LanguageModelToolMessage, LanguageModelToolResultOutput, LanguageModelToolResultPart,
+        LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use ai_sdk_provider::provider::ProviderOptions;
     use ai_sdk_provider::warning::Warning;
@@ -4756,6 +4760,7 @@ mod tests {
     fn openai_compatible_chat_passes_tools_tool_choice_and_provider_options() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
+        let abort_controller = LanguageModelAbortController::new();
         let transport: OpenAICompatibleTransport =
             Arc::new(move |request| -> OpenAICompatibleTransportFuture {
                 *captured_request_for_transport
@@ -4842,7 +4847,8 @@ mod tests {
                 .with_response_format(
                     LanguageModelResponseFormat::json().with_schema(input_schema.clone()),
                 )
-                .with_provider_options(provider_options),
+                .with_provider_options(provider_options)
+                .with_abort_signal(abort_controller.signal()),
             ),
         );
 
@@ -4868,12 +4874,18 @@ mod tests {
             )
         }));
 
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_signal = request.abort_signal.clone().expect("abort signal set");
+        abort_controller.abort_with_reason("client-disconnected");
+        assert!(request_signal.is_aborted());
+        assert_eq!(request_signal.reason(), Some(json!("client-disconnected")));
+
         assert_eq!(
-            captured_request
-                .lock()
-                .expect("captured request mutex is not poisoned")
-                .clone()
-                .expect("request is captured")
+            request
                 .body
                 .and_then(|body| body.as_text().map(str::to_string))
                 .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok()),

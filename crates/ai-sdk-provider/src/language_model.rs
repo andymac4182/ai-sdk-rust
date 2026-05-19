@@ -3,6 +3,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll, Waker};
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -18,6 +19,7 @@ use crate::warning::Warning;
 struct LanguageModelAbortState {
     aborted: AtomicBool,
     reason: Mutex<Option<JsonValue>>,
+    wakers: Mutex<Vec<Waker>>,
 }
 
 /// Caller-controlled abort signal passed to provider language-model calls.
@@ -39,6 +41,29 @@ impl LanguageModelAbortSignal {
             .lock()
             .expect("language model abort reason lock is not poisoned")
             .clone()
+    }
+
+    /// Polls until the signal is aborted, registering the current task for wake-up.
+    pub fn poll_aborted(&self, context: &Context<'_>) -> Poll<()> {
+        if self.is_aborted() {
+            return Poll::Ready(());
+        }
+
+        let mut wakers = self
+            .state
+            .wakers
+            .lock()
+            .expect("language model abort waker lock is not poisoned");
+
+        if self.is_aborted() {
+            return Poll::Ready(());
+        }
+
+        if !wakers.iter().any(|waker| waker.will_wake(context.waker())) {
+            wakers.push(context.waker().clone());
+        }
+
+        Poll::Pending
     }
 }
 
@@ -84,6 +109,15 @@ impl LanguageModelAbortController {
                 .reason
                 .lock()
                 .expect("language model abort reason lock is not poisoned") = reason;
+            let mut wakers = self
+                .signal
+                .state
+                .wakers
+                .lock()
+                .expect("language model abort waker lock is not poisoned");
+            for waker in wakers.drain(..) {
+                waker.wake();
+            }
         }
     }
 }

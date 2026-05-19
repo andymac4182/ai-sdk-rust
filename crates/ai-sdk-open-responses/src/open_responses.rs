@@ -253,7 +253,8 @@ impl OpenResponsesLanguageModel {
         let post_options =
             PostJsonToApiOptions::new(self.config.settings.url.clone(), request_body)
                 .with_headers(request_headers)
-                .with_environment(RuntimeEnvironment::unknown());
+                .with_environment(RuntimeEnvironment::unknown())
+                .with_optional_abort_signal(options.abort_signal.clone());
         let transport = Arc::clone(&self.config.transport);
 
         match post_json_to_api(
@@ -319,7 +320,8 @@ impl OpenResponsesLanguageModel {
         let post_options =
             PostJsonToApiOptions::new(self.config.settings.url.clone(), request_body)
                 .with_headers(request_headers)
-                .with_environment(RuntimeEnvironment::unknown());
+                .with_environment(RuntimeEnvironment::unknown())
+                .with_optional_abort_signal(options.abort_signal.clone());
         let transport = Arc::clone(&self.config.transport);
 
         match post_json_to_api(
@@ -6434,16 +6436,16 @@ mod tests {
     use ai_sdk_provider::headers::Headers;
     use ai_sdk_provider::json::{JsonObject, JsonValue};
     use ai_sdk_provider::language_model::{
-        FinishReason, LanguageModel, LanguageModelAssistantContentPart,
-        LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
-        LanguageModelCustomPart, LanguageModelFileData, LanguageModelFilePart,
-        LanguageModelFunctionTool, LanguageModelMessage, LanguageModelProviderTool,
-        LanguageModelReasoningEffort, LanguageModelReasoningFilePart, LanguageModelReasoningPart,
-        LanguageModelResponseFormat, LanguageModelSource, LanguageModelStreamPart,
-        LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelTool,
-        LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
-        LanguageModelToolCallPart, LanguageModelToolChoice, LanguageModelToolContentPart,
-        LanguageModelToolMessage, LanguageModelToolResultContentPart,
+        FinishReason, LanguageModel, LanguageModelAbortController,
+        LanguageModelAssistantContentPart, LanguageModelAssistantMessage, LanguageModelCallOptions,
+        LanguageModelContent, LanguageModelCustomPart, LanguageModelFileData,
+        LanguageModelFilePart, LanguageModelFunctionTool, LanguageModelMessage,
+        LanguageModelProviderTool, LanguageModelReasoningEffort, LanguageModelReasoningFilePart,
+        LanguageModelReasoningPart, LanguageModelResponseFormat, LanguageModelSource,
+        LanguageModelStreamPart, LanguageModelSystemMessage, LanguageModelTextPart,
+        LanguageModelTool, LanguageModelToolApprovalRequestPart,
+        LanguageModelToolApprovalResponsePart, LanguageModelToolCallPart, LanguageModelToolChoice,
+        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultContentPart,
         LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUserContentPart,
         LanguageModelUserMessage,
     };
@@ -9932,6 +9934,7 @@ mod tests {
     fn open_responses_provider_warns_for_unsupported_standard_call_options() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
+        let abort_controller = LanguageModelAbortController::new();
         let transport: OpenResponsesTransport =
             Arc::new(move |request| -> OpenResponsesTransportFuture {
                 *captured_request_for_transport
@@ -9981,7 +9984,8 @@ mod tests {
                 )])
                 .with_stop_sequence("</done>")
                 .with_top_k(40)
-                .with_seed(1234),
+                .with_seed(1234)
+                .with_abort_signal(abort_controller.signal()),
             ),
         );
 
@@ -10003,6 +10007,11 @@ mod tests {
             .expect("captured request mutex is not poisoned")
             .clone()
             .expect("request is captured");
+        let request_signal = request.abort_signal.clone().expect("abort signal set");
+        abort_controller.abort_with_reason("client-disconnected");
+        assert!(request_signal.is_aborted());
+        assert_eq!(request_signal.reason(), Some(json!("client-disconnected")));
+
         let request_body = request
             .body
             .as_ref()
