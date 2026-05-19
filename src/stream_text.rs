@@ -43,11 +43,12 @@ use crate::language_model::{
     LanguageModelToolInputStart, LanguageModelUsage,
 };
 use crate::prompt::{Prompt, standardize_prompt};
-use crate::provider::{InvalidPromptError, ProviderMetadata, ProviderOptions};
+use crate::provider::{ApiCallError, InvalidPromptError, ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{
     ExperimentalSandbox, Tool, convert_to_base64, prepare_tools_with_context,
     with_user_agent_suffix,
 };
+use crate::retry::DEFAULT_MAX_RETRIES;
 use crate::telemetry::{TelemetryOptions, create_telemetry_dispatcher};
 use crate::text_stream_response::{
     TextStreamResponse, TextStreamResponseInit, TextStreamResponseOptions,
@@ -683,6 +684,9 @@ pub struct StreamTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Optional telemetry dispatcher settings.
     pub telemetry: Option<TelemetryOptions>,
 
+    /// Maximum number of retries for failed provider stream requests.
+    pub max_retries: usize,
+
     /// Optional callback invoked for portable stream chunks.
     pub on_chunk: Option<StreamTextOnChunk<'a>>,
 
@@ -719,6 +723,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             on_step_finish: None,
             on_finish: None,
             telemetry: None,
+            max_retries: DEFAULT_MAX_RETRIES,
             on_chunk: None,
             on_error: None,
             max_steps: 1,
@@ -754,6 +759,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             on_step_finish: None,
             on_finish: None,
             telemetry: None,
+            max_retries: DEFAULT_MAX_RETRIES,
             on_chunk: None,
             on_error: None,
             max_steps: 1,
@@ -1020,6 +1026,12 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
     /// Sets telemetry options for this streaming generation.
     pub fn with_telemetry(mut self, telemetry: TelemetryOptions) -> Self {
         self.telemetry = Some(telemetry);
+        self
+    }
+
+    /// Sets the maximum number of retries for failed provider stream requests.
+    pub fn with_max_retries(mut self, max_retries: usize) -> Self {
+        self.max_retries = max_retries;
         self
     }
 
@@ -1691,6 +1703,7 @@ where
         on_step_finish,
         on_finish,
         telemetry,
+        max_retries,
         on_chunk,
         on_error,
         max_steps,
@@ -1735,6 +1748,7 @@ where
             frequency_penalty: call_options.frequency_penalty,
             stop_sequences: call_options.stop_sequences.clone(),
             seed: call_options.seed,
+            max_retries,
             reasoning: call_options.reasoning.clone(),
             headers: call_options.headers.clone(),
             provider_options: call_options.provider_options.clone(),
@@ -1807,10 +1821,11 @@ where
         }
 
         let model_call_started_at = Instant::now();
-        let mut collected_step = collect_stream_text_step(
+        let mut collected_step = collect_stream_text_step_with_retries(
             model,
             step_call_options.clone(),
             include_raw_chunks,
+            max_retries,
             &mut parts,
             on_chunk.as_ref(),
             on_error.as_ref(),
@@ -2149,6 +2164,46 @@ impl CollectedStreamTextStep {
     }
 }
 
+async fn collect_stream_text_step_with_retries<M>(
+    model: &M,
+    call_options: LanguageModelCallOptions,
+    include_raw_chunks: bool,
+    max_retries: usize,
+    parts: &mut Vec<TextStreamPart>,
+    on_chunk: Option<&StreamTextOnChunk<'_>>,
+    on_error: Option<&StreamTextOnError<'_>>,
+) -> CollectedStreamTextStep
+where
+    M: LanguageModel + ?Sized,
+    M::Stream: IntoIterator<Item = LanguageModelStreamPart>,
+{
+    let mut retries = 0;
+
+    loop {
+        let mut attempt_parts = Vec::new();
+        let collected_step = collect_stream_text_step(
+            model,
+            call_options.clone(),
+            include_raw_chunks,
+            &mut attempt_parts,
+            None,
+            None,
+        )
+        .await;
+
+        if retries < max_retries
+            && stream_text_step_is_retryable_pre_stream_failure(&collected_step, &attempt_parts)
+        {
+            retries += 1;
+            continue;
+        }
+
+        replay_stream_text_callbacks(&attempt_parts, on_chunk, on_error).await;
+        parts.extend(attempt_parts);
+        return collected_step;
+    }
+}
+
 async fn collect_stream_text_step<M>(
     model: &M,
     call_options: LanguageModelCallOptions,
@@ -2445,6 +2500,77 @@ where
         provider_metadata,
         performance,
         provider_content,
+    }
+}
+
+fn stream_text_step_is_retryable_pre_stream_failure(
+    collected_step: &CollectedStreamTextStep,
+    attempt_parts: &[TextStreamPart],
+) -> bool {
+    let Some(error) = collected_step.errors.first() else {
+        return false;
+    };
+
+    collected_step.errors.len() == 1
+        && collected_step.finish_reason == FinishReason::Error
+        && collected_step.text.is_empty()
+        && collected_step.text_stream.is_empty()
+        && collected_step.reasoning_text.is_none()
+        && collected_step.sources.is_empty()
+        && collected_step.files.is_empty()
+        && collected_step.reasoning_files.is_empty()
+        && collected_step.tool_calls.is_empty()
+        && collected_step.tool_results.is_empty()
+        && collected_step.custom_parts.is_empty()
+        && attempt_parts.iter().all(|part| {
+            matches!(
+                part,
+                TextStreamPart::StartStep(_) | TextStreamPart::Error(_)
+            )
+        })
+        && stream_text_error_is_retryable(error)
+}
+
+fn stream_text_error_is_retryable(error: &JsonValue) -> bool {
+    error
+        .get("isRetryable")
+        .or_else(|| error.get("is_retryable"))
+        .and_then(JsonValue::as_bool)
+        .unwrap_or_else(|| {
+            error
+                .get("statusCode")
+                .or_else(|| error.get("status_code"))
+                .and_then(JsonValue::as_u64)
+                .and_then(|status_code| u16::try_from(status_code).ok())
+                .is_some_and(ApiCallError::is_retryable_status_code)
+        })
+}
+
+async fn replay_stream_text_callbacks(
+    parts: &[TextStreamPart],
+    on_chunk: Option<&StreamTextOnChunk<'_>>,
+    on_error: Option<&StreamTextOnError<'_>>,
+) {
+    for part in parts {
+        if let Some(on_chunk) = on_chunk
+            && is_stream_text_chunk_callback_part(part)
+        {
+            on_chunk
+                .chunk(StreamTextOnChunkEvent {
+                    chunk: part.clone(),
+                })
+                .await;
+        }
+
+        if let Some(on_error) = on_error
+            && let TextStreamPart::Error(part) = part
+        {
+            on_error
+                .error(StreamTextOnErrorEvent {
+                    error: part.error.clone(),
+                })
+                .await;
+        }
     }
 }
 
@@ -3890,6 +4016,7 @@ mod tests {
                     async move {
                         assert_eq!(event.operation_id, "ai.streamText");
                         assert_eq!(event.messages.len(), 1);
+                        assert_eq!(event.max_retries, DEFAULT_MAX_RETRIES);
                         start_events
                             .lock()
                             .expect("events lock")
@@ -4101,6 +4228,7 @@ mod tests {
         );
         assert_eq!(events[0].event["operationId"], json!("ai.streamText"));
         assert_eq!(events[0].event["provider"], json!("mock-provider"));
+        assert_eq!(events[0].event["maxRetries"], json!(DEFAULT_MAX_RETRIES));
         assert_eq!(events[5].event["text"], json!("Hello"));
     }
 
@@ -4273,6 +4401,69 @@ mod tests {
         assert_eq!(
             callback_errors.lock().expect("errors lock").as_slice(),
             ["chunk failed"]
+        );
+    }
+
+    #[test]
+    fn stream_text_retries_retryable_pre_stream_errors() {
+        let retryable_error = LanguageModelStreamResult::new(vec![LanguageModelStreamPart::Error(
+            LanguageModelErrorStreamPart::new(json!({
+                "message": "rate limited",
+                "statusCode": 429,
+                "isRetryable": true
+            })),
+        )]);
+        let successful_stream = LanguageModelStreamResult::new(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "Recovered")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+        let model =
+            MockLanguageModel::new().with_stream_results([retryable_error, successful_stream]);
+        let callback_errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let callback_chunks = Arc::new(Mutex::new(Vec::<String>::new()));
+        let errors = Arc::clone(&callback_errors);
+        let chunks = Arc::clone(&callback_chunks);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_max_retries(1)
+                .with_on_error(move |event| {
+                    let errors = Arc::clone(&errors);
+                    async move {
+                        errors
+                            .lock()
+                            .expect("errors lock")
+                            .push(event.error["message"].as_str().unwrap_or("").to_string());
+                    }
+                })
+                .with_on_chunk(move |event| {
+                    let chunks = Arc::clone(&chunks);
+                    async move {
+                        if let TextStreamPart::TextDelta(part) = event.chunk {
+                            chunks.lock().expect("chunks lock").push(part.text);
+                        }
+                    }
+                }),
+        ));
+
+        assert_eq!(model.stream_calls().len(), 2);
+        assert_eq!(result.text, "Recovered");
+        assert!(result.errors.is_empty());
+        assert!(
+            !result
+                .parts
+                .iter()
+                .any(|part| matches!(part, TextStreamPart::Error(_)))
+        );
+        assert!(callback_errors.lock().expect("errors lock").is_empty());
+        assert_eq!(
+            callback_chunks.lock().expect("chunks lock").as_slice(),
+            ["Recovered"]
         );
     }
 
