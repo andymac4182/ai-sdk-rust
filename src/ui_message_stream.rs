@@ -112,6 +112,23 @@ pub enum UiMessageChunk {
 
         /// URL or data URI for the generated file.
         url: String,
+
+        /// Provider-specific metadata for the file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+
+    /// Generated reasoning file part.
+    ReasoningFile {
+        /// The IANA media type of the generated reasoning file.
+        media_type: String,
+
+        /// URL or data URI for the generated reasoning file.
+        url: String,
+
+        /// Provider-specific metadata for the reasoning file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
     },
 
     /// URL source part.
@@ -162,6 +179,18 @@ pub enum UiMessageChunk {
         /// Whether the provider executes the tool.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_executed: Option<bool>,
+
+        /// Provider-specific metadata for the tool call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+
+        /// Whether the tool was dynamically defined.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dynamic: Option<bool>,
+
+        /// Optional display title for the tool call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
     },
 
     /// Delta for streamed input to a tool call.
@@ -191,6 +220,18 @@ pub enum UiMessageChunk {
         /// Provider-specific metadata for the tool call.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
+
+        /// High-level metadata from the matched tool definition.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_metadata: Option<JsonObject>,
+
+        /// Whether the tool was dynamically defined.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dynamic: Option<bool>,
+
+        /// Optional display title for the tool call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
     },
 
     /// Tool input could not be parsed or validated.
@@ -206,6 +247,26 @@ pub enum UiMessageChunk {
 
         /// Human-readable error text.
         error_text: String,
+
+        /// Whether the provider executes the tool.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_executed: Option<bool>,
+
+        /// Provider-specific metadata for the tool call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+
+        /// High-level metadata from the matched tool definition.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_metadata: Option<JsonObject>,
+
+        /// Whether the tool was dynamically defined.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dynamic: Option<bool>,
+
+        /// Optional display title for the tool call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
     },
 
     /// Tool output is available.
@@ -215,6 +276,26 @@ pub enum UiMessageChunk {
 
         /// Tool output.
         output: JsonValue,
+
+        /// Whether the provider executed the tool.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_executed: Option<bool>,
+
+        /// Provider-specific metadata for the tool result.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+
+        /// High-level metadata from the matched tool definition.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_metadata: Option<JsonObject>,
+
+        /// Whether the tool output is preliminary.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preliminary: Option<bool>,
+
+        /// Whether the tool was dynamically defined.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dynamic: Option<bool>,
     },
 
     /// Tool execution failed.
@@ -224,6 +305,22 @@ pub enum UiMessageChunk {
 
         /// Human-readable error text.
         error_text: String,
+
+        /// Whether the provider executed the tool.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_executed: Option<bool>,
+
+        /// Provider-specific metadata for the tool result.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+
+        /// High-level metadata from the matched tool definition.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_metadata: Option<JsonObject>,
+
+        /// Whether the tool was dynamically defined.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dynamic: Option<bool>,
     },
 
     /// Provider-executed tool approval is requested.
@@ -233,6 +330,10 @@ pub enum UiMessageChunk {
 
         /// Tool call identifier.
         tool_call_id: String,
+
+        /// Provider-specific metadata for the approval request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
     },
 
     /// Tool output was denied.
@@ -250,6 +351,16 @@ pub enum UiMessageChunk {
         /// Whether the tool was dynamically defined.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic: Option<bool>,
+    },
+
+    /// Provider-specific custom chunk.
+    Custom {
+        /// Provider-specific custom kind.
+        kind: String,
+
+        /// Provider-specific metadata for the custom chunk.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
     },
 
     /// Error chunk sent to UI-message stream consumers.
@@ -482,6 +593,16 @@ impl UiMessageChunk {
         Self::File {
             media_type: media_type.into(),
             url: url.into(),
+            provider_metadata: None,
+        }
+    }
+
+    /// Creates a reasoning-file UI-message chunk.
+    pub fn reasoning_file(media_type: impl Into<String>, url: impl Into<String>) -> Self {
+        Self::ReasoningFile {
+            media_type: media_type.into(),
+            url: url.into(),
+            provider_metadata: None,
         }
     }
 
@@ -516,6 +637,9 @@ impl UiMessageChunk {
             tool_call_id: tool_call_id.into(),
             tool_name: tool_name.into(),
             provider_executed: None,
+            provider_metadata: None,
+            dynamic: None,
+            title: None,
         }
     }
 
@@ -542,6 +666,9 @@ impl UiMessageChunk {
             input: input.into(),
             provider_executed: None,
             provider_metadata: None,
+            tool_metadata: None,
+            dynamic: None,
+            title: None,
         }
     }
 
@@ -557,6 +684,11 @@ impl UiMessageChunk {
             tool_name: tool_name.into(),
             input: input.into(),
             error_text: error_text.into(),
+            provider_executed: None,
+            provider_metadata: None,
+            tool_metadata: None,
+            dynamic: None,
+            title: None,
         }
     }
 
@@ -568,6 +700,11 @@ impl UiMessageChunk {
         Self::ToolOutputAvailable {
             tool_call_id: tool_call_id.into(),
             output: output.into(),
+            provider_executed: None,
+            provider_metadata: None,
+            tool_metadata: None,
+            preliminary: None,
+            dynamic: None,
         }
     }
 
@@ -579,6 +716,10 @@ impl UiMessageChunk {
         Self::ToolOutputError {
             tool_call_id: tool_call_id.into(),
             error_text: error_text.into(),
+            provider_executed: None,
+            provider_metadata: None,
+            tool_metadata: None,
+            dynamic: None,
         }
     }
 
@@ -590,6 +731,7 @@ impl UiMessageChunk {
         Self::ToolApprovalRequest {
             approval_id: approval_id.into(),
             tool_call_id: tool_call_id.into(),
+            provider_metadata: None,
         }
     }
 
@@ -603,6 +745,14 @@ impl UiMessageChunk {
             tool_name: tool_name.into(),
             provider_executed: None,
             dynamic: None,
+        }
+    }
+
+    /// Creates a custom UI-message chunk.
+    pub fn custom(kind: impl Into<String>) -> Self {
+        Self::Custom {
+            kind: kind.into(),
+            provider_metadata: None,
         }
     }
 
@@ -931,6 +1081,7 @@ Ensure a \"reasoning-start\" chunk is sent before any \"reasoning-end\" chunks."
                 updates.push(state.message.clone());
             }
             chunk @ (UiMessageChunk::File { .. }
+            | UiMessageChunk::ReasoningFile { .. }
             | UiMessageChunk::SourceUrl { .. }
             | UiMessageChunk::SourceDocument { .. }
             | UiMessageChunk::ToolInputStart { .. }
@@ -940,7 +1091,8 @@ Ensure a \"reasoning-start\" chunk is sent before any \"reasoning-end\" chunks."
             | UiMessageChunk::ToolOutputAvailable { .. }
             | UiMessageChunk::ToolOutputError { .. }
             | UiMessageChunk::ToolApprovalRequest { .. }
-            | UiMessageChunk::ToolOutputDenied { .. }) => {
+            | UiMessageChunk::ToolOutputDenied { .. }
+            | UiMessageChunk::Custom { .. }) => {
                 state.message.parts.push(
                     serde_json::to_value(&chunk)
                         .expect("ui-message stream chunk serializes to a JSON part"),

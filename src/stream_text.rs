@@ -33,10 +33,10 @@ use crate::json::{JsonObject, JsonValue};
 use crate::language_model::{
     FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelContent,
     LanguageModelCustomContent, LanguageModelErrorStreamPart, LanguageModelFile,
-    LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelPrompt,
-    LanguageModelRawStreamPart, LanguageModelReasoning, LanguageModelReasoningEnd,
-    LanguageModelReasoningFile, LanguageModelReasoningStart, LanguageModelRequest,
-    LanguageModelResponse, LanguageModelSource, LanguageModelStreamPart,
+    LanguageModelFileData, LanguageModelFinishReason, LanguageModelGenerateResult,
+    LanguageModelPrompt, LanguageModelRawStreamPart, LanguageModelReasoning,
+    LanguageModelReasoningEnd, LanguageModelReasoningFile, LanguageModelReasoningStart,
+    LanguageModelRequest, LanguageModelResponse, LanguageModelSource, LanguageModelStreamPart,
     LanguageModelStreamResponseMetadata, LanguageModelStreamResultResponse, LanguageModelText,
     LanguageModelTextEnd, LanguageModelTextStart, LanguageModelToolApprovalRequest,
     LanguageModelToolChoice, LanguageModelToolInputDelta, LanguageModelToolInputEnd,
@@ -45,7 +45,8 @@ use crate::language_model::{
 use crate::prompt::{Prompt, standardize_prompt};
 use crate::provider::{InvalidPromptError, ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{
-    ExperimentalSandbox, Tool, prepare_tools_with_context, with_user_agent_suffix,
+    ExperimentalSandbox, Tool, convert_to_base64, prepare_tools_with_context,
+    with_user_agent_suffix,
 };
 use crate::telemetry::{TelemetryOptions, create_telemetry_dispatcher};
 use crate::text_stream_response::{
@@ -1181,6 +1182,9 @@ pub struct StreamTextUiMessageStreamOptions {
     /// Whether reasoning chunks should be included. Defaults to `true`.
     pub send_reasoning: bool,
 
+    /// Whether source chunks should be included. Defaults to `false`.
+    pub send_sources: bool,
+
     /// Whether the stream-start chunk should be included. Defaults to `true`.
     pub send_start: bool,
 
@@ -1206,6 +1210,12 @@ impl StreamTextUiMessageStreamOptions {
         self
     }
 
+    /// Sets whether source chunks should be included.
+    pub fn with_send_sources(mut self, send_sources: bool) -> Self {
+        self.send_sources = send_sources;
+        self
+    }
+
     /// Sets whether the stream-start chunk should be included.
     pub fn with_send_start(mut self, send_start: bool) -> Self {
         self.send_start = send_start;
@@ -1224,6 +1234,7 @@ impl Default for StreamTextUiMessageStreamOptions {
         Self {
             message_id: None,
             send_reasoning: true,
+            send_sources: false,
             send_start: true,
             send_finish: true,
         }
@@ -1320,17 +1331,127 @@ impl StreamTextResult {
                         ));
                     }
                 }
-                TextStreamPart::ToolInputStart(_)
-                | TextStreamPart::ToolInputDelta(_)
-                | TextStreamPart::ToolInputEnd(_)
-                | TextStreamPart::ToolApprovalRequest(_)
-                | TextStreamPart::ToolCall(_)
-                | TextStreamPart::ToolResult(_)
-                | TextStreamPart::Custom(_)
-                | TextStreamPart::File(_)
-                | TextStreamPart::ReasoningFile(_)
-                | TextStreamPart::Source(_)
-                | TextStreamPart::Raw(_) => {}
+                TextStreamPart::ToolInputStart(part) => {
+                    chunks.push(UiMessageChunk::ToolInputStart {
+                        tool_call_id: part.id.clone(),
+                        tool_name: part.tool_name.clone(),
+                        provider_executed: part.provider_executed,
+                        provider_metadata: part.provider_metadata.clone(),
+                        dynamic: part.dynamic,
+                        title: part.title.clone(),
+                    });
+                }
+                TextStreamPart::ToolInputDelta(part) => {
+                    chunks.push(UiMessageChunk::tool_input_delta(
+                        part.id.clone(),
+                        part.delta.clone(),
+                    ));
+                }
+                TextStreamPart::ToolInputEnd(_) => {}
+                TextStreamPart::ToolApprovalRequest(part) => {
+                    chunks.push(UiMessageChunk::ToolApprovalRequest {
+                        approval_id: part.approval_id.clone(),
+                        tool_call_id: part.tool_call_id.clone(),
+                        provider_metadata: part.provider_metadata.clone(),
+                    });
+                }
+                TextStreamPart::ToolCall(part) => {
+                    if part.invalid == Some(true) {
+                        chunks.push(UiMessageChunk::ToolInputError {
+                            tool_call_id: part.tool_call_id.clone(),
+                            tool_name: part.tool_name.clone(),
+                            input: part.input.clone(),
+                            error_text: part
+                                .error
+                                .clone()
+                                .unwrap_or_else(|| "An error occurred.".to_string()),
+                            provider_executed: part.provider_executed,
+                            provider_metadata: part.provider_metadata.clone(),
+                            tool_metadata: part.tool_metadata.clone(),
+                            dynamic: part.dynamic,
+                            title: part.title.clone(),
+                        });
+                    } else {
+                        chunks.push(UiMessageChunk::ToolInputAvailable {
+                            tool_call_id: part.tool_call_id.clone(),
+                            tool_name: part.tool_name.clone(),
+                            input: part.input.clone(),
+                            provider_executed: part.provider_executed,
+                            provider_metadata: part.provider_metadata.clone(),
+                            tool_metadata: part.tool_metadata.clone(),
+                            dynamic: part.dynamic,
+                            title: part.title.clone(),
+                        });
+                    }
+                }
+                TextStreamPart::ToolResult(part) => {
+                    if part.is_error == Some(true) {
+                        chunks.push(UiMessageChunk::ToolOutputError {
+                            tool_call_id: part.tool_call_id.clone(),
+                            error_text: tool_result_error_text(part),
+                            provider_executed: part.provider_executed,
+                            provider_metadata: part.provider_metadata.clone(),
+                            tool_metadata: part.tool_metadata.clone(),
+                            dynamic: part.dynamic,
+                        });
+                    } else {
+                        chunks.push(UiMessageChunk::ToolOutputAvailable {
+                            tool_call_id: part.tool_call_id.clone(),
+                            output: part.output.clone(),
+                            provider_executed: part.provider_executed,
+                            provider_metadata: part.provider_metadata.clone(),
+                            tool_metadata: part.tool_metadata.clone(),
+                            preliminary: part.preliminary,
+                            dynamic: part.dynamic,
+                        });
+                    }
+                }
+                TextStreamPart::Custom(part) => {
+                    chunks.push(UiMessageChunk::Custom {
+                        kind: part.kind.clone(),
+                        provider_metadata: part.provider_metadata.clone(),
+                    });
+                }
+                TextStreamPart::File(part) => {
+                    chunks.push(UiMessageChunk::File {
+                        media_type: part.file.media_type.clone(),
+                        url: ui_message_file_url(&part.file.media_type, &part.file.data),
+                        provider_metadata: part.provider_metadata.clone(),
+                    });
+                }
+                TextStreamPart::ReasoningFile(part) => {
+                    if options.send_reasoning {
+                        chunks.push(UiMessageChunk::ReasoningFile {
+                            media_type: part.file.media_type.clone(),
+                            url: ui_message_file_url(&part.file.media_type, &part.file.data),
+                            provider_metadata: part.provider_metadata.clone(),
+                        });
+                    }
+                }
+                TextStreamPart::Source(part) => {
+                    if options.send_sources {
+                        match part {
+                            LanguageModelSource::Url(source) => {
+                                chunks.push(UiMessageChunk::SourceUrl {
+                                    source_id: source.id.clone(),
+                                    url: source.url.clone(),
+                                    title: source.title.clone(),
+                                    provider_metadata: source.provider_metadata.clone(),
+                                });
+                            }
+                            LanguageModelSource::Document(source) => {
+                                chunks.push(UiMessageChunk::SourceDocument {
+                                    source_id: source.id.clone(),
+                                    media_type: source.media_type.clone(),
+                                    title: source.title.clone(),
+                                    filename: source.filename.clone(),
+                                    provider_metadata: source.provider_metadata.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+                TextStreamPart::Raw(_) => {}
             }
         }
 
@@ -2210,6 +2331,23 @@ fn ui_message_error_text(error: &JsonValue) -> String {
         .unwrap_or_else(|| "An error occurred.".to_string())
 }
 
+fn tool_result_error_text(tool_result: &GenerateTextToolResult) -> String {
+    tool_result
+        .output
+        .as_str()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| tool_result.output.to_string())
+}
+
+fn ui_message_file_url(media_type: &str, data: &LanguageModelFileData) -> String {
+    match data {
+        LanguageModelFileData::Data { data } => {
+            format!("data:{media_type};base64,{}", convert_to_base64(data))
+        }
+        LanguageModelFileData::Url { url } => url.to_string(),
+    }
+}
+
 fn text_language_model_content(
     text: String,
     provider_metadata: Option<ProviderMetadata>,
@@ -2326,17 +2464,21 @@ mod tests {
     use serde_json::{Map, json};
 
     use super::*;
+    use crate::file_data::FileDataContent;
     use crate::generate_text::{ToolApprovalStatusKind, has_tool_call};
     use crate::json::NonNullJsonValue;
     use crate::language_model::{
         FinishReason, InputTokenUsage, LanguageModelAssistantContentPart,
-        LanguageModelErrorStreamPart, LanguageModelFinishReason, LanguageModelMessage,
-        LanguageModelRawStreamPart, LanguageModelReasoningDelta, LanguageModelStreamFinish,
-        LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
+        LanguageModelDocumentSource, LanguageModelErrorStreamPart, LanguageModelFile,
+        LanguageModelFileData, LanguageModelFinishReason, LanguageModelMessage,
+        LanguageModelRawStreamPart, LanguageModelReasoningDelta, LanguageModelReasoningFile,
+        LanguageModelStreamFinish, LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
         LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSystemMessage,
-        LanguageModelTextDelta, LanguageModelTextPart, LanguageModelToolCall,
-        LanguageModelToolContentPart, LanguageModelToolResult, LanguageModelToolResultOutput,
-        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelTextDelta, LanguageModelTextPart, LanguageModelToolApprovalRequest,
+        LanguageModelToolCall, LanguageModelToolContentPart, LanguageModelToolInputDelta,
+        LanguageModelToolInputEnd, LanguageModelToolInputStart, LanguageModelToolResult,
+        LanguageModelToolResultOutput, LanguageModelUrlSource, LanguageModelUserContentPart,
+        LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::mock_models::MockLanguageModel;
     use crate::prompt::Prompt;
@@ -2603,6 +2745,184 @@ mod tests {
                 { "type": "finish-step" }
             ])
         );
+    }
+
+    #[test]
+    fn stream_text_result_maps_portable_non_text_parts_to_ui_message_stream() {
+        let provider_metadata = ProviderMetadata::from([(
+            "testProvider".to_string(),
+            Map::from_iter([("signature".to_string(), json!("sig-1"))]),
+        )]);
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::File(
+                    LanguageModelFile::new(
+                        "text/plain",
+                        LanguageModelFileData::Data {
+                            data: FileDataContent::Base64("SGVsbG8=".to_string()),
+                        },
+                    )
+                    .with_provider_metadata(provider_metadata.clone()),
+                ),
+                LanguageModelStreamPart::ReasoningFile(
+                    LanguageModelReasoningFile::new(
+                        "application/json",
+                        LanguageModelFileData::Data {
+                            data: FileDataContent::Base64("e30=".to_string()),
+                        },
+                    )
+                    .with_provider_metadata(provider_metadata.clone()),
+                ),
+                LanguageModelStreamPart::Source(LanguageModelSource::Url(
+                    LanguageModelUrlSource::new("source-1", "https://example.com")
+                        .with_title("Example")
+                        .with_provider_metadata(provider_metadata.clone()),
+                )),
+                LanguageModelStreamPart::Source(LanguageModelSource::Document(
+                    LanguageModelDocumentSource::new("doc-1", "application/pdf", "Reference")
+                        .with_filename("reference.pdf")
+                        .with_provider_metadata(provider_metadata.clone()),
+                )),
+                LanguageModelStreamPart::Custom(
+                    LanguageModelCustomContent::new("mock-provider.custom")
+                        .with_provider_metadata(provider_metadata.clone()),
+                ),
+                LanguageModelStreamPart::ToolInputStart(
+                    LanguageModelToolInputStart::new("call-1", "search")
+                        .with_provider_executed(true)
+                        .with_dynamic(true)
+                        .with_title("Search")
+                        .with_provider_metadata(provider_metadata.clone()),
+                ),
+                LanguageModelStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                    "call-1",
+                    r#"{"query":"rust"}"#,
+                )),
+                LanguageModelStreamPart::ToolInputEnd(LanguageModelToolInputEnd::new("call-1")),
+                LanguageModelStreamPart::ToolCall(
+                    LanguageModelToolCall::new("call-1", "search", r#"{"query":"rust"}"#)
+                        .with_provider_executed(true)
+                        .with_dynamic(true)
+                        .with_provider_metadata(provider_metadata.clone()),
+                ),
+                LanguageModelStreamPart::ToolResult(
+                    LanguageModelToolResult::new(
+                        "call-1",
+                        "search",
+                        NonNullJsonValue::new(json!({ "answer": "found" }))
+                            .expect("tool result is non-null"),
+                    )
+                    .with_preliminary(true)
+                    .with_dynamic(true)
+                    .with_provider_metadata(provider_metadata.clone()),
+                ),
+                LanguageModelStreamPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequest::new("approval-1", "call-1")
+                        .with_provider_metadata(provider_metadata.clone()),
+                ),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Search")],
+        )));
+        let default_chunks =
+            serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize");
+        assert!(
+            default_chunks
+                .as_array()
+                .expect("chunks are an array")
+                .iter()
+                .all(|chunk| chunk["type"] != "source-url" && chunk["type"] != "source-document")
+        );
+
+        let chunks = serde_json::to_value(result.to_ui_message_stream_with_options(
+            StreamTextUiMessageStreamOptions::new().with_send_sources(true),
+        ))
+        .expect("chunks serialize");
+        let chunks = chunks.as_array().expect("chunks are an array");
+
+        for expected in [
+            json!({
+                "type": "file",
+                "mediaType": "text/plain",
+                "url": "data:text/plain;base64,SGVsbG8=",
+                "providerMetadata": { "testProvider": { "signature": "sig-1" } }
+            }),
+            json!({
+                "type": "reasoning-file",
+                "mediaType": "application/json",
+                "url": "data:application/json;base64,e30=",
+                "providerMetadata": { "testProvider": { "signature": "sig-1" } }
+            }),
+            json!({
+                "type": "source-url",
+                "sourceId": "source-1",
+                "url": "https://example.com",
+                "title": "Example",
+                "providerMetadata": { "testProvider": { "signature": "sig-1" } }
+            }),
+            json!({
+                "type": "source-document",
+                "sourceId": "doc-1",
+                "mediaType": "application/pdf",
+                "title": "Reference",
+                "filename": "reference.pdf",
+                "providerMetadata": { "testProvider": { "signature": "sig-1" } }
+            }),
+            json!({
+                "type": "custom",
+                "kind": "mock-provider.custom",
+                "providerMetadata": { "testProvider": { "signature": "sig-1" } }
+            }),
+            json!({
+                "type": "tool-input-start",
+                "toolCallId": "call-1",
+                "toolName": "search",
+                "providerExecuted": true,
+                "providerMetadata": { "testProvider": { "signature": "sig-1" } },
+                "dynamic": true,
+                "title": "Search"
+            }),
+            json!({
+                "type": "tool-input-delta",
+                "toolCallId": "call-1",
+                "inputTextDelta": "{\"query\":\"rust\"}"
+            }),
+            json!({
+                "type": "tool-input-available",
+                "toolCallId": "call-1",
+                "toolName": "search",
+                "input": { "query": "rust" },
+                "providerExecuted": true,
+                "providerMetadata": { "testProvider": { "signature": "sig-1" } },
+                "dynamic": true
+            }),
+            json!({
+                "type": "tool-output-available",
+                "toolCallId": "call-1",
+                "output": { "answer": "found" },
+                "providerExecuted": true,
+                "providerMetadata": { "testProvider": { "signature": "sig-1" } },
+                "preliminary": true,
+                "dynamic": true
+            }),
+            json!({
+                "type": "tool-approval-request",
+                "approvalId": "approval-1",
+                "toolCallId": "call-1",
+                "providerMetadata": { "testProvider": { "signature": "sig-1" } }
+            }),
+        ] {
+            assert!(
+                chunks.contains(&expected),
+                "missing expected UI message chunk: {expected}"
+            );
+        }
     }
 
     #[test]
