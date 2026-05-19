@@ -326,6 +326,7 @@ pub async fn transcribe<M: TranscriptionModel + ?Sized>(
             audio,
             media_type,
             provider_options: Some(provider_options.unwrap_or_default()),
+            abort_signal: None,
             headers: Some(headers),
         })
         .await;
@@ -706,6 +707,7 @@ mod tests {
                 audio: FileDataContent::Bytes(vec![0xff, 0xfb]),
                 media_type: "audio/mpeg".to_string(),
                 provider_options: Some(provider_options),
+                abort_signal: None,
                 headers: Some({
                     let mut headers = Headers::new();
                     headers.insert(
@@ -760,6 +762,7 @@ mod tests {
                 audio: FileDataContent::Bytes(vec![0xff, 0xfb]),
                 media_type: "audio/mpeg".to_string(),
                 provider_options: Some(ProviderOptions::new()),
+                abort_signal: None,
                 headers: Some({
                     let mut headers = Headers::new();
                     headers.insert("user-agent".to_string(), format!("ai/{VERSION}"));
@@ -850,6 +853,7 @@ mod tests {
                 audio: FileDataContent::Bytes(vec![1, 2, 3, 4]),
                 media_type: "audio/wav".to_string(),
                 provider_options: Some(ProviderOptions::new()),
+                abort_signal: None,
                 headers: Some({
                     let mut headers = Headers::new();
                     headers.insert("user-agent".to_string(), format!("ai/{VERSION}"));

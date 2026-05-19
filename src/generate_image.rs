@@ -385,6 +385,7 @@ pub async fn generate_image<M: ImageModel + ?Sized>(
                 files: normalized_prompt.files,
                 mask: normalized_prompt.mask,
                 provider_options: provider_options.clone().unwrap_or_default(),
+                abort_signal: None,
                 headers: Some(headers.clone()),
             })
             .await;

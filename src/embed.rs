@@ -795,6 +795,7 @@ fn embedding_call_options(
 ) -> EmbeddingModelCallOptions {
     EmbeddingModelCallOptions {
         values,
+        abort_signal: None,
         provider_options: provider_options.cloned(),
         headers: Some(headers.clone()),
     }

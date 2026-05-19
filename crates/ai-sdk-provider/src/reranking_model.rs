@@ -4,6 +4,7 @@ use time::OffsetDateTime;
 
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
+use crate::language_model::ProviderAbortSignal;
 use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
 use crate::warning::Warning;
 
@@ -70,6 +71,10 @@ pub struct RerankingModelCallOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_n: Option<u64>,
 
+    /// Abort signal for cancelling the operation.
+    #[serde(default, skip)]
+    pub abort_signal: Option<ProviderAbortSignal>,
+
     /// Provider-specific options passed through to the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_options: Option<ProviderOptions>,
@@ -86,6 +91,7 @@ impl RerankingModelCallOptions {
             documents,
             query: query.into(),
             top_n: None,
+            abort_signal: None,
             provider_options: None,
             headers: None,
         }
@@ -94,6 +100,12 @@ impl RerankingModelCallOptions {
     /// Sets the maximum number of returned ranked documents.
     pub fn with_top_n(mut self, top_n: u64) -> Self {
         self.top_n = Some(top_n);
+        self
+    }
+
+    /// Sets the abort signal for the reranking call.
+    pub fn with_abort_signal(mut self, abort_signal: ProviderAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
         self
     }
 
@@ -257,6 +269,7 @@ mod tests {
         RerankingModel, RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
         RerankingModelResponse, RerankingModelResult,
     };
+    use crate::language_model::ProviderAbortController;
     use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
     use crate::warning::Warning;
     use serde_json::json;
@@ -337,6 +350,38 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn call_options_carries_abort_signal_without_serializing_it() {
+        let abort_controller = ProviderAbortController::new();
+        let options = RerankingModelCallOptions::new(
+            RerankingModelDocuments::text(vec!["First document".to_string()]),
+            "search query",
+        )
+        .with_abort_signal(abort_controller.signal());
+
+        assert!(
+            options
+                .abort_signal
+                .as_ref()
+                .is_some_and(|signal| !signal.is_aborted())
+        );
+        assert_eq!(
+            serde_json::to_value(&options).expect("call options serialize"),
+            json!({
+                "documents": {
+                    "type": "text",
+                    "values": ["First document"]
+                },
+                "query": "search query"
+            })
+        );
+
+        let cloned_signal = options.abort_signal.clone().expect("abort signal set");
+        abort_controller.abort_with_reason("manual abort");
+        assert!(cloned_signal.is_aborted());
+        assert_eq!(cloned_signal.reason(), Some(json!("manual abort")));
     }
 
     #[test]

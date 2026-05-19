@@ -59,6 +59,7 @@ pub use language_model::{
     LanguageModelToolResultCustomContent, LanguageModelToolResultOutput,
     LanguageModelToolResultPart, LanguageModelUrlSource, LanguageModelUsage,
     LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
+    ProviderAbortController, ProviderAbortSignal,
 };
 pub use provider::{
     ApiCallError, EmptyResponseBodyError, InvalidArgumentError, InvalidPromptError,

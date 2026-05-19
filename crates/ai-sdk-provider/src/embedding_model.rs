@@ -3,6 +3,7 @@ use std::future::Future;
 
 use crate::headers::Headers;
 use crate::json::JsonValue;
+use crate::language_model::ProviderAbortSignal;
 use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
 use crate::warning::Warning;
 
@@ -61,6 +62,10 @@ pub struct EmbeddingModelCallOptions {
     /// Text values to generate embeddings for.
     pub values: Vec<String>,
 
+    /// Abort signal for cancelling the operation.
+    #[serde(default, skip)]
+    pub abort_signal: Option<ProviderAbortSignal>,
+
     /// Provider-specific options passed through to the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_options: Option<ProviderOptions>,
@@ -75,9 +80,16 @@ impl EmbeddingModelCallOptions {
     pub fn new(values: Vec<String>) -> Self {
         Self {
             values,
+            abort_signal: None,
             provider_options: None,
             headers: None,
         }
+    }
+
+    /// Sets the abort signal for the embedding call.
+    pub fn with_abort_signal(mut self, abort_signal: ProviderAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
+        self
     }
 
     /// Adds provider-specific options.
@@ -209,6 +221,7 @@ mod tests {
         EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelResponse, EmbeddingModelResult,
         EmbeddingModelUsage,
     };
+    use crate::language_model::ProviderAbortController;
     use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
     use crate::warning::Warning;
     use serde_json::json;
@@ -295,6 +308,31 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn call_options_carries_abort_signal_without_serializing_it() {
+        let abort_controller = ProviderAbortController::new();
+        let options = EmbeddingModelCallOptions::new(vec!["search query".to_string()])
+            .with_abort_signal(abort_controller.signal());
+
+        assert!(
+            options
+                .abort_signal
+                .as_ref()
+                .is_some_and(|signal| !signal.is_aborted())
+        );
+        assert_eq!(
+            serde_json::to_value(&options).expect("call options serialize"),
+            json!({
+                "values": ["search query"]
+            })
+        );
+
+        let cloned_signal = options.abort_signal.clone().expect("abort signal set");
+        abort_controller.abort_with_reason("manual abort");
+        assert!(cloned_signal.is_aborted());
+        assert_eq!(cloned_signal.reason(), Some(json!("manual abort")));
     }
 
     #[test]

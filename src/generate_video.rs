@@ -441,6 +441,7 @@ pub async fn generate_video<M: VideoModel + ?Sized>(
                 seed,
                 image: normalized_prompt.image.clone(),
                 provider_options: provider_options.clone().unwrap_or_default(),
+                abort_signal: None,
                 headers: Some(headers.clone()),
             })
             .await;

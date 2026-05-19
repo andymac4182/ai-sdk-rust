@@ -6,6 +6,7 @@ use url::Url;
 
 use crate::file_data::FileDataContent;
 use crate::headers::Headers;
+use crate::language_model::ProviderAbortSignal;
 use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
 use crate::warning::Warning;
 
@@ -173,6 +174,10 @@ pub struct VideoModelCallOptions {
     #[serde(default)]
     pub provider_options: ProviderOptions,
 
+    /// Abort signal for cancelling the operation.
+    #[serde(default, skip)]
+    pub abort_signal: Option<ProviderAbortSignal>,
+
     /// Additional HTTP headers for HTTP-based providers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<Headers>,
@@ -191,6 +196,7 @@ impl VideoModelCallOptions {
             seed: None,
             image: None,
             provider_options: ProviderOptions::new(),
+            abort_signal: None,
             headers: None,
         }
     }
@@ -240,6 +246,12 @@ impl VideoModelCallOptions {
     /// Adds provider-specific options.
     pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
         self.provider_options = provider_options;
+        self
+    }
+
+    /// Sets the abort signal for the video generation call.
+    pub fn with_abort_signal(mut self, abort_signal: ProviderAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
         self
     }
 
@@ -509,6 +521,7 @@ mod tests {
         VideoModelResponseMetadata, VideoModelResult, VideoModelVideoData,
     };
     use crate::file_data::FileDataContent;
+    use crate::language_model::ProviderAbortController;
     use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
     use crate::warning::Warning;
     use serde_json::json;
@@ -631,6 +644,31 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn call_options_carries_abort_signal_without_serializing_it() {
+        let abort_controller = ProviderAbortController::new();
+        let options = VideoModelCallOptions::new(1).with_abort_signal(abort_controller.signal());
+
+        assert!(
+            options
+                .abort_signal
+                .as_ref()
+                .is_some_and(|signal| !signal.is_aborted())
+        );
+        assert_eq!(
+            serde_json::to_value(&options).expect("call options serialize"),
+            json!({
+                "n": 1,
+                "providerOptions": {}
+            })
+        );
+
+        let cloned_signal = options.abort_signal.clone().expect("abort signal set");
+        abort_controller.abort_with_reason("manual abort");
+        assert!(cloned_signal.is_aborted());
+        assert_eq!(cloned_signal.reason(), Some(json!("manual abort")));
     }
 
     #[test]

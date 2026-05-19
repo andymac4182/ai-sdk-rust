@@ -287,6 +287,7 @@ pub async fn generate_speech<M: SpeechModel + ?Sized>(
             speed,
             language,
             provider_options,
+            abort_signal: None,
             headers: Some(headers),
         })
         .await;
@@ -620,6 +621,7 @@ mod tests {
                 speed: Some(1.25),
                 language: Some("en".to_string()),
                 provider_options: Some(provider_options),
+                abort_signal: None,
                 headers: Some(expected_headers),
             }]
         );

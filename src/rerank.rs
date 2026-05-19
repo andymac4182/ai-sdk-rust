@@ -663,6 +663,7 @@ pub async fn rerank<M: RerankingModel + ?Sized>(options: RerankOptions<'_, M>) -
             documents: documents.to_model_documents(),
             query: query.clone(),
             top_n,
+            abort_signal: None,
             provider_options: provider_options.clone(),
             headers: headers.clone(),
         })

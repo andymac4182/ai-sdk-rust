@@ -73,6 +73,8 @@ impl PartialEq for LanguageModelAbortSignal {
     }
 }
 
+impl Eq for LanguageModelAbortSignal {}
+
 /// Controller used to trigger a [`LanguageModelAbortSignal`].
 #[derive(Clone, Debug, Default)]
 pub struct LanguageModelAbortController {
@@ -121,6 +123,12 @@ impl LanguageModelAbortController {
         }
     }
 }
+
+/// Provider-wide alias for runtime abort signals passed to provider calls.
+pub type ProviderAbortSignal = LanguageModelAbortSignal;
+
+/// Provider-wide alias for controllers that trigger provider abort signals.
+pub type ProviderAbortController = LanguageModelAbortController;
 
 /// Supported URL regular-expression patterns by media type for a language model.
 ///
