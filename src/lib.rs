@@ -4,6 +4,7 @@
 /// The crate version compiled into the library.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod agent;
 pub mod baseten;
 pub mod cerebras;
 pub mod deepinfra;
@@ -59,6 +60,10 @@ pub mod video_model;
 pub mod voyage;
 pub mod warning;
 
+pub use agent::{
+    TOOL_LOOP_AGENT_VERSION, ToolLoopAgent, ToolLoopAgentCallOptions, ToolLoopAgentModelSettings,
+    ToolLoopAgentPrepareCall, ToolLoopAgentPreparedCall, ToolLoopAgentSettings,
+};
 pub use baseten::{
     BasetenProvider, BasetenProviderSettings, DEFAULT_BASETEN_BASE_URL, baseten, create_baseten,
 };
