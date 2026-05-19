@@ -1350,6 +1350,40 @@ impl fmt::Debug for StreamTextMessageMetadata {
     }
 }
 
+/// Callback invoked while converting stream-text errors to UI-message text.
+pub type StreamTextUiMessageErrorFunction = dyn Fn(&JsonValue) -> String + Send + Sync + 'static;
+
+/// Callback wrapper for upstream `toUIMessageStream` `onError`.
+#[derive(Clone)]
+pub struct StreamTextUiMessageErrorHandler {
+    callback: Arc<StreamTextUiMessageErrorFunction>,
+}
+
+impl StreamTextUiMessageErrorHandler {
+    /// Creates a UI-message stream error handler.
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(&JsonValue) -> String + Send + Sync + 'static,
+    {
+        Self {
+            callback: Arc::new(callback),
+        }
+    }
+
+    /// Returns the UI-message error text for one stream error payload.
+    pub fn error_text(&self, error: &JsonValue) -> String {
+        (self.callback)(error)
+    }
+}
+
+impl fmt::Debug for StreamTextUiMessageErrorHandler {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StreamTextUiMessageErrorHandler")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Options for converting a [`StreamTextResult`] into UI-message stream chunks.
 #[derive(Clone, Debug)]
 pub struct StreamTextUiMessageStreamOptions {
@@ -1358,6 +1392,9 @@ pub struct StreamTextUiMessageStreamOptions {
 
     /// Optional callback that emits UI message metadata for matching stream parts.
     pub message_metadata: Option<StreamTextMessageMetadata>,
+
+    /// Optional callback used to map stream errors into UI-safe text.
+    pub on_error: Option<StreamTextUiMessageErrorHandler>,
 
     /// Whether reasoning chunks should be included. Defaults to `true`.
     pub send_reasoning: bool,
@@ -1393,6 +1430,15 @@ impl StreamTextUiMessageStreamOptions {
         self
     }
 
+    /// Sets a callback that maps stream errors into UI-message error text.
+    pub fn with_on_error<F>(mut self, on_error: F) -> Self
+    where
+        F: Fn(&JsonValue) -> String + Send + Sync + 'static,
+    {
+        self.on_error = Some(StreamTextUiMessageErrorHandler::new(on_error));
+        self
+    }
+
     /// Sets whether reasoning chunks should be included.
     pub fn with_send_reasoning(mut self, send_reasoning: bool) -> Self {
         self.send_reasoning = send_reasoning;
@@ -1423,6 +1469,7 @@ impl Default for StreamTextUiMessageStreamOptions {
         Self {
             message_id: None,
             message_metadata: None,
+            on_error: None,
             send_reasoning: true,
             send_sources: false,
             send_start: true,
@@ -1524,7 +1571,10 @@ impl StreamTextResult {
                     }
                 }
                 TextStreamPart::Error(part) => {
-                    chunks.push(UiMessageChunk::error(ui_message_error_text(&part.error)));
+                    chunks.push(UiMessageChunk::error(ui_message_error_text(
+                        &part.error,
+                        &options,
+                    )));
                     push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                 }
                 TextStreamPart::Abort(part) => {
@@ -1587,10 +1637,7 @@ impl StreamTextResult {
                             tool_call_id: part.tool_call_id.clone(),
                             tool_name: part.tool_name.clone(),
                             input: part.input.clone(),
-                            error_text: part
-                                .error
-                                .clone()
-                                .unwrap_or_else(|| "An error occurred.".to_string()),
+                            error_text: tool_call_error_text(part.error.as_deref(), &options),
                             provider_executed: part.provider_executed,
                             provider_metadata: part.provider_metadata.clone(),
                             tool_metadata: part.tool_metadata.clone(),
@@ -1615,7 +1662,7 @@ impl StreamTextResult {
                     if part.is_error == Some(true) {
                         chunks.push(UiMessageChunk::ToolOutputError {
                             tool_call_id: part.tool_call_id.clone(),
-                            error_text: tool_result_error_text(part),
+                            error_text: tool_result_error_text(part, &options),
                             provider_executed: part.provider_executed,
                             provider_metadata: part.provider_metadata.clone(),
                             tool_metadata: part.tool_metadata.clone(),
@@ -2845,14 +2892,36 @@ fn is_stream_text_chunk_callback_part(part: &TextStreamPart) -> bool {
     )
 }
 
-fn ui_message_error_text(error: &JsonValue) -> String {
+fn ui_message_error_text(error: &JsonValue, options: &StreamTextUiMessageStreamOptions) -> String {
+    if let Some(on_error) = &options.on_error {
+        return on_error.error_text(error);
+    }
+
+    default_ui_message_error_text(error)
+}
+
+fn default_ui_message_error_text(error: &JsonValue) -> String {
     error
         .as_str()
         .map(ToString::to_string)
         .unwrap_or_else(|| "An error occurred.".to_string())
 }
 
-fn tool_result_error_text(tool_result: &GenerateTextToolResult) -> String {
+fn tool_call_error_text(error: Option<&str>, options: &StreamTextUiMessageStreamOptions) -> String {
+    let error = error
+        .map(|error| JsonValue::String(error.to_string()))
+        .unwrap_or_else(|| JsonValue::String("An error occurred.".to_string()));
+    ui_message_error_text(&error, options)
+}
+
+fn tool_result_error_text(
+    tool_result: &GenerateTextToolResult,
+    options: &StreamTextUiMessageStreamOptions,
+) -> String {
+    if tool_result.provider_executed != Some(true) {
+        return ui_message_error_text(&tool_result.output, options);
+    }
+
     tool_result
         .output
         .as_str()
@@ -3264,6 +3333,126 @@ mod tests {
                 { "type": "text-delta", "id": "1", "delta": "visible" },
                 { "type": "text-end", "id": "1" },
                 { "type": "finish-step" }
+            ])
+        );
+    }
+
+    #[test]
+    fn stream_text_result_ui_message_stream_options_mask_errors_with_on_error() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let mut result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Say hello")],
+        )));
+
+        result.parts = vec![
+            TextStreamPart::Start(TextStreamStartPart::new()),
+            TextStreamPart::StartStep(TextStreamStartStepPart::new(
+                LanguageModelRequest::default(),
+                Vec::new(),
+            )),
+            TextStreamPart::Error(LanguageModelErrorStreamPart::new(json!({
+                "message": "provider secret"
+            }))),
+            TextStreamPart::ToolCall(GenerateTextToolCall {
+                tool_call_id: "call-invalid".to_string(),
+                tool_name: "weather".to_string(),
+                input: json!("{ bad json"),
+                title: None,
+                provider_executed: None,
+                dynamic: None,
+                invalid: Some(true),
+                error: Some("invalid input secret".to_string()),
+                provider_metadata: None,
+                tool_metadata: None,
+            }),
+            TextStreamPart::ToolResult(GenerateTextToolResult {
+                tool_call_id: "call-local".to_string(),
+                tool_name: "weather".to_string(),
+                input: json!({ "city": "Paris" }),
+                output: json!({ "message": "local tool secret" }),
+                title: None,
+                is_error: Some(true),
+                provider_executed: None,
+                dynamic: None,
+                preliminary: None,
+                provider_metadata: None,
+                tool_metadata: None,
+            }),
+            TextStreamPart::ToolResult(GenerateTextToolResult {
+                tool_call_id: "call-provider".to_string(),
+                tool_name: "web_search".to_string(),
+                input: json!({ "query": "rust" }),
+                output: json!({ "message": "provider tool error" }),
+                title: None,
+                is_error: Some(true),
+                provider_executed: Some(true),
+                dynamic: None,
+                preliminary: None,
+                provider_metadata: None,
+                tool_metadata: None,
+            }),
+            TextStreamPart::FinishStep(TextStreamFinishStepPart::new(
+                StreamTextResponseMetadata::new(),
+                usage(),
+                StreamTextStepPerformance { step_time_ms: 0 },
+                FinishReason::Error,
+                Some("error".to_string()),
+                None,
+            )),
+            TextStreamPart::Finish(TextStreamFinishPart::new(
+                FinishReason::Error,
+                Some("error".to_string()),
+                usage(),
+            )),
+        ];
+
+        let chunks = serde_json::to_value(result.to_ui_message_stream_with_options(
+            StreamTextUiMessageStreamOptions::new().with_on_error(|error| {
+                format!(
+                    "masked:{}",
+                    error
+                        .get("message")
+                        .and_then(JsonValue::as_str)
+                        .or_else(|| error.as_str())
+                        .unwrap_or("unknown")
+                )
+            }),
+        ))
+        .expect("chunks serialize");
+
+        assert_eq!(
+            chunks,
+            json!([
+                { "type": "start" },
+                { "type": "start-step" },
+                { "type": "error", "errorText": "masked:provider secret" },
+                {
+                    "type": "tool-input-error",
+                    "toolCallId": "call-invalid",
+                    "toolName": "weather",
+                    "input": "{ bad json",
+                    "errorText": "masked:invalid input secret"
+                },
+                {
+                    "type": "tool-output-error",
+                    "toolCallId": "call-local",
+                    "errorText": "masked:local tool secret"
+                },
+                {
+                    "type": "tool-output-error",
+                    "toolCallId": "call-provider",
+                    "errorText": "{\"message\":\"provider tool error\"}",
+                    "providerExecuted": true
+                },
+                { "type": "finish-step" },
+                { "type": "finish", "finishReason": "error" }
             ])
         );
     }
