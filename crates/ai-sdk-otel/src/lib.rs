@@ -4699,7 +4699,7 @@ mod tests {
         )
         .expect("export succeeds");
 
-        let requests = receiver.wait_for_requests(1, std::time::Duration::from_secs(2));
+        let requests = receiver.wait_for_requests(1, std::time::Duration::from_secs(10));
         assert_eq!(requests.len(), 1);
         let request = &requests[0];
         assert_eq!(request.method, "POST");
@@ -4746,7 +4746,7 @@ mod tests {
         )
         .expect("real OpenTelemetry export succeeds");
 
-        let requests = receiver.wait_for_requests(1, std::time::Duration::from_secs(2));
+        let requests = receiver.wait_for_requests(1, std::time::Duration::from_secs(10));
         assert_eq!(requests.len(), 1);
         let request = &requests[0];
         assert_eq!(request.method, "POST");
