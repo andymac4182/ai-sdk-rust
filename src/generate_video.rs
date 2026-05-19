@@ -118,9 +118,41 @@ impl From<GenerateVideoPromptImage> for GenerateVideoPrompt {
 pub type GenerateVideoDownloadFuture =
     Pin<Box<dyn Future<Output = Result<DownloadedBlob, DownloadError>> + Send>>;
 
+/// Options passed to a generated URL-video download callback.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GenerateVideoDownloadOptions {
+    /// URL returned by the provider for the generated video.
+    pub url: Url,
+
+    /// Abort signal shared with the provider call.
+    pub abort_signal: Option<ProviderAbortSignal>,
+}
+
+impl GenerateVideoDownloadOptions {
+    /// Creates download options for a URL video.
+    pub fn new(url: Url) -> Self {
+        Self {
+            url,
+            abort_signal: None,
+        }
+    }
+
+    /// Sets the abort signal for the download call.
+    pub fn with_abort_signal(mut self, abort_signal: ProviderAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
+        self
+    }
+
+    /// Sets the optional abort signal for the download call.
+    pub fn with_optional_abort_signal(mut self, abort_signal: Option<ProviderAbortSignal>) -> Self {
+        self.abort_signal = abort_signal;
+        self
+    }
+}
+
 /// Function used to download provider-returned URL videos.
 pub type GenerateVideoDownloadFunction =
-    dyn Fn(Url) -> GenerateVideoDownloadFuture + Send + Sync + 'static;
+    dyn Fn(GenerateVideoDownloadOptions) -> GenerateVideoDownloadFuture + Send + Sync + 'static;
 
 /// Runtime download callback used for provider-returned URL videos.
 #[derive(Clone)]
@@ -132,17 +164,17 @@ impl GenerateVideoDownload {
     /// Creates a URL-video download callback.
     pub fn new<F, Fut>(download: F) -> Self
     where
-        F: Fn(Url) -> Fut + Send + Sync + 'static,
+        F: Fn(GenerateVideoDownloadOptions) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<DownloadedBlob, DownloadError>> + Send + 'static,
     {
         Self {
-            download: Arc::new(move |url| Box::pin(download(url))),
+            download: Arc::new(move |options| Box::pin(download(options))),
         }
     }
 
     /// Downloads a generated URL video.
-    pub fn download(&self, url: Url) -> GenerateVideoDownloadFuture {
-        (self.download)(url)
+    pub fn download(&self, options: GenerateVideoDownloadOptions) -> GenerateVideoDownloadFuture {
+        (self.download)(options)
     }
 }
 
@@ -462,7 +494,7 @@ pub async fn generate_video<M: VideoModel + ?Sized>(
             VideoModelResponseMetadata::from_response(response, call_provider_metadata.clone());
 
         for video in call_videos {
-            videos.push(resolve_video_data(video, download.as_ref()).await?);
+            videos.push(resolve_video_data(video, download.as_ref(), abort_signal.as_ref()).await?);
         }
 
         warnings.extend(call_warnings);
@@ -558,6 +590,7 @@ fn video_model_file_from_data(data: FileDataContent, media_type: Option<String>)
 async fn resolve_video_data(
     video: VideoModelVideoData,
     download: Option<&GenerateVideoDownload>,
+    abort_signal: Option<&ProviderAbortSignal>,
 ) -> Result<GeneratedFile, GenerateVideoError> {
     match video {
         VideoModelVideoData::Url { url, media_type } => {
@@ -569,7 +602,12 @@ async fn resolve_video_data(
                 .into());
             };
 
-            let blob = download.download(url).await?;
+            let blob = download
+                .download(
+                    GenerateVideoDownloadOptions::new(url)
+                        .with_optional_abort_signal(abort_signal.cloned()),
+                )
+                .await?;
             let data = FileDataContent::Bytes(blob.data);
             let media_type = usable_media_type(&media_type)
                 .or_else(|| blob.media_type.as_deref().and_then(usable_media_type))
@@ -1122,11 +1160,11 @@ mod tests {
         let downloaded_urls = Arc::new(Mutex::new(Vec::new()));
         let download = GenerateVideoDownload::new({
             let downloaded_urls = Arc::clone(&downloaded_urls);
-            move |url| {
+            move |options| {
                 downloaded_urls
                     .lock()
                     .expect("download urls lock is not poisoned")
-                    .push(url);
+                    .push(options.url);
 
                 ready(Ok(DownloadedBlob::new(vec![
                     0x00, 0x00, 0x00, 0x20, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm',
@@ -1161,6 +1199,46 @@ mod tests {
                 0x00, 0x00, 0x00, 0x20, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm',
             ]
         );
+    }
+
+    #[test]
+    fn generate_video_forwards_abort_signal_to_download_callback() {
+        let abort_controller = ProviderAbortController::new();
+        let captured_signal = Arc::new(Mutex::new(None));
+        let captured_signal_for_download = Arc::clone(&captured_signal);
+        let download = GenerateVideoDownload::new(move |options| {
+            *captured_signal_for_download
+                .lock()
+                .expect("captured signal lock is not poisoned") = options.abort_signal;
+
+            ready(Ok(DownloadedBlob::new(vec![
+                0x00, 0x00, 0x00, 0x20, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm',
+            ])))
+        });
+        let url = Url::parse("https://example.com/video.mp4").expect("url parses");
+        let model = RecordingVideoModel::new(vec![VideoModelResult::new(
+            vec![VideoModelVideoData::url(url, "application/octet-stream")],
+            video_response("video-test"),
+        )]);
+
+        let result = poll_ready(generate_video(
+            GenerateVideoOptions::new(&model, "moving clouds")
+                .with_download(download)
+                .with_abort_signal(abort_controller.signal()),
+        ))
+        .expect("video generation succeeds");
+
+        assert_eq!(result.video.media_type(), "video/mp4");
+        let download_signal = captured_signal
+            .lock()
+            .expect("captured signal lock is not poisoned")
+            .clone()
+            .expect("download received abort signal");
+        assert!(!download_signal.is_aborted());
+
+        abort_controller.abort_with_reason("client-disconnected");
+        assert!(download_signal.is_aborted());
+        assert_eq!(download_signal.reason(), Some(json!("client-disconnected")));
     }
 
     #[test]

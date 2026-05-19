@@ -136,9 +136,41 @@ impl From<Url> for TranscribeAudio {
 pub type TranscribeDownloadFuture =
     Pin<Box<dyn Future<Output = Result<DownloadedBlob, DownloadError>> + Send>>;
 
+/// Options passed to a URL-audio download callback.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TranscribeDownloadOptions {
+    /// URL audio source to download.
+    pub url: Url,
+
+    /// Abort signal shared with the provider call.
+    pub abort_signal: Option<ProviderAbortSignal>,
+}
+
+impl TranscribeDownloadOptions {
+    /// Creates download options for URL audio.
+    pub fn new(url: Url) -> Self {
+        Self {
+            url,
+            abort_signal: None,
+        }
+    }
+
+    /// Sets the abort signal for the download call.
+    pub fn with_abort_signal(mut self, abort_signal: ProviderAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
+        self
+    }
+
+    /// Sets the optional abort signal for the download call.
+    pub fn with_optional_abort_signal(mut self, abort_signal: Option<ProviderAbortSignal>) -> Self {
+        self.abort_signal = abort_signal;
+        self
+    }
+}
+
 /// Function used to download URL audio before transcription.
 pub type TranscribeDownloadFunction =
-    dyn Fn(Url) -> TranscribeDownloadFuture + Send + Sync + 'static;
+    dyn Fn(TranscribeDownloadOptions) -> TranscribeDownloadFuture + Send + Sync + 'static;
 
 /// Runtime download callback used for URL audio.
 #[derive(Clone)]
@@ -150,17 +182,17 @@ impl TranscribeDownload {
     /// Creates a URL-audio download callback.
     pub fn new<F, Fut>(download: F) -> Self
     where
-        F: Fn(Url) -> Fut + Send + Sync + 'static,
+        F: Fn(TranscribeDownloadOptions) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<DownloadedBlob, DownloadError>> + Send + 'static,
     {
         Self {
-            download: Arc::new(move |url| Box::pin(download(url))),
+            download: Arc::new(move |options| Box::pin(download(options))),
         }
     }
 
     /// Downloads URL audio.
-    pub fn download(&self, url: Url) -> TranscribeDownloadFuture {
-        (self.download)(url)
+    pub fn download(&self, options: TranscribeDownloadOptions) -> TranscribeDownloadFuture {
+        (self.download)(options)
     }
 }
 
@@ -318,7 +350,7 @@ pub async fn transcribe<M: TranscriptionModel + ?Sized>(
         download,
     } = options;
 
-    let audio = resolve_audio_data(audio, download.as_ref()).await?;
+    let audio = resolve_audio_data(audio, download.as_ref(), abort_signal.as_ref()).await?;
     let media_type = detect_media_type(&audio, Some("audio"))
         .unwrap_or("audio/wav")
         .to_string();
@@ -368,6 +400,7 @@ pub async fn experimental_transcribe<M: TranscriptionModel + ?Sized>(
 async fn resolve_audio_data(
     audio: TranscribeAudio,
     download: Option<&TranscribeDownload>,
+    abort_signal: Option<&ProviderAbortSignal>,
 ) -> Result<FileDataContent, TranscribeError> {
     match audio {
         TranscribeAudio::Data { data } => Ok(normalize_audio_data(data)),
@@ -380,7 +413,12 @@ async fn resolve_audio_data(
                 .into());
             };
 
-            let blob = download.download(url).await?;
+            let blob = download
+                .download(
+                    TranscribeDownloadOptions::new(url)
+                        .with_optional_abort_signal(abort_signal.cloned()),
+                )
+                .await?;
             Ok(FileDataContent::Bytes(blob.data))
         }
     }
@@ -765,11 +803,11 @@ mod tests {
         let downloaded_urls = Arc::new(Mutex::new(Vec::new()));
         let download = TranscribeDownload::new({
             let downloaded_urls = Arc::clone(&downloaded_urls);
-            move |url| {
+            move |options| {
                 downloaded_urls
                     .lock()
                     .expect("download urls lock is not poisoned")
-                    .push(url);
+                    .push(options.url);
 
                 ready(Ok(
                     DownloadedBlob::new(vec![0xff, 0xfb]).with_media_type("audio/ogg")
@@ -812,6 +850,47 @@ mod tests {
     }
 
     #[test]
+    fn transcribe_forwards_abort_signal_to_download_callback() {
+        let abort_controller = ProviderAbortController::new();
+        let captured_signal = Arc::new(Mutex::new(None));
+        let captured_signal_for_download = Arc::clone(&captured_signal);
+        let download = TranscribeDownload::new(move |options| {
+            *captured_signal_for_download
+                .lock()
+                .expect("captured signal lock is not poisoned") = options.abort_signal;
+
+            ready(Ok(
+                DownloadedBlob::new(vec![0xff, 0xfb]).with_media_type("audio/ogg")
+            ))
+        });
+        let model = RecordingTranscriptionModel::new(vec![TranscriptionModelResult::new(
+            "Downloaded transcript.",
+            Vec::new(),
+            transcription_response("openai/whisper-1"),
+        )]);
+        let url = Url::parse("https://example.com/audio.mp3").expect("url parses");
+
+        let result = poll_ready(transcribe(
+            TranscribeOptions::new(&model, url)
+                .with_download(download)
+                .with_abort_signal(abort_controller.signal()),
+        ))
+        .expect("transcription succeeds");
+
+        assert_eq!(result.text, "Downloaded transcript.");
+        let download_signal = captured_signal
+            .lock()
+            .expect("captured signal lock is not poisoned")
+            .clone()
+            .expect("download received abort signal");
+        assert!(!download_signal.is_aborted());
+
+        abort_controller.abort_with_reason("client-disconnected");
+        assert!(download_signal.is_aborted());
+        assert_eq!(download_signal.reason(), Some(json!("client-disconnected")));
+    }
+
+    #[test]
     fn transcribe_url_audio_requires_download_callback() {
         let model = RecordingTranscriptionModel::new(vec![TranscriptionModelResult::new(
             "unreachable",
@@ -836,9 +915,9 @@ mod tests {
 
     #[test]
     fn transcribe_propagates_url_download_errors() {
-        let download = TranscribeDownload::new(|url| {
+        let download = TranscribeDownload::new(|options| {
             ready(Err(DownloadError::with_cause_message(
-                url.to_string(),
+                options.url.to_string(),
                 "network down",
             )))
         });

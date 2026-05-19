@@ -238,8 +238,8 @@ inventory.
 | Embeddings: `embed`, `embedMany` | verified | `src/embed.rs` | `embed_calls_model_with_single_value_and_maps_result`; `embed_many_*` tests | Provider implementations remain unported. |
 | Image generation: `generateImage` and `experimental_generateImage` | verified | `src/generate_image.rs` | `generate_image_*` tests | Provider implementations remain unported. |
 | Speech generation: `generateSpeech` and experimental alias | verified | `src/generate_speech.rs` | Speech generation tests | Provider implementations remain unported. |
-| Video generation: `generateVideo` and experimental alias | verified | `src/generate_video.rs` | Video generation tests | Provider implementations remain unported. |
-| Transcription: `transcribe` and experimental alias | verified | `src/transcribe.rs` | `transcribe_*` tests | Provider implementations remain unported. |
+| Video generation: `generateVideo` and experimental alias | verified | `src/generate_video.rs` | Video generation tests, including `generate_video_forwards_abort_signal_to_model_call` and `generate_video_forwards_abort_signal_to_download_callback` | Provider implementations remain unported. |
+| Transcription: `transcribe` and experimental alias | verified | `src/transcribe.rs` | `transcribe_*` tests, including `transcribe_forwards_abort_signal_to_model_call` and `transcribe_forwards_abort_signal_to_download_callback` | Provider implementations remain unported. |
 | Reranking: `rerank` | verified | `src/rerank.rs` | `rerank_*` tests | Provider implementations remain unported. |
 | File upload: `uploadFile` | verified | `src/upload_file.rs` | `upload_file_*` tests | Provider implementations remain unported. |
 | Skill upload: `uploadSkill` | verified | `src/upload_skill.rs` | `upload_skill_*` tests | Provider implementations remain unported. |
@@ -613,9 +613,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   options. Gateway embedding/image/reranking/video and OpenAI-compatible
   embedding/image generation/image edit models pass those signals into
   `ProviderApiRequest`; `PostFormDataToApiOptions` and `PostToApiOptions` now
-  retain non-serialized abort signals like `PostJsonToApiOptions`. The URL
-  download callbacks for video and transcription still accept only `Url`, so
-  abort-aware download callback plumbing remains an explicit follow-up.
+  retain non-serialized abort signals like `PostJsonToApiOptions`.
+- 2026-05-20: URL download callbacks now receive high-level abort signals
+  `GenerateVideoDownloadOptions` and `TranscribeDownloadOptions` now mirror
+  upstream custom download callback options by carrying the URL and optional
+  abort signal into URL-backed video/audio downloads.
 
 ## Next Unported Work Queue
 
@@ -643,18 +645,14 @@ focused tests for each portable behavior before changing rows to `verified`.
    exporter shape and the real Rust `opentelemetry` SDK/exporter path. Once root
    telemetry wiring is available, live provider tests should also assert that
    telemetry export.
-3. Close the remaining non-language abort-signal follow-up for URL-backed
-   downloads: `generateVideo` and `transcribe` provider calls now receive
-   abort signals, but their configurable download callbacks still accept only
-   `Url` and cannot observe cancellation yet.
-4. Continue the remaining first-phase Open Responses/OpenAI Responses audit
+3. Continue the remaining first-phase Open Responses/OpenAI Responses audit
    from current upstream tests instead of the old topic list. The verified rows
    now cover the previously named request-tool, prompt-file, unsupported-option,
    no-schema JSON, allowed-tools, shell/apply-patch, assistant filtering, and
    custom provider-tool slices; the next Open Responses work should compare
    `packages/openai/src/responses` and OpenAI model-capability tests against the
    package-owned Rust crate, then add exact missing test names to this ledger.
-5. Keep the next slices Gateway-first within the first-phase queue: close
+4. Keep the next slices Gateway-first within the first-phase queue: close
    the whole common/core plus Vercel AI Gateway first-phase queue before
    expanding to unrelated providers. Continue choosing from `packages/ai`,
    `packages/provider`, `packages/provider-utils`, `packages/openai-compatible`,
@@ -662,27 +660,27 @@ focused tests for each portable behavior before changing rows to `verified`.
    OTel, Workflow, telemetry, UI transport, chat state management, and
    test-server support until those rows are verified or intentionally
    documented as non-portable.
-6. Continue `packages/mcp` inside `crates/ai-sdk-mcp` by broadening the new
+5. Continue `packages/mcp` inside `crates/ai-sdk-mcp` by broadening the new
    authenticated loopback Streamable HTTP proof into remaining MCP examples for
    hosted auth variants plus, where credentials are available,
    protected live MCP service validation.
-7. Continue `streamText` parity with remaining retry/backoff edge cases,
+6. Continue `streamText` parity with remaining retry/backoff edge cases,
    true post-return `createUIMessageStream` delayed-merge behavior if a live
    stream abstraction is introduced, and remaining smoothStream delay
    scheduling because Gateway relies on this high-level library surface.
-8. Continue `streamObject` parity with remaining retry/backoff edge cases and
+7. Continue `streamObject` parity with remaining retry/backoff edge cases and
    remaining partial-output strategy edge cases after the Gateway
    text/stream/UI path is stronger.
-9. Expand native Gateway beyond the current language, streaming,
+8. Expand native Gateway beyond the current language, streaming,
    image/embedding/reranking/video, account metadata, auth/observability,
    provider-executed tools, and error-classification slices with broader
    provider package tests.
-10. Do not resume unrelated standalone provider wrappers until the common/core
+9. Do not resume unrelated standalone provider wrappers until the common/core
    SDK and Vercel AI Gateway rows above are verified or explicitly documented
    as intentionally non-portable. When standalone provider work resumes,
    continue it only as package-owned crates that match their upstream
    TypeScript packages; do not add new root-owned provider modules.
-11. Crate splitting is an immediate hard acceptance gate, not optional cleanup
+10. Crate splitting is an immediate hard acceptance gate, not optional cleanup
    after the port is otherwise complete. The Rust workspace must have a strict
    1:1 mapping between upstream `vercel/ai` TypeScript packages and Rust
    crates: every portable upstream package gets exactly one corresponding Rust

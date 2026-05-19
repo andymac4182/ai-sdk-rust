@@ -219,8 +219,9 @@ pub use generate_text::{
 };
 pub use generate_video::{
     ExperimentalGenerateVideoResult, GenerateVideoDownload, GenerateVideoDownloadFunction,
-    GenerateVideoDownloadFuture, GenerateVideoError, GenerateVideoOptions, GenerateVideoPrompt,
-    GenerateVideoPromptImage, GenerateVideoResult, experimental_generate_video, generate_video,
+    GenerateVideoDownloadFuture, GenerateVideoDownloadOptions, GenerateVideoError,
+    GenerateVideoOptions, GenerateVideoPrompt, GenerateVideoPromptImage, GenerateVideoResult,
+    experimental_generate_video, generate_video,
 };
 pub use headers::Headers;
 pub use huggingface::{
@@ -433,8 +434,8 @@ pub use togetherai::{
 };
 pub use transcribe::{
     ExperimentalTranscriptionResult, TranscribeAudio, TranscribeDownload,
-    TranscribeDownloadFunction, TranscribeDownloadFuture, TranscribeError, TranscribeOptions,
-    TranscriptionResult, experimental_transcribe, transcribe,
+    TranscribeDownloadFunction, TranscribeDownloadFuture, TranscribeDownloadOptions,
+    TranscribeError, TranscribeOptions, TranscriptionResult, experimental_transcribe, transcribe,
 };
 pub use transcription_model::{
     NoTranscriptGeneratedError, TranscriptionModel, TranscriptionModelCallOptions,
