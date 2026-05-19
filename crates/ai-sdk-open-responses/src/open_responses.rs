@@ -6503,6 +6503,131 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_converts_standard_tool_result_outputs() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_tool_results",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Tool results accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 10,
+                            "output_tokens": 4
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call_json",
+                    "get_weather",
+                    LanguageModelToolResultOutput::json(json!({
+                        "temperature": 72,
+                        "condition": "sunny"
+                    })),
+                )),
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call_text",
+                    "search",
+                    LanguageModelToolResultOutput::text("Search results: Found 5 items"),
+                )),
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call_error_text",
+                    "api_call",
+                    LanguageModelToolResultOutput::error_text("API request failed: timeout"),
+                )),
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call_error_json",
+                    "api_call",
+                    LanguageModelToolResultOutput::error_json(json!({
+                        "message": "rate limited"
+                    })),
+                )),
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call_denied",
+                    "dangerous_action",
+                    LanguageModelToolResultOutput::execution_denied()
+                        .with_reason("User declined the action"),
+                )),
+            ])),
+        ])));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "gpt-4.1-mini",
+                "input": [
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_json",
+                        "output": "{\"condition\":\"sunny\",\"temperature\":72}"
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_text",
+                        "output": "Search results: Found 5 items"
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_error_text",
+                        "output": "API request failed: timeout"
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_error_json",
+                        "output": "{\"message\":\"rate limited\"}"
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_denied",
+                        "output": "User declined the action"
+                    }
+                ]
+            }))
+        );
+    }
+
+    #[test]
     fn open_responses_provider_converts_tool_approval_responses_to_mcp_input() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
