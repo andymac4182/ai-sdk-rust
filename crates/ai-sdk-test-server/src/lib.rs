@@ -5,7 +5,12 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::Arc;
+use std::io::{self, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use serde_json::{Value as JsonValue, json};
 
@@ -410,6 +415,105 @@ pub fn create_test_server(
     TestServer::new(routes)
 }
 
+/// Loopback HTTP server backed by [`TestServer`] route handlers.
+pub struct LoopbackTestServer {
+    origin: String,
+    server: Arc<Mutex<TestServer>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl fmt::Debug for LoopbackTestServer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LoopbackTestServer")
+            .field("origin", &self.origin)
+            .field("calls", &self.calls())
+            .finish_non_exhaustive()
+    }
+}
+
+impl LoopbackTestServer {
+    /// Starts a loopback HTTP server with path-keyed route handlers.
+    pub fn start(
+        routes: impl IntoIterator<Item = (impl Into<String>, UrlHandler)>,
+    ) -> io::Result<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        listener.set_nonblocking(true)?;
+        let origin = format!("http://{}", listener.local_addr()?);
+        let server = Arc::new(Mutex::new(TestServer::new(routes)));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_server = Arc::clone(&server);
+        let thread_stop = Arc::clone(&stop);
+        let thread_origin = origin.clone();
+        let thread = thread::spawn(move || {
+            while !thread_stop.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let _ = handle_loopback_connection(stream, &thread_origin, &thread_server);
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Ok(Self {
+            origin,
+            server,
+            stop,
+            thread: Some(thread),
+        })
+    }
+
+    /// Returns the server origin, for example `http://127.0.0.1:12345`.
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    /// Builds an absolute URL for a path on this loopback server.
+    pub fn url(&self, path: &str) -> String {
+        if path.starts_with('/') {
+            format!("{}{path}", self.origin)
+        } else {
+            format!("{}/{}", self.origin, path)
+        }
+    }
+
+    /// Returns captured calls.
+    pub fn calls(&self) -> Vec<TestServerCall> {
+        self.server
+            .lock()
+            .expect("loopback test server lock is not poisoned")
+            .calls
+            .clone()
+    }
+
+    /// Restores original route responses and clears captured calls.
+    pub fn reset(&self) {
+        self.server
+            .lock()
+            .expect("loopback test server lock is not poisoned")
+            .reset();
+    }
+}
+
+impl Drop for LoopbackTestServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = TcpStream::connect(
+            self.origin
+                .strip_prefix("http://")
+                .expect("loopback origin has HTTP prefix"),
+        );
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 /// Rust analogue of upstream `convertArrayToReadableStream`.
 pub fn convert_array_to_readable_stream<T>(values: impl IntoIterator<Item = T>) -> Vec<T> {
     values.into_iter().collect()
@@ -491,6 +595,127 @@ fn unquote_header_value(value: &str) -> String {
         .and_then(|value| value.strip_suffix('"'))
         .unwrap_or(value)
         .to_string()
+}
+
+fn handle_loopback_connection(
+    mut stream: TcpStream,
+    origin: &str,
+    server: &Arc<Mutex<TestServer>>,
+) -> io::Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    let mut buffer = Vec::new();
+    let mut chunk = [0; 4096];
+    let request = loop {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            return Ok(());
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if let Some(request) = parse_loopback_request(origin, &buffer) {
+            break request;
+        }
+    };
+    let relative_url = request.url.strip_prefix(origin).unwrap_or(&request.url);
+    let route_key = relative_url
+        .split_once('?')
+        .map_or(relative_url, |(path, _)| path)
+        .to_string();
+    let response = server
+        .lock()
+        .expect("loopback test server lock is not poisoned")
+        .handle(&route_key, request);
+
+    write_loopback_response(&mut stream, response)
+}
+
+fn parse_loopback_request(origin: &str, buffer: &[u8]) -> Option<TestRequest> {
+    let header_end = buffer.windows(4).position(|window| window == b"\r\n\r\n")?;
+    let head = String::from_utf8_lossy(&buffer[..header_end]);
+    let mut lines = head.lines();
+    let request_line = lines.next()?;
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts.next()?.to_string();
+    let target = request_parts.next()?.to_string();
+    let mut headers = TestHeaders::new();
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+    }
+    let content_length = headers
+        .get("content-length")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let body_start = header_end + 4;
+    if buffer.len() < body_start + content_length {
+        return None;
+    }
+    let body = String::from_utf8_lossy(&buffer[body_start..body_start + content_length]);
+    let url = if target.starts_with("http://") || target.starts_with("https://") {
+        target
+    } else {
+        format!("{origin}{target}")
+    };
+    let mut request = TestRequest::new(method, url);
+    request.headers = headers;
+    if content_length > 0 {
+        request.body = Some(body.to_string());
+    }
+    Some(request)
+}
+
+fn write_loopback_response(stream: &mut TcpStream, response: RenderedResponse) -> io::Result<()> {
+    let mut headers = response.headers;
+    let body = rendered_body_bytes(response.body);
+    if !headers
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case("content-length"))
+    {
+        headers.insert("content-length".to_string(), body.len().to_string());
+    }
+    if !headers
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case("connection"))
+    {
+        headers.insert("connection".to_string(), "close".to_string());
+    }
+
+    write!(
+        stream,
+        "HTTP/1.1 {} {}\r\n",
+        response.status,
+        http_reason_phrase(response.status)
+    )?;
+    for (name, value) in headers {
+        write!(stream, "{name}: {value}\r\n")?;
+    }
+    stream.write_all(b"\r\n")?;
+    stream.write_all(&body)?;
+    stream.flush()
+}
+
+fn rendered_body_bytes(body: RenderedBody) -> Vec<u8> {
+    match body {
+        RenderedBody::Json(value) => serde_json::to_vec(&value).expect("JSON response serializes"),
+        RenderedBody::StreamChunks(chunks) => chunks.join("").into_bytes(),
+        RenderedBody::Binary(bytes) => bytes,
+        RenderedBody::Text(text) => text.into_bytes(),
+        RenderedBody::Empty => Vec::new(),
+    }
+}
+
+fn http_reason_phrase(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        202 => "Accepted",
+        204 => "No Content",
+        400 => "Bad Request",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        _ => "OK",
+    }
 }
 
 /// Controller for deterministic stream tests.
@@ -606,9 +831,12 @@ fn with_stream_headers(headers: TestHeaders) -> TestHeaders {
 #[cfg(test)]
 mod tests {
     use super::{
-        RenderedBody, TestRequest, TestResponseController, UrlHandler, UrlResponse,
-        UrlResponseParameter, create_test_server,
+        LoopbackTestServer, RenderedBody, TestRequest, TestResponseController, UrlHandler,
+        UrlResponse, UrlResponseParameter, create_test_server,
     };
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
     use serde_json::json;
 
     #[test]
@@ -880,6 +1108,80 @@ file body\r\n\
     }
 
     #[test]
+    fn loopback_test_server_serves_http_and_records_requests() {
+        let server = LoopbackTestServer::start([(
+            "/json",
+            UrlHandler::new(
+                UrlResponse::json_value(json!({ "message": "hello" })).with_header("x-test", "1"),
+            ),
+        )])
+        .expect("loopback server starts");
+        let body = r#"{ "prompt": "hi" }"#;
+        let response = send_loopback_request(
+            server.origin(),
+            &format!(
+                "POST /json?mode=test HTTP/1.1\r\n\
+Host: localhost\r\n\
+Content-Type: application/json\r\n\
+User-Agent: loopback-test\r\n\
+Content-Length: {}\r\n\
+\r\n\
+{body}",
+                body.len()
+            ),
+        );
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("content-type: application/json"));
+        assert!(response.contains("x-test: 1"));
+        assert!(response.ends_with(r#"{"message":"hello"}"#));
+
+        let calls = server.calls();
+        let call = calls.first().expect("call is recorded");
+        assert_eq!(call.request_method(), "POST");
+        assert_eq!(call.request_url(), &server.url("/json?mode=test"));
+        assert_eq!(call.request_user_agent(), Some("loopback-test"));
+        assert_eq!(call.request_body_json(), Some(json!({ "prompt": "hi" })));
+        assert_eq!(
+            call.request_url_search_params()
+                .get("mode")
+                .map(String::as_str),
+            Some("test")
+        );
+    }
+
+    #[test]
+    fn loopback_test_server_serves_streams_missing_routes_and_reset() {
+        let server = LoopbackTestServer::start([(
+            "/events",
+            UrlHandler::new(UrlResponse::stream_chunks([
+                "event: message\n",
+                "data: ok\n\n",
+            ])),
+        )])
+        .expect("loopback server starts");
+
+        let stream_response = send_loopback_request(
+            server.origin(),
+            "GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert!(stream_response.starts_with("HTTP/1.1 200 OK"));
+        assert!(stream_response.contains("content-type: text/event-stream"));
+        assert!(stream_response.ends_with("event: message\ndata: ok\n\n"));
+
+        let missing_response = send_loopback_request(
+            server.origin(),
+            "GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert!(missing_response.starts_with("HTTP/1.1 404 Not Found"));
+        assert!(missing_response.ends_with(r#"{"error":"Not Found"}"#));
+        assert_eq!(server.calls().len(), 2);
+
+        server.reset();
+        assert!(server.calls().is_empty());
+    }
+
+    #[test]
     fn response_controller_records_writes_errors_and_close() {
         let mut controller = TestResponseController::new();
         controller.write("chunk1");
@@ -889,5 +1191,21 @@ file body\r\n\
         assert_eq!(controller.chunks(), &["chunk1".to_string()]);
         assert_eq!(controller.error_message(), Some("boom"));
         assert!(controller.is_closed());
+    }
+
+    fn send_loopback_request(origin: &str, request: &str) -> String {
+        let address = origin
+            .strip_prefix("http://")
+            .expect("loopback origin has HTTP prefix");
+        let mut stream = TcpStream::connect(address).expect("connect to loopback server");
+        stream
+            .write_all(request.as_bytes())
+            .expect("write loopback request");
+        stream.flush().expect("flush loopback request");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("read loopback response");
+        response
     }
 }
