@@ -443,6 +443,15 @@ impl OAuthProtectedResourceMetadataDiscoveryOptions {
         self
     }
 
+    /// Uses an optional explicit protected-resource metadata URL.
+    pub fn with_optional_resource_metadata_url(
+        mut self,
+        resource_metadata_url: Option<String>,
+    ) -> Self {
+        self.resource_metadata_url = resource_metadata_url;
+        self
+    }
+
     /// Uses a custom MCP protocol version header.
     pub fn with_protocol_version(mut self, protocol_version: impl Into<String>) -> Self {
         self.protocol_version = protocol_version.into();
@@ -575,6 +584,30 @@ impl StartAuthorizationOptions {
         self.resource = Some(resource);
         self
     }
+
+    /// Sets optional authorization server metadata.
+    pub fn with_optional_metadata(mut self, metadata: Option<AuthorizationServerMetadata>) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    /// Sets an optional requested OAuth scope.
+    pub fn with_optional_scope(mut self, scope: Option<String>) -> Self {
+        self.scope = scope;
+        self
+    }
+
+    /// Sets an optional OAuth state parameter.
+    pub fn with_optional_state(mut self, state: Option<String>) -> Self {
+        self.state = state;
+        self
+    }
+
+    /// Sets an optional RFC 8707 resource parameter.
+    pub fn with_optional_resource(mut self, resource: Option<Url>) -> Self {
+        self.resource = resource;
+        self
+    }
 }
 
 /// Result of constructing an authorization redirect URL.
@@ -623,6 +656,155 @@ impl OAuthClientAuthenticationHook {
 impl fmt::Debug for OAuthClientAuthenticationHook {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("OAuthClientAuthenticationHook")
+    }
+}
+
+/// Result returned by the high-level MCP OAuth provider flow.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthResult {
+    Authorized,
+    Redirect,
+}
+
+/// Credential scope invalidated after an OAuth server rejects stored credentials.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OAuthCredentialScope {
+    All,
+    Client,
+    Tokens,
+    Verifier,
+}
+
+/// Options for the high-level MCP OAuth provider flow.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthOptions {
+    pub server_url: String,
+    pub authorization_code: Option<String>,
+    pub callback_state: Option<String>,
+    pub scope: Option<String>,
+    pub resource_metadata_url: Option<String>,
+}
+
+impl AuthOptions {
+    /// Creates OAuth provider-flow options for an MCP server URL.
+    pub fn new(server_url: impl Into<String>) -> Self {
+        Self {
+            server_url: server_url.into(),
+            authorization_code: None,
+            callback_state: None,
+            scope: None,
+            resource_metadata_url: None,
+        }
+    }
+
+    /// Sets the callback authorization code to exchange for tokens.
+    pub fn with_authorization_code(mut self, authorization_code: impl Into<String>) -> Self {
+        self.authorization_code = Some(authorization_code.into());
+        self
+    }
+
+    /// Sets the callback state value returned by the authorization server.
+    pub fn with_callback_state(mut self, callback_state: impl Into<String>) -> Self {
+        self.callback_state = Some(callback_state.into());
+        self
+    }
+
+    /// Sets the requested OAuth scope.
+    pub fn with_scope(mut self, scope: impl Into<String>) -> Self {
+        self.scope = Some(scope.into());
+        self
+    }
+
+    /// Sets an explicit protected-resource metadata URL.
+    pub fn with_resource_metadata_url(mut self, resource_metadata_url: impl Into<String>) -> Self {
+        self.resource_metadata_url = Some(resource_metadata_url.into());
+        self
+    }
+}
+
+/// State storage and callback surface used by the MCP OAuth provider flow.
+pub trait OAuthClientProvider {
+    /// Returns currently stored tokens, when available.
+    fn tokens(&self) -> McpOAuthResult<Option<OAuthTokens>>;
+
+    /// Persists newly issued tokens.
+    fn save_tokens(&mut self, tokens: OAuthTokens) -> McpOAuthResult<()>;
+
+    /// Sends the user to the authorization URL.
+    fn redirect_to_authorization(&mut self, authorization_url: Url) -> McpOAuthResult<()>;
+
+    /// Persists the PKCE verifier for the callback exchange.
+    fn save_code_verifier(&mut self, code_verifier: String) -> McpOAuthResult<()>;
+
+    /// Returns the PKCE verifier saved when authorization started.
+    fn code_verifier(&self) -> McpOAuthResult<String>;
+
+    /// Returns the redirect URI configured for this client.
+    fn redirect_url(&self) -> String;
+
+    /// Returns metadata used for dynamic client registration and scopes.
+    fn client_metadata(&self) -> OAuthClientMetadata;
+
+    /// Returns existing OAuth client credentials, when available.
+    fn client_information(&self) -> McpOAuthResult<Option<OAuthClientInformation>>;
+
+    /// Indicates that this provider can persist dynamically registered clients.
+    fn can_save_client_information(&self) -> bool {
+        false
+    }
+
+    /// Persists dynamically registered OAuth client information.
+    fn save_client_information(
+        &mut self,
+        _client_information: OAuthClientInformationFull,
+    ) -> McpOAuthResult<()> {
+        Err(McpOAuthError::new(
+            "OAuth client information must be saveable for dynamic registration",
+        ))
+    }
+
+    /// Returns a state value for CSRF protection when starting authorization.
+    fn state(&self) -> McpOAuthResult<Option<String>> {
+        Ok(None)
+    }
+
+    /// Indicates that this provider can persist state values.
+    fn can_save_state(&self) -> bool {
+        false
+    }
+
+    /// Persists the state value generated for a redirect.
+    fn save_state(&mut self, _state: String) -> McpOAuthResult<()> {
+        Ok(())
+    }
+
+    /// Returns the previously stored state value for callback validation.
+    fn stored_state(&self) -> McpOAuthResult<Option<String>> {
+        Ok(None)
+    }
+
+    /// Returns a custom client-authentication hook for token endpoint requests.
+    fn client_authentication_hook(&self) -> Option<OAuthClientAuthenticationHook> {
+        None
+    }
+
+    /// Indicates that this provider overrides default resource URL validation.
+    fn has_custom_resource_validation(&self) -> bool {
+        false
+    }
+
+    /// Validates or overrides the RFC 8707 resource URL used for OAuth requests.
+    fn validate_resource_url(
+        &self,
+        _server_url: &Url,
+        _resource: Option<&str>,
+    ) -> McpOAuthResult<Option<Url>> {
+        Ok(None)
+    }
+
+    /// Invalidates stored credentials before retrying the auth flow.
+    fn invalidate_credentials(&mut self, _scope: OAuthCredentialScope) -> McpOAuthResult<()> {
+        Ok(())
     }
 }
 
@@ -678,6 +860,27 @@ impl ExchangeAuthorizationOptions {
             + 'static,
     {
         self.add_client_authentication = Some(OAuthClientAuthenticationHook::new(hook));
+        self
+    }
+
+    /// Sets optional authorization server metadata.
+    pub fn with_optional_metadata(mut self, metadata: Option<AuthorizationServerMetadata>) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    /// Sets an optional RFC 8707 resource parameter.
+    pub fn with_optional_resource(mut self, resource: Option<Url>) -> Self {
+        self.resource = resource;
+        self
+    }
+
+    /// Sets an optional custom client-authentication hook.
+    pub fn with_optional_client_authentication(
+        mut self,
+        add_client_authentication: Option<OAuthClientAuthenticationHook>,
+    ) -> Self {
+        self.add_client_authentication = add_client_authentication;
         self
     }
 }
@@ -742,6 +945,27 @@ impl RefreshAuthorizationOptions {
         self.add_client_authentication = Some(OAuthClientAuthenticationHook::new(hook));
         self
     }
+
+    /// Sets optional authorization server metadata.
+    pub fn with_optional_metadata(mut self, metadata: Option<AuthorizationServerMetadata>) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    /// Sets an optional RFC 8707 resource parameter.
+    pub fn with_optional_resource(mut self, resource: Option<Url>) -> Self {
+        self.resource = resource;
+        self
+    }
+
+    /// Sets an optional custom client-authentication hook.
+    pub fn with_optional_client_authentication(
+        mut self,
+        add_client_authentication: Option<OAuthClientAuthenticationHook>,
+    ) -> Self {
+        self.add_client_authentication = add_client_authentication;
+        self
+    }
 }
 
 impl PartialEq for RefreshAuthorizationOptions {
@@ -773,6 +997,12 @@ impl RegisterClientOptions {
     /// Sets authorization server metadata.
     pub fn with_metadata(mut self, metadata: impl Into<AuthorizationServerMetadata>) -> Self {
         self.metadata = Some(metadata.into());
+        self
+    }
+
+    /// Sets optional authorization server metadata.
+    pub fn with_optional_metadata(mut self, metadata: Option<AuthorizationServerMetadata>) -> Self {
+        self.metadata = metadata;
         self
     }
 }
@@ -1266,6 +1496,186 @@ pub fn register_client(
             "Failed to parse OAuth client information response: {error}"
         ))
     })
+}
+
+/// Runs the high-level MCP OAuth provider flow.
+pub fn auth<P>(provider: &mut P, options: AuthOptions) -> McpOAuthResult<AuthResult>
+where
+    P: OAuthClientProvider + ?Sized,
+{
+    match auth_internal(provider, &options) {
+        Ok(result) => Ok(result),
+        Err(error) if is_invalid_client_error(&error) => {
+            provider.invalidate_credentials(OAuthCredentialScope::All)?;
+            auth_internal(provider, &options)
+        }
+        Err(error) if is_invalid_grant_error(&error) => {
+            provider.invalidate_credentials(OAuthCredentialScope::Tokens)?;
+            auth_internal(provider, &options)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Selects the RFC 8707 resource URL with optional provider validation override.
+pub fn select_resource_url_for_provider<P>(
+    server_url: impl AsRef<str>,
+    provider: &P,
+    resource_metadata: Option<&OAuthProtectedResourceMetadata>,
+) -> McpOAuthResult<Option<Url>>
+where
+    P: OAuthClientProvider + ?Sized,
+{
+    if provider.has_custom_resource_validation() {
+        let default_resource = resource_url_from_server_url(server_url.as_ref())?;
+        return provider.validate_resource_url(
+            &default_resource,
+            resource_metadata.map(|metadata| metadata.resource.as_str()),
+        );
+    }
+
+    select_resource_url(server_url, resource_metadata)
+}
+
+fn auth_internal<P>(provider: &mut P, options: &AuthOptions) -> McpOAuthResult<AuthResult>
+where
+    P: OAuthClientProvider + ?Sized,
+{
+    let mut resource_metadata = None;
+    let mut authorization_server_url = None;
+    if let Ok(metadata) = discover_oauth_protected_resource_metadata(
+        &options.server_url,
+        OAuthProtectedResourceMetadataDiscoveryOptions::default()
+            .with_optional_resource_metadata_url(options.resource_metadata_url.clone()),
+    ) {
+        if let Some(server_url) = metadata
+            .authorization_servers
+            .as_ref()
+            .and_then(|servers| servers.first())
+        {
+            authorization_server_url = Some(server_url.clone());
+        }
+        resource_metadata = Some(metadata);
+    }
+
+    let authorization_server_url =
+        authorization_server_url.unwrap_or_else(|| options.server_url.clone());
+    let resource = select_resource_url_for_provider(
+        &options.server_url,
+        provider,
+        resource_metadata.as_ref(),
+    )?;
+    let metadata = discover_authorization_server_metadata(
+        &authorization_server_url,
+        AuthorizationServerMetadataDiscoveryOptions::default(),
+    )?;
+    let client_metadata = provider.client_metadata();
+
+    let mut client_information = provider.client_information()?;
+    if client_information.is_none() {
+        if options.authorization_code.is_some() {
+            return Err(McpOAuthError::new(
+                "Existing OAuth client information is required when exchanging an authorization code",
+            ));
+        }
+
+        if !provider.can_save_client_information() {
+            return Err(McpOAuthError::new(
+                "OAuth client information must be saveable for dynamic registration",
+            ));
+        }
+
+        let full_information = register_client(
+            &authorization_server_url,
+            RegisterClientOptions::new(client_metadata.clone())
+                .with_optional_metadata(metadata.clone()),
+        )?;
+        provider.save_client_information(full_information.clone())?;
+        client_information = Some(full_information.information);
+    }
+    let client_information = client_information.expect("client information is present");
+
+    if let Some(authorization_code) = &options.authorization_code {
+        if let Some(expected_state) = provider.stored_state()? {
+            if Some(expected_state.as_str()) != options.callback_state.as_deref() {
+                return Err(McpOAuthError::new(
+                    "OAuth state parameter mismatch - possible CSRF attack",
+                ));
+            }
+        }
+
+        let code_verifier = provider.code_verifier()?;
+        let tokens = exchange_authorization(
+            &authorization_server_url,
+            ExchangeAuthorizationOptions::new(
+                client_information,
+                authorization_code.clone(),
+                code_verifier,
+                provider.redirect_url(),
+            )
+            .with_optional_metadata(metadata.clone())
+            .with_optional_resource(resource.clone())
+            .with_optional_client_authentication(provider.client_authentication_hook()),
+        )?;
+        provider.save_tokens(tokens)?;
+        return Ok(AuthResult::Authorized);
+    }
+
+    if let Some(tokens) = provider.tokens()? {
+        if let Some(refresh_token) = tokens.refresh_token {
+            match refresh_authorization(
+                &authorization_server_url,
+                RefreshAuthorizationOptions::new(client_information.clone(), refresh_token)
+                    .with_optional_metadata(metadata.clone())
+                    .with_optional_resource(resource.clone())
+                    .with_optional_client_authentication(provider.client_authentication_hook()),
+            ) {
+                Ok(tokens) => {
+                    provider.save_tokens(tokens)?;
+                    return Ok(AuthResult::Authorized);
+                }
+                Err(error) if should_continue_after_refresh_error(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    let state = provider.state()?;
+    if let Some(state) = &state
+        && provider.can_save_state()
+    {
+        provider.save_state(state.clone())?;
+    }
+
+    let result = start_authorization(
+        &authorization_server_url,
+        StartAuthorizationOptions::with_generated_pkce(
+            client_information,
+            provider.redirect_url(),
+        )?
+        .with_optional_metadata(metadata)
+        .with_optional_scope(options.scope.clone().or(client_metadata.scope))
+        .with_optional_state(state)
+        .with_optional_resource(resource),
+    )?;
+    provider.save_code_verifier(result.code_verifier)?;
+    provider.redirect_to_authorization(result.authorization_url)?;
+    Ok(AuthResult::Redirect)
+}
+
+fn is_invalid_client_error(error: &McpOAuthError) -> bool {
+    matches!(
+        error.error_code.as_deref(),
+        Some("invalid_client" | "unauthorized_client")
+    )
+}
+
+fn is_invalid_grant_error(error: &McpOAuthError) -> bool {
+    error.error_code.as_deref() == Some("invalid_grant")
+}
+
+fn should_continue_after_refresh_error(error: &McpOAuthError) -> bool {
+    error.error_code.is_none() || error.error_code.as_deref() == Some("server_error")
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2670,6 +3080,237 @@ mod tests {
         );
     }
 
+    #[test]
+    fn auth_registers_client_and_redirects_when_tokens_are_missing() {
+        let server = LocalOAuthServer::new(Vec::new());
+        let server_url = server.url();
+        server.set_responses(vec![
+            LocalOAuthResponse::empty(404),
+            LocalOAuthResponse::json(auth_metadata_json(&server_url)),
+            LocalOAuthResponse::json(json!({
+                "client_id": "registered-client",
+                "client_secret": "registered-secret",
+                "redirect_uris": ["http://localhost:3000/callback"],
+                "client_name": "Test Client"
+            })),
+        ]);
+        let mut provider = TestOAuthProvider::new().with_save_client_information();
+
+        let result = auth(&mut provider, AuthOptions::new(server_url.clone()))
+            .expect("auth redirects after registration");
+
+        assert_eq!(result, AuthResult::Redirect);
+        assert_eq!(
+            provider
+                .saved_client_information
+                .as_ref()
+                .map(|client| client.information.client_id.as_str()),
+            Some("registered-client")
+        );
+        let redirect_url = provider.redirects.first().expect("redirect captured");
+        assert_eq!(
+            query_param(redirect_url, "client_id").as_deref(),
+            Some("registered-client")
+        );
+        assert!(query_param(redirect_url, "code_challenge").is_some());
+        assert!(query_param(redirect_url, "resource").is_none());
+        assert_eq!(
+            provider.saved_code_verifier.as_deref().map(str::len),
+            Some(43)
+        );
+        let requests = server.requests();
+        assert_eq!(requests[0].path, "/.well-known/oauth-protected-resource");
+        assert_eq!(requests[1].path, "/.well-known/oauth-authorization-server");
+        assert_eq!(requests[2].path, "/register");
+    }
+
+    #[test]
+    fn auth_exchanges_callback_code_and_saves_tokens_with_resource() {
+        let server = LocalOAuthServer::new(Vec::new());
+        let server_url = format!("{}/mcp-server", server.url());
+        server.set_responses(vec![
+            LocalOAuthResponse::json(json!({
+                "resource": server_url,
+                "authorization_servers": [server.url()]
+            })),
+            LocalOAuthResponse::json(auth_metadata_json(&server.url())),
+            LocalOAuthResponse::json(json!({
+                "access_token": "access123",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "refresh_token": "refresh123"
+            })),
+        ]);
+        let mut provider = TestOAuthProvider::new()
+            .with_client_information(
+                OAuthClientInformation::new("client123").with_client_secret("secret123"),
+            )
+            .with_code_verifier("verifier123")
+            .with_stored_state("STATE");
+
+        let result = auth(
+            &mut provider,
+            AuthOptions::new(server_url.clone())
+                .with_authorization_code("code123")
+                .with_callback_state("STATE"),
+        )
+        .expect("authorization code exchanges");
+
+        assert_eq!(result, AuthResult::Authorized);
+        assert_eq!(
+            provider
+                .saved_tokens
+                .last()
+                .map(|tokens| tokens.access_token.as_str()),
+            Some("access123")
+        );
+        let requests = server.requests();
+        let body = form_body(&requests[2].body);
+        assert_eq!(
+            body.get("grant_type").map(String::as_str),
+            Some("authorization_code")
+        );
+        assert_eq!(body.get("code").map(String::as_str), Some("code123"));
+        assert_eq!(
+            body.get("code_verifier").map(String::as_str),
+            Some("verifier123")
+        );
+        assert_eq!(
+            body.get("resource").map(String::as_str),
+            Some(server_url.as_str())
+        );
+    }
+
+    #[test]
+    fn auth_rejects_mismatched_callback_state_before_token_exchange() {
+        let server = LocalOAuthServer::new(Vec::new());
+        let server_url = server.url();
+        server.set_responses(vec![
+            LocalOAuthResponse::empty(404),
+            LocalOAuthResponse::json(auth_metadata_json(&server_url)),
+        ]);
+        let mut provider = TestOAuthProvider::new()
+            .with_client_information(OAuthClientInformation::new("client123"))
+            .with_code_verifier("verifier123")
+            .with_stored_state("EXPECTED");
+
+        let error = auth(
+            &mut provider,
+            AuthOptions::new(server_url)
+                .with_authorization_code("code123")
+                .with_callback_state("ACTUAL"),
+        )
+        .expect_err("state mismatch fails");
+
+        assert!(error.message.contains("state parameter mismatch"));
+        assert!(provider.saved_tokens.is_empty());
+        assert_eq!(server.requests().len(), 2);
+    }
+
+    #[test]
+    fn auth_invalidates_rejected_refresh_token_and_retries_to_redirect() {
+        let server = LocalOAuthServer::new(Vec::new());
+        let server_url = server.url();
+        server.set_responses(vec![
+            LocalOAuthResponse::empty(404),
+            LocalOAuthResponse::json(auth_metadata_json(&server_url)),
+            LocalOAuthResponse::new(
+                400,
+                [("content-type", "application/json")],
+                json!({
+                    "error": "invalid_grant",
+                    "error_description": "Refresh token expired"
+                })
+                .to_string(),
+            ),
+            LocalOAuthResponse::empty(404),
+            LocalOAuthResponse::json(auth_metadata_json(&server_url)),
+        ]);
+        let mut provider = TestOAuthProvider::new()
+            .with_client_information(OAuthClientInformation::new("client123"))
+            .with_tokens(OAuthTokens {
+                access_token: "old-access".to_string(),
+                id_token: None,
+                token_type: "Bearer".to_string(),
+                expires_in: None,
+                scope: None,
+                refresh_token: Some("refresh123".to_string()),
+            });
+
+        let result = auth(&mut provider, AuthOptions::new(server_url))
+            .expect("invalid refresh token falls back to redirect after invalidation");
+
+        assert_eq!(result, AuthResult::Redirect);
+        assert_eq!(provider.invalidated, vec![OAuthCredentialScope::Tokens]);
+        assert_eq!(provider.redirects.len(), 1);
+        let requests = server.requests();
+        let body = form_body(&requests[2].body);
+        assert_eq!(
+            body.get("grant_type").map(String::as_str),
+            Some("refresh_token")
+        );
+        assert_eq!(
+            body.get("refresh_token").map(String::as_str),
+            Some("refresh123")
+        );
+        assert_eq!(requests.len(), 5);
+    }
+
+    #[test]
+    fn auth_invalidates_rejected_client_credentials_and_reregisters() {
+        let server = LocalOAuthServer::new(Vec::new());
+        let server_url = server.url();
+        server.set_responses(vec![
+            LocalOAuthResponse::empty(404),
+            LocalOAuthResponse::json(auth_metadata_json(&server_url)),
+            LocalOAuthResponse::new(
+                401,
+                [("content-type", "application/json")],
+                json!({
+                    "error": "invalid_client",
+                    "error_description": "Client credentials expired"
+                })
+                .to_string(),
+            ),
+            LocalOAuthResponse::empty(404),
+            LocalOAuthResponse::json(auth_metadata_json(&server_url)),
+            LocalOAuthResponse::json(json!({
+                "client_id": "registered-again",
+                "client_secret": "registered-secret",
+                "redirect_uris": ["http://localhost:3000/callback"],
+                "client_name": "Test Client"
+            })),
+        ]);
+        let mut provider = TestOAuthProvider::new()
+            .with_save_client_information()
+            .with_client_information(OAuthClientInformation::new("client123"))
+            .with_tokens(OAuthTokens {
+                access_token: "old-access".to_string(),
+                id_token: None,
+                token_type: "Bearer".to_string(),
+                expires_in: None,
+                scope: None,
+                refresh_token: Some("refresh123".to_string()),
+            });
+
+        let result = auth(&mut provider, AuthOptions::new(server_url))
+            .expect("invalid client credentials trigger reregistration redirect");
+
+        assert_eq!(result, AuthResult::Redirect);
+        assert_eq!(provider.invalidated, vec![OAuthCredentialScope::All]);
+        assert_eq!(
+            provider
+                .saved_client_information
+                .as_ref()
+                .map(|client| client.information.client_id.as_str()),
+            Some("registered-again")
+        );
+        assert_eq!(provider.redirects.len(), 1);
+        let requests = server.requests();
+        assert_eq!(requests[2].path, "/token");
+        assert_eq!(requests[5].path, "/register");
+    }
+
     trait OAuthMetadataTestExt {
         fn with_token_endpoint(self, token_endpoint: String) -> Self;
         fn with_registration_endpoint(self, registration_endpoint: String) -> Self;
@@ -2729,6 +3370,175 @@ mod tests {
             .map(|(_, value)| value.into_owned())
     }
 
+    fn auth_metadata_json(server_url: &str) -> JsonValue {
+        json!({
+            "issuer": server_url,
+            "authorization_endpoint": format!("{server_url}/authorize"),
+            "token_endpoint": format!("{server_url}/token"),
+            "registration_endpoint": format!("{server_url}/register"),
+            "response_types_supported": ["code"],
+            "code_challenge_methods_supported": ["S256"]
+        })
+    }
+
+    #[derive(Debug)]
+    struct TestOAuthProvider {
+        redirect_url: String,
+        client_metadata: OAuthClientMetadata,
+        client_information: Option<OAuthClientInformation>,
+        tokens: Option<OAuthTokens>,
+        code_verifier: String,
+        stored_state: Option<String>,
+        state: Option<String>,
+        allow_save_client_information: bool,
+        allow_save_state: bool,
+        saved_tokens: Vec<OAuthTokens>,
+        redirects: Vec<Url>,
+        saved_code_verifier: Option<String>,
+        saved_client_information: Option<OAuthClientInformationFull>,
+        saved_state: Option<String>,
+        invalidated: Vec<OAuthCredentialScope>,
+    }
+
+    impl TestOAuthProvider {
+        fn new() -> Self {
+            Self {
+                redirect_url: "http://localhost:3000/callback".to_string(),
+                client_metadata: OAuthClientMetadata::new(vec![
+                    "http://localhost:3000/callback".to_string(),
+                ])
+                .with_client_name("Test Client"),
+                client_information: None,
+                tokens: None,
+                code_verifier: "test-verifier".to_string(),
+                stored_state: None,
+                state: None,
+                allow_save_client_information: false,
+                allow_save_state: false,
+                saved_tokens: Vec::new(),
+                redirects: Vec::new(),
+                saved_code_verifier: None,
+                saved_client_information: None,
+                saved_state: None,
+                invalidated: Vec::new(),
+            }
+        }
+
+        fn with_client_information(mut self, client_information: OAuthClientInformation) -> Self {
+            self.client_information = Some(client_information);
+            self
+        }
+
+        fn with_tokens(mut self, tokens: OAuthTokens) -> Self {
+            self.tokens = Some(tokens);
+            self
+        }
+
+        fn with_code_verifier(mut self, code_verifier: impl Into<String>) -> Self {
+            self.code_verifier = code_verifier.into();
+            self
+        }
+
+        fn with_stored_state(mut self, stored_state: impl Into<String>) -> Self {
+            self.stored_state = Some(stored_state.into());
+            self
+        }
+
+        fn with_save_client_information(mut self) -> Self {
+            self.allow_save_client_information = true;
+            self
+        }
+    }
+
+    impl OAuthClientProvider for TestOAuthProvider {
+        fn tokens(&self) -> McpOAuthResult<Option<OAuthTokens>> {
+            Ok(self.tokens.clone())
+        }
+
+        fn save_tokens(&mut self, tokens: OAuthTokens) -> McpOAuthResult<()> {
+            self.tokens = Some(tokens.clone());
+            self.saved_tokens.push(tokens);
+            Ok(())
+        }
+
+        fn redirect_to_authorization(&mut self, authorization_url: Url) -> McpOAuthResult<()> {
+            self.redirects.push(authorization_url);
+            Ok(())
+        }
+
+        fn save_code_verifier(&mut self, code_verifier: String) -> McpOAuthResult<()> {
+            self.saved_code_verifier = Some(code_verifier);
+            Ok(())
+        }
+
+        fn code_verifier(&self) -> McpOAuthResult<String> {
+            Ok(self.code_verifier.clone())
+        }
+
+        fn redirect_url(&self) -> String {
+            self.redirect_url.clone()
+        }
+
+        fn client_metadata(&self) -> OAuthClientMetadata {
+            self.client_metadata.clone()
+        }
+
+        fn client_information(&self) -> McpOAuthResult<Option<OAuthClientInformation>> {
+            Ok(self.client_information.clone())
+        }
+
+        fn can_save_client_information(&self) -> bool {
+            self.allow_save_client_information
+        }
+
+        fn save_client_information(
+            &mut self,
+            client_information: OAuthClientInformationFull,
+        ) -> McpOAuthResult<()> {
+            self.client_information = Some(client_information.information.clone());
+            self.saved_client_information = Some(client_information);
+            Ok(())
+        }
+
+        fn state(&self) -> McpOAuthResult<Option<String>> {
+            Ok(self.state.clone())
+        }
+
+        fn can_save_state(&self) -> bool {
+            self.allow_save_state
+        }
+
+        fn save_state(&mut self, state: String) -> McpOAuthResult<()> {
+            self.saved_state = Some(state);
+            Ok(())
+        }
+
+        fn stored_state(&self) -> McpOAuthResult<Option<String>> {
+            Ok(self.stored_state.clone())
+        }
+
+        fn invalidate_credentials(&mut self, scope: OAuthCredentialScope) -> McpOAuthResult<()> {
+            self.invalidated.push(scope);
+            match scope {
+                OAuthCredentialScope::All => {
+                    self.client_information = None;
+                    self.tokens = None;
+                    self.saved_code_verifier = None;
+                }
+                OAuthCredentialScope::Client => {
+                    self.client_information = None;
+                }
+                OAuthCredentialScope::Tokens => {
+                    self.tokens = None;
+                }
+                OAuthCredentialScope::Verifier => {
+                    self.saved_code_verifier = None;
+                }
+            }
+            Ok(())
+        }
+    }
+
     #[derive(Clone, Debug)]
     struct LocalOAuthRequest {
         method: String,
@@ -2737,6 +3547,7 @@ mod tests {
         body: String,
     }
 
+    #[derive(Clone, Debug)]
     struct LocalOAuthResponse {
         status: u16,
         headers: BTreeMap<String, String>,
@@ -2776,6 +3587,7 @@ mod tests {
     struct LocalOAuthServer {
         url: String,
         requests: Arc<Mutex<Vec<LocalOAuthRequest>>>,
+        responses: Arc<Mutex<VecDeque<LocalOAuthResponse>>>,
         stop: Arc<AtomicBool>,
         handle: Option<JoinHandle<()>>,
     }
@@ -2815,6 +3627,7 @@ mod tests {
             Self {
                 url,
                 requests,
+                responses,
                 stop,
                 handle: Some(handle),
             }
@@ -2822,6 +3635,10 @@ mod tests {
 
         fn url(&self) -> String {
             self.url.clone()
+        }
+
+        fn set_responses(&self, responses: Vec<LocalOAuthResponse>) {
+            *self.responses.lock().expect("local responses lock") = VecDeque::from(responses);
         }
 
         fn requests(&self) -> Vec<LocalOAuthRequest> {
