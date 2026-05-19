@@ -9826,6 +9826,266 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_maps_pdf_input_file_fixture() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_048edf44633e41ae0069d4fe9fabf48194957da2d8582b1c4a",
+                        "object": "response",
+                        "created_at": 1775566496,
+                        "status": "completed",
+                        "model": "gpt-4.1-nano-2025-04-14",
+                        "output": [
+                            {
+                                "id": "msg_048edf44633e41ae0069d4fea0d1a08194af1e491c093df1d9",
+                                "type": "message",
+                                "status": "completed",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "annotations": [],
+                                        "logprobs": [],
+                                        "text": "Dummy PDF file"
+                                    }
+                                ],
+                                "role": "assistant"
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 44,
+                            "input_tokens_details": {
+                                "cached_tokens": 0
+                            },
+                            "output_tokens": 4,
+                            "output_tokens_details": {
+                                "reasoning_tokens": 0
+                            },
+                            "total_tokens": 48
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-nano");
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
+                    "What text does this PDF contain? Reply with just the text content, nothing else.",
+                )),
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Url {
+                        url: Url::parse(
+                            "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
+                        )
+                        .expect("valid URL"),
+                    },
+                    "application/pdf",
+                )),
+            ])),
+        ])));
+
+        assert_eq!(
+            result
+                .content
+                .iter()
+                .filter_map(|part| match part {
+                    LanguageModelContent::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["Dummy PDF file"]
+        );
+        assert_eq!(result.usage.input_tokens.total, Some(44));
+        assert_eq!(result.usage.input_tokens.no_cache, Some(44));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(result.usage.output_tokens.total, Some(4));
+        assert_eq!(result.usage.output_tokens.text, Some(4));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(0));
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-4.1-nano",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "What text does this PDF contain? Reply with just the text content, nothing else."
+                            },
+                            {
+                                "type": "input_file",
+                                "file_url": "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf"
+                            }
+                        ]
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_streams_pdf_input_file_fixture() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport = Arc::new(
+            move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                let sse = [
+                    r#"data: {"type":"response.created","response":{"id":"resp_051ebd7ab60063870069d4fe8ac1348194bf06d0a4646af05f","object":"response","created_at":1775566475,"status":"in_progress","model":"gpt-4.1-nano-2025-04-14","output":[],"error":null,"usage":null}}"#,
+                    "",
+                    r#"data: {"type":"response.in_progress","response":{"id":"resp_051ebd7ab60063870069d4fe8ac1348194bf06d0a4646af05f","object":"response","created_at":1775566475,"status":"in_progress","model":"gpt-4.1-nano-2025-04-14","output":[],"error":null,"usage":null}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_051ebd7ab60063870069d4fe8c1b7c8194b701e22f1ef094dd","type":"message","status":"in_progress","role":"assistant","content":[]}}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":"Dummy","item_id":"msg_051ebd7ab60063870069d4fe8c1b7c8194b701e22f1ef094dd","output_index":0,"sequence_number":4}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":" PDF","item_id":"msg_051ebd7ab60063870069d4fe8c1b7c8194b701e22f1ef094dd","output_index":0,"sequence_number":5}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":" file","item_id":"msg_051ebd7ab60063870069d4fe8c1b7c8194b701e22f1ef094dd","output_index":0,"sequence_number":6}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.done","content_index":0,"item_id":"msg_051ebd7ab60063870069d4fe8c1b7c8194b701e22f1ef094dd","output_index":0,"sequence_number":7,"text":"Dummy PDF file"}"#,
+                    "",
+                    r#"data: {"type":"response.content_part.done","content_index":0,"item_id":"msg_051ebd7ab60063870069d4fe8c1b7c8194b701e22f1ef094dd","output_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":"Dummy PDF file"},"sequence_number":8}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","item":{"id":"msg_051ebd7ab60063870069d4fe8c1b7c8194b701e22f1ef094dd","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":"Dummy PDF file"}],"role":"assistant"},"output_index":0,"sequence_number":9}"#,
+                    "",
+                    r#"data: {"type":"response.completed","response":{"id":"resp_051ebd7ab60063870069d4fe8ac1348194bf06d0a4646af05f","object":"response","created_at":1775566475,"status":"completed","model":"gpt-4.1-nano-2025-04-14","output":[{"id":"msg_051ebd7ab60063870069d4fe8c1b7c8194b701e22f1ef094dd","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":"Dummy PDF file"}],"role":"assistant"}],"error":null,"usage":{"input_tokens":44,"input_tokens_details":{"cached_tokens":0},"output_tokens":4,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":48}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-nano");
+
+        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
+                    "What text does this PDF contain?",
+                )),
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Url {
+                        url: Url::parse(
+                            "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
+                        )
+                        .expect("valid URL"),
+                    },
+                    "application/pdf",
+                )),
+            ])),
+        ])));
+
+        let deltas = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) => Some(delta.delta.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(deltas, vec!["Dummy", " PDF", " file"]);
+        assert!(result.stream.iter().any(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::TextEnd(end)
+                    if end.id == "msg_051ebd7ab60063870069d4fe8c1b7c8194b701e22f1ef094dd"
+            )
+        }));
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish part");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(finish.usage.input_tokens.total, Some(44));
+        assert_eq!(finish.usage.input_tokens.no_cache, Some(44));
+        assert_eq!(finish.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(finish.usage.output_tokens.total, Some(4));
+        assert_eq!(finish.usage.output_tokens.text, Some(4));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(0));
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let request_body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-4.1-nano",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "What text does this PDF contain?"
+                            },
+                            {
+                                "type": "input_file",
+                                "file_url": "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf"
+                            }
+                        ]
+                    }
+                ],
+                "stream": true
+            })
+        );
+    }
+
+    #[test]
     fn open_responses_provider_maps_deprecated_file_id_prefixes() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
