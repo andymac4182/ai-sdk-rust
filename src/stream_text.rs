@@ -56,9 +56,10 @@ use crate::text_stream_response::{
     TextStreamResponseWriter, create_text_stream_response, pipe_text_stream_to_response,
 };
 use crate::ui_message_stream::{
-    UiMessageChunk, UiMessageStreamResponse, UiMessageStreamResponseInit,
-    UiMessageStreamResponseOptions, UiMessageStreamResponseWriter,
-    create_ui_message_stream_response, pipe_ui_message_stream_to_response,
+    ResponseUiMessageId, UiMessage, UiMessageChunk, UiMessageStreamResponse,
+    UiMessageStreamResponseInit, UiMessageStreamResponseOptions, UiMessageStreamResponseWriter,
+    create_ui_message_stream_response, get_response_ui_message_id,
+    pipe_ui_message_stream_to_response,
 };
 use crate::warning::Warning;
 
@@ -1384,11 +1385,51 @@ impl fmt::Debug for StreamTextUiMessageErrorHandler {
     }
 }
 
+/// Function used to generate a persisted response UI-message id.
+pub type StreamTextGenerateMessageIdFunction = dyn Fn() -> String + Send + Sync + 'static;
+
+/// Callback wrapper for upstream `toUIMessageStream` `generateMessageId`.
+#[derive(Clone)]
+pub struct StreamTextGenerateMessageId {
+    callback: Arc<StreamTextGenerateMessageIdFunction>,
+}
+
+impl StreamTextGenerateMessageId {
+    /// Creates a response message id generator.
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn() -> String + Send + Sync + 'static,
+    {
+        Self {
+            callback: Arc::new(callback),
+        }
+    }
+
+    /// Generates a response message id.
+    pub fn generate(&self) -> String {
+        (self.callback)()
+    }
+}
+
+impl fmt::Debug for StreamTextGenerateMessageId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StreamTextGenerateMessageId")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Options for converting a [`StreamTextResult`] into UI-message stream chunks.
 #[derive(Clone, Debug)]
 pub struct StreamTextUiMessageStreamOptions {
     /// Optional response message id to include in the stream-start chunk.
     pub message_id: Option<String>,
+
+    /// Original UI messages used to enable persistence-mode id selection.
+    pub original_messages: Option<Vec<UiMessage>>,
+
+    /// Optional response message id generator for persistence mode.
+    pub generate_message_id: Option<StreamTextGenerateMessageId>,
 
     /// Optional callback that emits UI message metadata for matching stream parts.
     pub message_metadata: Option<StreamTextMessageMetadata>,
@@ -1418,6 +1459,24 @@ impl StreamTextUiMessageStreamOptions {
     /// Sets the response message id included in the stream-start chunk.
     pub fn with_message_id(mut self, message_id: impl Into<String>) -> Self {
         self.message_id = Some(message_id.into());
+        self
+    }
+
+    /// Sets the original UI messages used for persistence-mode id selection.
+    pub fn with_original_messages<I>(mut self, original_messages: I) -> Self
+    where
+        I: IntoIterator<Item = UiMessage>,
+    {
+        self.original_messages = Some(original_messages.into_iter().collect());
+        self
+    }
+
+    /// Sets a response message id generator for persistence mode.
+    pub fn with_generate_message_id<F>(mut self, generate_message_id: F) -> Self
+    where
+        F: Fn() -> String + Send + Sync + 'static,
+    {
+        self.generate_message_id = Some(StreamTextGenerateMessageId::new(generate_message_id));
         self
     }
 
@@ -1468,6 +1527,8 @@ impl Default for StreamTextUiMessageStreamOptions {
     fn default() -> Self {
         Self {
             message_id: None,
+            original_messages: None,
+            generate_message_id: None,
             message_metadata: None,
             on_error: None,
             send_reasoning: true,
@@ -1495,12 +1556,13 @@ impl StreamTextResult {
         options: StreamTextUiMessageStreamOptions,
     ) -> Vec<UiMessageChunk> {
         let mut chunks = Vec::new();
+        let response_message_id = stream_text_response_message_id(&options);
 
         for stream_part in &self.parts {
             match stream_part {
                 TextStreamPart::Start(_) => {
                     if options.send_start {
-                        let mut chunk = match &options.message_id {
+                        let mut chunk = match &response_message_id {
                             Some(message_id) => {
                                 UiMessageChunk::start_with_message_id(message_id.clone())
                             }
@@ -1807,6 +1869,26 @@ fn push_stream_text_ui_message_metadata(
     if let Some(message_metadata) = stream_text_ui_message_metadata(options, part) {
         chunks.push(UiMessageChunk::message_metadata(message_metadata));
     }
+}
+
+fn stream_text_response_message_id(options: &StreamTextUiMessageStreamOptions) -> Option<String> {
+    if let Some(message_id) = &options.message_id {
+        return match options.original_messages.as_deref() {
+            Some(original_messages) => get_response_ui_message_id(
+                Some(original_messages),
+                ResponseUiMessageId::id(message_id.clone()),
+            ),
+            None => Some(message_id.clone()),
+        };
+    }
+
+    options.generate_message_id.as_ref().and_then(|generate| {
+        let generate = generate.clone();
+        get_response_ui_message_id(
+            options.original_messages.as_deref(),
+            ResponseUiMessageId::generate(move || generate.generate()),
+        )
+    })
 }
 
 /// Runs a text streaming call against a language model and collects the stream.
@@ -3076,6 +3158,7 @@ mod tests {
     use crate::telemetry::{
         TelemetryEvent, TelemetryEventKind, TelemetryIntegration, TelemetryOptions,
     };
+    use crate::ui_message_stream::UiMessageRole;
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
         let waker = Waker::noop();
@@ -3335,6 +3418,67 @@ mod tests {
                 { "type": "finish-step" }
             ])
         );
+    }
+
+    #[test]
+    fn stream_text_result_ui_message_stream_options_use_persistence_message_ids() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Say hello")],
+        )));
+
+        let continuation = serde_json::to_value(
+            result.to_ui_message_stream_with_options(
+                StreamTextUiMessageStreamOptions::new()
+                    .with_original_messages([
+                        UiMessage::new("user-1", UiMessageRole::User),
+                        UiMessage::new("assistant-existing", UiMessageRole::Assistant),
+                    ])
+                    .with_generate_message_id(|| "generated-new".to_string()),
+            ),
+        )
+        .expect("chunks serialize");
+
+        assert_eq!(
+            continuation[0],
+            json!({ "type": "start", "messageId": "assistant-existing" })
+        );
+
+        let new_response = serde_json::to_value(
+            result.to_ui_message_stream_with_options(
+                StreamTextUiMessageStreamOptions::new()
+                    .with_original_messages([UiMessage::new("user-1", UiMessageRole::User)])
+                    .with_generate_message_id(|| "generated-new".to_string()),
+            ),
+        )
+        .expect("chunks serialize");
+
+        assert_eq!(
+            new_response[0],
+            json!({ "type": "start", "messageId": "generated-new" })
+        );
+
+        let client_generated = serde_json::to_value(
+            result.to_ui_message_stream_with_options(
+                StreamTextUiMessageStreamOptions::new()
+                    .with_generate_message_id(|| "generated-new".to_string()),
+            ),
+        )
+        .expect("chunks serialize");
+
+        assert_eq!(client_generated[0], json!({ "type": "start" }));
     }
 
     #[test]
