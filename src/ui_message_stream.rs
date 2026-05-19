@@ -369,6 +369,13 @@ pub enum UiMessageChunk {
         error_text: String,
     },
 
+    /// Abort notification for a UI-message stream.
+    Abort {
+        /// Optional abort reason supplied by the caller/runtime.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<JsonValue>,
+    },
+
     /// End of a model-call step inside the UI-message stream.
     FinishStep,
 
@@ -842,6 +849,18 @@ impl UiMessageChunk {
         }
     }
 
+    /// Creates a stream-abort UI-message chunk without a reason.
+    pub fn abort() -> Self {
+        Self::Abort { reason: None }
+    }
+
+    /// Creates a stream-abort UI-message chunk with a reason.
+    pub fn abort_with_reason(reason: impl Into<JsonValue>) -> Self {
+        Self::Abort {
+            reason: Some(reason.into()),
+        }
+    }
+
     /// Creates a step-finish UI-message chunk.
     pub fn finish_step() -> Self {
         Self::FinishStep
@@ -926,6 +945,12 @@ pub struct StreamingUiMessageState {
     /// Last finish reason observed for the stream.
     pub finish_reason: Option<FinishReason>,
 
+    /// Whether an abort chunk has been observed.
+    pub aborted: bool,
+
+    /// Abort reason from the most recent abort chunk, when supplied.
+    pub abort_reason: Option<JsonValue>,
+
     active_text_parts: BTreeMap<String, usize>,
     active_reasoning_parts: BTreeMap<String, usize>,
 }
@@ -941,6 +966,8 @@ impl StreamingUiMessageState {
         Self {
             message,
             finish_reason: None,
+            aborted: false,
+            abort_reason: None,
             active_text_parts: BTreeMap::new(),
             active_reasoning_parts: BTreeMap::new(),
         }
@@ -1181,6 +1208,29 @@ Ensure a \"reasoning-start\" chunk is sent before any \"reasoning-end\" chunks."
             UiMessageChunk::Error { error_text } => {
                 if terminate_on_error {
                     return Err(UiMessageStreamProcessError::new("error", "", error_text));
+                }
+            }
+            UiMessageChunk::Abort { reason } => {
+                let active_indices = state
+                    .active_text_parts
+                    .values()
+                    .chain(state.active_reasoning_parts.values())
+                    .copied()
+                    .collect::<Vec<_>>();
+
+                for index in &active_indices {
+                    if let Some(part) = state.message.parts.get_mut(*index) {
+                        set_ui_message_part_state(part, "done");
+                    }
+                }
+
+                state.active_text_parts.clear();
+                state.active_reasoning_parts.clear();
+                state.aborted = true;
+                state.abort_reason = reason;
+
+                if !active_indices.is_empty() {
+                    updates.push(state.message.clone());
                 }
             }
             UiMessageChunk::FinishStep => {
@@ -1934,6 +1984,53 @@ mod tests {
                     ]
                 }
             ])
+        );
+    }
+
+    #[test]
+    fn process_ui_message_stream_accepts_abort_chunks() {
+        let abort = UiMessageChunk::abort_with_reason(json!({ "source": "client" }));
+        assert_eq!(
+            serde_json::to_value(&abort).expect("abort chunk serializes"),
+            json!({
+                "type": "abort",
+                "reason": { "source": "client" }
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<UiMessageChunk>(json!({ "type": "abort" }))
+                .expect("abort chunk deserializes"),
+            UiMessageChunk::abort()
+        );
+
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        let messages = process_ui_message_stream(
+            &mut state,
+            [
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", "partial"),
+                abort,
+            ],
+            false,
+        )
+        .expect("abort chunks process");
+
+        assert!(state.aborted);
+        assert_eq!(state.abort_reason, Some(json!({ "source": "client" })));
+        assert_eq!(
+            serde_json::to_value(messages.last().expect("abort writes final state"))
+                .expect("message serializes"),
+            json!({
+                "id": "msg-123",
+                "role": "assistant",
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": "partial",
+                        "state": "done"
+                    }
+                ]
+            })
         );
     }
 
