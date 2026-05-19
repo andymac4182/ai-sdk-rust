@@ -4037,9 +4037,11 @@ mod tests {
     use ai_sdk_provider::image_model::{ImageModel, ImageModelCallOptions};
     use ai_sdk_provider::json::{JsonObject, JsonValue};
     use ai_sdk_provider::language_model::{
-        FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelMessage,
+        FinishReason, LanguageModel, LanguageModelCallOptions, LanguageModelFunctionTool,
+        LanguageModelMessage, LanguageModelProviderTool, LanguageModelReasoningEffort,
         LanguageModelResponseFormat, LanguageModelSystemMessage, LanguageModelTextPart,
-        LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelTool, LanguageModelToolChoice, LanguageModelUserContentPart,
+        LanguageModelUserMessage,
     };
     use ai_sdk_provider::provider::ProviderOptions;
     use ai_sdk_provider::warning::Warning;
@@ -4742,6 +4744,180 @@ mod tests {
         );
         assert_eq!(messages[1]["role"], "user");
         assert_eq!(messages[1]["content"], "Return an answer.");
+    }
+
+    #[test]
+    fn openai_compatible_chat_passes_tools_tool_choice_and_provider_options() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "ok"
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com")
+                .with_supports_structured_outputs(true),
+        )
+        .with_transport(transport)
+        .chat_model("test-chat-model");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai-compatible": {
+                "user": "deprecated-user",
+                "reasoningEffort": "low"
+            },
+            "openaiCompatible": {
+                "textVerbosity": "low"
+            },
+            "test-provider": {
+                "reasoningEffort": "medium",
+                "someCustomOption": "raw-value",
+                "user": "raw-user"
+            },
+            "testProvider": {
+                "someCustomOption": "camel-value",
+                "strictJsonSchema": false,
+                "user": "camel-user"
+            }
+        }))
+        .expect("provider options deserialize");
+        let input_schema: JsonObject = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "city": {
+                    "type": "string"
+                }
+            },
+            "required": ["city"]
+        }))
+        .expect("schema deserializes");
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Use the weather tool"),
+                    )]),
+                )])
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new("weather", input_schema.clone())
+                        .with_description("Get weather")
+                        .with_strict(false),
+                ))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "gateway.unsupported",
+                    "unsupported",
+                    JsonObject::new(),
+                )))
+                .with_tool_choice(LanguageModelToolChoice::Tool {
+                    tool_name: "weather".to_string(),
+                })
+                .with_reasoning(LanguageModelReasoningEffort::High)
+                .with_response_format(
+                    LanguageModelResponseFormat::json().with_schema(input_schema.clone()),
+                )
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Deprecated { setting, .. }
+                    if setting == "providerOptions key 'openai-compatible'"
+            )
+        }));
+        assert!(result.warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Deprecated { setting, .. }
+                    if setting == "providerOptions key 'test-provider'"
+            )
+        }));
+        assert!(result.warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Unsupported { feature, .. }
+                    if feature == "provider-defined tool gateway.unsupported"
+            )
+        }));
+
+        assert_eq!(
+            captured_request
+                .lock()
+                .expect("captured request mutex is not poisoned")
+                .clone()
+                .expect("request is captured")
+                .body
+                .and_then(|body| body.as_text().map(str::to_string))
+                .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok()),
+            Some(json!({
+                "model": "test-chat-model",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Use the weather tool"
+                    }
+                ],
+                "user": "camel-user",
+                "reasoning_effort": "medium",
+                "verbosity": "low",
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "schema": input_schema,
+                        "strict": false,
+                        "name": "response"
+                    }
+                },
+                "someCustomOption": "camel-value",
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "weather",
+                            "description": "Get weather",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "city": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["city"]
+                            },
+                            "strict": false
+                        }
+                    }
+                ],
+                "tool_choice": {
+                    "type": "function",
+                    "function": {
+                        "name": "weather"
+                    }
+                }
+            }))
+        );
     }
 
     #[test]
