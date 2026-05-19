@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 use ai_sdk_provider::{JsonObject, JsonValue};
 use ai_sdk_provider_utils::convert_bytes_to_base64;
@@ -583,8 +584,50 @@ pub struct StartAuthorizationResult {
     pub code_verifier: String,
 }
 
+/// Mutable token-request state passed to a custom OAuth client-auth hook.
+pub struct OAuthClientAuthenticationContext<'a> {
+    pub headers: &'a mut BTreeMap<String, String>,
+    pub params: &'a mut BTreeMap<String, String>,
+    pub authorization_server_url: &'a str,
+    pub metadata: Option<&'a AuthorizationServerMetadata>,
+}
+
+/// Callback that can override default OAuth token-endpoint client authentication.
+#[derive(Clone)]
+pub struct OAuthClientAuthenticationHook(
+    Arc<
+        dyn for<'a> Fn(OAuthClientAuthenticationContext<'a>) -> McpOAuthResult<()>
+            + Send
+            + Sync
+            + 'static,
+    >,
+);
+
+impl OAuthClientAuthenticationHook {
+    /// Creates a reusable custom client-authentication hook.
+    pub fn new<F>(hook: F) -> Self
+    where
+        F: for<'a> Fn(OAuthClientAuthenticationContext<'a>) -> McpOAuthResult<()>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self(Arc::new(hook))
+    }
+
+    fn apply(&self, context: OAuthClientAuthenticationContext<'_>) -> McpOAuthResult<()> {
+        (self.0)(context)
+    }
+}
+
+impl fmt::Debug for OAuthClientAuthenticationHook {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("OAuthClientAuthenticationHook")
+    }
+}
+
 /// Options for exchanging an OAuth authorization code.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ExchangeAuthorizationOptions {
     pub metadata: Option<AuthorizationServerMetadata>,
     pub client_information: OAuthClientInformation,
@@ -592,6 +635,7 @@ pub struct ExchangeAuthorizationOptions {
     pub code_verifier: String,
     pub redirect_uri: String,
     pub resource: Option<Url>,
+    pub add_client_authentication: Option<OAuthClientAuthenticationHook>,
 }
 
 impl ExchangeAuthorizationOptions {
@@ -609,6 +653,7 @@ impl ExchangeAuthorizationOptions {
             code_verifier: code_verifier.into(),
             redirect_uri: redirect_uri.into(),
             resource: None,
+            add_client_authentication: None,
         }
     }
 
@@ -623,15 +668,40 @@ impl ExchangeAuthorizationOptions {
         self.resource = Some(resource);
         self
     }
+
+    /// Sets a custom client-authentication hook for token exchange requests.
+    pub fn with_client_authentication<F>(mut self, hook: F) -> Self
+    where
+        F: for<'a> Fn(OAuthClientAuthenticationContext<'a>) -> McpOAuthResult<()>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.add_client_authentication = Some(OAuthClientAuthenticationHook::new(hook));
+        self
+    }
+}
+
+impl PartialEq for ExchangeAuthorizationOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.metadata == other.metadata
+            && self.client_information == other.client_information
+            && self.authorization_code == other.authorization_code
+            && self.code_verifier == other.code_verifier
+            && self.redirect_uri == other.redirect_uri
+            && self.resource == other.resource
+            && self.add_client_authentication.is_some() == other.add_client_authentication.is_some()
+    }
 }
 
 /// Options for refreshing OAuth tokens.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct RefreshAuthorizationOptions {
     pub metadata: Option<AuthorizationServerMetadata>,
     pub client_information: OAuthClientInformation,
     pub refresh_token: String,
     pub resource: Option<Url>,
+    pub add_client_authentication: Option<OAuthClientAuthenticationHook>,
 }
 
 impl RefreshAuthorizationOptions {
@@ -645,6 +715,7 @@ impl RefreshAuthorizationOptions {
             client_information,
             refresh_token: refresh_token.into(),
             resource: None,
+            add_client_authentication: None,
         }
     }
 
@@ -658,6 +729,28 @@ impl RefreshAuthorizationOptions {
     pub fn with_resource(mut self, resource: Url) -> Self {
         self.resource = Some(resource);
         self
+    }
+
+    /// Sets a custom client-authentication hook for refresh-token requests.
+    pub fn with_client_authentication<F>(mut self, hook: F) -> Self
+    where
+        F: for<'a> Fn(OAuthClientAuthenticationContext<'a>) -> McpOAuthResult<()>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.add_client_authentication = Some(OAuthClientAuthenticationHook::new(hook));
+        self
+    }
+}
+
+impl PartialEq for RefreshAuthorizationOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.metadata == other.metadata
+            && self.client_information == other.client_information
+            && self.refresh_token == other.refresh_token
+            && self.resource == other.resource
+            && self.add_client_authentication.is_some() == other.add_client_authentication.is_some()
     }
 }
 
@@ -1048,15 +1141,24 @@ pub fn exchange_authorization(
         ("redirect_uri".to_string(), options.redirect_uri),
     ]);
     let mut headers = token_request_headers();
-    apply_client_authentication(
-        select_client_auth_method(
+    if let Some(add_client_authentication) = &options.add_client_authentication {
+        add_client_authentication.apply(OAuthClientAuthenticationContext {
+            headers: &mut headers,
+            params: &mut params,
+            authorization_server_url: authorization_server_url.as_ref(),
+            metadata: options.metadata.as_ref(),
+        })?;
+    } else {
+        apply_client_authentication(
+            select_client_auth_method(
+                &options.client_information,
+                supported_auth_methods(options.metadata.as_ref()),
+            ),
             &options.client_information,
-            supported_auth_methods(options.metadata.as_ref()),
-        ),
-        &options.client_information,
-        &mut headers,
-        &mut params,
-    )?;
+            &mut headers,
+            &mut params,
+        )?;
+    }
     if let Some(resource) = &options.resource {
         params.insert("resource".to_string(), resource_url_strip_slash(resource));
     }
@@ -1089,15 +1191,24 @@ pub fn refresh_authorization(
         ("refresh_token".to_string(), options.refresh_token),
     ]);
     let mut headers = token_request_headers();
-    apply_client_authentication(
-        select_client_auth_method(
+    if let Some(add_client_authentication) = &options.add_client_authentication {
+        add_client_authentication.apply(OAuthClientAuthenticationContext {
+            headers: &mut headers,
+            params: &mut params,
+            authorization_server_url: authorization_server_url.as_ref(),
+            metadata: options.metadata.as_ref(),
+        })?;
+    } else {
+        apply_client_authentication(
+            select_client_auth_method(
+                &options.client_information,
+                supported_auth_methods(options.metadata.as_ref()),
+            ),
             &options.client_information,
-            supported_auth_methods(options.metadata.as_ref()),
-        ),
-        &options.client_information,
-        &mut headers,
-        &mut params,
-    )?;
+            &mut headers,
+            &mut params,
+        )?;
+    }
     if let Some(resource) = &options.resource {
         params.insert("resource".to_string(), resource_url_strip_slash(resource));
     }
@@ -2254,6 +2365,71 @@ mod tests {
     }
 
     #[test]
+    fn exchange_authorization_allows_custom_client_authentication_hook() {
+        let server = LocalOAuthServer::new(vec![LocalOAuthResponse::json(json!({
+            "access_token": "access123",
+            "token_type": "Bearer"
+        }))]);
+        let metadata = oauth_metadata().with_token_endpoint(format!("{}/token", server.url()));
+
+        let tokens = exchange_authorization(
+            "https://auth.example.com",
+            ExchangeAuthorizationOptions::new(
+                OAuthClientInformation::new("client123").with_client_secret("secret123"),
+                "code123",
+                "verifier123",
+                "http://localhost:3000/callback",
+            )
+            .with_metadata(metadata)
+            .with_client_authentication(|context| {
+                context.headers.insert(
+                    "Authorization".to_string(),
+                    "Basic Y2xpZW50MTIzOnNlY3JldDEyMw==".to_string(),
+                );
+                context.params.insert(
+                    "example_url".to_string(),
+                    context.authorization_server_url.to_string(),
+                );
+                context.params.insert(
+                    "example_metadata".to_string(),
+                    context
+                        .metadata
+                        .map(AuthorizationServerMetadata::authorization_endpoint)
+                        .unwrap_or("?")
+                        .to_string(),
+                );
+                context
+                    .params
+                    .insert("example_param".to_string(), "example_value".to_string());
+                Ok(())
+            }),
+        )
+        .expect("authorization code exchanges with custom auth");
+
+        assert_eq!(tokens.access_token, "access123");
+        let requests = server.requests();
+        assert_eq!(
+            requests[0].headers.get("authorization"),
+            Some(&"Basic Y2xpZW50MTIzOnNlY3JldDEyMw==".to_string())
+        );
+        let body = form_body(&requests[0].body);
+        assert_eq!(body.get("client_id"), None);
+        assert_eq!(body.get("client_secret"), None);
+        assert_eq!(
+            body.get("example_url").map(String::as_str),
+            Some("https://auth.example.com")
+        );
+        assert_eq!(
+            body.get("example_metadata").map(String::as_str),
+            Some("https://auth.example.com/authorize")
+        );
+        assert_eq!(
+            body.get("example_param").map(String::as_str),
+            Some("example_value")
+        );
+    }
+
+    #[test]
     fn exchange_authorization_validates_grant_type_and_token_response() {
         let grant_error = exchange_authorization(
             "https://auth.example.com",
@@ -2352,6 +2528,71 @@ mod tests {
 
         assert_eq!(error.message, "Token refresh failed");
         assert_eq!(error.error_code.as_deref(), Some("server_error"));
+    }
+
+    #[test]
+    fn refresh_authorization_allows_custom_client_authentication_hook() {
+        let server = LocalOAuthServer::new(vec![LocalOAuthResponse::json(json!({
+            "access_token": "newaccess123",
+            "token_type": "Bearer",
+            "refresh_token": "newrefresh123"
+        }))]);
+        let metadata = oauth_metadata().with_token_endpoint(format!("{}/token", server.url()));
+
+        let tokens = refresh_authorization(
+            "https://auth.example.com",
+            RefreshAuthorizationOptions::new(
+                OAuthClientInformation::new("client123").with_client_secret("secret123"),
+                "refresh123",
+            )
+            .with_metadata(metadata)
+            .with_client_authentication(|context| {
+                context.headers.insert(
+                    "Authorization".to_string(),
+                    "Basic Y2xpZW50MTIzOnNlY3JldDEyMw==".to_string(),
+                );
+                context.params.insert(
+                    "example_url".to_string(),
+                    context.authorization_server_url.to_string(),
+                );
+                context.params.insert(
+                    "example_metadata".to_string(),
+                    context
+                        .metadata
+                        .map(AuthorizationServerMetadata::authorization_endpoint)
+                        .unwrap_or("?")
+                        .to_string(),
+                );
+                context
+                    .params
+                    .insert("example_param".to_string(), "example_value".to_string());
+                Ok(())
+            }),
+        )
+        .expect("refresh exchanges with custom auth");
+
+        assert_eq!(tokens.access_token, "newaccess123");
+        assert_eq!(tokens.refresh_token.as_deref(), Some("newrefresh123"));
+        let requests = server.requests();
+        assert_eq!(
+            requests[0].headers.get("authorization"),
+            Some(&"Basic Y2xpZW50MTIzOnNlY3JldDEyMw==".to_string())
+        );
+        let body = form_body(&requests[0].body);
+        assert_eq!(body.get("client_id"), None);
+        assert_eq!(body.get("client_secret"), None);
+        assert_eq!(
+            body.get("example_url").map(String::as_str),
+            Some("https://auth.example.com")
+        );
+        assert_eq!(
+            body.get("example_metadata").map(String::as_str),
+            Some("https://auth.example.com/authorize")
+        );
+        assert_eq!(
+            body.get("example_param").map(String::as_str),
+            Some("example_value")
+        );
     }
 
     #[test]

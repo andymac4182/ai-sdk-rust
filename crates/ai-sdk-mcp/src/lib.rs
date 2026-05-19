@@ -24,8 +24,9 @@ use ai_sdk_provider_utils::{
 pub use oauth::{
     AuthorizationServerMetadata, AuthorizationServerMetadataDiscoveryOptions,
     DiscoveryMetadataType, DiscoveryUrl, ExchangeAuthorizationOptions, McpOAuthError,
-    McpOAuthResult, OAuthClientInformation, OAuthClientInformationFull, OAuthClientMetadata,
-    OAuthErrorResponse, OAuthMetadata, OAuthPkceChallenge, OAuthProtectedResourceMetadata,
+    McpOAuthResult, OAuthClientAuthenticationContext, OAuthClientAuthenticationHook,
+    OAuthClientInformation, OAuthClientInformationFull, OAuthClientMetadata, OAuthErrorResponse,
+    OAuthMetadata, OAuthPkceChallenge, OAuthProtectedResourceMetadata,
     OAuthProtectedResourceMetadataDiscoveryOptions, OAuthTokens, OpenIdProviderDiscoveryMetadata,
     RefreshAuthorizationOptions, RegisterClientOptions, StartAuthorizationOptions,
     StartAuthorizationResult, build_discovery_urls, check_resource_allowed,
