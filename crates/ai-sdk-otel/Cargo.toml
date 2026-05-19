@@ -18,8 +18,19 @@ unsafe_code = "forbid"
 [lints.clippy]
 all = "warn"
 
+[features]
+default = []
+real-opentelemetry = [
+    "dep:opentelemetry",
+    "dep:opentelemetry-otlp",
+    "dep:opentelemetry_sdk",
+]
+
 [dependencies]
 ai-sdk-provider = { path = "../ai-sdk-provider" }
 ai-sdk-provider-utils = { path = "../ai-sdk-provider-utils" }
+opentelemetry = { version = "0.32.0", default-features = false, features = ["trace"], optional = true }
+opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-json", "reqwest-blocking-client", "trace"], optional = true }
+opentelemetry_sdk = { version = "0.32.0", default-features = false, features = ["trace"], optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
