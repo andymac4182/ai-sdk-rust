@@ -45,6 +45,7 @@ mod tests {
     use crate::stream_text::{StreamTextOptions, stream_text};
     use crate::telemetry::{TelemetryOptions, create_open_telemetry_integration};
     use crate::warning::Warning;
+    use ai_sdk_mcp::{McpClientConfig, MockMcpTransport, create_mcp_client};
     use serde_json::json;
     use std::env;
     use std::fs;
@@ -913,6 +914,163 @@ mod tests {
                     }
                 ]
             })
+        );
+    }
+
+    #[test]
+    fn vercel_ai_gateway_openai_compatible_runs_generate_text_with_mcp_tools() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let captured_requests_for_transport = Arc::clone(&captured_requests);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                let call_number = {
+                    let mut requests = captured_requests_for_transport
+                        .lock()
+                        .expect("captured requests mutex is not poisoned");
+                    requests.push(request.clone());
+                    requests.len()
+                };
+
+                let response = match call_number {
+                    1 => json!({
+                        "id": "chatcmpl-gateway-mcp-tool-loop-1",
+                        "model": "openai/gpt-4.1-mini",
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "content": null,
+                                    "tool_calls": [
+                                        {
+                                            "id": "call_mcp_1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "mock-tool",
+                                                "arguments": "{\"foo\":\"bar\"}"
+                                            }
+                                        }
+                                    ]
+                                },
+                                "finish_reason": "tool_calls"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 8,
+                            "completion_tokens": 4
+                        }
+                    }),
+                    2 => json!({
+                        "id": "chatcmpl-gateway-mcp-tool-loop-2",
+                        "model": "openai/gpt-4.1-mini",
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "The MCP tool returned Mock tool call result."
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 14,
+                            "completion_tokens": 8
+                        }
+                    }),
+                    other => panic!("unexpected request #{other}"),
+                };
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    response.to_string(),
+                ))))
+            });
+        let provider = create_vercel_ai_gateway_openai_compatible(
+            VercelAiGatewayOpenAICompatibleSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://ai-gateway.test/v1"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("openai/gpt-4.1-mini");
+        let client = create_mcp_client(
+            McpClientConfig::new(MockMcpTransport::new())
+                .with_client_name("gateway-mcp-test-client"),
+        )
+        .expect("MCP client initializes");
+        let mcp_tools = client.tools().expect("MCP tools build");
+
+        let mut options =
+            GenerateTextOptions::from_prompt(&model, Prompt::from_prompt("Use the MCP mock tool."))
+                .expect("prompt is valid")
+                .with_active_tools(["mock-tool"])
+                .with_max_steps(2);
+        for tool in mcp_tools.into_values() {
+            options = options.with_tool(tool);
+        }
+        let result = poll_ready(generate_text(options));
+
+        assert_eq!(result.text, "The MCP tool returned Mock tool call result.");
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool_name, "mock-tool");
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(
+            result.tool_results[0].output["content"][0]["text"],
+            "Mock tool call result"
+        );
+        assert_eq!(
+            result.tool_results[0]
+                .tool_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("clientName"))
+                .and_then(JsonValue::as_str),
+            Some("gateway-mcp-test-client")
+        );
+        client.close().expect("MCP client closes");
+
+        let requests = captured_requests
+            .lock()
+            .expect("captured requests mutex is not poisoned")
+            .clone();
+        let request_bodies = requests
+            .iter()
+            .map(|request| {
+                request
+                    .body
+                    .as_ref()
+                    .and_then(ProviderApiRequestBody::as_text)
+                    .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+                    .expect("request body is JSON")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(request_bodies.len(), 2);
+        assert_eq!(
+            request_bodies[0]["tools"]
+                .as_array()
+                .expect("tools are serialized")
+                .len(),
+            1
+        );
+        assert_eq!(
+            request_bodies[0]["tools"][0]["function"]["name"],
+            "mock-tool"
+        );
+        assert_eq!(
+            request_bodies[0]["tools"][0]["function"]["description"],
+            "A mock tool for testing"
+        );
+        assert!(
+            request_bodies[1]["messages"]
+                .as_array()
+                .expect("messages are serialized")
+                .iter()
+                .any(|message| {
+                    message["role"] == "tool"
+                        && message["tool_call_id"] == "call_mcp_1"
+                        && message["content"]
+                            .as_str()
+                            .is_some_and(|content| content.contains("Mock tool call result"))
+                })
         );
     }
 
@@ -4514,6 +4672,68 @@ mod tests {
             text.contains("brisbane") && text.contains("sunny"),
             "Gateway OpenAI-compatible tool-loop response did not include the expected tool result"
         );
+    }
+
+    #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI-compatible MCP tool-loop model call"]
+    fn live_vercel_ai_gateway_openai_compatible_generate_text_mcp_tool_loop() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!(
+                "skipping live Gateway OpenAI-compatible MCP tool-loop test because no API key is configured"
+            );
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_AI_GATEWAY_OPENAI_COMPATIBLE_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_OPENAI_COMPATIBLE_MODEL"))
+            .or_else(|_| env::var("AI_SDK_RUST_GATEWAY_MODEL"))
+            .or_else(|_| env::var("AI_GATEWAY_MODEL"))
+            .unwrap_or_else(|_| "openai/gpt-4.1-mini".to_string());
+        let model = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key(api_key)
+            .language_model(model_id);
+        let client = create_mcp_client(
+            McpClientConfig::new(MockMcpTransport::new())
+                .with_client_name("live-gateway-mcp-test-client"),
+        )
+        .expect("MCP client initializes");
+        let mcp_tools = client.tools().expect("MCP tools build");
+
+        let mut options = GenerateTextOptions::from_prompt(
+            &model,
+            Prompt::from_prompt(
+                "Call the mock-tool MCP tool with foo set to bar, then reply with one short sentence about the tool result.",
+            ),
+        )
+        .expect("prompt is valid")
+        .with_active_tools(["mock-tool"])
+        .with_prepare_step(|options| async move {
+            if options.step_number == 0 {
+                PrepareStepResult::new().with_tool_choice(LanguageModelToolChoice::Tool {
+                    tool_name: "mock-tool".to_string(),
+                })
+            } else {
+                PrepareStepResult::new()
+            }
+        })
+        .with_max_steps(2)
+        .with_max_output_tokens(56)
+        .with_temperature(0.0);
+        for tool in mcp_tools.into_values() {
+            options = options.with_tool(tool);
+        }
+
+        let result = poll_ready(generate_text(options));
+
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool_name, "mock-tool");
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(
+            result.tool_results[0].output["content"][0]["text"],
+            "Mock tool call result"
+        );
+        assert!(!result.text.trim().is_empty());
+        client.close().expect("MCP client closes");
     }
 
     #[test]
