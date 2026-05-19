@@ -47,6 +47,7 @@ use crate::provider::{InvalidPromptError, ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{
     ExperimentalSandbox, Tool, prepare_tools_with_context, with_user_agent_suffix,
 };
+use crate::telemetry::{TelemetryOptions, create_telemetry_dispatcher};
 use crate::text_stream_response::{
     TextStreamResponse, TextStreamResponseInit, TextStreamResponseOptions,
     TextStreamResponseWriter, create_text_stream_response, pipe_text_stream_to_response,
@@ -633,6 +634,9 @@ pub struct StreamTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Optional callback invoked after the full streamed generation result is complete.
     pub on_finish: Option<GenerateTextOnFinish<'a>>,
 
+    /// Optional telemetry dispatcher settings.
+    pub telemetry: Option<TelemetryOptions>,
+
     /// Optional callback invoked for portable stream chunks.
     pub on_chunk: Option<StreamTextOnChunk<'a>>,
 
@@ -668,6 +672,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             on_tool_execution_end: None,
             on_step_finish: None,
             on_finish: None,
+            telemetry: None,
             on_chunk: None,
             on_error: None,
             max_steps: 1,
@@ -702,6 +707,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             on_tool_execution_end: None,
             on_step_finish: None,
             on_finish: None,
+            telemetry: None,
             on_chunk: None,
             on_error: None,
             max_steps: 1,
@@ -962,6 +968,12 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
         Fut: Future<Output = ()> + 'a,
     {
         self.on_finish = Some(GenerateTextOnFinish::new(on_finish));
+        self
+    }
+
+    /// Sets telemetry options for this streaming generation.
+    pub fn with_telemetry(mut self, telemetry: TelemetryOptions) -> Self {
+        self.telemetry = Some(telemetry);
         self
     }
 
@@ -1400,11 +1412,13 @@ where
         on_tool_execution_end,
         on_step_finish,
         on_finish,
+        telemetry,
         on_chunk,
         on_error,
         max_steps,
         stop_conditions,
     } = options;
+    let telemetry_dispatcher = create_telemetry_dispatcher(telemetry);
     let include_raw_chunks = call_options.include_raw_chunks.unwrap_or(false);
     let mut parts = vec![TextStreamPart::Start(TextStreamStartPart::new())];
     let base_language_model_tools = call_options.tools.take();
@@ -1418,7 +1432,7 @@ where
     let mut generate_steps = Vec::new();
     let mut pending_deferred_provider_tool_call_ids = BTreeSet::new();
 
-    if let Some(on_start) = &on_start {
+    if on_start.is_some() || telemetry_dispatcher.is_enabled() {
         let mut start_tools = base_language_model_tools.clone().unwrap_or_default();
         if let Some(mut prepared_tools) =
             prepare_tools_with_context(&tools, Some(&tools_context), experimental_sandbox.as_ref())
@@ -1426,31 +1440,33 @@ where
             start_tools.append(&mut prepared_tools);
         }
 
-        on_start
-            .start(GenerateTextStartEvent {
-                call_id: call_id.clone(),
-                operation_id: "ai.streamText".to_string(),
-                provider: model.provider().to_string(),
-                model_id: model.model_id().to_string(),
-                messages: initial_messages.clone(),
-                tools: start_tools,
-                tool_choice: call_options.tool_choice.clone(),
-                active_tools: active_tools_for_start,
-                max_output_tokens: call_options.max_output_tokens,
-                temperature: call_options.temperature,
-                top_p: call_options.top_p,
-                top_k: call_options.top_k,
-                presence_penalty: call_options.presence_penalty,
-                frequency_penalty: call_options.frequency_penalty,
-                stop_sequences: call_options.stop_sequences.clone(),
-                seed: call_options.seed,
-                reasoning: call_options.reasoning.clone(),
-                headers: call_options.headers.clone(),
-                provider_options: call_options.provider_options.clone(),
-                runtime_context: runtime_context.clone(),
-                tools_context: tools_context.clone(),
-            })
-            .await;
+        let start_event = GenerateTextStartEvent {
+            call_id: call_id.clone(),
+            operation_id: "ai.streamText".to_string(),
+            provider: model.provider().to_string(),
+            model_id: model.model_id().to_string(),
+            messages: initial_messages.clone(),
+            tools: start_tools,
+            tool_choice: call_options.tool_choice.clone(),
+            active_tools: active_tools_for_start,
+            max_output_tokens: call_options.max_output_tokens,
+            temperature: call_options.temperature,
+            top_p: call_options.top_p,
+            top_k: call_options.top_k,
+            presence_penalty: call_options.presence_penalty,
+            frequency_penalty: call_options.frequency_penalty,
+            stop_sequences: call_options.stop_sequences.clone(),
+            seed: call_options.seed,
+            reasoning: call_options.reasoning.clone(),
+            headers: call_options.headers.clone(),
+            provider_options: call_options.provider_options.clone(),
+            runtime_context: runtime_context.clone(),
+            tools_context: tools_context.clone(),
+        };
+        if let Some(on_start) = &on_start {
+            on_start.start(start_event.clone()).await;
+        }
+        telemetry_dispatcher.on_start(&start_event);
     }
 
     for step_number in 0..max_steps {
@@ -1476,34 +1492,40 @@ where
         step_call_options.tools = step_language_model_tools;
         append_stream_text_user_agent(&mut step_call_options);
 
-        if let Some(on_step_start) = &on_step_start {
-            on_step_start
-                .start(GenerateTextStepStartEvent {
-                    call_id: call_id.clone(),
-                    provider: model.provider().to_string(),
-                    model_id: model.model_id().to_string(),
-                    step_number,
-                    messages: step_prompt.clone(),
-                    tools: step_call_options.tools.clone().unwrap_or_default(),
-                    tool_choice: step_call_options.tool_choice.clone(),
-                    active_tools: active_tools.map(|tools| tools.to_vec()),
-                    steps: generate_steps.clone(),
-                    provider_options: step_call_options.provider_options.clone(),
-                    runtime_context: runtime_context.clone(),
-                    tools_context: tools_context.clone(),
-                })
-                .await;
+        if on_step_start.is_some() || telemetry_dispatcher.is_enabled() {
+            let step_start_event = GenerateTextStepStartEvent {
+                call_id: call_id.clone(),
+                provider: model.provider().to_string(),
+                model_id: model.model_id().to_string(),
+                step_number,
+                messages: step_prompt.clone(),
+                tools: step_call_options.tools.clone().unwrap_or_default(),
+                tool_choice: step_call_options.tool_choice.clone(),
+                active_tools: active_tools.map(|tools| tools.to_vec()),
+                steps: generate_steps.clone(),
+                provider_options: step_call_options.provider_options.clone(),
+                runtime_context: runtime_context.clone(),
+                tools_context: tools_context.clone(),
+            };
+            if let Some(on_step_start) = &on_step_start {
+                on_step_start.start(step_start_event.clone()).await;
+            }
+            telemetry_dispatcher.on_step_start(&step_start_event);
         }
 
-        if let Some(on_language_model_call_start) = &on_language_model_call_start {
-            on_language_model_call_start
-                .start(LanguageModelCallStartEvent::from_call_options(
-                    &call_id,
-                    model.provider(),
-                    model.model_id(),
-                    &step_call_options,
-                ))
-                .await;
+        if on_language_model_call_start.is_some() || telemetry_dispatcher.is_enabled() {
+            let language_model_call_start_event = LanguageModelCallStartEvent::from_call_options(
+                &call_id,
+                model.provider(),
+                model.model_id(),
+                &step_call_options,
+            );
+            if let Some(on_language_model_call_start) = &on_language_model_call_start {
+                on_language_model_call_start
+                    .start(language_model_call_start_event.clone())
+                    .await;
+            }
+            telemetry_dispatcher.on_language_model_call_start(&language_model_call_start_event);
         }
 
         let model_call_started_at = Instant::now();
@@ -1557,13 +1579,15 @@ where
         );
         apply_generate_text_response_metadata(&mut generate_step);
 
-        if let Some(on_language_model_call_end) = &on_language_model_call_end {
-            on_language_model_call_end
-                .end(LanguageModelCallEndEvent::from_step(
-                    &generate_step,
-                    response_time_ms,
-                ))
-                .await;
+        if on_language_model_call_end.is_some() || telemetry_dispatcher.is_enabled() {
+            let language_model_call_end_event =
+                LanguageModelCallEndEvent::from_step(&generate_step, response_time_ms);
+            if let Some(on_language_model_call_end) = &on_language_model_call_end {
+                on_language_model_call_end
+                    .end(language_model_call_end_event.clone())
+                    .await;
+            }
+            telemetry_dispatcher.on_language_model_call_end(&language_model_call_end_event);
         }
 
         let tool_approvals = resolve_tool_approvals_for_step(
@@ -1608,7 +1632,7 @@ where
                 experimental_sandbox.as_ref(),
                 on_tool_execution_start.as_ref(),
                 on_tool_execution_end.as_ref(),
-                None,
+                Some(&telemetry_dispatcher),
             ),
         )
         .await;
@@ -1676,6 +1700,7 @@ where
         if let Some(on_step_finish) = &on_step_finish {
             on_step_finish.finish(generate_step.clone()).await;
         }
+        telemetry_dispatcher.on_step_finish(&generate_step);
 
         stream_steps.push(collected_step.into_stream_text_step());
         generate_steps.push(generate_step);
@@ -1705,10 +1730,12 @@ where
         total_usage.clone(),
     )));
 
-    if let Some(on_finish) = &on_finish {
-        on_finish
-            .finish(GenerateTextFinishEvent::from_steps(&[], &generate_steps))
-            .await;
+    if on_finish.is_some() || telemetry_dispatcher.is_enabled() {
+        let finish_event = GenerateTextFinishEvent::from_steps(&[], &generate_steps);
+        if let Some(on_finish) = &on_finish {
+            on_finish.finish(finish_event.clone()).await;
+        }
+        telemetry_dispatcher.on_end(&finish_event);
     }
 
     StreamTextResult {
@@ -2314,6 +2341,9 @@ mod tests {
     use crate::mock_models::MockLanguageModel;
     use crate::prompt::Prompt;
     use crate::provider_utils::Tool;
+    use crate::telemetry::{
+        TelemetryEvent, TelemetryEventKind, TelemetryIntegration, TelemetryOptions,
+    };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
         let waker = Waker::noop();
@@ -3362,6 +3392,149 @@ mod tests {
                 "on-step-finish",
                 "on-finish"
             ]
+        );
+    }
+
+    #[test]
+    fn stream_text_dispatches_telemetry_lifecycle_events() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let events = Arc::new(Mutex::new(Vec::<TelemetryEvent>::new()));
+        let mut integration = TelemetryIntegration::new();
+        for kind in [
+            TelemetryEventKind::OnStart,
+            TelemetryEventKind::OnStepStart,
+            TelemetryEventKind::OnLanguageModelCallStart,
+            TelemetryEventKind::OnLanguageModelCallEnd,
+            TelemetryEventKind::OnStepFinish,
+            TelemetryEventKind::OnEnd,
+        ] {
+            let captured = Arc::clone(&events);
+            integration = integration.with_callback(kind, move |event| {
+                captured.lock().expect("telemetry event lock").push(event);
+            });
+        }
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")]).with_telemetry(
+                TelemetryOptions::new()
+                    .with_function_id("stream-text-test")
+                    .with_record_inputs(false)
+                    .with_record_outputs(true)
+                    .with_integration(integration),
+            ),
+        ));
+
+        assert_eq!(result.text, "Hello");
+        let events = events.lock().expect("telemetry event lock");
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![
+                TelemetryEventKind::OnStart,
+                TelemetryEventKind::OnStepStart,
+                TelemetryEventKind::OnLanguageModelCallStart,
+                TelemetryEventKind::OnLanguageModelCallEnd,
+                TelemetryEventKind::OnStepFinish,
+                TelemetryEventKind::OnEnd,
+            ]
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.function_id.as_deref() == Some("stream-text-test"))
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.record_inputs == Some(false))
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.record_outputs == Some(true))
+        );
+        assert_eq!(events[0].event["operationId"], json!("ai.streamText"));
+        assert_eq!(events[0].event["provider"], json!("mock-provider"));
+        assert_eq!(events[5].event["text"], json!("Hello"));
+    }
+
+    #[test]
+    fn stream_text_dispatches_tool_execution_telemetry_events() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "weather",
+                    r#"{"city":"Brisbane"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let events = Arc::new(Mutex::new(Vec::<TelemetryEvent>::new()));
+        let tool_start_events = Arc::clone(&events);
+        let tool_end_events = Arc::clone(&events);
+        let integration = TelemetryIntegration::new()
+            .with_callback(TelemetryEventKind::OnToolExecutionStart, move |event| {
+                tool_start_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push(event);
+            })
+            .with_callback(TelemetryEventKind::OnToolExecutionEnd, move |event| {
+                tool_end_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push(event);
+            });
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    |input, _options| async move {
+                        Ok(json!({
+                            "city": input["city"],
+                            "forecast": "sunny"
+                        }))
+                    },
+                ))
+                .with_telemetry(
+                    TelemetryOptions::new()
+                        .with_function_id("stream-tool-telemetry")
+                        .with_integration(integration),
+                ),
+        ));
+
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].output["forecast"], "sunny");
+        let events = events.lock().expect("telemetry event lock");
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![
+                TelemetryEventKind::OnToolExecutionStart,
+                TelemetryEventKind::OnToolExecutionEnd,
+            ]
+        );
+        assert_eq!(events[0].event["toolCall"]["toolName"], json!("weather"));
+        assert_eq!(events[1].event["toolCall"]["toolCallId"], json!("call-1"));
+        assert!(events[1].event["toolExecutionMs"].is_number());
+        assert!(
+            events
+                .iter()
+                .all(|event| event.function_id.as_deref() == Some("stream-tool-telemetry"))
         );
     }
 
