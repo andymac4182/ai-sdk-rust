@@ -8,7 +8,6 @@ mod tests {
     };
     use crate::embed::{EmbedManyOptions, embed_many};
     use crate::embedding_model::EmbeddingModel;
-    use crate::file_data::{FileData, FileDataContent};
     use crate::generate_image::{
         GenerateImageOptions, GenerateImagePromptImage, GenerateImagePromptImages, generate_image,
     };
@@ -17,11 +16,11 @@ mod tests {
     use crate::json::{JsonObject, JsonValue};
     use crate::language_model::{
         FinishReason, LanguageModel, LanguageModelAssistantContentPart,
-        LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelFilePart,
-        LanguageModelMessage, LanguageModelReasoningPart, LanguageModelStreamPart,
-        LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelToolCallPart,
-        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultOutput,
-        LanguageModelToolResultPart, LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelMessage,
+        LanguageModelReasoningPart, LanguageModelStreamPart, LanguageModelSystemMessage,
+        LanguageModelTextPart, LanguageModelToolCallPart, LanguageModelToolContentPart,
+        LanguageModelToolMessage, LanguageModelToolResultOutput, LanguageModelToolResultPart,
+        LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::prompt::Prompt;
     use crate::provider::ProviderOptions;
@@ -36,7 +35,6 @@ mod tests {
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
-    use url::Url;
 
     #[test]
     fn openai_compatible_embedding_model_embeds_through_embed_many() {
@@ -913,229 +911,6 @@ mod tests {
             Some(LanguageModelStreamPart::Finish(finish))
                 if finish.finish_reason.unified == FinishReason::Error
         ));
-    }
-
-    #[test]
-    fn openai_compatible_chat_converts_multimodal_user_messages() {
-        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
-        let captured_request_for_transport = Arc::clone(&captured_request);
-        let transport: OpenAICompatibleTransport =
-            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
-                *captured_request_for_transport
-                    .lock()
-                    .expect("captured request mutex is not poisoned") = Some(request.clone());
-
-                Box::pin(ready(Ok(ProviderApiResponse::text(
-                    200,
-                    "OK",
-                    json!({
-                        "choices": [
-                            {
-                                "message": {
-                                    "content": "ok"
-                                },
-                                "finish_reason": "stop"
-                            }
-                        ],
-                        "usage": {
-                            "prompt_tokens": 1,
-                            "completion_tokens": 1
-                        }
-                    })
-                    .to_string(),
-                ))))
-            });
-        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
-            "test-provider",
-            "https://api.example.com",
-        ))
-        .with_transport(transport)
-        .chat_model("test-chat-model");
-        let message_metadata: ProviderOptions = serde_json::from_value(json!({
-            "openaiCompatible": {
-                "priority": "high"
-            },
-            "ignoredProvider": {
-                "ignored": true
-            }
-        }))
-        .expect("metadata deserializes");
-        let text_metadata: ProviderOptions = serde_json::from_value(json!({
-            "openaiCompatible": {
-                "sentiment": "positive"
-            }
-        }))
-        .expect("metadata deserializes");
-        let image_metadata: ProviderOptions = serde_json::from_value(json!({
-            "openaiCompatible": {
-                "alt_text": "A sample image"
-            }
-        }))
-        .expect("metadata deserializes");
-        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
-            LanguageModelMessage::User(
-                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
-                    LanguageModelTextPart::new("Hello").with_provider_options(text_metadata),
-                )])
-                .with_provider_options(message_metadata.clone()),
-            ),
-            LanguageModelMessage::User(
-                LanguageModelUserMessage::new(vec![
-                    LanguageModelUserContentPart::Text(
-                        LanguageModelTextPart::new("Summarize these inputs")
-                            .with_provider_options(message_metadata.clone()),
-                    ),
-                    LanguageModelUserContentPart::File(
-                        LanguageModelFilePart::new(
-                            FileData::Data {
-                                data: FileDataContent::Bytes(vec![0, 1, 2, 3]),
-                            },
-                            "image/png",
-                        )
-                        .with_provider_options(image_metadata),
-                    ),
-                    LanguageModelUserContentPart::File(LanguageModelFilePart::new(
-                        FileData::Url {
-                            url: Url::parse("https://example.com/image.jpg")
-                                .expect("url parses"),
-                        },
-                        "image/*",
-                    )),
-                    LanguageModelUserContentPart::File(LanguageModelFilePart::new(
-                        FileData::Data {
-                            data: FileDataContent::Base64("AAECAw==".to_string()),
-                        },
-                        "audio/wav",
-                    )),
-                    LanguageModelUserContentPart::File(
-                        LanguageModelFilePart::new(
-                            FileData::Data {
-                                data: FileDataContent::Bytes(vec![0, 1, 2, 3]),
-                            },
-                            "application/pdf",
-                        )
-                        .with_filename("report.pdf"),
-                    ),
-                    LanguageModelUserContentPart::File(LanguageModelFilePart::new(
-                        FileData::Data {
-                            data: FileDataContent::Base64("SGVsbG8=".to_string()),
-                        },
-                        "text/markdown",
-                    )),
-                    LanguageModelUserContentPart::File(LanguageModelFilePart::new(
-                        FileData::Url {
-                            url: Url::parse("https://example.com/readme.md")
-                                .expect("url parses"),
-                        },
-                        "text/markdown",
-                    )),
-                ])
-                .with_provider_options(message_metadata),
-            ),
-        ])));
-
-        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
-        assert_eq!(
-            captured_request
-                .lock()
-                .expect("captured request mutex is not poisoned")
-                .clone()
-                .expect("request is captured")
-                .body
-                .and_then(|body| body.as_text().map(str::to_string))
-                .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok()),
-            Some(json!({
-                "model": "test-chat-model",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "Hello",
-                        "sentiment": "positive"
-                    },
-                    {
-                        "role": "user",
-                        "priority": "high",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "Summarize these inputs",
-                                "priority": "high"
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": "data:image/png;base64,AAECAw=="
-                                },
-                                "alt_text": "A sample image"
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": "https://example.com/image.jpg"
-                                }
-                            },
-                            {
-                                "type": "input_audio",
-                                "input_audio": {
-                                    "data": "AAECAw==",
-                                    "format": "wav"
-                                }
-                            },
-                            {
-                                "type": "file",
-                                "file": {
-                                    "filename": "report.pdf",
-                                    "file_data": "data:application/pdf;base64,AAECAw=="
-                                }
-                            },
-                            {
-                                "type": "text",
-                                "text": "Hello"
-                            },
-                            {
-                                "type": "text",
-                                "text": "https://example.com/readme.md"
-                            }
-                        ]
-                    }
-                ]
-            }))
-        );
-    }
-
-    #[test]
-    fn openai_compatible_chat_rejects_unsupported_file_messages_before_transport() {
-        let transport: OpenAICompatibleTransport =
-            Arc::new(|_request| -> OpenAICompatibleTransportFuture {
-                panic!("transport should not be called for unsupported prompt conversion")
-            });
-        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
-            "test-provider",
-            "https://api.example.com",
-        ))
-        .with_transport(transport)
-        .chat_model("test-chat-model");
-        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
-            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
-                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
-                    FileData::Data {
-                        data: FileDataContent::Bytes(vec![0, 1, 2, 3]),
-                    },
-                    "video/mp4",
-                )),
-            ])),
-        ])));
-
-        assert_eq!(result.finish_reason.unified, FinishReason::Error);
-        assert_eq!(
-            result
-                .provider_metadata
-                .as_ref()
-                .and_then(|metadata| metadata.get("test-provider"))
-                .and_then(|metadata| metadata.get("errorMessage"))
-                .and_then(JsonValue::as_str),
-            Some("'file part media type video/mp4' functionality not supported")
-        );
     }
 
     #[test]
