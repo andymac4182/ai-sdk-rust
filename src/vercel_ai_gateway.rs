@@ -3369,6 +3369,191 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a Vercel AI Gateway API key, makes a live OpenAI-compatible object call, and exports OTLP telemetry locally"]
+    fn live_vercel_ai_gateway_openai_compatible_generate_object_with_otel() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!(
+                "skipping live Gateway OpenAI-compatible object telemetry test because no API key is configured"
+            );
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_AI_GATEWAY_OPENAI_COMPATIBLE_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_OPENAI_COMPATIBLE_MODEL"))
+            .or_else(|_| env::var("AI_SDK_RUST_GATEWAY_MODEL"))
+            .or_else(|_| env::var("AI_GATEWAY_MODEL"))
+            .unwrap_or_else(|_| "openai/gpt-4.1-mini".to_string());
+        let receiver =
+            ai_sdk_otel::LocalOtlpTraceReceiver::start().expect("local OTLP receiver starts");
+        let recorder = Arc::new(Mutex::new(ai_sdk_otel::OpenTelemetry::new(
+            ai_sdk_otel::OpenTelemetryOptions::new(),
+        )));
+        let model = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key(api_key)
+            .language_model(model_id.clone());
+        let object_schema: JsonObject = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "marker": {
+                    "type": "string"
+                },
+                "count": {
+                    "type": "integer"
+                }
+            },
+            "required": ["marker", "count"],
+            "additionalProperties": false
+        }))
+        .expect("schema deserializes");
+
+        let result = poll_ready(generate_object(
+            GenerateObjectOptions::from_prompt(
+                &model,
+                Prompt::from_prompt(
+                    "Return a JSON object with marker exactly \"rust-vercel-ai-gateway-object-otel-ok\" and count exactly 9.",
+                ),
+            )
+            .expect("prompt is valid")
+            .with_schema(json_schema(object_schema))
+            .with_max_output_tokens(80)
+            .with_temperature(0.0)
+            .with_telemetry(
+                TelemetryOptions::new()
+                    .with_function_id("live-gateway-object-otel")
+                    .with_record_inputs(true)
+                    .with_record_outputs(true)
+                    .with_integration(create_open_telemetry_integration(Arc::clone(&recorder))),
+            ),
+        ))
+        .expect("Gateway OpenAI-compatible object generation succeeds");
+
+        assert_eq!(
+            result.object.get("marker").and_then(JsonValue::as_str),
+            Some("rust-vercel-ai-gateway-object-otel-ok")
+        );
+        assert_eq!(
+            result.object.get("count").and_then(JsonValue::as_i64),
+            Some(9)
+        );
+
+        let tracer = recorder.lock().expect("recorder lock").tracer().clone();
+        assert!(
+            tracer
+                .spans
+                .iter()
+                .any(|span| span.name == format!("invoke_agent {model_id}")),
+            "live Gateway object telemetry did not record the operation span"
+        );
+        assert!(
+            tracer
+                .spans
+                .iter()
+                .any(|span| span.attributes.get("gen_ai.agent.name")
+                    == Some(&json!("live-gateway-object-otel"))),
+            "live Gateway object telemetry did not include the configured function id"
+        );
+
+        assert_live_gateway_otel_payload(
+            &receiver,
+            &tracer,
+            &model_id,
+            "live-gateway-object-otel",
+            "ai-sdk-rust-live-gateway-object-otel",
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a Vercel AI Gateway API key, makes a live OpenAI-compatible stream object call, and exports OTLP telemetry locally"]
+    fn live_vercel_ai_gateway_openai_compatible_stream_object_with_otel() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!(
+                "skipping live Gateway OpenAI-compatible stream object telemetry test because no API key is configured"
+            );
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_AI_GATEWAY_OPENAI_COMPATIBLE_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_OPENAI_COMPATIBLE_MODEL"))
+            .or_else(|_| env::var("AI_SDK_RUST_GATEWAY_MODEL"))
+            .or_else(|_| env::var("AI_GATEWAY_MODEL"))
+            .unwrap_or_else(|_| "openai/gpt-4.1-mini".to_string());
+        let receiver =
+            ai_sdk_otel::LocalOtlpTraceReceiver::start().expect("local OTLP receiver starts");
+        let recorder = Arc::new(Mutex::new(ai_sdk_otel::OpenTelemetry::new(
+            ai_sdk_otel::OpenTelemetryOptions::new(),
+        )));
+        let model = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key(api_key)
+            .language_model(model_id.clone());
+        let object_schema: JsonObject = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "marker": {
+                    "type": "string"
+                },
+                "count": {
+                    "type": "integer"
+                }
+            },
+            "required": ["marker", "count"],
+            "additionalProperties": false
+        }))
+        .expect("schema deserializes");
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::from_prompt(
+                &model,
+                Prompt::from_prompt(
+                    "Return a JSON object with marker exactly \"rust-vercel-ai-gateway-stream-object-otel-ok\" and count exactly 10.",
+                ),
+            )
+            .expect("prompt is valid")
+            .with_schema(json_schema(object_schema))
+            .with_max_output_tokens(80)
+            .with_temperature(0.0)
+            .with_telemetry(
+                TelemetryOptions::new()
+                    .with_function_id("live-gateway-stream-object-otel")
+                    .with_record_inputs(true)
+                    .with_record_outputs(true)
+                    .with_integration(create_open_telemetry_integration(Arc::clone(&recorder))),
+            ),
+        ));
+        let object = result
+            .object
+            .expect("Gateway OpenAI-compatible stream object is generated");
+
+        assert_eq!(
+            object.get("marker").and_then(JsonValue::as_str),
+            Some("rust-vercel-ai-gateway-stream-object-otel-ok")
+        );
+        assert_eq!(object.get("count").and_then(JsonValue::as_i64), Some(10));
+
+        let tracer = recorder.lock().expect("recorder lock").tracer().clone();
+        assert!(
+            tracer
+                .spans
+                .iter()
+                .any(|span| span.name == format!("invoke_agent {model_id}")),
+            "live Gateway stream object telemetry did not record the operation span"
+        );
+        assert!(
+            tracer
+                .spans
+                .iter()
+                .any(|span| span.attributes.get("gen_ai.agent.name")
+                    == Some(&json!("live-gateway-stream-object-otel"))),
+            "live Gateway stream object telemetry did not include the configured function id"
+        );
+
+        assert_live_gateway_otel_payload(
+            &receiver,
+            &tracer,
+            &model_id,
+            "live-gateway-stream-object-otel",
+            "ai-sdk-rust-live-gateway-stream-object-otel",
+        );
+    }
+
+    #[test]
     #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI Responses API call"]
     fn live_vercel_ai_gateway_openai_responses_generate_text() {
         let Some(api_key) = live_gateway_api_key() else {
