@@ -10086,6 +10086,149 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_maps_lmstudio_basic_response_fixture() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_551daeb1a02e4fcaf9ab76ed29f821a6db2df1883e55652c",
+                        "object": "response",
+                        "created_at": 1768900049,
+                        "completed_at": 1768900162,
+                        "status": "completed",
+                        "model": "mistralai/ministral-3-14b-reasoning",
+                        "output": [
+                            {
+                                "id": "rs_3l1z5wpifxkwxhj459ya7",
+                                "type": "reasoning",
+                                "status": "completed",
+                                "summary": [],
+                                "content": [
+                                    {
+                                        "type": "reasoning_text",
+                                        "text": "reasoning content"
+                                    }
+                                ]
+                            },
+                            {
+                                "id": "msg_p1y190hl7hj1xyfqr1cir",
+                                "type": "message",
+                                "role": "assistant",
+                                "status": "completed",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "text content",
+                                        "annotations": [],
+                                        "logprobs": []
+                                    }
+                                ]
+                            }
+                        ],
+                        "error": null,
+                        "usage": {
+                            "input_tokens": 136,
+                            "output_tokens": 3677,
+                            "total_tokens": 3813,
+                            "input_tokens_details": {
+                                "cached_tokens": 0
+                            },
+                            "output_tokens_details": {
+                                "reasoning_tokens": 2456
+                            }
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("lmstudio", "https://localhost:1234/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("mistralai/ministral-3-14b-reasoning");
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
+                    "Write a short festival description.",
+                )),
+            ])),
+        ])));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(result.finish_reason.raw, None);
+        assert!(matches!(
+            &result.content[0],
+            LanguageModelContent::Reasoning(reasoning)
+                if reasoning.text == "reasoning content"
+                    && reasoning
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("lmstudio"))
+                        .and_then(|metadata| metadata.get("itemId"))
+                        .and_then(JsonValue::as_str)
+                        == Some("rs_3l1z5wpifxkwxhj459ya7")
+        ));
+        assert!(matches!(
+            &result.content[1],
+            LanguageModelContent::Text(text) if text.text == "text content"
+        ));
+        assert_eq!(result.usage.input_tokens.total, Some(136));
+        assert_eq!(result.usage.input_tokens.no_cache, Some(136));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(result.usage.output_tokens.total, Some(3677));
+        assert_eq!(result.usage.output_tokens.text, Some(1221));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(2456));
+        assert_eq!(
+            result
+                .usage
+                .raw
+                .as_ref()
+                .and_then(|raw| raw.get("total_tokens")),
+            Some(&json!(3813))
+        );
+
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "mistralai/ministral-3-14b-reasoning",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Write a short festival description."
+                            }
+                        ]
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
     fn open_responses_provider_maps_deprecated_file_id_prefixes() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
