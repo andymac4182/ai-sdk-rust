@@ -1053,6 +1053,55 @@ impl fmt::Debug for UiMessageStreamFinishCallback {
     }
 }
 
+/// Event passed to the upstream-style UI-message stream step-finish callback.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiMessageStreamStepFinishCallbackEvent {
+    /// The updated conversation messages after applying the current step.
+    pub messages: Vec<UiMessage>,
+
+    /// Whether the response continued the last original assistant message.
+    pub is_continuation: bool,
+
+    /// The response message sent to the client.
+    pub response_message: UiMessage,
+}
+
+/// Callback invoked after a UI-message stream step has finished.
+pub type UiMessageStreamStepFinishCallbackFunction =
+    dyn Fn(UiMessageStreamStepFinishCallbackEvent) + Send + Sync + 'static;
+
+/// Callback wrapper for upstream `UIMessageStreamOnStepFinishCallback`.
+#[derive(Clone)]
+pub struct UiMessageStreamStepFinishCallback {
+    callback: Arc<UiMessageStreamStepFinishCallbackFunction>,
+}
+
+impl UiMessageStreamStepFinishCallback {
+    /// Creates a UI-message stream step-finish callback.
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(UiMessageStreamStepFinishCallbackEvent) + Send + Sync + 'static,
+    {
+        Self {
+            callback: Arc::new(callback),
+        }
+    }
+
+    /// Runs the step-finish callback.
+    pub fn finish_step(&self, event: UiMessageStreamStepFinishCallbackEvent) {
+        (self.callback)(event);
+    }
+}
+
+impl fmt::Debug for UiMessageStreamStepFinishCallback {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UiMessageStreamStepFinishCallback")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Callback invoked after a UI-message stream has been read.
 pub type UiMessageStreamOnFinishFunction =
     dyn Fn(UiMessageStreamFinishEvent) + Send + Sync + 'static;
@@ -1427,6 +1476,9 @@ pub struct HandleUiMessageStreamFinishOptions {
 
     /// Optional callback invoked with the final persisted-message state.
     pub on_finish: Option<UiMessageStreamFinishCallback>,
+
+    /// Optional callback invoked after each step finishes.
+    pub on_step_finish: Option<UiMessageStreamStepFinishCallback>,
 }
 
 impl HandleUiMessageStreamFinishOptions {
@@ -1440,6 +1492,7 @@ impl HandleUiMessageStreamFinishOptions {
             message_id: None,
             original_messages: Vec::new(),
             on_finish: None,
+            on_step_finish: None,
         }
     }
 
@@ -1472,6 +1525,139 @@ impl HandleUiMessageStreamFinishOptions {
         self.on_finish = Some(on_finish);
         self
     }
+
+    /// Sets the upstream-style step-finish callback.
+    pub fn with_on_step_finish<F>(mut self, on_step_finish: F) -> Self
+    where
+        F: Fn(UiMessageStreamStepFinishCallbackEvent) + Send + Sync + 'static,
+    {
+        self.on_step_finish = Some(UiMessageStreamStepFinishCallback::new(on_step_finish));
+        self
+    }
+
+    /// Sets a pre-built upstream-style step-finish callback.
+    pub fn with_step_finish_callback(
+        mut self,
+        on_step_finish: UiMessageStreamStepFinishCallback,
+    ) -> Self {
+        self.on_step_finish = Some(on_step_finish);
+        self
+    }
+}
+
+/// Options for [`create_ui_message_stream`].
+#[derive(Clone, Debug, Default)]
+pub struct CreateUiMessageStreamOptions {
+    /// Response message id generated for the created stream.
+    pub message_id: Option<String>,
+
+    /// Original UI messages used to compute continuation state.
+    pub original_messages: Vec<UiMessage>,
+
+    /// Optional callback invoked with the final persisted-message state.
+    pub on_finish: Option<UiMessageStreamFinishCallback>,
+
+    /// Optional callback invoked after each step finishes.
+    pub on_step_finish: Option<UiMessageStreamStepFinishCallback>,
+}
+
+impl CreateUiMessageStreamOptions {
+    /// Creates default create-stream options.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the generated response message id.
+    pub fn with_message_id(mut self, message_id: impl Into<String>) -> Self {
+        self.message_id = Some(message_id.into());
+        self
+    }
+
+    /// Sets the original UI messages for persistence/continuation mode.
+    pub fn with_original_messages<I>(mut self, original_messages: I) -> Self
+    where
+        I: IntoIterator<Item = UiMessage>,
+    {
+        self.original_messages = original_messages.into_iter().collect();
+        self
+    }
+
+    /// Sets the upstream-style finish callback.
+    pub fn with_on_finish<F>(mut self, on_finish: F) -> Self
+    where
+        F: Fn(UiMessageStreamFinishCallbackEvent) + Send + Sync + 'static,
+    {
+        self.on_finish = Some(UiMessageStreamFinishCallback::new(on_finish));
+        self
+    }
+
+    /// Sets the upstream-style step-finish callback.
+    pub fn with_on_step_finish<F>(mut self, on_step_finish: F) -> Self
+    where
+        F: Fn(UiMessageStreamStepFinishCallbackEvent) + Send + Sync + 'static,
+    {
+        self.on_step_finish = Some(UiMessageStreamStepFinishCallback::new(on_step_finish));
+        self
+    }
+}
+
+/// Writer used by [`create_ui_message_stream`].
+#[derive(Clone, Debug, Default)]
+pub struct UiMessageStreamWriter {
+    chunks: Vec<UiMessageChunk>,
+}
+
+impl UiMessageStreamWriter {
+    /// Appends one UI-message stream chunk.
+    pub fn write(&mut self, chunk: UiMessageChunk) {
+        self.chunks.push(chunk);
+    }
+
+    /// Merges another UI-message stream into this writer.
+    pub fn merge<I>(&mut self, stream: I)
+    where
+        I: IntoIterator<Item = UiMessageChunk>,
+    {
+        self.chunks.extend(stream);
+    }
+
+    /// Returns the written chunks.
+    pub fn into_chunks(self) -> Vec<UiMessageChunk> {
+        self.chunks
+    }
+}
+
+/// Creates a UI-message stream from a Rust writer callback.
+pub fn create_ui_message_stream<F>(
+    options: CreateUiMessageStreamOptions,
+    execute: F,
+) -> Result<Vec<UiMessageChunk>, UiMessageStreamProcessError>
+where
+    F: FnOnce(&mut UiMessageStreamWriter),
+{
+    let CreateUiMessageStreamOptions {
+        message_id,
+        original_messages,
+        on_finish,
+        on_step_finish,
+    } = options;
+
+    let mut writer = UiMessageStreamWriter::default();
+    execute(&mut writer);
+
+    let mut finish_options = HandleUiMessageStreamFinishOptions::new(writer.into_chunks());
+    if let Some(message_id) = message_id {
+        finish_options = finish_options.with_message_id(message_id);
+    }
+    finish_options = finish_options.with_original_messages(original_messages);
+    if let Some(on_finish) = on_finish {
+        finish_options = finish_options.with_finish_callback(on_finish);
+    }
+    if let Some(on_step_finish) = on_step_finish {
+        finish_options = finish_options.with_step_finish_callback(on_step_finish);
+    }
+
+    handle_ui_message_stream_finish(finish_options)
 }
 
 /// Applies upstream-style finish handling to a UI-message stream.
@@ -1483,6 +1669,7 @@ pub fn handle_ui_message_stream_finish(
         mut message_id,
         original_messages,
         on_finish,
+        on_step_finish,
     } = options;
 
     let last_message = original_messages
@@ -1506,37 +1693,77 @@ pub fn handle_ui_message_stream_finish(
         }
     }
 
-    if let Some(on_finish) = on_finish {
+    if on_finish.is_some() || on_step_finish.is_some() {
         let mut state = StreamingUiMessageState::new(
             message_id.clone().unwrap_or_default(),
             last_message.clone(),
         );
-        process_ui_message_stream(&mut state, stream.clone(), false)?;
 
-        let is_continuation = last_message
-            .as_ref()
-            .is_some_and(|last_message| state.message.id == last_message.id);
-        let mut messages = if is_continuation {
-            original_messages
-                .iter()
-                .take(original_messages.len().saturating_sub(1))
-                .cloned()
-                .collect::<Vec<_>>()
-        } else {
-            original_messages
-        };
-        messages.push(state.message.clone());
+        for chunk in stream.iter().cloned() {
+            let is_finish_step = matches!(chunk, UiMessageChunk::FinishStep);
+            process_ui_message_stream(&mut state, [chunk], false)?;
 
-        on_finish.finish(UiMessageStreamFinishCallbackEvent {
-            messages,
-            is_continuation,
-            is_aborted: state.aborted,
-            response_message: state.message,
-            finish_reason: state.finish_reason,
-        });
+            if is_finish_step {
+                if let Some(on_step_finish) = &on_step_finish {
+                    let is_continuation =
+                        ui_message_stream_is_continuation(&state.message, last_message.as_ref());
+                    on_step_finish.finish_step(UiMessageStreamStepFinishCallbackEvent {
+                        messages: ui_message_stream_persisted_messages(
+                            &original_messages,
+                            state.message.clone(),
+                            is_continuation,
+                        ),
+                        is_continuation,
+                        response_message: state.message.clone(),
+                    });
+                }
+            }
+        }
+
+        let is_continuation =
+            ui_message_stream_is_continuation(&state.message, last_message.as_ref());
+
+        if let Some(on_finish) = on_finish {
+            on_finish.finish(UiMessageStreamFinishCallbackEvent {
+                messages: ui_message_stream_persisted_messages(
+                    &original_messages,
+                    state.message.clone(),
+                    is_continuation,
+                ),
+                is_continuation,
+                is_aborted: state.aborted,
+                response_message: state.message,
+                finish_reason: state.finish_reason,
+            });
+        }
     }
 
     Ok(stream)
+}
+
+fn ui_message_stream_is_continuation(
+    response_message: &UiMessage,
+    last_message: Option<&UiMessage>,
+) -> bool {
+    last_message.is_some_and(|last_message| response_message.id == last_message.id)
+}
+
+fn ui_message_stream_persisted_messages(
+    original_messages: &[UiMessage],
+    response_message: UiMessage,
+    is_continuation: bool,
+) -> Vec<UiMessage> {
+    let mut messages = if is_continuation {
+        original_messages
+            .iter()
+            .take(original_messages.len().saturating_sub(1))
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        original_messages.to_vec()
+    };
+    messages.push(response_message);
+    messages
 }
 
 fn update_ui_message_metadata(message: &mut UiMessage, message_metadata: Option<JsonValue>) {
@@ -2332,6 +2559,89 @@ mod tests {
         assert_eq!(
             finish_events[0].messages[1],
             finish_events[0].response_message
+        );
+    }
+
+    #[test]
+    fn create_ui_message_stream_invokes_step_and_finish_callbacks() {
+        let step_events = Arc::new(Mutex::new(
+            Vec::<UiMessageStreamStepFinishCallbackEvent>::new(),
+        ));
+        let step_events_for_callback = Arc::clone(&step_events);
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        let chunks = create_ui_message_stream(
+            CreateUiMessageStreamOptions::new()
+                .with_message_id("response-message-id")
+                .with_original_messages([UiMessage::new("user-1", UiMessageRole::User)])
+                .with_on_step_finish(move |event| {
+                    step_events_for_callback
+                        .lock()
+                        .expect("step events lock")
+                        .push(event);
+                })
+                .with_on_finish(move |event| {
+                    finish_events_for_callback
+                        .lock()
+                        .expect("finish events lock")
+                        .push(event);
+                }),
+            |writer| {
+                writer.write(UiMessageChunk::start());
+                writer.write(UiMessageChunk::start_step());
+                writer.write(UiMessageChunk::text_start("text-1"));
+                writer.write(UiMessageChunk::text_delta("text-1", "one"));
+                writer.write(UiMessageChunk::text_end("text-1"));
+                writer.write(UiMessageChunk::finish_step());
+                writer.merge([
+                    UiMessageChunk::start_step(),
+                    UiMessageChunk::text_start("text-2"),
+                    UiMessageChunk::text_delta("text-2", "two"),
+                    UiMessageChunk::text_end("text-2"),
+                    UiMessageChunk::finish_step(),
+                    UiMessageChunk::finish_with_reason(FinishReason::Stop),
+                ]);
+            },
+        )
+        .expect("stream is created");
+
+        assert_eq!(
+            serde_json::to_value(&chunks[0]).expect("chunk serializes"),
+            json!({ "type": "start", "messageId": "response-message-id" })
+        );
+
+        let step_events = step_events.lock().expect("step events lock");
+        assert_eq!(step_events.len(), 2);
+        assert!(!step_events[0].is_continuation);
+        assert_eq!(step_events[0].messages.len(), 2);
+        assert_eq!(
+            step_events[0].response_message.parts,
+            vec![
+                json!({ "type": "step-start" }),
+                json!({ "type": "text", "text": "one", "state": "done" })
+            ]
+        );
+        assert_eq!(
+            step_events[1].response_message.parts,
+            vec![
+                json!({ "type": "step-start" }),
+                json!({ "type": "text", "text": "one", "state": "done" }),
+                json!({ "type": "step-start" }),
+                json!({ "type": "text", "text": "two", "state": "done" })
+            ]
+        );
+        assert_eq!(step_events[1].messages[1], step_events[1].response_message);
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert!(!finish_events[0].is_continuation);
+        assert!(!finish_events[0].is_aborted);
+        assert_eq!(finish_events[0].finish_reason, Some(FinishReason::Stop));
+        assert_eq!(finish_events[0].messages[0].id, "user-1");
+        assert_eq!(
+            finish_events[0].response_message,
+            step_events[1].response_message
         );
     }
 
