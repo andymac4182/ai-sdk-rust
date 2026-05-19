@@ -4034,7 +4034,7 @@ mod tests {
     };
     use ai_sdk_provider::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions};
     use ai_sdk_provider::headers::Headers;
-    use ai_sdk_provider::image_model::ImageModel;
+    use ai_sdk_provider::image_model::{ImageModel, ImageModelCallOptions};
     use ai_sdk_provider::json::JsonValue;
     use ai_sdk_provider::provider::ProviderOptions;
     use ai_sdk_provider::warning::Warning;
@@ -4322,6 +4322,122 @@ mod tests {
                 .and_then(|metadata| metadata.get("errorMessage"))
                 .and_then(JsonValue::as_str),
             Some("Invalid API key")
+        );
+    }
+
+    #[test]
+    fn openai_compatible_image_model_passes_options_warnings_and_errors() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "data": [
+                            {
+                                "b64_json": "aW1hZ2U="
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
+            "black-forest-labs",
+            "https://api.example.com",
+        ))
+        .with_transport(transport)
+        .image_model("flux-pro");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "black-forest-labs": {
+                "quality": "standard"
+            },
+            "blackForestLabs": {
+                "quality": "hd"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A forest")
+                    .with_aspect_ratio("16:9")
+                    .with_seed(123)
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Deprecated { setting, .. }
+                    if setting == "providerOptions key 'black-forest-labs'"
+            )
+        }));
+        assert_eq!(
+            result
+                .warnings
+                .iter()
+                .filter(|warning| matches!(warning, Warning::Unsupported { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(
+            captured_request
+                .lock()
+                .expect("captured request mutex is not poisoned")
+                .clone()
+                .expect("request is captured")
+                .body
+                .and_then(|body| body.as_text().map(str::to_string))
+                .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok()),
+            Some(json!({
+                "model": "flux-pro",
+                "prompt": "A forest",
+                "n": 1,
+                "quality": "hd",
+                "response_format": "b64_json"
+            }))
+        );
+
+        let error_transport: OpenAICompatibleTransport =
+            Arc::new(|_request| -> OpenAICompatibleTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    400,
+                    "Bad Request",
+                    json!({
+                        "error": {
+                            "message": "Invalid image prompt"
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let error_model = OpenAICompatibleProvider::from_settings(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com"),
+        )
+        .with_transport(error_transport)
+        .image_model("dall-e-3");
+        let error_result = poll_ready(
+            error_model.do_generate(ImageModelCallOptions::new(1).with_prompt("bad prompt")),
+        );
+
+        assert!(error_result.images.is_empty());
+        assert_eq!(
+            error_result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("test-provider"))
+                .map(|metadata| &metadata.extra)
+                .and_then(|extra| extra.get("errorMessage"))
+                .and_then(JsonValue::as_str),
+            Some("Invalid image prompt")
         );
     }
 
