@@ -1867,6 +1867,40 @@ struct OpenTelemetryCallState {
     runtime_context: Option<TelemetryAttributes>,
 }
 
+/// Options for the legacy AI SDK OpenTelemetry recorder.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LegacyOpenTelemetryOptions {
+    pub tracer: Option<MockTracer>,
+}
+
+impl LegacyOpenTelemetryOptions {
+    /// Creates default legacy OTel options.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Uses an existing dependency-free tracer.
+    pub fn with_tracer(mut self, tracer: MockTracer) -> Self {
+        self.tracer = Some(tracer);
+        self
+    }
+}
+
+#[derive(Clone, Debug)]
+struct LegacyOpenTelemetryCallState {
+    operation_id: String,
+    telemetry: TelemetryOptions,
+    provider: String,
+    model_id: String,
+    root_span: usize,
+    step_span: Option<usize>,
+    embed_spans: BTreeMap<String, usize>,
+    rerank_span: Option<usize>,
+    tool_spans: BTreeMap<String, usize>,
+    base_telemetry_attributes: TelemetryAttributes,
+    settings: TelemetryAttributes,
+}
+
 /// Start event accepted by [`OpenTelemetry::on_start`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct OpenTelemetryStartEvent {
@@ -2402,6 +2436,7 @@ pub struct OpenTelemetryToolExecutionStartEvent {
     pub call_id: String,
     pub tool_call_id: String,
     pub tool_name: String,
+    pub input: Option<TelemetryAttributeValue>,
 }
 
 impl OpenTelemetryToolExecutionStartEvent {
@@ -2415,7 +2450,14 @@ impl OpenTelemetryToolExecutionStartEvent {
             call_id: call_id.into(),
             tool_call_id: tool_call_id.into(),
             tool_name: tool_name.into(),
+            input: None,
         }
+    }
+
+    /// Sets the tool input attribute.
+    pub fn with_input(mut self, input: impl Into<TelemetryAttributeValue>) -> Self {
+        self.input = Some(input.into());
+        self
     }
 }
 
@@ -2425,6 +2467,7 @@ pub struct OpenTelemetryToolExecutionEndEvent {
     pub call_id: String,
     pub tool_call_id: String,
     pub output: Option<TelemetryAttributeValue>,
+    pub error: Option<RecordSpanError>,
 }
 
 impl OpenTelemetryToolExecutionEndEvent {
@@ -2434,12 +2477,19 @@ impl OpenTelemetryToolExecutionEndEvent {
             call_id: call_id.into(),
             tool_call_id: tool_call_id.into(),
             output: None,
+            error: None,
         }
     }
 
     /// Sets the tool output attribute.
     pub fn with_output(mut self, output: impl Into<TelemetryAttributeValue>) -> Self {
         self.output = Some(output.into());
+        self
+    }
+
+    /// Sets the tool error status.
+    pub fn with_error(mut self, error: RecordSpanError) -> Self {
+        self.error = Some(error);
         self
     }
 }
@@ -2590,6 +2640,602 @@ impl OpenTelemetryErrorEvent {
             call_id: call_id.into(),
             error,
         }
+    }
+}
+
+/// Dependency-free Rust recorder for upstream `LegacyOpenTelemetry` behavior.
+pub struct LegacyOpenTelemetry {
+    tracer: MockTracer,
+    call_states: BTreeMap<String, LegacyOpenTelemetryCallState>,
+}
+
+impl LegacyOpenTelemetry {
+    /// Creates a legacy recorder.
+    pub fn new(options: LegacyOpenTelemetryOptions) -> Self {
+        Self {
+            tracer: options.tracer.unwrap_or_default(),
+            call_states: BTreeMap::new(),
+        }
+    }
+
+    /// Returns the recorded tracer.
+    pub fn tracer(&self) -> &MockTracer {
+        &self.tracer
+    }
+
+    /// Consumes this recorder and returns the tracer.
+    pub fn into_tracer(self) -> MockTracer {
+        self.tracer
+    }
+
+    /// Returns the number of active call states.
+    pub fn active_call_count(&self) -> usize {
+        self.call_states.len()
+    }
+
+    /// Starts a high-level text-generation operation span.
+    pub fn on_start(&mut self, event: OpenTelemetryStartEvent) {
+        let base_telemetry_attributes = get_base_telemetry_attributes(
+            &event.provider,
+            &event.model_id,
+            event.settings.clone(),
+            None,
+            event.runtime_context.as_ref(),
+        );
+        let attributes = legacy_operation_start_attributes(LegacyOperationStartAttributes {
+            telemetry: &event.telemetry,
+            operation_id: &event.operation_id,
+            base_telemetry_attributes: &base_telemetry_attributes,
+            system_instructions: event.system_instructions.as_ref(),
+            input_messages: event.input_messages.as_ref(),
+            schema: None,
+        });
+        let root_span = self
+            .tracer
+            .start_span(event.operation_id.clone(), attributes);
+        self.call_states.insert(
+            event.call_id,
+            LegacyOpenTelemetryCallState {
+                operation_id: event.operation_id,
+                telemetry: event.telemetry,
+                provider: event.provider,
+                model_id: event.model_id,
+                root_span,
+                step_span: None,
+                embed_spans: BTreeMap::new(),
+                rerank_span: None,
+                tool_spans: BTreeMap::new(),
+                base_telemetry_attributes,
+                settings: event.settings,
+            },
+        );
+    }
+
+    /// Starts a high-level object-generation operation span.
+    pub fn on_object_operation_start(&mut self, event: OpenTelemetryObjectStartEvent) {
+        let base_telemetry_attributes = get_base_telemetry_attributes(
+            &event.provider,
+            &event.model_id,
+            event.settings.clone(),
+            None,
+            None,
+        );
+        let attributes = legacy_operation_start_attributes(LegacyOperationStartAttributes {
+            telemetry: &event.telemetry,
+            operation_id: &event.operation_id,
+            base_telemetry_attributes: &base_telemetry_attributes,
+            system_instructions: event.system_instructions.as_ref(),
+            input_messages: event.input_messages.as_ref(),
+            schema: Some(ObjectSchemaSupplemental {
+                schema: event.schema.as_ref(),
+                schema_name: event.schema_name.as_deref(),
+                schema_description: event.schema_description.as_deref(),
+                output_mode: event.output_mode.as_deref(),
+            }),
+        });
+        let root_span = self
+            .tracer
+            .start_span(event.operation_id.clone(), attributes);
+        self.call_states.insert(
+            event.call_id,
+            LegacyOpenTelemetryCallState {
+                operation_id: event.operation_id,
+                telemetry: event.telemetry,
+                provider: event.provider,
+                model_id: event.model_id,
+                root_span,
+                step_span: None,
+                embed_spans: BTreeMap::new(),
+                rerank_span: None,
+                tool_spans: BTreeMap::new(),
+                base_telemetry_attributes,
+                settings: event.settings,
+            },
+        );
+    }
+
+    /// Starts a text-generation step span.
+    pub fn on_step_start(&mut self, event: OpenTelemetryStepStartEvent) {
+        let Some(state) = self.call_states.get_mut(&event.call_id) else {
+            return;
+        };
+        let operation_id = legacy_step_operation_id(&state.operation_id);
+        let attributes = legacy_step_start_attributes(LegacyStepStartAttributes {
+            telemetry: &state.telemetry,
+            operation_id: &operation_id,
+            provider: &state.provider,
+            model_id: &state.model_id,
+            base_telemetry_attributes: &state.base_telemetry_attributes,
+            settings: &state.settings,
+            input_messages: None,
+        });
+        state.step_span = Some(self.tracer.start_span(operation_id, attributes));
+    }
+
+    /// Adds prompt/model attributes to the active step span.
+    pub fn on_language_model_call_start(
+        &mut self,
+        event: OpenTelemetryLanguageModelCallStartEvent,
+    ) {
+        let Some((span, telemetry, operation_id, base, settings)) =
+            self.call_states.get(&event.call_id).and_then(|state| {
+                state.step_span.map(|span| {
+                    (
+                        span,
+                        state.telemetry.clone(),
+                        legacy_step_operation_id(&state.operation_id),
+                        state.base_telemetry_attributes.clone(),
+                        state.settings.clone(),
+                    )
+                })
+            })
+        else {
+            return;
+        };
+        let attributes = legacy_step_start_attributes(LegacyStepStartAttributes {
+            telemetry: &telemetry,
+            operation_id: &operation_id,
+            provider: &event.provider,
+            model_id: &event.model_id,
+            base_telemetry_attributes: &base,
+            settings: &settings,
+            input_messages: event.input_messages.as_ref(),
+        });
+        if let Some(span) = self.tracer.spans.get_mut(span) {
+            span.set_attributes(attributes);
+        }
+    }
+
+    /// Adds response attributes to the active step span.
+    pub fn on_language_model_call_end(&mut self, event: OpenTelemetryLanguageModelCallEndEvent) {
+        let Some((span, telemetry)) = self
+            .call_states
+            .get(&event.call_id)
+            .and_then(|state| state.step_span.map(|span| (span, state.telemetry.clone())))
+        else {
+            return;
+        };
+        if let Some(span) = self.tracer.spans.get_mut(span) {
+            span.set_attributes(legacy_language_model_end_attributes(&telemetry, &event));
+        }
+    }
+
+    /// Starts an object-generation model-call span.
+    pub fn on_object_step_start(&mut self, event: OpenTelemetryObjectStepStartEvent) {
+        let Some(state) = self.call_states.get_mut(&event.call_id) else {
+            return;
+        };
+        let operation_id = legacy_step_operation_id(&state.operation_id);
+        let attributes = legacy_step_start_attributes(LegacyStepStartAttributes {
+            telemetry: &state.telemetry,
+            operation_id: &operation_id,
+            provider: &event.provider,
+            model_id: &event.model_id,
+            base_telemetry_attributes: &state.base_telemetry_attributes,
+            settings: &event.settings,
+            input_messages: event.input_messages.as_ref(),
+        });
+        state.step_span = Some(self.tracer.start_span(operation_id, attributes));
+    }
+
+    /// Finishes an object-generation model-call span.
+    pub fn on_object_step_finish(&mut self, event: OpenTelemetryObjectStepFinishEvent) {
+        let Some((span, telemetry)) = self.call_states.get_mut(&event.call_id).and_then(|state| {
+            state
+                .step_span
+                .take()
+                .map(|span| (span, state.telemetry.clone()))
+        }) else {
+            return;
+        };
+        let mut attributes = legacy_language_model_end_attributes(
+            &telemetry,
+            &OpenTelemetryLanguageModelCallEndEvent {
+                call_id: event.call_id,
+                finish_reason: event.finish_reason,
+                usage: event.usage,
+                output_messages: None,
+            },
+        );
+        if let Some(object_text) = event.object_text {
+            attributes.insert(
+                "ai.response.object".to_string(),
+                json!(legacy_object_text_attribute(&object_text)),
+            );
+        }
+        if let Some(span) = self.tracer.spans.get_mut(span) {
+            span.set_attributes(attributes);
+            span.end();
+        }
+    }
+
+    /// Starts a high-level embedding operation span.
+    pub fn on_embed_operation_start(&mut self, event: OpenTelemetryEmbedStartEvent) {
+        let base_telemetry_attributes = get_base_telemetry_attributes(
+            &event.provider,
+            &event.model_id,
+            TelemetryAttributes::new(),
+            None,
+            None,
+        );
+        let mut attributes = assemble_operation_name(&event.operation_id, Some(&event.telemetry));
+        attributes.extend(base_telemetry_attributes.clone());
+        attributes.extend(select_attributes(
+            Some(&event.telemetry),
+            embedding_input_attributes(&event.input),
+        ));
+        let root_span = self
+            .tracer
+            .start_span(event.operation_id.clone(), attributes);
+        self.call_states.insert(
+            event.call_id,
+            LegacyOpenTelemetryCallState {
+                operation_id: event.operation_id,
+                telemetry: event.telemetry,
+                provider: event.provider,
+                model_id: event.model_id,
+                root_span,
+                step_span: None,
+                embed_spans: BTreeMap::new(),
+                rerank_span: None,
+                tool_spans: BTreeMap::new(),
+                base_telemetry_attributes,
+                settings: TelemetryAttributes::new(),
+            },
+        );
+    }
+
+    /// Starts an inner embedding model-call span.
+    pub fn on_embedding_model_call_start(
+        &mut self,
+        event: OpenTelemetryEmbeddingModelCallStartEvent,
+    ) {
+        let Some(state) = self.call_states.get_mut(&event.call_id) else {
+            return;
+        };
+        let operation_id = format!("{}.doEmbed", state.operation_id);
+        let mut attributes = assemble_operation_name(&operation_id, Some(&state.telemetry));
+        attributes.extend(state.base_telemetry_attributes.clone());
+        attributes.extend(select_attributes(
+            Some(&state.telemetry),
+            embedding_values_attributes(&event.values),
+        ));
+        let span = self.tracer.start_span(operation_id, attributes);
+        state.embed_spans.insert(event.embed_call_id, span);
+    }
+
+    /// Finishes an inner embedding model-call span.
+    pub fn on_embedding_model_call_end(&mut self, event: OpenTelemetryEmbeddingModelCallEndEvent) {
+        let Some((span, telemetry)) = self.call_states.get_mut(&event.call_id).and_then(|state| {
+            state
+                .embed_spans
+                .remove(&event.embed_call_id)
+                .map(|span| (span, state.telemetry.clone()))
+        }) else {
+            return;
+        };
+        let mut attributes = select_attributes(
+            Some(&telemetry),
+            [(
+                "ai.embeddings".to_string(),
+                AttributeSpec::output(json!(
+                    event
+                        .embeddings
+                        .iter()
+                        .map(telemetry_json_string)
+                        .collect::<Vec<_>>()
+                )),
+            )],
+        );
+        if let Some(tokens) = event.usage.tokens {
+            attributes.insert("ai.usage.tokens".to_string(), json!(tokens));
+        }
+        if let Some(span) = self.tracer.spans.get_mut(span) {
+            span.set_attributes(attributes);
+            span.end();
+        }
+    }
+
+    /// Starts a high-level rerank operation span.
+    pub fn on_rerank_operation_start(&mut self, event: OpenTelemetryRerankStartEvent) {
+        let base_telemetry_attributes = get_base_telemetry_attributes(
+            &event.provider,
+            &event.model_id,
+            TelemetryAttributes::new(),
+            None,
+            None,
+        );
+        let mut attributes = assemble_operation_name(&event.operation_id, Some(&event.telemetry));
+        attributes.extend(base_telemetry_attributes.clone());
+        attributes.extend(select_attributes(
+            Some(&event.telemetry),
+            reranking_document_attributes(&event.documents),
+        ));
+        let root_span = self
+            .tracer
+            .start_span(event.operation_id.clone(), attributes);
+        self.call_states.insert(
+            event.call_id,
+            LegacyOpenTelemetryCallState {
+                operation_id: event.operation_id,
+                telemetry: event.telemetry,
+                provider: event.provider,
+                model_id: event.model_id,
+                root_span,
+                step_span: None,
+                embed_spans: BTreeMap::new(),
+                rerank_span: None,
+                tool_spans: BTreeMap::new(),
+                base_telemetry_attributes,
+                settings: TelemetryAttributes::new(),
+            },
+        );
+    }
+
+    /// Starts an inner reranking model-call span.
+    pub fn on_reranking_model_call_start(
+        &mut self,
+        event: OpenTelemetryRerankingModelCallStartEvent,
+    ) {
+        let Some(state) = self.call_states.get_mut(&event.call_id) else {
+            return;
+        };
+        let operation_id = "ai.rerank.doGenerate".to_string();
+        let mut attributes = assemble_operation_name(&operation_id, Some(&state.telemetry));
+        attributes.extend(state.base_telemetry_attributes.clone());
+        attributes.extend(select_attributes(
+            Some(&state.telemetry),
+            reranking_document_attributes(&event.documents),
+        ));
+        let span = self.tracer.start_span(operation_id, attributes);
+        state.rerank_span = Some(span);
+    }
+
+    /// Finishes an inner reranking model-call span.
+    pub fn on_reranking_model_call_end(&mut self, event: OpenTelemetryRerankingModelCallEndEvent) {
+        let Some((span, telemetry)) = self.call_states.get_mut(&event.call_id).and_then(|state| {
+            state
+                .rerank_span
+                .take()
+                .map(|span| (span, state.telemetry.clone()))
+        }) else {
+            return;
+        };
+        let attributes = select_attributes(
+            Some(&telemetry),
+            [
+                (
+                    "ai.ranking.type".to_string(),
+                    AttributeSpec::value(json!(event.documents_type)),
+                ),
+                (
+                    "ai.ranking".to_string(),
+                    AttributeSpec::output(json!(
+                        event
+                            .ranking
+                            .iter()
+                            .map(telemetry_json_string)
+                            .collect::<Vec<_>>()
+                    )),
+                ),
+            ],
+        );
+        if let Some(span) = self.tracer.spans.get_mut(span) {
+            span.set_attributes(attributes);
+            span.end();
+        }
+    }
+
+    /// Starts a tool execution span under the active step span.
+    pub fn on_tool_execution_start(&mut self, event: OpenTelemetryToolExecutionStartEvent) {
+        let Some(state) = self.call_states.get_mut(&event.call_id) else {
+            return;
+        };
+        if state.step_span.is_none() {
+            return;
+        }
+        let mut attributes = assemble_operation_name("ai.toolCall", Some(&state.telemetry));
+        attributes.extend(select_attributes(
+            Some(&state.telemetry),
+            [
+                (
+                    "ai.toolCall.name".to_string(),
+                    AttributeSpec::value(json!(&event.tool_name)),
+                ),
+                (
+                    "ai.toolCall.id".to_string(),
+                    AttributeSpec::value(json!(&event.tool_call_id)),
+                ),
+                (
+                    "ai.toolCall.args".to_string(),
+                    event.input.map_or(AttributeSpec::Omitted, |input| {
+                        AttributeSpec::output(json!(telemetry_json_string(&input)))
+                    }),
+                ),
+            ],
+        ));
+        let span = self.tracer.start_span("ai.toolCall", attributes);
+        state.tool_spans.insert(event.tool_call_id, span);
+    }
+
+    /// Executes a closure in the corresponding tool span context when present.
+    pub fn execute_tool<T>(
+        &mut self,
+        call_id: &str,
+        tool_call_id: &str,
+        execute: impl FnOnce(Option<&mut MockSpan>) -> T,
+    ) -> T {
+        let span = self
+            .call_states
+            .get(call_id)
+            .and_then(|state| state.tool_spans.get(tool_call_id).copied());
+        match span.and_then(|index| self.tracer.spans.get_mut(index)) {
+            Some(span) => execute(Some(span)),
+            None => execute(None),
+        }
+    }
+
+    /// Finishes a tool execution span.
+    pub fn on_tool_execution_end(&mut self, event: OpenTelemetryToolExecutionEndEvent) {
+        let Some((span, telemetry)) = self.call_states.get_mut(&event.call_id).and_then(|state| {
+            state
+                .tool_spans
+                .remove(&event.tool_call_id)
+                .map(|span| (span, state.telemetry.clone()))
+        }) else {
+            return;
+        };
+        let Some(span) = self.tracer.spans.get_mut(span) else {
+            return;
+        };
+        if let Some(error) = event.error {
+            record_error_on_span(span, error);
+        } else if let Some(output) = event.output {
+            span.set_attributes(select_attributes(
+                Some(&telemetry),
+                [(
+                    "ai.toolCall.result".to_string(),
+                    AttributeSpec::output(json!(telemetry_json_string(&output))),
+                )],
+            ));
+        }
+        span.end();
+    }
+
+    /// Finishes the current step span.
+    pub fn on_step_finish(&mut self, call_id: &str) {
+        let Some(span) = self
+            .call_states
+            .get_mut(call_id)
+            .and_then(|state| state.step_span.take())
+        else {
+            return;
+        };
+        if let Some(span) = self.tracer.spans.get_mut(span) {
+            span.end();
+        }
+    }
+
+    /// Finishes a high-level text-generation operation span.
+    pub fn on_end(&mut self, event: OpenTelemetryEndEvent) {
+        let Some(state) = self.call_states.remove(&event.call_id) else {
+            return;
+        };
+        for span in state.tool_spans.into_values() {
+            self.end_legacy_span(Some(span), TelemetryAttributes::new());
+        }
+        self.end_legacy_span(state.step_span, TelemetryAttributes::new());
+        let attributes = legacy_language_model_end_attributes(
+            &state.telemetry,
+            &OpenTelemetryLanguageModelCallEndEvent {
+                call_id: event.call_id,
+                finish_reason: event.finish_reason,
+                usage: event.usage,
+                output_messages: event.output_messages,
+            },
+        );
+        self.end_legacy_span(Some(state.root_span), attributes);
+    }
+
+    /// Finishes a high-level object-generation operation span.
+    pub fn on_object_operation_end(&mut self, event: OpenTelemetryObjectEndEvent) {
+        let Some(state) = self.call_states.remove(&event.call_id) else {
+            return;
+        };
+        self.end_legacy_span(state.step_span, TelemetryAttributes::new());
+        let mut attributes = legacy_language_model_end_attributes(
+            &state.telemetry,
+            &OpenTelemetryLanguageModelCallEndEvent {
+                call_id: event.call_id,
+                finish_reason: event.finish_reason,
+                usage: event.usage,
+                output_messages: None,
+            },
+        );
+        if let Some(object) = event.object {
+            attributes.insert(
+                "ai.response.object".to_string(),
+                json!(telemetry_json_string(&object)),
+            );
+        }
+        self.end_legacy_span(Some(state.root_span), attributes);
+    }
+
+    /// Finishes a high-level embedding operation span.
+    pub fn on_embed_operation_end(&mut self, event: OpenTelemetryEmbedEndEvent) {
+        let Some(state) = self.call_states.remove(&event.call_id) else {
+            return;
+        };
+        for span in state.embed_spans.into_values() {
+            self.end_legacy_span(Some(span), TelemetryAttributes::new());
+        }
+        let mut attributes = legacy_embedding_output_attributes(
+            &state.telemetry,
+            &event.embedding,
+            state.operation_id == "ai.embedMany",
+        );
+        if let Some(tokens) = event.usage.tokens {
+            attributes.insert("ai.usage.tokens".to_string(), json!(tokens));
+        }
+        self.end_legacy_span(Some(state.root_span), attributes);
+    }
+
+    /// Finishes a high-level rerank operation span.
+    pub fn on_rerank_operation_end(&mut self, event: OpenTelemetryRerankEndEvent) {
+        let Some(state) = self.call_states.remove(&event.call_id) else {
+            return;
+        };
+        self.end_legacy_span(state.rerank_span, TelemetryAttributes::new());
+        self.end_legacy_span(Some(state.root_span), TelemetryAttributes::new());
+    }
+
+    /// Records an error on active spans, ends them, and cleans up call state.
+    pub fn on_error(&mut self, event: OpenTelemetryErrorEvent) {
+        let Some(state) = self.call_states.remove(&event.call_id) else {
+            return;
+        };
+        let mut spans = Vec::new();
+        spans.extend(state.tool_spans.into_values());
+        spans.extend(state.embed_spans.into_values());
+        spans.extend(
+            [state.rerank_span, state.step_span, Some(state.root_span)]
+                .into_iter()
+                .flatten(),
+        );
+        for span in spans {
+            if let Some(span) = self.tracer.spans.get_mut(span) {
+                record_error_on_span(span, event.error.clone());
+                span.end();
+            }
+        }
+    }
+
+    fn end_legacy_span(&mut self, span: Option<usize>, attributes: TelemetryAttributes) {
+        let Some(span) = span.and_then(|span| self.tracer.spans.get_mut(span)) else {
+            return;
+        };
+        span.set_attributes(attributes);
+        span.end();
     }
 }
 
@@ -3448,6 +4094,222 @@ struct ObjectSchemaSupplemental<'a> {
     schema_name: Option<&'a str>,
     schema_description: Option<&'a str>,
     output_mode: Option<&'a str>,
+}
+
+struct LegacyOperationStartAttributes<'a> {
+    telemetry: &'a TelemetryOptions,
+    operation_id: &'a str,
+    base_telemetry_attributes: &'a TelemetryAttributes,
+    system_instructions: Option<&'a Vec<SemConvSystemInstruction>>,
+    input_messages: Option<&'a Vec<SemConvMessage>>,
+    schema: Option<ObjectSchemaSupplemental<'a>>,
+}
+
+fn legacy_operation_start_attributes(
+    input: LegacyOperationStartAttributes<'_>,
+) -> TelemetryAttributes {
+    let mut attributes = assemble_operation_name(input.operation_id, Some(input.telemetry));
+    attributes.extend(input.base_telemetry_attributes.clone());
+    attributes.extend(select_attributes(
+        Some(input.telemetry),
+        [(
+            "ai.prompt".to_string(),
+            legacy_prompt_json(input.system_instructions, input.input_messages)
+                .map_or(AttributeSpec::Omitted, |prompt| {
+                    AttributeSpec::input(json!(prompt))
+                }),
+        )],
+    ));
+    if let Some(schema) = input.schema {
+        attributes.extend(select_attributes(
+            Some(input.telemetry),
+            object_schema_attributes(schema),
+        ));
+    }
+    attributes
+}
+
+struct LegacyStepStartAttributes<'a> {
+    telemetry: &'a TelemetryOptions,
+    operation_id: &'a str,
+    provider: &'a str,
+    model_id: &'a str,
+    base_telemetry_attributes: &'a TelemetryAttributes,
+    settings: &'a TelemetryAttributes,
+    input_messages: Option<&'a Vec<SemConvMessage>>,
+}
+
+fn legacy_step_start_attributes(input: LegacyStepStartAttributes<'_>) -> TelemetryAttributes {
+    let mut attributes = assemble_operation_name(input.operation_id, Some(input.telemetry));
+    attributes.extend(input.base_telemetry_attributes.clone());
+    attributes.extend(select_attributes(
+        Some(input.telemetry),
+        [
+            (
+                "ai.prompt.messages".to_string(),
+                input
+                    .input_messages
+                    .map_or(AttributeSpec::Omitted, |messages| {
+                        AttributeSpec::input(json!(telemetry_json_string(messages)))
+                    }),
+            ),
+            (
+                "gen_ai.system".to_string(),
+                AttributeSpec::value(json!(input.provider)),
+            ),
+            (
+                "gen_ai.request.model".to_string(),
+                AttributeSpec::value(json!(input.model_id)),
+            ),
+        ],
+    ));
+    append_legacy_genai_request_settings(&mut attributes, input.telemetry, input.settings);
+    attributes
+}
+
+fn legacy_language_model_end_attributes(
+    telemetry: &TelemetryOptions,
+    event: &OpenTelemetryLanguageModelCallEndEvent,
+) -> TelemetryAttributes {
+    let mut attributes = select_attributes(
+        Some(telemetry),
+        [
+            (
+                "ai.response.finishReason".to_string(),
+                AttributeSpec::value(json!(&event.finish_reason)),
+            ),
+            (
+                "ai.response.text".to_string(),
+                legacy_output_text(event.output_messages.as_ref())
+                    .map_or(AttributeSpec::Omitted, |text| {
+                        AttributeSpec::output(json!(text))
+                    }),
+            ),
+            (
+                "gen_ai.response.finish_reasons".to_string(),
+                AttributeSpec::value(json!([&event.finish_reason])),
+            ),
+        ],
+    );
+    if let Some(usage) = event.usage {
+        append_legacy_usage_attributes(&mut attributes, usage);
+    }
+    attributes
+}
+
+fn append_legacy_usage_attributes(
+    attributes: &mut TelemetryAttributes,
+    usage: TelemetryTokenUsage,
+) {
+    for (key, value) in [
+        ("ai.usage.inputTokens", usage.input_tokens),
+        ("ai.usage.outputTokens", usage.output_tokens),
+        ("ai.usage.totalTokens", usage.total_tokens),
+        ("gen_ai.usage.input_tokens", usage.input_tokens),
+        ("gen_ai.usage.output_tokens", usage.output_tokens),
+    ] {
+        if let Some(value) = value {
+            attributes.insert(key.to_string(), json!(value));
+        }
+    }
+}
+
+fn append_legacy_genai_request_settings(
+    attributes: &mut TelemetryAttributes,
+    telemetry: &TelemetryOptions,
+    settings: &TelemetryAttributes,
+) {
+    if !telemetry.should_record() {
+        return;
+    }
+    for (source, target) in [
+        ("frequencyPenalty", "gen_ai.request.frequency_penalty"),
+        ("maxOutputTokens", "gen_ai.request.max_tokens"),
+        ("presencePenalty", "gen_ai.request.presence_penalty"),
+        ("stopSequences", "gen_ai.request.stop_sequences"),
+        ("temperature", "gen_ai.request.temperature"),
+        ("topK", "gen_ai.request.top_k"),
+        ("topP", "gen_ai.request.top_p"),
+    ] {
+        if let Some(value) = settings.get(source).filter(|value| !value.is_null()) {
+            attributes.insert(target.to_string(), value.clone());
+        }
+    }
+}
+
+fn legacy_prompt_json(
+    system_instructions: Option<&Vec<SemConvSystemInstruction>>,
+    input_messages: Option<&Vec<SemConvMessage>>,
+) -> Option<String> {
+    if system_instructions.is_none() && input_messages.is_none() {
+        return None;
+    }
+    Some(telemetry_json_string(&json!({
+        "system": system_instructions,
+        "messages": input_messages,
+    })))
+}
+
+fn legacy_output_text(output_messages: Option<&Vec<SemConvMessage>>) -> Option<String> {
+    let mut text = String::new();
+    for message in output_messages? {
+        for part in &message.parts {
+            if part.get("type").and_then(JsonValue::as_str) == Some("text") {
+                if let Some(content) = part.get("content").and_then(JsonValue::as_str) {
+                    text.push_str(content);
+                }
+            }
+        }
+    }
+    if text.is_empty() { None } else { Some(text) }
+}
+
+fn legacy_step_operation_id(operation_id: &str) -> String {
+    match operation_id {
+        "ai.streamText" => "ai.streamText.doStream",
+        "ai.generateObject" => "ai.generateObject.doGenerate",
+        "ai.streamObject" => "ai.streamObject.doStream",
+        _ => "ai.generateText.doGenerate",
+    }
+    .to_string()
+}
+
+fn legacy_object_text_attribute(object_text: &str) -> String {
+    serde_json::from_str::<JsonValue>(object_text)
+        .map(|value| telemetry_json_string(&value))
+        .unwrap_or_else(|_| object_text.to_string())
+}
+
+fn legacy_embedding_output_attributes(
+    telemetry: &TelemetryOptions,
+    embedding: &OpenTelemetryEmbeddingOutput,
+    is_many: bool,
+) -> TelemetryAttributes {
+    let attributes = match (is_many, embedding) {
+        (true, OpenTelemetryEmbeddingOutput::Many(embeddings)) => vec![(
+            "ai.embeddings".to_string(),
+            AttributeSpec::output(json!(
+                embeddings
+                    .iter()
+                    .map(telemetry_json_string)
+                    .collect::<Vec<_>>()
+            )),
+        )],
+        (_, OpenTelemetryEmbeddingOutput::One(embedding)) => vec![(
+            "ai.embedding".to_string(),
+            AttributeSpec::output(json!(telemetry_json_string(embedding))),
+        )],
+        (false, OpenTelemetryEmbeddingOutput::Many(embeddings)) => vec![(
+            "ai.embedding".to_string(),
+            AttributeSpec::output(json!(
+                embeddings
+                    .first()
+                    .map(telemetry_json_string)
+                    .unwrap_or_else(|| "[]".to_string())
+            )),
+        )],
+    };
+    select_attributes(Some(telemetry), attributes)
 }
 
 struct ObjectOperationStartAttributeInput<'a> {
@@ -4631,6 +5493,232 @@ mod tests {
         );
         assert_eq!(
             tracer.spans[1].attributes.get("ai.ranking"),
+            Some(&json!(["{\"index\":1,\"score\":0.9}"]))
+        );
+    }
+
+    #[test]
+    fn legacy_open_telemetry_records_generate_text_step_tool_and_root_spans() {
+        let mut recorder = LegacyOpenTelemetry::new(LegacyOpenTelemetryOptions::new());
+        let output_messages = vec![SemConvMessage::output(
+            vec![json!({ "type": "text", "content": "Sunny." })],
+            "stop",
+        )];
+
+        recorder.on_start(
+            OpenTelemetryStartEvent::new("call-1", "ai.generateText", "openai.chat", "gpt-4o-mini")
+                .with_telemetry(TelemetryOptions::new().with_function_id("weather"))
+                .with_settings(TelemetryAttributes::from([
+                    ("temperature".to_string(), json!(0.2)),
+                    ("maxOutputTokens".to_string(), json!(128)),
+                ]))
+                .with_input_messages(vec![SemConvMessage::input(
+                    "user",
+                    vec![json!({ "type": "text", "content": "Weather?" })],
+                )]),
+        );
+        recorder.on_step_start(OpenTelemetryStepStartEvent::new("call-1", 0));
+        recorder.on_language_model_call_start(
+            OpenTelemetryLanguageModelCallStartEvent::new("call-1", "openai.chat", "gpt-4o-mini")
+                .with_input_messages(vec![SemConvMessage::input(
+                    "user",
+                    vec![json!({ "type": "text", "content": "Weather?" })],
+                )]),
+        );
+        recorder.on_tool_execution_start(
+            OpenTelemetryToolExecutionStartEvent::new("call-1", "tool-1", "weather")
+                .with_input(json!({ "city": "Paris" })),
+        );
+        recorder.execute_tool("call-1", "tool-1", |span| {
+            span.expect("tool span active")
+                .set_attribute("custom.executed", json!(true));
+        });
+        recorder.on_tool_execution_end(
+            OpenTelemetryToolExecutionEndEvent::new("call-1", "tool-1")
+                .with_output(json!({ "temperature": 24 })),
+        );
+        recorder.on_language_model_call_end(
+            OpenTelemetryLanguageModelCallEndEvent::new("call-1", "stop")
+                .with_usage(TelemetryTokenUsage {
+                    input_tokens: Some(7),
+                    output_tokens: Some(4),
+                    total_tokens: Some(11),
+                })
+                .with_output_messages(output_messages.clone()),
+        );
+        recorder.on_step_finish("call-1");
+        recorder.on_end(
+            OpenTelemetryEndEvent::new("call-1", "stop")
+                .with_usage(TelemetryTokenUsage {
+                    input_tokens: Some(7),
+                    output_tokens: Some(4),
+                    total_tokens: Some(11),
+                })
+                .with_output_messages(output_messages),
+        );
+
+        assert_eq!(recorder.active_call_count(), 0);
+        let tracer = recorder.into_tracer();
+        assert_eq!(tracer.spans.len(), 3);
+        assert_eq!(tracer.spans[0].name, "ai.generateText");
+        assert_eq!(tracer.spans[1].name, "ai.generateText.doGenerate");
+        assert_eq!(tracer.spans[2].name, "ai.toolCall");
+        assert!(tracer.spans.iter().all(|span| span.ended));
+        assert_eq!(
+            tracer.spans[0].attributes.get("operation.name"),
+            Some(&json!("ai.generateText weather"))
+        );
+        assert_eq!(
+            tracer.spans[0].attributes.get("ai.model.provider"),
+            Some(&json!("openai.chat"))
+        );
+        assert_eq!(
+            tracer.spans[0].attributes.get("ai.response.text"),
+            Some(&json!("Sunny."))
+        );
+        assert_eq!(
+            tracer.spans[1].attributes.get("gen_ai.request.max_tokens"),
+            Some(&json!(128))
+        );
+        assert_eq!(
+            tracer.spans[1].attributes.get("ai.usage.totalTokens"),
+            Some(&json!(11))
+        );
+        assert_eq!(
+            tracer.spans[2].attributes.get("ai.toolCall.args"),
+            Some(&json!("{\"city\":\"Paris\"}"))
+        );
+        assert_eq!(
+            tracer.spans[2].attributes.get("ai.toolCall.result"),
+            Some(&json!("{\"temperature\":24}"))
+        );
+        assert_eq!(
+            tracer.spans[2].attributes.get("custom.executed"),
+            Some(&json!(true))
+        );
+    }
+
+    #[test]
+    fn legacy_open_telemetry_records_object_embedding_and_rerank_spans() {
+        let mut recorder = LegacyOpenTelemetry::new(LegacyOpenTelemetryOptions::new());
+        let usage = TelemetryTokenUsage {
+            input_tokens: Some(5),
+            output_tokens: Some(7),
+            total_tokens: Some(12),
+        };
+
+        recorder.on_object_operation_start(
+            OpenTelemetryObjectStartEvent::new(
+                "object-call",
+                "ai.generateObject",
+                "openai.chat",
+                "gpt-4o-mini",
+            )
+            .with_schema(
+                json!({ "type": "object", "properties": { "answer": { "type": "string" } } }),
+                "Answer",
+                "Answer schema",
+            )
+            .with_output_mode("object"),
+        );
+        recorder.on_object_step_start(OpenTelemetryObjectStepStartEvent::new(
+            "object-call",
+            "openai.chat",
+            "gpt-4o-mini",
+        ));
+        recorder.on_object_step_finish(
+            OpenTelemetryObjectStepFinishEvent::new("object-call", "stop")
+                .with_usage(usage)
+                .with_object_text(r#"{"answer":"ok"}"#),
+        );
+        recorder.on_object_operation_end(
+            OpenTelemetryObjectEndEvent::new("object-call", "stop")
+                .with_usage(usage)
+                .with_object(json!({ "answer": "ok" })),
+        );
+
+        recorder.on_embed_operation_start(OpenTelemetryEmbedStartEvent::new(
+            "embed-call",
+            "ai.embedMany",
+            "openai.embedding",
+            "text-embedding-3-small",
+            OpenTelemetryEmbeddingInput::many(["alpha", "beta"]),
+        ));
+        recorder.on_embedding_model_call_start(OpenTelemetryEmbeddingModelCallStartEvent::new(
+            "embed-call",
+            "inner-embed-1",
+            ["alpha", "beta"],
+        ));
+        recorder.on_embedding_model_call_end(
+            OpenTelemetryEmbeddingModelCallEndEvent::new(
+                "embed-call",
+                "inner-embed-1",
+                [vec![0.1, 0.2], vec![0.3, 0.4]],
+            )
+            .with_usage(OpenTelemetryEmbeddingUsage { tokens: Some(6) }),
+        );
+        recorder.on_embed_operation_end(
+            OpenTelemetryEmbedEndEvent::new(
+                "embed-call",
+                OpenTelemetryEmbeddingOutput::many([vec![0.1, 0.2], vec![0.3, 0.4]]),
+            )
+            .with_usage(OpenTelemetryEmbeddingUsage { tokens: Some(6) }),
+        );
+
+        recorder.on_rerank_operation_start(OpenTelemetryRerankStartEvent::new(
+            "rerank-call",
+            "cohere.rerank",
+            "rerank-v3.5",
+            [json!("alpha"), json!({ "id": "beta" })],
+        ));
+        recorder.on_reranking_model_call_start(OpenTelemetryRerankingModelCallStartEvent::new(
+            "rerank-call",
+            "object",
+            [json!("alpha"), json!({ "id": "beta" })],
+        ));
+        recorder.on_reranking_model_call_end(OpenTelemetryRerankingModelCallEndEvent::new(
+            "rerank-call",
+            "object",
+            [json!({ "index": 1, "score": 0.9 })],
+        ));
+        recorder.on_rerank_operation_end(OpenTelemetryRerankEndEvent::new("rerank-call"));
+
+        assert_eq!(recorder.active_call_count(), 0);
+        let tracer = recorder.into_tracer();
+        assert_eq!(
+            tracer
+                .spans
+                .iter()
+                .map(|span| span.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "ai.generateObject",
+                "ai.generateObject.doGenerate",
+                "ai.embedMany",
+                "ai.embedMany.doEmbed",
+                "ai.rerank",
+                "ai.rerank.doGenerate",
+            ]
+        );
+        assert!(tracer.spans.iter().all(|span| span.ended));
+        assert_eq!(
+            tracer.spans[0].attributes.get("ai.schema.name"),
+            Some(&json!("Answer"))
+        );
+        assert_eq!(
+            tracer.spans[1].attributes.get("ai.response.object"),
+            Some(&json!("{\"answer\":\"ok\"}"))
+        );
+        assert_eq!(
+            tracer.spans[2].attributes.get("ai.values"),
+            Some(&json!(["\"alpha\"", "\"beta\""]))
+        );
+        assert_eq!(
+            tracer.spans[3].attributes.get("ai.embeddings"),
+            Some(&json!(["[0.1,0.2]", "[0.3,0.4]"]))
+        );
+        assert_eq!(
+            tracer.spans[5].attributes.get("ai.ranking"),
             Some(&json!(["{\"index\":1,\"score\":0.9}"]))
         );
     }

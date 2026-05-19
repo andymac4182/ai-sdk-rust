@@ -12,6 +12,9 @@ use crate::language_model::LanguageModelPrompt;
 /// Recorder handle accepted by the OpenTelemetry integration adapter.
 pub type OpenTelemetryRecorder = Arc<Mutex<ai_sdk_otel::OpenTelemetry>>;
 
+/// Recorder handle accepted by the legacy OpenTelemetry integration adapter.
+pub type LegacyOpenTelemetryRecorder = Arc<Mutex<ai_sdk_otel::LegacyOpenTelemetry>>;
+
 /// Diagnostic channel name used by upstream AI SDK telemetry.
 pub const AI_SDK_TELEMETRY_DIAGNOSTIC_CHANNEL: &str = "aisdk:telemetry";
 
@@ -221,7 +224,145 @@ pub fn create_open_telemetry_integration(recorder: OpenTelemetryRecorder) -> Tel
     })
 }
 
+/// Creates a root telemetry integration backed by `ai-sdk-otel`'s legacy
+/// OpenTelemetry recorder.
+pub fn create_legacy_open_telemetry_integration(
+    recorder: LegacyOpenTelemetryRecorder,
+) -> TelemetryIntegration {
+    let mut integration = TelemetryIntegration::new();
+    for kind in [
+        TelemetryEventKind::OnStart,
+        TelemetryEventKind::OnStepStart,
+        TelemetryEventKind::OnLanguageModelCallStart,
+        TelemetryEventKind::OnLanguageModelCallEnd,
+        TelemetryEventKind::OnToolExecutionStart,
+        TelemetryEventKind::OnToolExecutionEnd,
+        TelemetryEventKind::OnStepFinish,
+        TelemetryEventKind::OnObjectStepStart,
+        TelemetryEventKind::OnObjectStepFinish,
+        TelemetryEventKind::OnEmbedStart,
+        TelemetryEventKind::OnEmbedEnd,
+        TelemetryEventKind::OnRerankStart,
+        TelemetryEventKind::OnRerankEnd,
+        TelemetryEventKind::OnEnd,
+        TelemetryEventKind::OnError,
+    ] {
+        let recorder = Arc::clone(&recorder);
+        integration = integration.with_callback(kind, move |event| {
+            dispatch_to_legacy_open_telemetry(&recorder, event);
+        });
+    }
+
+    let execute_recorder = Arc::clone(&recorder);
+    integration.with_execute_tool(move |options| {
+        let call_id = options.call_id;
+        let tool_call_id = options.tool_call_id;
+        let execute = options.execute;
+        match execute_recorder.lock() {
+            Ok(mut recorder) => recorder.execute_tool(&call_id, &tool_call_id, |_| execute()),
+            Err(_) => execute(),
+        }
+    })
+}
+
 fn dispatch_to_open_telemetry(recorder: &OpenTelemetryRecorder, event: TelemetryEvent) {
+    let Ok(mut recorder) = recorder.lock() else {
+        return;
+    };
+
+    match event.kind {
+        TelemetryEventKind::OnStart => {
+            if is_object_operation(&event.event) {
+                if let Some(start) = open_telemetry_object_start_event(&event) {
+                    recorder.on_object_operation_start(start);
+                }
+            } else if let Some(start) = open_telemetry_start_event(&event) {
+                recorder.on_start(start);
+            }
+        }
+        TelemetryEventKind::OnStepStart => {
+            if let Some(start) = open_telemetry_step_start_event(&event.event) {
+                recorder.on_step_start(start);
+            }
+        }
+        TelemetryEventKind::OnLanguageModelCallStart => {
+            if let Some(start) = open_telemetry_language_model_call_start_event(&event.event) {
+                recorder.on_language_model_call_start(start);
+            }
+        }
+        TelemetryEventKind::OnLanguageModelCallEnd => {
+            if let Some(end) = open_telemetry_language_model_call_end_event(&event.event) {
+                recorder.on_language_model_call_end(end);
+            }
+        }
+        TelemetryEventKind::OnToolExecutionStart => {
+            if let Some(start) = open_telemetry_tool_execution_start_event(&event.event) {
+                recorder.on_tool_execution_start(start);
+            }
+        }
+        TelemetryEventKind::OnToolExecutionEnd => {
+            if let Some(end) = open_telemetry_tool_execution_end_event(&event.event) {
+                recorder.on_tool_execution_end(end);
+            }
+        }
+        TelemetryEventKind::OnStepFinish => {
+            if let Some(call_id) = string_field(&event.event, "callId") {
+                recorder.on_step_finish(&call_id);
+            }
+        }
+        TelemetryEventKind::OnObjectStepStart => {
+            if let Some(start) = open_telemetry_object_step_start_event(&event.event) {
+                recorder.on_object_step_start(start);
+            }
+        }
+        TelemetryEventKind::OnObjectStepFinish => {
+            if let Some(finish) = open_telemetry_object_step_finish_event(&event.event) {
+                recorder.on_object_step_finish(finish);
+            }
+        }
+        TelemetryEventKind::OnEmbedStart => {
+            if let Some(start) = open_telemetry_embed_start_event(&event) {
+                recorder.on_embed_operation_start(start);
+            }
+        }
+        TelemetryEventKind::OnEmbedEnd => {
+            if let Some(end) = open_telemetry_embed_end_event(&event.event) {
+                recorder.on_embed_operation_end(end);
+            }
+        }
+        TelemetryEventKind::OnRerankStart => {
+            if let Some(start) = open_telemetry_rerank_start_event(&event) {
+                recorder.on_rerank_operation_start(start);
+            }
+        }
+        TelemetryEventKind::OnRerankEnd => {
+            if let Some(call_id) = string_field(&event.event, "callId") {
+                recorder.on_rerank_operation_end(ai_sdk_otel::OpenTelemetryRerankEndEvent::new(
+                    call_id,
+                ));
+            }
+        }
+        TelemetryEventKind::OnEnd => {
+            if event.event.get("object").is_some() || event.event.get("error").is_some() {
+                if let Some(end) = open_telemetry_object_end_event(&event.event) {
+                    recorder.on_object_operation_end(end);
+                }
+            } else if let Some(end) = open_telemetry_end_event(&event.event) {
+                recorder.on_end(end);
+            }
+        }
+        TelemetryEventKind::OnError => {
+            if let Some(error) = open_telemetry_error_event(&event.event) {
+                recorder.on_error(error);
+            }
+        }
+    }
+}
+
+fn dispatch_to_legacy_open_telemetry(
+    recorder: &LegacyOpenTelemetryRecorder,
+    event: TelemetryEvent,
+) {
     let Ok(mut recorder) = recorder.lock() else {
         return;
     };
@@ -414,11 +555,15 @@ fn open_telemetry_tool_execution_start_event(
     payload: &JsonValue,
 ) -> Option<ai_sdk_otel::OpenTelemetryToolExecutionStartEvent> {
     let tool_call = payload.get("toolCall")?;
-    Some(ai_sdk_otel::OpenTelemetryToolExecutionStartEvent::new(
+    let mut start = ai_sdk_otel::OpenTelemetryToolExecutionStartEvent::new(
         string_field(payload, "callId")?,
         string_field(tool_call, "toolCallId")?,
         string_field(tool_call, "toolName")?,
-    ))
+    );
+    if let Some(input) = tool_call.get("input").filter(|value| !value.is_null()) {
+        start = start.with_input(input.clone());
+    }
+    Some(start)
 }
 
 fn open_telemetry_tool_execution_end_event(
@@ -434,6 +579,16 @@ fn open_telemetry_tool_execution_end_event(
         .and_then(|output| output.get("output"))
     {
         end = end.with_output(output.clone());
+    } else if let Some(error) = payload
+        .get("toolOutput")
+        .and_then(|output| output.get("error"))
+    {
+        end = end.with_error(ai_sdk_otel::RecordSpanError::exception(
+            "Error",
+            error
+                .as_str()
+                .map_or_else(|| error.to_string(), str::to_string),
+        ));
     }
     Some(end)
 }
@@ -1498,6 +1653,130 @@ mod tests {
         assert_eq!(
             body["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["name"],
             "invoke_agent gpt-4o-mini"
+        );
+    }
+
+    #[test]
+    fn legacy_open_telemetry_integration_exports_dispatcher_spans_to_local_otlp_receiver() {
+        let _guard = telemetry_test_guard();
+        reset_telemetry_state_for_tests();
+        let receiver = ai_sdk_otel::LocalOtlpTraceReceiver::start().expect("receiver starts");
+        let recorder = Arc::new(Mutex::new(ai_sdk_otel::LegacyOpenTelemetry::new(
+            ai_sdk_otel::LegacyOpenTelemetryOptions::new(),
+        )));
+        let dispatcher = create_telemetry_dispatcher(Some(
+            TelemetryOptions::new()
+                .with_function_id("legacy-weather")
+                .with_record_inputs(true)
+                .with_record_outputs(true)
+                .with_integration(create_legacy_open_telemetry_integration(Arc::clone(
+                    &recorder,
+                ))),
+        ));
+
+        dispatcher.on_start(json!({
+            "callId": "legacy-call",
+            "operationId": "ai.generateText",
+            "provider": "openai.chat",
+            "modelId": "gpt-4o-mini",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "Weather?" }]
+                }
+            ],
+            "temperature": 0.2,
+            "maxOutputTokens": 128
+        }));
+        dispatcher.on_step_start(json!({
+            "callId": "legacy-call",
+            "stepNumber": 0
+        }));
+        dispatcher.on_language_model_call_start(json!({
+            "callId": "legacy-call",
+            "provider": "openai.chat",
+            "modelId": "gpt-4o-mini",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "Weather?" }]
+                }
+            ]
+        }));
+        dispatcher.on_tool_execution_start(json!({
+            "callId": "legacy-call",
+            "toolCall": {
+                "toolCallId": "tool-1",
+                "toolName": "weather",
+                "input": { "city": "Paris" }
+            }
+        }));
+        let result =
+            dispatcher.execute_tool("legacy-call", "tool-1", || json!({ "temperature": 24 }));
+        dispatcher.on_tool_execution_end(json!({
+            "callId": "legacy-call",
+            "toolCall": {
+                "toolCallId": "tool-1",
+                "toolName": "weather",
+                "input": { "city": "Paris" }
+            },
+            "toolOutput": {
+                "type": "tool-result",
+                "output": result
+            }
+        }));
+        dispatcher.on_language_model_call_end(json!({
+            "callId": "legacy-call",
+            "finishReason": "stop",
+            "usage": {
+                "inputTokens": { "total": 7 },
+                "outputTokens": { "total": 4 }
+            },
+            "text": "Sunny."
+        }));
+        dispatcher.on_step_finish(json!({ "callId": "legacy-call" }));
+        dispatcher.on_end(json!({
+            "callId": "legacy-call",
+            "finishReason": "stop",
+            "totalUsage": {
+                "inputTokens": { "total": 7 },
+                "outputTokens": { "total": 4 }
+            },
+            "text": "Sunny."
+        }));
+
+        let tracer = recorder.lock().expect("recorder lock").tracer().clone();
+        assert_eq!(tracer.spans.len(), 3);
+        assert!(tracer.spans.iter().all(|span| span.ended));
+        assert_eq!(tracer.spans[0].name, "ai.generateText");
+        assert_eq!(tracer.spans[1].name, "ai.generateText.doGenerate");
+        assert_eq!(tracer.spans[2].name, "ai.toolCall");
+        assert_eq!(
+            tracer.spans[0].attributes.get("operation.name"),
+            Some(&json!("ai.generateText legacy-weather"))
+        );
+        assert_eq!(
+            tracer.spans[1].attributes.get("gen_ai.request.max_tokens"),
+            Some(&json!(128))
+        );
+        assert_eq!(
+            tracer.spans[2].attributes.get("ai.toolCall.result"),
+            Some(&json!("{\"temperature\":24}"))
+        );
+
+        ai_sdk_otel::export_tracer_to_otlp_http_json(
+            &tracer,
+            &ai_sdk_otel::OtlpHttpTraceExportOptions::new(receiver.endpoint())
+                .with_service_name("ai-sdk-rust-dispatcher-legacy-otel"),
+        )
+        .expect("export succeeds");
+
+        let requests = receiver.wait_for_requests(1, std::time::Duration::from_secs(10));
+        assert_eq!(requests.len(), 1);
+        let body = requests[0].body_json().expect("OTLP body is JSON");
+        assert_eq!(
+            body["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["name"],
+            "ai.generateText"
         );
     }
 }

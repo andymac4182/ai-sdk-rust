@@ -16,6 +16,10 @@ if (( $# > 0 )); then
 fi
 
 cargo test -p ai-sdk-otel --features real-opentelemetry receiver
+cargo test --all-features \
+  telemetry::tests::open_telemetry_integration_exports_dispatcher_spans_to_local_otlp_receiver
+cargo test --all-features \
+  telemetry::tests::legacy_open_telemetry_integration_exports_dispatcher_spans_to_local_otlp_receiver
 
 if [[ "$run_live_gateway" == "1" ]]; then
   if [[ -f .env.local ]]; then
