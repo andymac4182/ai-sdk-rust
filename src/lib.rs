@@ -440,7 +440,8 @@ pub use transcription_model::{
 pub use ui_message_stream::{
     ReadUiMessageStreamOptions, ResponseUiMessageId, StreamingUiMessageState,
     UI_MESSAGE_STREAM_CONTENT_TYPE, UI_MESSAGE_STREAM_VERSION, UI_MESSAGE_STREAM_VERSION_HEADER,
-    UiMessage, UiMessageChunk, UiMessageRole, UiMessageStreamProcessError, UiMessageStreamResponse,
+    UiMessage, UiMessageChunk, UiMessageRole, UiMessageStreamFinishEvent, UiMessageStreamOnFinish,
+    UiMessageStreamOnFinishFunction, UiMessageStreamProcessError, UiMessageStreamResponse,
     UiMessageStreamResponseInit, UiMessageStreamResponseOptions, UiMessageStreamResponseWriter,
     create_ui_message_stream_response, get_response_ui_message_id, is_dynamic_tool_ui_part,
     is_static_tool_ui_part, is_tool_ui_part,

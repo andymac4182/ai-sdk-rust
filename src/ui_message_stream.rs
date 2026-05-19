@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
@@ -974,8 +975,65 @@ impl StreamingUiMessageState {
     }
 }
 
+/// Event passed to a UI-message stream finish callback.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiMessageStreamFinishEvent {
+    /// Final accumulated UI message.
+    pub message: UiMessage,
+
+    /// Message snapshots emitted while applying stream chunks.
+    pub message_states: Vec<UiMessage>,
+
+    /// Last finish reason observed in the stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<FinishReason>,
+
+    /// Whether an abort chunk was observed.
+    pub is_aborted: bool,
+
+    /// Abort reason from the last abort chunk, when supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abort_reason: Option<JsonValue>,
+}
+
+/// Callback invoked after a UI-message stream has been read.
+pub type UiMessageStreamOnFinishFunction =
+    dyn Fn(UiMessageStreamFinishEvent) + Send + Sync + 'static;
+
+/// Callback wrapper for upstream-style UI-message stream `onFinish`.
+#[derive(Clone)]
+pub struct UiMessageStreamOnFinish {
+    callback: Arc<UiMessageStreamOnFinishFunction>,
+}
+
+impl UiMessageStreamOnFinish {
+    /// Creates a UI-message stream finish callback.
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(UiMessageStreamFinishEvent) + Send + Sync + 'static,
+    {
+        Self {
+            callback: Arc::new(callback),
+        }
+    }
+
+    /// Runs the finish callback.
+    pub fn finish(&self, event: UiMessageStreamFinishEvent) {
+        (self.callback)(event);
+    }
+}
+
+impl fmt::Debug for UiMessageStreamOnFinish {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UiMessageStreamOnFinish")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Options for [`read_ui_message_stream`].
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ReadUiMessageStreamOptions {
     /// Previous assistant message to resume from.
     pub message: Option<UiMessage>,
@@ -985,6 +1043,9 @@ pub struct ReadUiMessageStreamOptions {
 
     /// Whether an `error` chunk terminates processing.
     pub terminate_on_error: bool,
+
+    /// Optional callback invoked after stream chunks have been applied.
+    pub on_finish: Option<UiMessageStreamOnFinish>,
 }
 
 impl ReadUiMessageStreamOptions {
@@ -997,6 +1058,7 @@ impl ReadUiMessageStreamOptions {
             message: None,
             stream: stream.into_iter().collect(),
             terminate_on_error: false,
+            on_finish: None,
         }
     }
 
@@ -1009,6 +1071,15 @@ impl ReadUiMessageStreamOptions {
     /// Sets whether an `error` chunk terminates processing.
     pub fn with_terminate_on_error(mut self, terminate_on_error: bool) -> Self {
         self.terminate_on_error = terminate_on_error;
+        self
+    }
+
+    /// Sets a callback that receives the final UI-message stream state.
+    pub fn with_on_finish<F>(mut self, on_finish: F) -> Self
+    where
+        F: Fn(UiMessageStreamFinishEvent) + Send + Sync + 'static,
+    {
+        self.on_finish = Some(UiMessageStreamOnFinish::new(on_finish));
         self
     }
 }
@@ -1270,7 +1341,20 @@ pub fn read_ui_message_stream(
         .unwrap_or_default();
     let mut state = StreamingUiMessageState::new(message_id, options.message);
 
-    process_ui_message_stream(&mut state, options.stream, options.terminate_on_error)
+    let message_states =
+        process_ui_message_stream(&mut state, options.stream, options.terminate_on_error)?;
+
+    if let Some(on_finish) = options.on_finish {
+        on_finish.finish(UiMessageStreamFinishEvent {
+            message: state.message.clone(),
+            message_states: message_states.clone(),
+            finish_reason: state.finish_reason,
+            is_aborted: state.aborted,
+            abort_reason: state.abort_reason,
+        });
+    }
+
+    Ok(message_states)
 }
 
 fn update_ui_message_metadata(message: &mut UiMessage, message_metadata: Option<JsonValue>) {
@@ -1654,6 +1738,7 @@ mod tests {
     use std::cell::Cell;
     use std::convert::Infallible;
     use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
     use serde_json::json;
@@ -1985,6 +2070,40 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[test]
+    fn read_ui_message_stream_invokes_finish_callback_with_final_state() {
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        let messages = read_ui_message_stream(
+            ReadUiMessageStreamOptions::new([
+                UiMessageChunk::start_with_message_id("msg-123"),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", "Hello"),
+                UiMessageChunk::text_end("text-1"),
+                UiMessageChunk::finish_with_reason(FinishReason::Stop),
+            ])
+            .with_on_finish(move |event| {
+                finish_events_for_callback
+                    .lock()
+                    .expect("finish events lock")
+                    .push(event);
+            }),
+        )
+        .expect("stream reads");
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert_eq!(
+            finish_events[0].message,
+            messages.last().expect("final message state").clone()
+        );
+        assert_eq!(finish_events[0].message_states, messages);
+        assert_eq!(finish_events[0].finish_reason, Some(FinishReason::Stop));
+        assert!(!finish_events[0].is_aborted);
+        assert_eq!(finish_events[0].abort_reason, None);
     }
 
     #[test]
