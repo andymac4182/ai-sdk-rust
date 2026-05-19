@@ -11,6 +11,7 @@ use crate::embedding_model::{
     EmbeddingModelResult, EmbeddingModelUsage,
 };
 use crate::headers::Headers;
+use crate::language_model::ProviderAbortSignal;
 use crate::provider::ProviderMetadata;
 use crate::provider::ProviderOptions;
 use crate::provider_utils::{IdGeneratorOptions, create_id_generator, with_user_agent_suffix};
@@ -266,6 +267,9 @@ pub struct EmbedOptions<'a, M: EmbeddingModel + ?Sized> {
     /// Additional HTTP headers for HTTP-based providers.
     pub headers: Option<Headers>,
 
+    /// Abort signal for cancelling the embedding call.
+    pub abort_signal: Option<ProviderAbortSignal>,
+
     /// Callback invoked before the model is called.
     pub on_start: Option<EmbedOnStart<'a>>,
 
@@ -284,6 +288,7 @@ impl<'a, M: EmbeddingModel + ?Sized> EmbedOptions<'a, M> {
             value: value.into(),
             provider_options: None,
             headers: None,
+            abort_signal: None,
             on_start: None,
             on_end: None,
             telemetry: None,
@@ -307,6 +312,12 @@ impl<'a, M: EmbeddingModel + ?Sized> EmbedOptions<'a, M> {
         self.headers
             .get_or_insert_with(Headers::new)
             .insert(name.into(), value.into());
+        self
+    }
+
+    /// Sets the abort signal for the embedding call.
+    pub fn with_abort_signal(mut self, abort_signal: ProviderAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
         self
     }
 
@@ -369,6 +380,9 @@ pub struct EmbedManyOptions<'a, M: EmbeddingModel + ?Sized> {
     /// Additional HTTP headers for HTTP-based providers.
     pub headers: Option<Headers>,
 
+    /// Abort signal for cancelling embedding model calls.
+    pub abort_signal: Option<ProviderAbortSignal>,
+
     /// Callback invoked before embedding begins.
     pub on_start: Option<EmbedOnStart<'a>>,
 
@@ -391,6 +405,7 @@ impl<'a, M: EmbeddingModel + ?Sized> EmbedManyOptions<'a, M> {
             values: values.into_iter().map(Into::into).collect(),
             provider_options: None,
             headers: None,
+            abort_signal: None,
             on_start: None,
             on_end: None,
             telemetry: None,
@@ -414,6 +429,12 @@ impl<'a, M: EmbeddingModel + ?Sized> EmbedManyOptions<'a, M> {
         self.headers
             .get_or_insert_with(Headers::new)
             .insert(name.into(), value.into());
+        self
+    }
+
+    /// Sets the abort signal for embedding model calls.
+    pub fn with_abort_signal(mut self, abort_signal: ProviderAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
         self
     }
 
@@ -526,6 +547,7 @@ pub async fn embed<M: EmbeddingModel + ?Sized>(options: EmbedOptions<'_, M>) -> 
         value,
         provider_options,
         headers,
+        abort_signal,
         on_start,
         on_end,
         telemetry,
@@ -562,6 +584,7 @@ pub async fn embed<M: EmbeddingModel + ?Sized>(options: EmbedOptions<'_, M>) -> 
             vec![value.clone()],
             provider_options.as_ref(),
             &headers,
+            abort_signal.as_ref(),
         ))
         .await;
 
@@ -670,6 +693,7 @@ pub async fn embed_many<M: EmbeddingModel + ?Sized>(
         values,
         provider_options,
         headers,
+        abort_signal,
         on_start,
         on_end,
         telemetry,
@@ -713,6 +737,7 @@ pub async fn embed_many<M: EmbeddingModel + ?Sized>(
                 values.clone(),
                 provider_options.as_ref(),
                 &headers,
+                abort_signal.as_ref(),
             ))
             .await;
 
@@ -755,6 +780,7 @@ pub async fn embed_many<M: EmbeddingModel + ?Sized>(
                 chunk,
                 provider_options.as_ref(),
                 &headers,
+                abort_signal.as_ref(),
             ))
             .await;
 
@@ -792,10 +818,11 @@ fn embedding_call_options(
     values: Vec<String>,
     provider_options: Option<&ProviderOptions>,
     headers: &Headers,
+    abort_signal: Option<&ProviderAbortSignal>,
 ) -> EmbeddingModelCallOptions {
     EmbeddingModelCallOptions {
         values,
-        abort_signal: None,
+        abort_signal: abort_signal.cloned(),
         provider_options: provider_options.cloned(),
         headers: Some(headers.clone()),
     }
@@ -868,6 +895,7 @@ mod tests {
         EmbedManyResult, EmbedOptions, EmbedResult, EmbedStartEvent, Embedding,
         EmbeddingModelCallEndEvent, EmbeddingModelCallStartEvent,
     };
+    use crate::ProviderAbortController;
     use crate::embedding_model::{
         EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelResponse, EmbeddingModelResult,
         EmbeddingModelUsage,
@@ -1042,6 +1070,30 @@ mod tests {
     }
 
     #[test]
+    fn embed_forwards_abort_signal_to_model_call() {
+        let abort_controller = ProviderAbortController::new();
+        let model = RecordingEmbeddingModel::new(
+            None,
+            true,
+            vec![EmbeddingModelResult::new(vec![vec![0.1, 0.2, 0.3]])],
+        );
+
+        let result = poll_ready(super::embed(
+            EmbedOptions::new(&model, "sunrise").with_abort_signal(abort_controller.signal()),
+        ));
+
+        assert_eq!(result.embedding, vec![0.1, 0.2, 0.3]);
+        let calls = model.calls();
+        assert_eq!(calls.len(), 1);
+        let call_signal = calls[0].abort_signal.clone().expect("abort signal set");
+        assert!(!call_signal.is_aborted());
+
+        abort_controller.abort_with_reason("client-disconnected");
+        assert!(call_signal.is_aborted());
+        assert_eq!(call_signal.reason(), Some(json!("client-disconnected")));
+    }
+
+    #[test]
     fn embed_many_without_model_limit_uses_one_model_call() {
         let response =
             EmbeddingModelResponse::new().with_header("x-request-id", "embed-many-request-1");
@@ -1166,6 +1218,41 @@ mod tests {
                 .as_ref()
                 .is_some_and(|headers| headers.get("x-trace").map(String::as_str) == Some("1"))
         }));
+    }
+
+    #[test]
+    fn embed_many_forwards_abort_signal_to_each_model_call() {
+        let abort_controller = ProviderAbortController::new();
+        let model = RecordingEmbeddingModel::new(
+            Some(1),
+            false,
+            vec![
+                EmbeddingModelResult::new(vec![vec![0.1]]),
+                EmbeddingModelResult::new(vec![vec![0.2]]),
+            ],
+        );
+
+        let result = poll_ready(super::embed_many(
+            EmbedManyOptions::new(&model, ["alpha", "beta"])
+                .with_abort_signal(abort_controller.signal()),
+        ));
+
+        assert_eq!(result.embeddings, vec![vec![0.1], vec![0.2]]);
+        let calls = model.calls();
+        assert_eq!(calls.len(), 2);
+        let call_signals = calls
+            .iter()
+            .map(|call| call.abort_signal.clone().expect("abort signal set"))
+            .collect::<Vec<_>>();
+        assert!(call_signals.iter().all(|signal| !signal.is_aborted()));
+
+        abort_controller.abort_with_reason("client-disconnected");
+        assert!(call_signals.iter().all(|signal| signal.is_aborted()));
+        assert!(
+            call_signals
+                .iter()
+                .all(|signal| signal.reason() == Some(json!("client-disconnected")))
+        );
     }
 
     #[test]

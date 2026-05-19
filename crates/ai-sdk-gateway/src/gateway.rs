@@ -1621,7 +1621,8 @@ impl GatewayEmbeddingModel {
         let auth_method = parse_gateway_auth_method(&request_headers);
         let post_options = PostJsonToApiOptions::new(self.embedding_model_url(), request_body)
             .with_headers(request_headers)
-            .with_environment(RuntimeEnvironment::unknown());
+            .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(options.abort_signal.clone());
         let transport = Arc::clone(&self.transport);
 
         match post_json_to_api(
@@ -1701,7 +1702,8 @@ impl GatewayImageModel {
         let auth_method = parse_gateway_auth_method(&request_headers);
         let post_options = PostJsonToApiOptions::new(self.image_model_url(), request_body)
             .with_headers(request_headers)
-            .with_environment(RuntimeEnvironment::unknown());
+            .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(options.abort_signal.clone());
         let transport = Arc::clone(&self.transport);
 
         match post_json_to_api(
@@ -1781,7 +1783,8 @@ impl GatewayRerankingModel {
         let auth_method = parse_gateway_auth_method(&request_headers);
         let post_options = PostJsonToApiOptions::new(self.reranking_model_url(), request_body)
             .with_headers(request_headers)
-            .with_environment(RuntimeEnvironment::unknown());
+            .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(options.abort_signal.clone());
         let transport = Arc::clone(&self.transport);
 
         match post_json_to_api(
@@ -1860,7 +1863,8 @@ impl GatewayVideoModel {
         let auth_method = parse_gateway_auth_method(&request_headers);
         let post_options = PostJsonToApiOptions::new(self.video_model_url(), request_body)
             .with_headers(request_headers)
-            .with_environment(RuntimeEnvironment::unknown());
+            .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(options.abort_signal.clone());
         let transport = Arc::clone(&self.transport);
 
         match post_json_to_api(
@@ -3632,6 +3636,18 @@ mod tests {
         value.as_object().cloned().expect("JSON value is an object")
     }
 
+    fn assert_request_tracks_abort_signal(
+        request: &ProviderApiRequest,
+        abort_controller: &LanguageModelAbortController,
+    ) {
+        let request_signal = request.abort_signal.clone().expect("abort signal set");
+        assert!(!request_signal.is_aborted());
+
+        abort_controller.abort_with_reason("client-disconnected");
+        assert!(request_signal.is_aborted());
+        assert_eq!(request_signal.reason(), Some(json!("client-disconnected")));
+    }
+
     #[test]
     fn get_gateway_auth_token_matches_upstream_precedence() {
         let token = get_gateway_auth_token_with_env(
@@ -4076,6 +4092,197 @@ mod tests {
                 }
             }))
         );
+    }
+
+    #[test]
+    fn gateway_embedding_model_passes_abort_signal_to_provider_api_request() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let abort_controller = LanguageModelAbortController::new();
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "embeddings": [[0.1, 0.2]]
+                })
+                .to_string(),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .embedding_model("openai/text-embedding-3-small");
+
+        let result = poll_ready(
+            model.do_embed(
+                EmbeddingModelCallOptions::new(vec!["hello".to_string()])
+                    .with_abort_signal(abort_controller.signal()),
+            ),
+        );
+
+        assert_eq!(result.embeddings, vec![vec![0.1, 0.2]]);
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_request_tracks_abort_signal(&request, &abort_controller);
+    }
+
+    #[test]
+    fn gateway_image_model_passes_abort_signal_to_provider_api_request() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let abort_controller = LanguageModelAbortController::new();
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "images": ["base64-image"]
+                })
+                .to_string(),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .image_model("openai/gpt-image-1");
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A red cube")
+                    .with_abort_signal(abort_controller.signal()),
+            ),
+        );
+
+        assert_eq!(result.images.len(), 1);
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_request_tracks_abort_signal(&request, &abort_controller);
+    }
+
+    #[test]
+    fn gateway_reranking_model_passes_abort_signal_to_provider_api_request() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let abort_controller = LanguageModelAbortController::new();
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "ranking": [
+                        {
+                            "index": 0,
+                            "relevanceScore": 0.9
+                        }
+                    ]
+                })
+                .to_string(),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .reranking_model("cohere/rerank-v3.5");
+
+        let result = poll_ready(
+            model.do_rerank(
+                RerankingModelCallOptions::new(
+                    RerankingModelDocuments::text(vec!["one".to_string(), "two".to_string()]),
+                    "one",
+                )
+                .with_abort_signal(abort_controller.signal()),
+            ),
+        );
+
+        assert_eq!(result.ranking.len(), 1);
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_request_tracks_abort_signal(&request, &abort_controller);
+    }
+
+    #[test]
+    fn gateway_video_model_passes_abort_signal_to_provider_api_request() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let abort_controller = LanguageModelAbortController::new();
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                format!(
+                    "data: {}\n\n",
+                    json!({
+                        "type": "result",
+                        "videos": [
+                            {
+                                "type": "base64",
+                                "data": "AAAAIGZ0eXBtcDQy",
+                                "mediaType": "video/mp4"
+                            }
+                        ]
+                    })
+                ),
+            ))))
+        });
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .video_model("google/veo-2.0-generate-001");
+
+        let result = poll_ready(
+            model.do_generate(
+                VideoModelCallOptions::new(1)
+                    .with_prompt("Animate this")
+                    .with_abort_signal(abort_controller.signal()),
+            ),
+        );
+
+        assert_eq!(result.videos.len(), 1);
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_request_tracks_abort_signal(&request, &abort_controller);
     }
 
     #[test]

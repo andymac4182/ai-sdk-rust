@@ -2234,6 +2234,10 @@ pub struct PostFormDataToApiOptions {
     /// Runtime indicators used to append the provider-utils user-agent suffix.
     #[serde(default, skip_serializing_if = "RuntimeEnvironment::is_unknown")]
     pub environment: RuntimeEnvironment,
+
+    /// Caller-controlled abort signal for this provider API request.
+    #[serde(default, skip)]
+    pub abort_signal: Option<LanguageModelAbortSignal>,
 }
 
 impl PostFormDataToApiOptions {
@@ -2244,6 +2248,7 @@ impl PostFormDataToApiOptions {
             headers: BTreeMap::new(),
             form_data,
             environment: RuntimeEnvironment::unknown(),
+            abort_signal: None,
         }
     }
 
@@ -2279,6 +2284,21 @@ impl PostFormDataToApiOptions {
         self
     }
 
+    /// Sets a caller-controlled abort signal for the HTTP transport request.
+    pub fn with_abort_signal(mut self, abort_signal: LanguageModelAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
+        self
+    }
+
+    /// Sets an optional caller-controlled abort signal for the HTTP transport request.
+    pub fn with_optional_abort_signal(
+        mut self,
+        abort_signal: Option<LanguageModelAbortSignal>,
+    ) -> Self {
+        self.abort_signal = abort_signal;
+        self
+    }
+
     /// Converts these options into the prepared provider API request.
     pub fn into_request(self) -> ProviderApiRequest {
         let Self {
@@ -2286,9 +2306,13 @@ impl PostFormDataToApiOptions {
             headers,
             form_data,
             environment,
+            abort_signal,
         } = self;
 
-        prepare_post_form_data_to_api_request(url, Some(headers), form_data, &environment)
+        let mut request =
+            prepare_post_form_data_to_api_request(url, Some(headers), form_data, &environment);
+        request.abort_signal = abort_signal;
+        request
     }
 }
 
@@ -2319,6 +2343,10 @@ pub struct PostToApiOptions {
     /// Runtime indicators used to append the provider-utils user-agent suffix.
     #[serde(default, skip_serializing_if = "RuntimeEnvironment::is_unknown")]
     pub environment: RuntimeEnvironment,
+
+    /// Caller-controlled abort signal for this provider API request.
+    #[serde(default, skip)]
+    pub abort_signal: Option<LanguageModelAbortSignal>,
 }
 
 impl PostToApiOptions {
@@ -2335,6 +2363,7 @@ impl PostToApiOptions {
             body,
             request_body_values: request_body_values.into(),
             environment: RuntimeEnvironment::unknown(),
+            abort_signal: None,
         }
     }
 
@@ -2376,6 +2405,21 @@ impl PostToApiOptions {
         self
     }
 
+    /// Sets a caller-controlled abort signal for the HTTP transport request.
+    pub fn with_abort_signal(mut self, abort_signal: LanguageModelAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
+        self
+    }
+
+    /// Sets an optional caller-controlled abort signal for the HTTP transport request.
+    pub fn with_optional_abort_signal(
+        mut self,
+        abort_signal: Option<LanguageModelAbortSignal>,
+    ) -> Self {
+        self.abort_signal = abort_signal;
+        self
+    }
+
     /// Converts these options into the prepared provider API request.
     pub fn into_request(self) -> ProviderApiRequest {
         let Self {
@@ -2384,9 +2428,18 @@ impl PostToApiOptions {
             body,
             request_body_values,
             environment,
+            abort_signal,
         } = self;
 
-        prepare_post_to_api_request(url, Some(headers), body, request_body_values, &environment)
+        let mut request = prepare_post_to_api_request(
+            url,
+            Some(headers),
+            body,
+            request_body_values,
+            &environment,
+        );
+        request.abort_signal = abort_signal;
+        request
     }
 }
 
@@ -12627,6 +12680,45 @@ mod tests {
     }
 
     #[test]
+    fn post_form_data_to_api_options_carries_abort_signal_without_serializing_it() {
+        let abort_controller = LanguageModelAbortController::new();
+        let form_data = FormData {
+            entries: vec![FormDataEntry::new(
+                "model",
+                FormDataValue::text("gpt-image-1"),
+            )],
+        };
+        let options = PostFormDataToApiOptions::new("https://api.example.com/v1/images", form_data)
+            .with_abort_signal(abort_controller.signal());
+
+        assert_eq!(
+            serde_json::to_value(&options).expect("post-form-data options serialize"),
+            json!({
+                "url": "https://api.example.com/v1/images",
+                "formData": {
+                    "entries": [
+                        {
+                            "name": "model",
+                            "value": {
+                                "type": "text",
+                                "value": "gpt-image-1"
+                            }
+                        }
+                    ]
+                }
+            })
+        );
+
+        let request = options.into_request();
+        let request_signal = request.abort_signal.clone().expect("request signal set");
+        assert!(!request_signal.is_aborted());
+
+        abort_controller.abort_with_reason("client-disconnected");
+        assert!(request_signal.is_aborted());
+        assert_eq!(request_signal.reason(), Some(json!("client-disconnected")));
+    }
+
+    #[test]
     fn post_form_data_to_api_prepares_request_and_handles_success() {
         let form_data = FormData {
             entries: vec![
@@ -12762,6 +12854,39 @@ mod tests {
                 json!({ "filename": "notes.txt" })
             )
         );
+    }
+
+    #[test]
+    fn post_to_api_options_carries_abort_signal_without_serializing_it() {
+        let abort_controller = LanguageModelAbortController::new();
+        let options = PostToApiOptions::new(
+            "https://api.example.com/v1/upload",
+            ProviderApiRequestBody::bytes([1_u8, 2, 3]),
+            json!({ "filename": "image.png" }),
+        )
+        .with_abort_signal(abort_controller.signal());
+
+        assert_eq!(
+            serde_json::to_value(&options).expect("post-to-api options serialize"),
+            json!({
+                "url": "https://api.example.com/v1/upload",
+                "body": {
+                    "type": "bytes",
+                    "content": [1, 2, 3]
+                },
+                "requestBodyValues": {
+                    "filename": "image.png"
+                }
+            })
+        );
+
+        let request = options.into_request();
+        let request_signal = request.abort_signal.clone().expect("request signal set");
+        assert!(!request_signal.is_aborted());
+
+        abort_controller.abort_with_reason("client-disconnected");
+        assert!(request_signal.is_aborted());
+        assert_eq!(request_signal.reason(), Some(json!("client-disconnected")));
     }
 
     #[test]

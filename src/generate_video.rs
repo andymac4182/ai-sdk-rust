@@ -11,6 +11,7 @@ use crate::file_data::FileDataContent;
 use crate::generate_text::GeneratedFile;
 use crate::headers::Headers;
 use crate::json::JsonValue;
+use crate::language_model::ProviderAbortSignal;
 use crate::provider::{ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{
     DownloadError, DownloadedBlob, convert_base64_to_bytes, detect_media_type,
@@ -251,6 +252,9 @@ pub struct GenerateVideoOptions<'a, M: VideoModel + ?Sized> {
     /// Provider-specific options passed through to the model.
     pub provider_options: Option<ProviderOptions>,
 
+    /// Abort signal for cancelling video generation calls.
+    pub abort_signal: Option<ProviderAbortSignal>,
+
     /// Additional HTTP headers for HTTP-based providers.
     pub headers: Option<Headers>,
 
@@ -272,6 +276,7 @@ impl<'a, M: VideoModel + ?Sized> GenerateVideoOptions<'a, M> {
             fps: None,
             seed: None,
             provider_options: None,
+            abort_signal: None,
             headers: None,
             download: None,
         }
@@ -322,6 +327,12 @@ impl<'a, M: VideoModel + ?Sized> GenerateVideoOptions<'a, M> {
     /// Adds provider-specific options.
     pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
         self.provider_options = Some(provider_options);
+        self
+    }
+
+    /// Sets the abort signal for video generation calls.
+    pub fn with_abort_signal(mut self, abort_signal: ProviderAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
         self
     }
 
@@ -407,6 +418,7 @@ pub async fn generate_video<M: VideoModel + ?Sized>(
         fps,
         seed,
         provider_options,
+        abort_signal,
         headers,
         download,
     } = options;
@@ -441,7 +453,7 @@ pub async fn generate_video<M: VideoModel + ?Sized>(
                 seed,
                 image: normalized_prompt.image.clone(),
                 provider_options: provider_options.clone().unwrap_or_default(),
-                abort_signal: None,
+                abort_signal: abort_signal.clone(),
                 headers: Some(headers.clone()),
             })
             .await;
@@ -676,6 +688,7 @@ mod tests {
         GenerateVideoPrompt, GenerateVideoPromptImage, GenerateVideoResult,
         experimental_generate_video, generate_video,
     };
+    use crate::ProviderAbortController;
     use crate::VERSION;
     use crate::file_data::FileDataContent;
     use crate::generate_text::GeneratedFile;
@@ -976,6 +989,31 @@ mod tests {
                 ..
             }) if media_type == "image/png"
         ));
+    }
+
+    #[test]
+    fn generate_video_forwards_abort_signal_to_model_call() {
+        let abort_controller = ProviderAbortController::new();
+        let model = RecordingVideoModel::new(vec![VideoModelResult::new(
+            vec![VideoModelVideoData::base64(mp4_base64(), "video/mp4")],
+            video_response("video-test"),
+        )]);
+
+        let result = poll_ready(generate_video(
+            GenerateVideoOptions::new(&model, "animate this")
+                .with_abort_signal(abort_controller.signal()),
+        ))
+        .expect("video generation succeeds");
+
+        assert_eq!(result.video.media_type(), "video/mp4");
+        let calls = model.calls();
+        assert_eq!(calls.len(), 1);
+        let call_signal = calls[0].abort_signal.clone().expect("abort signal set");
+        assert!(!call_signal.is_aborted());
+
+        abort_controller.abort_with_reason("client-disconnected");
+        assert!(call_signal.is_aborted());
+        assert_eq!(call_signal.reason(), Some(json!("client-disconnected")));
     }
 
     #[test]

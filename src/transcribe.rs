@@ -9,6 +9,7 @@ use url::Url;
 use crate::VERSION;
 use crate::file_data::FileDataContent;
 use crate::headers::Headers;
+use crate::language_model::ProviderAbortSignal;
 use crate::provider::ProviderMetadata;
 use crate::provider::ProviderOptions;
 use crate::provider_utils::{
@@ -248,6 +249,9 @@ pub struct TranscribeOptions<'a, M: TranscriptionModel + ?Sized> {
     /// Provider-specific options passed through to the model.
     pub provider_options: Option<ProviderOptions>,
 
+    /// Abort signal for cancelling the transcription call.
+    pub abort_signal: Option<ProviderAbortSignal>,
+
     /// Additional HTTP headers for HTTP-based providers.
     pub headers: Option<Headers>,
 
@@ -262,6 +266,7 @@ impl<'a, M: TranscriptionModel + ?Sized> TranscribeOptions<'a, M> {
             model,
             audio: audio.into(),
             provider_options: None,
+            abort_signal: None,
             headers: None,
             download: None,
         }
@@ -270,6 +275,12 @@ impl<'a, M: TranscriptionModel + ?Sized> TranscribeOptions<'a, M> {
     /// Adds provider-specific options.
     pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
         self.provider_options = Some(provider_options);
+        self
+    }
+
+    /// Sets the abort signal for the transcription call.
+    pub fn with_abort_signal(mut self, abort_signal: ProviderAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
         self
     }
 
@@ -302,6 +313,7 @@ pub async fn transcribe<M: TranscriptionModel + ?Sized>(
         model,
         audio,
         provider_options,
+        abort_signal,
         headers,
         download,
     } = options;
@@ -326,7 +338,7 @@ pub async fn transcribe<M: TranscriptionModel + ?Sized>(
             audio,
             media_type,
             provider_options: Some(provider_options.unwrap_or_default()),
-            abort_signal: None,
+            abort_signal,
             headers: Some(headers),
         })
         .await;
@@ -399,6 +411,7 @@ mod tests {
         ExperimentalTranscriptionResult, TranscribeAudio, TranscribeDownload, TranscribeOptions,
         TranscriptionResult, experimental_transcribe, transcribe,
     };
+    use crate::ProviderAbortController;
     use crate::VERSION;
     use crate::file_data::FileDataContent;
     use crate::headers::Headers;
@@ -719,6 +732,32 @@ mod tests {
                 }),
             }]
         );
+    }
+
+    #[test]
+    fn transcribe_forwards_abort_signal_to_model_call() {
+        let abort_controller = ProviderAbortController::new();
+        let model = RecordingTranscriptionModel::new(vec![TranscriptionModelResult::new(
+            "Hello world.",
+            Vec::new(),
+            transcription_response("openai/whisper-1"),
+        )]);
+
+        let result = poll_ready(transcribe(
+            TranscribeOptions::new(&model, FileDataContent::Base64("//s=".to_string()))
+                .with_abort_signal(abort_controller.signal()),
+        ))
+        .expect("transcription succeeds");
+
+        assert_eq!(result.text, "Hello world.");
+        let calls = model.calls();
+        assert_eq!(calls.len(), 1);
+        let call_signal = calls[0].abort_signal.clone().expect("abort signal set");
+        assert!(!call_signal.is_aborted());
+
+        abort_controller.abort_with_reason("client-disconnected");
+        assert!(call_signal.is_aborted());
+        assert_eq!(call_signal.reason(), Some(json!("client-disconnected")));
     }
 
     #[test]

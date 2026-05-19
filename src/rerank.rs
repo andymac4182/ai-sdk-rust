@@ -8,6 +8,7 @@ use time::OffsetDateTime;
 
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
+use crate::language_model::ProviderAbortSignal;
 use crate::provider::{ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{IdGeneratorOptions, create_id_generator};
 use crate::reranking_model::{
@@ -486,6 +487,9 @@ pub struct RerankOptions<'a, M: RerankingModel + ?Sized> {
     /// Provider-specific options passed through to the model.
     pub provider_options: Option<ProviderOptions>,
 
+    /// Abort signal for cancelling the rerank call.
+    pub abort_signal: Option<ProviderAbortSignal>,
+
     /// Additional HTTP headers for HTTP-based providers.
     pub headers: Option<Headers>,
 
@@ -509,6 +513,7 @@ impl<'a, M: RerankingModel + ?Sized> RerankOptions<'a, M> {
             top_n: None,
             max_retries: None,
             provider_options: None,
+            abort_signal: None,
             headers: None,
             on_start: None,
             on_end: None,
@@ -531,6 +536,12 @@ impl<'a, M: RerankingModel + ?Sized> RerankOptions<'a, M> {
     /// Adds provider-specific options.
     pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
         self.provider_options = Some(provider_options);
+        self
+    }
+
+    /// Sets the abort signal for the rerank call.
+    pub fn with_abort_signal(mut self, abort_signal: ProviderAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
         self
     }
 
@@ -602,6 +613,7 @@ pub async fn rerank<M: RerankingModel + ?Sized>(options: RerankOptions<'_, M>) -
         top_n,
         max_retries,
         provider_options,
+        abort_signal,
         headers,
         on_start,
         on_end,
@@ -663,7 +675,7 @@ pub async fn rerank<M: RerankingModel + ?Sized>(options: RerankOptions<'_, M>) -
             documents: documents.to_model_documents(),
             query: query.clone(),
             top_n,
-            abort_signal: None,
+            abort_signal,
             provider_options: provider_options.clone(),
             headers: headers.clone(),
         })
@@ -744,6 +756,7 @@ mod tests {
         RerankResponse, RerankResult, RerankStartEvent, RerankingModelCallEndEvent,
         RerankingModelCallStartEvent,
     };
+    use crate::ProviderAbortController;
     use crate::headers::Headers;
     use crate::json::JsonObject;
     use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
@@ -947,6 +960,33 @@ mod tests {
                 "cloudy day in the mountains".to_string(),
             ])
         );
+    }
+
+    #[test]
+    fn rerank_forwards_abort_signal_to_model_call() {
+        let abort_controller = ProviderAbortController::new();
+        let model = RecordingRerankingModel::new(vec![RerankingModelResult::new(vec![
+            RerankingModelRanking::new(0, 0.9),
+        ])]);
+
+        let result = poll_ready(super::rerank(
+            RerankOptions::new(
+                &model,
+                RerankDocuments::text(["sunny day at the beach", "rainy day in the city"]),
+                "sunny day",
+            )
+            .with_abort_signal(abort_controller.signal()),
+        ));
+
+        assert_eq!(result.ranking.len(), 1);
+        let calls = model.calls();
+        assert_eq!(calls.len(), 1);
+        let call_signal = calls[0].abort_signal.clone().expect("abort signal set");
+        assert!(!call_signal.is_aborted());
+
+        abort_controller.abort_with_reason("client-disconnected");
+        assert!(call_signal.is_aborted());
+        assert_eq!(call_signal.reason(), Some(json!("client-disconnected")));
     }
 
     #[test]

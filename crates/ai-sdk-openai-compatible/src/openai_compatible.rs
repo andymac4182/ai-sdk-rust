@@ -1126,7 +1126,8 @@ impl OpenAICompatibleEmbeddingModel {
         };
         let post_options = PostJsonToApiOptions::new(url, request_body)
             .with_headers(request_headers)
-            .with_environment(RuntimeEnvironment::unknown());
+            .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(options.abort_signal.clone());
         let transport = Arc::clone(&self.config.transport);
 
         match post_json_to_api(
@@ -1314,7 +1315,8 @@ impl OpenAICompatibleImageModel {
         };
         let post_options = PostJsonToApiOptions::new(url, request_body)
             .with_headers(request_headers)
-            .with_environment(RuntimeEnvironment::unknown());
+            .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(options.abort_signal.clone());
         let transport = Arc::clone(&self.config.transport);
 
         match post_json_to_api(
@@ -1368,7 +1370,8 @@ impl OpenAICompatibleImageModel {
         };
         let post_options = PostFormDataToApiOptions::new(url, form_data)
             .with_headers(request_headers)
-            .with_environment(RuntimeEnvironment::unknown());
+            .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(options.abort_signal.clone());
         let transport = Arc::clone(&self.config.transport);
 
         match post_form_data_to_api(
@@ -4039,7 +4042,7 @@ mod tests {
     use ai_sdk_provider::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions};
     use ai_sdk_provider::file_data::{FileData, FileDataContent};
     use ai_sdk_provider::headers::Headers;
-    use ai_sdk_provider::image_model::{ImageModel, ImageModelCallOptions};
+    use ai_sdk_provider::image_model::{ImageModel, ImageModelCallOptions, ImageModelFile};
     use ai_sdk_provider::json::{JsonObject, JsonValue};
     use ai_sdk_provider::language_model::{
         FinishReason, LanguageModel, LanguageModelAbortController,
@@ -4063,6 +4066,18 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
     use url::Url;
+
+    fn assert_request_tracks_abort_signal(
+        request: &ProviderApiRequest,
+        abort_controller: &LanguageModelAbortController,
+    ) {
+        let request_signal = request.abort_signal.clone().expect("abort signal set");
+        assert!(!request_signal.is_aborted());
+
+        abort_controller.abort_with_reason("client-disconnected");
+        assert!(request_signal.is_aborted());
+        assert_eq!(request_signal.reason(), Some(json!("client-disconnected")));
+    }
 
     #[test]
     fn openai_compatible_provider_lists_models() {
@@ -4343,6 +4358,53 @@ mod tests {
     }
 
     #[test]
+    fn openai_compatible_embedding_passes_abort_signal_to_provider_api_request() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let abort_controller = LanguageModelAbortController::new();
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "data": [
+                            {
+                                "embedding": [0.1, 0.2]
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
+            "test-provider",
+            "https://api.example.com",
+        ))
+        .with_transport(transport)
+        .embedding_model("text-embedding-3-small");
+
+        let result = poll_ready(
+            model.do_embed(
+                EmbeddingModelCallOptions::new(vec!["hello".to_string()])
+                    .with_abort_signal(abort_controller.signal()),
+            ),
+        );
+
+        assert_eq!(result.embeddings, vec![vec![0.1, 0.2]]);
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_request_tracks_abort_signal(&request, &abort_controller);
+    }
+
+    #[test]
     fn openai_compatible_image_model_passes_options_warnings_and_errors() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -4456,6 +4518,106 @@ mod tests {
                 .and_then(JsonValue::as_str),
             Some("Invalid image prompt")
         );
+    }
+
+    #[test]
+    fn openai_compatible_image_generation_passes_abort_signal_to_provider_api_request() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let abort_controller = LanguageModelAbortController::new();
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "data": [
+                            {
+                                "b64_json": "aW1hZ2U="
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
+            "test-provider",
+            "https://api.example.com",
+        ))
+        .with_transport(transport)
+        .image_model("dall-e-3");
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A forest")
+                    .with_abort_signal(abort_controller.signal()),
+            ),
+        );
+
+        assert_eq!(result.images.len(), 1);
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_request_tracks_abort_signal(&request, &abort_controller);
+    }
+
+    #[test]
+    fn openai_compatible_image_edit_passes_abort_signal_to_provider_api_request() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let abort_controller = LanguageModelAbortController::new();
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "data": [
+                            {
+                                "b64_json": "ZWRpdGVkLWltYWdl"
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
+            "test-provider",
+            "https://api.example.com",
+        ))
+        .with_transport(transport)
+        .image_model("dall-e-3");
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Add a flamingo to the pool")
+                    .with_files(vec![ImageModelFile::file(
+                        "image/png",
+                        FileDataContent::Bytes(vec![137, 80, 78, 71]),
+                    )])
+                    .with_abort_signal(abort_controller.signal()),
+            ),
+        );
+
+        assert_eq!(result.images.len(), 1);
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_request_tracks_abort_signal(&request, &abort_controller);
     }
 
     #[test]

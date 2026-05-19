@@ -2,6 +2,7 @@ use crate::VERSION;
 use crate::file_data::FileDataContent;
 use crate::generate_text::GeneratedFile;
 use crate::headers::Headers;
+use crate::language_model::ProviderAbortSignal;
 use crate::provider::{ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{Base64DecodeError, detect_media_type, with_user_agent_suffix};
 use crate::speech_model::{
@@ -183,6 +184,9 @@ pub struct GenerateSpeechOptions<'a, M: SpeechModel + ?Sized> {
     /// Provider-specific options passed through to the model.
     pub provider_options: Option<ProviderOptions>,
 
+    /// Abort signal for cancelling the speech generation call.
+    pub abort_signal: Option<ProviderAbortSignal>,
+
     /// Additional HTTP headers for HTTP-based providers.
     pub headers: Option<Headers>,
 }
@@ -199,6 +203,7 @@ impl<'a, M: SpeechModel + ?Sized> GenerateSpeechOptions<'a, M> {
             speed: None,
             language: None,
             provider_options: None,
+            abort_signal: None,
             headers: None,
         }
     }
@@ -239,6 +244,12 @@ impl<'a, M: SpeechModel + ?Sized> GenerateSpeechOptions<'a, M> {
         self
     }
 
+    /// Sets the abort signal for the speech generation call.
+    pub fn with_abort_signal(mut self, abort_signal: ProviderAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
+        self
+    }
+
     /// Sets all additional HTTP headers.
     pub fn with_headers(mut self, headers: Headers) -> Self {
         self.headers = Some(headers);
@@ -267,6 +278,7 @@ pub async fn generate_speech<M: SpeechModel + ?Sized>(
         speed,
         language,
         provider_options,
+        abort_signal,
         headers,
     } = options;
 
@@ -287,7 +299,7 @@ pub async fn generate_speech<M: SpeechModel + ?Sized>(
             speed,
             language,
             provider_options,
-            abort_signal: None,
+            abort_signal,
             headers: Some(headers),
         })
         .await;
@@ -348,6 +360,7 @@ mod tests {
         GenerateSpeechOptions, GeneratedAudioFile, SpeechResult, experimental_generate_speech,
         generate_speech,
     };
+    use crate::ProviderAbortController;
     use crate::VERSION;
     use crate::file_data::FileDataContent;
     use crate::headers::Headers;
@@ -646,6 +659,31 @@ mod tests {
             )]
         );
         assert_eq!(result.provider_metadata, provider_metadata);
+    }
+
+    #[test]
+    fn generate_speech_forwards_abort_signal_to_model_call() {
+        let abort_controller = ProviderAbortController::new();
+        let model = RecordingSpeechModel::new(vec![SpeechModelResult::new(
+            FileDataContent::Bytes(vec![0xff, 0xfb]),
+            speech_response("speech-test"),
+        )]);
+
+        let result = poll_ready(generate_speech(
+            GenerateSpeechOptions::new(&model, "Hello from Rust.")
+                .with_abort_signal(abort_controller.signal()),
+        ))
+        .expect("speech generates");
+
+        assert_eq!(result.audio.media_type(), "audio/mpeg");
+        let calls = model.calls();
+        assert_eq!(calls.len(), 1);
+        let call_signal = calls[0].abort_signal.clone().expect("abort signal set");
+        assert!(!call_signal.is_aborted());
+
+        abort_controller.abort_with_reason("client-disconnected");
+        assert!(call_signal.is_aborted());
+        assert_eq!(call_signal.reason(), Some(json!("client-disconnected")));
     }
 
     #[test]
