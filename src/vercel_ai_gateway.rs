@@ -4158,6 +4158,147 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI Responses tool-loop model call"]
+    fn live_vercel_ai_gateway_openai_responses_generate_text_tool_loop() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!(
+                "skipping live Gateway OpenAI Responses tool-loop test because no API key is configured"
+            );
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_AI_GATEWAY_OPENAI_RESPONSES_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_OPENAI_RESPONSES_MODEL"))
+            .or_else(|_| env::var("AI_SDK_RUST_GATEWAY_RESPONSES_MODEL"))
+            .or_else(|_| env::var("AI_GATEWAY_RESPONSES_MODEL"))
+            .unwrap_or_else(|_| "openai/gpt-4.1-mini".to_string());
+        let model = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key(api_key)
+            .responses(model_id);
+        let input_schema: JsonObject = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "city": {
+                    "type": "string"
+                }
+            },
+            "required": ["city"],
+            "additionalProperties": false
+        }))
+        .expect("schema deserializes");
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(
+                &model,
+                Prompt::from_prompt(
+                    "Call the weather tool for Brisbane, then reply with a short sentence that includes Brisbane and sunny.",
+                ),
+            )
+            .expect("prompt is valid")
+            .with_provider_options(gateway_responses_store_false_provider_options())
+            .with_tool(
+                Tool::new("weather", input_schema.clone())
+                    .with_description("Get the current weather for a city")
+                    .with_execute(|input, options| async move {
+                        Ok(json!({
+                            "city": input
+                                .get("city")
+                                .and_then(JsonValue::as_str)
+                                .unwrap_or("Brisbane"),
+                            "forecast": "sunny",
+                            "toolCallId": options.tool_call_id
+                        }))
+                    }),
+            )
+            .with_prepare_step(|options| async move {
+                if options.step_number == 0 {
+                    PrepareStepResult::new().with_tool_choice(LanguageModelToolChoice::Tool {
+                        tool_name: "weather".to_string(),
+                    })
+                } else {
+                    PrepareStepResult::new()
+                }
+            })
+            .with_max_steps(2)
+            .with_max_output_tokens(56)
+            .with_temperature(0.0),
+        ));
+
+        let text = result.text.to_lowercase();
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.tool_results.len(), 1);
+        assert!(
+            text.contains("brisbane") && text.contains("sunny"),
+            "Gateway OpenAI Responses tool-loop response did not include the expected tool result"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI Responses stream tool-loop model call"]
+    fn live_vercel_ai_gateway_openai_responses_stream_text_tool_loop() {
+        let Some(api_key) = live_gateway_api_key() else {
+            eprintln!(
+                "skipping live Gateway OpenAI Responses stream tool-loop test because no API key is configured"
+            );
+            return;
+        };
+        let model_id = env::var("AI_SDK_RUST_AI_GATEWAY_OPENAI_RESPONSES_MODEL")
+            .or_else(|_| env::var("AI_GATEWAY_OPENAI_RESPONSES_MODEL"))
+            .or_else(|_| env::var("AI_SDK_RUST_GATEWAY_RESPONSES_MODEL"))
+            .or_else(|_| env::var("AI_GATEWAY_RESPONSES_MODEL"))
+            .unwrap_or_else(|_| "openai/gpt-4.1-mini".to_string());
+        let model = VercelAiGatewayOpenAICompatibleProvider::new()
+            .with_api_key(api_key)
+            .responses(model_id);
+        let input_schema: JsonObject = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "city": {
+                    "type": "string"
+                }
+            },
+            "required": ["city"],
+            "additionalProperties": false
+        }))
+        .expect("schema deserializes");
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::from_prompt(
+                &model,
+                Prompt::from_prompt(
+                    "Call the weather tool for Brisbane, then reply with a short sentence that includes Brisbane and sunny.",
+                ),
+            )
+            .expect("prompt is valid")
+            .with_provider_options(gateway_responses_store_false_provider_options())
+            .with_tool(
+                Tool::new("weather", input_schema)
+                    .with_description("Get the current weather for a city")
+                    .with_execute(|input, options| async move {
+                        Ok(json!({
+                            "city": input
+                                .get("city")
+                                .and_then(JsonValue::as_str)
+                                .unwrap_or("Brisbane"),
+                            "forecast": "sunny",
+                            "toolCallId": options.tool_call_id
+                        }))
+                    }),
+            )
+            .with_max_steps(2)
+            .with_max_output_tokens(56)
+            .with_temperature(0.0),
+        ));
+
+        let text = result.text.to_lowercase();
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.tool_results.len(), 1);
+        assert!(
+            text.contains("brisbane") && text.contains("sunny"),
+            "Gateway OpenAI Responses stream tool-loop response did not include the expected tool result"
+        );
+    }
+
+    #[test]
     #[ignore = "requires a Vercel AI Gateway API key and makes a live OpenAI-compatible tool-loop model call"]
     fn live_vercel_ai_gateway_openai_compatible_generate_text_tool_loop() {
         let Some(api_key) = live_gateway_api_key() else {
@@ -4806,6 +4947,15 @@ mod tests {
             .ok()
             .filter(|value| !value.trim().is_empty())
             .or_else(load_gateway_api_key_from_dotenv)
+    }
+
+    fn gateway_responses_store_false_provider_options() -> ProviderOptions {
+        serde_json::from_value(json!({
+            "vercelAiGateway": {
+                "store": false
+            }
+        }))
+        .expect("provider options deserialize")
     }
 
     fn load_gateway_api_key_from_dotenv() -> Option<String> {
