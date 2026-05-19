@@ -416,6 +416,48 @@ impl TextStreamFinishPart {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum TextStreamAbortKind {
+    #[serde(rename = "abort")]
+    Abort,
+}
+
+/// Abort notification for a high-level text stream.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextStreamAbortPart {
+    #[serde(rename = "type")]
+    kind: TextStreamAbortKind,
+
+    /// Optional abort reason supplied by the caller/runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<JsonValue>,
+}
+
+impl TextStreamAbortPart {
+    /// Creates an abort part without a reason.
+    pub fn new() -> Self {
+        Self {
+            kind: TextStreamAbortKind::Abort,
+            reason: None,
+        }
+    }
+
+    /// Creates an abort part with a reason.
+    pub fn with_reason(reason: impl Into<JsonValue>) -> Self {
+        Self {
+            kind: TextStreamAbortKind::Abort,
+            reason: Some(reason.into()),
+        }
+    }
+}
+
+impl Default for TextStreamAbortPart {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// High-level stream part emitted by [`stream_text`].
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(untagged)]
@@ -476,6 +518,9 @@ pub enum TextStreamPart {
 
     /// Raw provider chunk.
     Raw(LanguageModelRawStreamPart),
+
+    /// Abort notification for the high-level stream.
+    Abort(TextStreamAbortPart),
 
     /// Provider stream error.
     Error(LanguageModelErrorStreamPart),
@@ -1320,6 +1365,12 @@ impl StreamTextResult {
                 }
                 TextStreamPart::Error(part) => {
                     chunks.push(UiMessageChunk::error(ui_message_error_text(&part.error)));
+                }
+                TextStreamPart::Abort(part) => {
+                    chunks.push(match &part.reason {
+                        Some(reason) => UiMessageChunk::abort_with_reason(reason.clone()),
+                        None => UiMessageChunk::abort(),
+                    });
                 }
                 TextStreamPart::FinishStep(_) => {
                     chunks.push(UiMessageChunk::finish_step());
@@ -2321,6 +2372,7 @@ fn is_stream_text_chunk_callback_part(part: &TextStreamPart) -> bool {
             | TextStreamPart::Custom(_)
             | TextStreamPart::Source(_)
             | TextStreamPart::Raw(_)
+            | TextStreamPart::Abort(_)
     )
 }
 
@@ -3060,6 +3112,22 @@ mod tests {
             })
         );
 
+        let abort = TextStreamPart::Abort(TextStreamAbortPart::with_reason(json!({
+            "source": "client"
+        })));
+        assert_eq!(
+            serde_json::to_value(&abort).expect("abort should serialize"),
+            json!({
+                "type": "abort",
+                "reason": { "source": "client" }
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<TextStreamPart>(json!({ "type": "abort" }))
+                .expect("abort should deserialize"),
+            TextStreamPart::Abort(TextStreamAbortPart::new())
+        );
+
         let finish = TextStreamPart::Finish(TextStreamFinishPart::new(
             FinishReason::Stop,
             Some("stop".to_string()),
@@ -3095,6 +3163,43 @@ mod tests {
                 .parts
                 .iter()
                 .any(|part| matches!(part, TextStreamPart::Error(_)))
+        );
+    }
+
+    #[test]
+    fn stream_text_result_maps_abort_part_to_ui_message_stream() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let mut result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Say hello")],
+        )));
+        result.parts.insert(
+            3,
+            TextStreamPart::Abort(TextStreamAbortPart::with_reason("client-disconnected")),
+        );
+
+        assert_eq!(
+            serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize"),
+            json!([
+                { "type": "start" },
+                { "type": "start-step" },
+                { "type": "text-start", "id": "1" },
+                { "type": "abort", "reason": "client-disconnected" },
+                { "type": "text-delta", "id": "1", "delta": "Hello" },
+                { "type": "text-end", "id": "1" },
+                { "type": "finish-step" },
+                { "type": "finish", "finishReason": "stop" }
+            ])
         );
     }
 
@@ -3712,6 +3817,64 @@ mod tests {
                 "on-step-finish",
                 "on-finish"
             ]
+        );
+    }
+
+    #[test]
+    fn stream_text_invokes_finish_callback_with_completed_records() {
+        let provider_metadata = ProviderMetadata::from([(
+            "mock".to_string(),
+            Map::from_iter([("trace".to_string(), json!("stream-finish"))]),
+        )]);
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(
+                    LanguageModelStreamFinish::new(usage(), finish_reason())
+                        .with_provider_metadata(provider_metadata.clone()),
+                ),
+            ]));
+        let finish_events = Arc::new(Mutex::new(Vec::<GenerateTextFinishEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")]).with_on_finish(
+                move |event| {
+                    let finish_events = Arc::clone(&finish_events_for_callback);
+                    async move {
+                        finish_events
+                            .lock()
+                            .expect("finish events lock")
+                            .push(event);
+                    }
+                },
+            ),
+        ));
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert_eq!(finish_events[0].text, result.text);
+        assert_eq!(finish_events[0].finish_reason, result.finish_reason);
+        assert_eq!(finish_events[0].raw_finish_reason, result.raw_finish_reason);
+        assert_eq!(finish_events[0].usage, result.usage);
+        assert_eq!(finish_events[0].total_usage, result.total_usage);
+        assert_eq!(finish_events[0].provider_metadata, Some(provider_metadata));
+        assert_eq!(finish_events[0].steps.len(), 1);
+        assert_eq!(finish_events[0].steps[0].text, result.steps[0].text);
+        let step_response = finish_events[0].steps[0]
+            .response
+            .as_ref()
+            .expect("finish event step has response metadata");
+        assert!(step_response.id.is_some());
+        assert!(step_response.timestamp.is_some());
+        assert_eq!(step_response.model_id.as_deref(), Some("mock-model-id"));
+        assert!(
+            step_response
+                .messages
+                .as_ref()
+                .is_some_and(|messages| !messages.is_empty())
         );
     }
 
