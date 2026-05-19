@@ -1017,17 +1017,15 @@ fn merge_open_responses_provider_options(
         return;
     };
 
-    let raw_provider_options_name = provider_options_name
-        .split('.')
-        .next()
-        .unwrap_or(provider_options_name)
-        .trim();
+    let raw_provider_options_name = open_responses_raw_provider_options_name(provider_options_name);
     let camel_provider_options_name =
         open_responses_camel_case_provider_options_key(raw_provider_options_name);
     let passthrough_options =
         open_responses_provider_option_passthrough_enabled(raw_provider_options_name);
+    let mut found_primary_options = false;
 
     if let Some(options) = provider_options.get(raw_provider_options_name) {
+        found_primary_options = true;
         if camel_provider_options_name != raw_provider_options_name {
             warnings.push(Warning::Deprecated {
                 setting: format!("providerOptions key '{raw_provider_options_name}'"),
@@ -1041,6 +1039,15 @@ fn merge_open_responses_provider_options(
     if camel_provider_options_name != raw_provider_options_name
         && let Some(options) = provider_options.get(&camel_provider_options_name)
     {
+        found_primary_options = true;
+        merge_open_responses_provider_option_object(options, passthrough_options, body);
+    }
+
+    if !found_primary_options
+        && let Some(fallback_provider_options_name) =
+            open_responses_fallback_provider_options_name(raw_provider_options_name)
+        && let Some(options) = provider_options.get(fallback_provider_options_name)
+    {
         merge_open_responses_provider_option_object(options, passthrough_options, body);
     }
 
@@ -1049,6 +1056,24 @@ fn merge_open_responses_provider_options(
         provider_options,
         body,
     );
+}
+
+fn open_responses_raw_provider_options_name(provider_options_name: &str) -> &str {
+    provider_options_name
+        .split('.')
+        .next()
+        .unwrap_or(provider_options_name)
+        .trim()
+}
+
+fn open_responses_fallback_provider_options_name(
+    raw_provider_options_name: &str,
+) -> Option<&'static str> {
+    if raw_provider_options_name == "azure" {
+        Some("openai")
+    } else {
+        None
+    }
 }
 
 fn open_responses_provider_option_passthrough_enabled(provider_options_name: &str) -> bool {
@@ -2281,11 +2306,7 @@ fn open_responses_store_enabled(
         return true;
     };
 
-    let raw_provider_options_name = provider_options_name
-        .split('.')
-        .next()
-        .unwrap_or(provider_options_name)
-        .trim();
+    let raw_provider_options_name = open_responses_raw_provider_options_name(provider_options_name);
     if !open_responses_provider_option_passthrough_enabled(raw_provider_options_name) {
         return true;
     }
@@ -2293,16 +2314,28 @@ fn open_responses_store_enabled(
     let camel_provider_options_name =
         open_responses_camel_case_provider_options_key(raw_provider_options_name);
     let mut store = None;
+    let mut found_primary_options = false;
 
     if let Some(options) = provider_options.get(raw_provider_options_name) {
+        found_primary_options = true;
         store = options.get("store").and_then(JsonValue::as_bool);
     }
 
     if camel_provider_options_name != raw_provider_options_name
         && let Some(options) = provider_options.get(&camel_provider_options_name)
-        && let Some(value) = options.get("store").and_then(JsonValue::as_bool)
     {
-        store = Some(value);
+        found_primary_options = true;
+        if let Some(value) = options.get("store").and_then(JsonValue::as_bool) {
+            store = Some(value);
+        }
+    }
+
+    if !found_primary_options
+        && let Some(fallback_provider_options_name) =
+            open_responses_fallback_provider_options_name(raw_provider_options_name)
+        && let Some(options) = provider_options.get(fallback_provider_options_name)
+    {
+        store = options.get("store").and_then(JsonValue::as_bool);
     }
 
     store.unwrap_or(true)
@@ -2350,27 +2383,36 @@ fn open_responses_provider_option_value<'a>(
     keys: &[&str],
 ) -> Option<&'a JsonValue> {
     let provider_options = provider_options?;
-    let raw_provider_options_name = provider_options_name
-        .split('.')
-        .next()
-        .unwrap_or(provider_options_name)
-        .trim();
+    let raw_provider_options_name = open_responses_raw_provider_options_name(provider_options_name);
     if !open_responses_provider_option_passthrough_enabled(raw_provider_options_name) {
         return None;
     }
 
-    if let Some(value) = provider_options
-        .get(raw_provider_options_name)
-        .and_then(|options| open_responses_option_value(options, keys))
-    {
-        return Some(value);
+    let mut found_primary_options = false;
+    if let Some(options) = provider_options.get(raw_provider_options_name) {
+        found_primary_options = true;
+        if let Some(value) = open_responses_option_value(options, keys) {
+            return Some(value);
+        }
     }
 
     let camel_provider_options_name =
         open_responses_camel_case_provider_options_key(raw_provider_options_name);
     if camel_provider_options_name != raw_provider_options_name {
+        if let Some(options) = provider_options.get(&camel_provider_options_name) {
+            found_primary_options = true;
+            if let Some(value) = open_responses_option_value(options, keys) {
+                return Some(value);
+            }
+        }
+    }
+
+    if !found_primary_options
+        && let Some(fallback_provider_options_name) =
+            open_responses_fallback_provider_options_name(raw_provider_options_name)
+    {
         return provider_options
-            .get(&camel_provider_options_name)
+            .get(fallback_provider_options_name)
             .and_then(|options| open_responses_option_value(options, keys));
     }
 
@@ -11447,6 +11489,125 @@ mod tests {
                 "store": true,
                 "truncation": "auto",
                 "top_logprobs": 5
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_falls_back_to_openai_options_for_azure_requests() {
+        let (provider, captured_request) = open_responses_captured_provider("azure", "gpt-4o");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "previousResponseId": "resp_prev",
+                "promptCacheKey": "cache-key",
+                "store": false,
+                "textVerbosity": "high"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            provider.language_model("gpt-4o").do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Hello"),
+                    )]),
+                )])
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("azure"))
+                .and_then(|metadata| metadata.get("responseId"))
+                .and_then(JsonValue::as_str),
+            Some("resp_captured")
+        );
+        assert!(
+            result
+                .provider_metadata
+                .as_ref()
+                .is_some_and(|metadata| !metadata.contains_key("openai"))
+        );
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-4o",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "previous_response_id": "resp_prev",
+                "prompt_cache_key": "cache-key",
+                "store": false,
+                "text": {
+                    "verbosity": "high"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_prefers_azure_options_over_openai_fallback() {
+        let (provider, captured_request) = open_responses_captured_provider("azure", "gpt-4o");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "azure": {
+                "promptCacheKey": "azure-cache-key",
+                "store": true
+            },
+            "openai": {
+                "promptCacheKey": "openai-cache-key",
+                "store": false,
+                "textVerbosity": "high"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            provider.language_model("gpt-4o").do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Hello"),
+                    )]),
+                )])
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-4o",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "prompt_cache_key": "azure-cache-key",
+                "store": true
             })
         );
     }
