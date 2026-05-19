@@ -1330,6 +1330,79 @@ pub fn export_tracer_to_otlp_http_json(
     Ok(())
 }
 
+/// Emits one span through the real Rust OpenTelemetry OTLP/HTTP exporter.
+///
+/// This is intentionally separate from the dependency-free mock tracer export
+/// path above. It verifies that the actual `opentelemetry` SDK/exporter can send
+/// an OTLP/HTTP JSON payload to the same local receiver used by CI.
+#[cfg(feature = "real-opentelemetry")]
+pub fn export_real_opentelemetry_span_to_otlp_http_json(
+    options: &OtlpHttpTraceExportOptions,
+    span_name: impl Into<String>,
+    attributes: TelemetryAttributes,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
+    use opentelemetry::trace::{Span as _, Tracer as _, TracerProvider as _};
+    use opentelemetry::{InstrumentationScope, KeyValue};
+    use opentelemetry_otlp::{Protocol, WithExportConfig};
+    use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
+
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_http()
+        .with_endpoint(options.endpoint.clone())
+        .with_protocol(Protocol::HttpJson)
+        .with_timeout(Duration::from_secs(5))
+        .build()?;
+    let resource = Resource::builder()
+        .with_service_name(options.service_name.clone())
+        .with_attributes(
+            options
+                .resource_attributes
+                .clone()
+                .into_iter()
+                .map(real_opentelemetry_key_value),
+        )
+        .build();
+    let provider = SdkTracerProvider::builder()
+        .with_resource(resource)
+        .with_simple_exporter(exporter)
+        .build();
+    let scope = InstrumentationScope::builder(options.scope_name.clone())
+        .with_version(options.scope_version.clone())
+        .build();
+    let tracer = provider.tracer_with_scope(scope);
+    let mut span = tracer.start(span_name.into());
+    span.set_attributes(
+        attributes
+            .into_iter()
+            .map(|(key, value)| KeyValue::new(key, real_opentelemetry_value(value))),
+    );
+    span.end();
+    provider.force_flush()?;
+    provider.shutdown()?;
+
+    Ok(())
+}
+
+#[cfg(feature = "real-opentelemetry")]
+fn real_opentelemetry_key_value((key, value): (String, JsonValue)) -> opentelemetry::KeyValue {
+    opentelemetry::KeyValue::new(key, real_opentelemetry_value(value))
+}
+
+#[cfg(feature = "real-opentelemetry")]
+fn real_opentelemetry_value(value: JsonValue) -> opentelemetry::Value {
+    match value {
+        JsonValue::Bool(value) => value.into(),
+        JsonValue::Number(value) => value
+            .as_i64()
+            .map(opentelemetry::Value::from)
+            .or_else(|| value.as_f64().map(opentelemetry::Value::from))
+            .unwrap_or_else(|| opentelemetry::Value::from(value.to_string())),
+        JsonValue::String(value) => value.into(),
+        JsonValue::Array(_) | JsonValue::Object(_) => opentelemetry::Value::from(value.to_string()),
+        JsonValue::Null => "null".into(),
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct OtlpHttpEndpoint {
     host: String,
@@ -4636,5 +4709,83 @@ mod tests {
             attribute["key"] == "gen_ai.provider.name"
                 && attribute["value"]["stringValue"] == "openai"
         }));
+    }
+
+    #[cfg(feature = "real-opentelemetry")]
+    #[test]
+    fn real_opentelemetry_http_exporter_sends_json_to_local_receiver() {
+        let receiver = LocalOtlpTraceReceiver::start().expect("OTLP receiver starts");
+
+        export_real_opentelemetry_span_to_otlp_http_json(
+            &OtlpHttpTraceExportOptions::new(receiver.endpoint())
+                .with_service_name("ai-sdk-rust-real-otel")
+                .with_scope_name("ai-sdk-otel-real-test")
+                .with_resource_attribute("deployment.environment.name", json!("test")),
+            "invoke_agent gpt-4o-mini",
+            TelemetryAttributes::from([
+                ("gen_ai.provider.name".to_string(), json!("openai")),
+                ("gen_ai.request.model".to_string(), json!("gpt-4o-mini")),
+                ("ai.operationId".to_string(), json!("ai.generateText")),
+            ]),
+        )
+        .expect("real OpenTelemetry export succeeds");
+
+        let requests = receiver.wait_for_requests(1, std::time::Duration::from_secs(2));
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/v1/traces");
+        assert_eq!(
+            request.headers.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+
+        let body = request.body_json().expect("real OTLP body is JSON");
+        let resource_attributes = body["resourceSpans"][0]["resource"]["attributes"]
+            .as_array()
+            .expect("resource attributes are present");
+        assert!(otlp_has_string_attribute(
+            resource_attributes,
+            "service.name",
+            "ai-sdk-rust-real-otel"
+        ));
+        assert!(otlp_has_string_attribute(
+            resource_attributes,
+            "deployment.environment.name",
+            "test"
+        ));
+        assert_eq!(
+            body["resourceSpans"][0]["scopeSpans"][0]["scope"]["name"],
+            "ai-sdk-otel-real-test"
+        );
+        assert_eq!(
+            body["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["name"],
+            "invoke_agent gpt-4o-mini"
+        );
+        let span_attributes = body["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["attributes"]
+            .as_array()
+            .expect("span attributes are present");
+        assert!(otlp_has_string_attribute(
+            span_attributes,
+            "gen_ai.provider.name",
+            "openai"
+        ));
+        assert!(otlp_has_string_attribute(
+            span_attributes,
+            "gen_ai.request.model",
+            "gpt-4o-mini"
+        ));
+        assert!(otlp_has_string_attribute(
+            span_attributes,
+            "ai.operationId",
+            "ai.generateText"
+        ));
+    }
+
+    #[cfg(feature = "real-opentelemetry")]
+    fn otlp_has_string_attribute(attributes: &[JsonValue], key: &str, value: &str) -> bool {
+        attributes
+            .iter()
+            .any(|attribute| attribute["key"] == key && attribute["value"]["stringValue"] == value)
     }
 }
