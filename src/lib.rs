@@ -32,6 +32,7 @@ pub mod language_model;
 pub mod language_model_middleware;
 pub mod logger;
 pub mod mock_models;
+pub mod object_transport;
 pub mod open_responses;
 pub mod openai;
 pub mod openai_compatible;
@@ -285,6 +286,11 @@ pub use logger::{
 pub use mock_models::{
     MockEmbeddingModel, MockImageModel, MockLanguageModel, MockProvider, MockRerankingModel,
     MockSpeechModel, MockTranscriptionModel, MockVideoModel,
+};
+pub use object_transport::{
+    ObjectRequestOptions, ObjectStreamResult, ObjectStreamUpdate, ObjectTransport,
+    ObjectTransportMethod, ObjectTransportOptions, ObjectTransportRequest,
+    parse_object_stream_final_json, process_object_text_stream,
 };
 pub use open_responses::{
     OpenResponsesLanguageModel, OpenResponsesProvider, OpenResponsesProviderSettings,
