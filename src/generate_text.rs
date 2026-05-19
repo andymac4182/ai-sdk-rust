@@ -30,7 +30,7 @@ use crate::language_model::{
 };
 use crate::prompt::{Prompt, standardize_prompt};
 use crate::provider::{
-    InvalidPromptError, JsonParseError, TypeValidationContext, TypeValidationError,
+    ApiCallError, InvalidPromptError, JsonParseError, TypeValidationContext, TypeValidationError,
     get_error_message,
 };
 use crate::provider::{ProviderMetadata, ProviderOptions};
@@ -39,6 +39,7 @@ use crate::provider_utils::{
     ToolModelOutputOptions, ToolNeedsApprovalOptions, convert_base64_to_bytes,
     convert_bytes_to_base64, create_id_generator, generate_id, prepare_tools_with_context,
 };
+use crate::retry::DEFAULT_MAX_RETRIES;
 use crate::telemetry::{TelemetryDispatcher, TelemetryOptions, create_telemetry_dispatcher};
 use crate::warning::Warning;
 
@@ -46,6 +47,10 @@ const DEFAULT_MAX_STEPS: usize = 1;
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+const fn default_max_retries() -> usize {
+    DEFAULT_MAX_RETRIES
 }
 
 /// Tool names that are enabled for a generation step.
@@ -480,6 +485,10 @@ pub struct GenerateTextStartEvent {
     /// Deterministic sampling seed configured for the generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
+
+    /// Maximum number of retries configured for failed provider requests.
+    #[serde(default = "default_max_retries")]
+    pub max_retries: usize,
 
     /// Reasoning effort configured for the generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3419,6 +3428,9 @@ pub struct GenerateTextOptions<'a, M: LanguageModel + ?Sized> {
     /// Optional telemetry dispatcher settings.
     pub telemetry: Option<TelemetryOptions>,
 
+    /// Maximum number of retries for failed provider requests.
+    pub max_retries: usize,
+
     /// Maximum number of model-call steps to run.
     pub max_steps: usize,
 
@@ -3453,6 +3465,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             on_step_finish: None,
             on_finish: None,
             telemetry: None,
+            max_retries: DEFAULT_MAX_RETRIES,
             max_steps: DEFAULT_MAX_STEPS,
             stop_conditions: Vec::new(),
             include: GenerateTextInclude::default(),
@@ -3491,6 +3504,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
             on_step_finish: None,
             on_finish: None,
             telemetry: None,
+            max_retries: DEFAULT_MAX_RETRIES,
             max_steps: DEFAULT_MAX_STEPS,
             stop_conditions: Vec::new(),
             include: GenerateTextInclude::default(),
@@ -3784,6 +3798,12 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
     /// Sets telemetry options for this generation.
     pub fn with_telemetry(mut self, telemetry: TelemetryOptions) -> Self {
         self.telemetry = Some(telemetry);
+        self
+    }
+
+    /// Sets the maximum number of retries for failed provider requests.
+    pub fn with_max_retries(mut self, max_retries: usize) -> Self {
+        self.max_retries = max_retries;
         self
     }
 
@@ -5102,6 +5122,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         on_step_finish,
         on_finish,
         telemetry,
+        max_retries,
         max_steps,
         stop_conditions,
         include,
@@ -5142,6 +5163,7 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
             frequency_penalty: call_options.frequency_penalty,
             stop_sequences: call_options.stop_sequences.clone(),
             seed: call_options.seed,
+            max_retries,
             reasoning: call_options.reasoning.clone(),
             headers: call_options.headers.clone(),
             provider_options: call_options.provider_options.clone(),
@@ -5292,7 +5314,8 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         }
 
         let step_started_at = Instant::now();
-        let result = step_model.do_generate(step_call_options.clone()).await;
+        let result =
+            do_generate_with_retries(step_model, step_call_options.clone(), max_retries).await;
         let response_time_ms = duration_ms(step_started_at.elapsed());
         let provider_content = result.content.clone();
         let mut step = GenerateTextStep::from_language_model_result(
@@ -5418,6 +5441,52 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
     }
 
     GenerateTextResult::from_steps(steps)
+}
+
+async fn do_generate_with_retries<M>(
+    model: &M,
+    call_options: LanguageModelCallOptions,
+    max_retries: usize,
+) -> LanguageModelGenerateResult
+where
+    M: LanguageModel + ?Sized,
+{
+    let mut retries = 0;
+
+    loop {
+        let result = model.do_generate(call_options.clone()).await;
+
+        if retries < max_retries && generate_result_is_retryable_pre_content_failure(&result) {
+            retries += 1;
+            continue;
+        }
+
+        return result;
+    }
+}
+
+fn generate_result_is_retryable_pre_content_failure(result: &LanguageModelGenerateResult) -> bool {
+    result.finish_reason.unified == FinishReason::Error
+        && result.content.is_empty()
+        && result
+            .provider_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.values().any(provider_metadata_is_retryable))
+}
+
+fn provider_metadata_is_retryable(metadata: &JsonObject) -> bool {
+    metadata
+        .get("isRetryable")
+        .or_else(|| metadata.get("is_retryable"))
+        .and_then(JsonValue::as_bool)
+        .unwrap_or_else(|| {
+            metadata
+                .get("statusCode")
+                .or_else(|| metadata.get("status_code"))
+                .and_then(JsonValue::as_u64)
+                .and_then(|status_code| u16::try_from(status_code).ok())
+                .is_some_and(ApiCallError::is_retryable_status_code)
+        })
 }
 
 fn accumulated_response_messages(
@@ -7442,6 +7511,7 @@ mod tests {
         LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
         LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
     };
+    use crate::mock_models::MockLanguageModel;
     use crate::prompt::Prompt;
     use crate::provider::{
         JsonParseError, ProviderMetadata, ProviderOptions, SpecificationVersion,
@@ -7450,6 +7520,7 @@ mod tests {
         ExperimentalSandbox, SandboxCommandOptions, SandboxCommandResult, SandboxRunCommandFuture,
         Schema, Tool, ToolExecutionError, ValidationResult, dynamic_tool,
     };
+    use crate::retry::DEFAULT_MAX_RETRIES;
     use crate::telemetry::{
         TelemetryEvent, TelemetryEventKind, TelemetryIntegration, TelemetryOptions,
     };
@@ -8775,6 +8846,7 @@ mod tests {
             frequency_penalty: None,
             stop_sequences: None,
             seed: None,
+            max_retries: DEFAULT_MAX_RETRIES,
             reasoning: None,
             headers: None,
             provider_options: None,
@@ -9217,6 +9289,48 @@ mod tests {
     }
 
     #[test]
+    fn generate_text_retries_retryable_pre_content_errors() {
+        let mut retry_metadata = ProviderMetadata::new();
+        retry_metadata.insert(
+            "mock".to_string(),
+            JsonObject::from_iter([
+                ("errorMessage".to_string(), json!("rate limited")),
+                ("statusCode".to_string(), json!(429)),
+                ("isRetryable".to_string(), json!(true)),
+            ]),
+        );
+        let retryable_error = LanguageModelGenerateResult::new(
+            Vec::new(),
+            LanguageModelFinishReason {
+                unified: FinishReason::Error,
+                raw: Some("api-error".to_string()),
+            },
+            LanguageModelUsage::default(),
+        )
+        .with_provider_metadata(retry_metadata);
+        let successful_result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "Recovered",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            LanguageModelUsage::default(),
+        );
+        let model =
+            MockLanguageModel::new().with_generate_results([retryable_error, successful_result]);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Say hello")]).with_max_retries(1),
+        ));
+
+        assert_eq!(model.generate_calls().len(), 2);
+        assert_eq!(result.text, "Recovered");
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+    }
+
+    #[test]
     fn generate_text_from_prompt_standardizes_text_and_instructions() {
         let model = FakeLanguageModel::new();
         let options = GenerateTextOptions::from_prompt(
@@ -9304,6 +9418,7 @@ mod tests {
                 .with_top_p(0.8)
                 .with_stop_sequence("DONE")
                 .with_seed(7)
+                .with_max_retries(4)
                 .with_header("x-trace", "trace_123")
                 .with_provider_options(provider_options.clone())
                 .with_runtime_context(runtime_context.clone())
@@ -9349,6 +9464,7 @@ mod tests {
         assert_eq!(start.top_p, Some(0.8));
         assert_eq!(start.stop_sequences, Some(vec!["DONE".to_string()]));
         assert_eq!(start.seed, Some(7));
+        assert_eq!(start.max_retries, 4);
         assert_eq!(
             start
                 .headers
