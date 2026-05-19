@@ -15,6 +15,7 @@ use crate::reranking_model::{
     RerankingModelResponse,
 };
 use crate::retry::DEFAULT_MAX_RETRIES;
+use crate::telemetry::{TelemetryOptions, create_telemetry_dispatcher};
 use crate::warning::Warning;
 
 /// Document accepted by high-level `rerank`.
@@ -493,6 +494,9 @@ pub struct RerankOptions<'a, M: RerankingModel + ?Sized> {
 
     /// Callback invoked after reranking completes.
     pub on_end: Option<RerankOnEnd<'a>>,
+
+    /// Optional telemetry dispatcher settings.
+    pub telemetry: Option<TelemetryOptions>,
 }
 
 impl<'a, M: RerankingModel + ?Sized> RerankOptions<'a, M> {
@@ -508,6 +512,7 @@ impl<'a, M: RerankingModel + ?Sized> RerankOptions<'a, M> {
             headers: None,
             on_start: None,
             on_end: None,
+            telemetry: None,
         }
     }
 
@@ -580,6 +585,12 @@ impl<'a, M: RerankingModel + ?Sized> RerankOptions<'a, M> {
     {
         self.with_on_end(on_end)
     }
+
+    /// Sets telemetry options for this rerank operation.
+    pub fn with_telemetry(mut self, telemetry: TelemetryOptions) -> Self {
+        self.telemetry = Some(telemetry);
+        self
+    }
 }
 
 /// Reranks documents using a reranking model.
@@ -594,48 +605,54 @@ pub async fn rerank<M: RerankingModel + ?Sized>(options: RerankOptions<'_, M>) -
         headers,
         on_start,
         on_end,
+        telemetry,
     } = options;
 
     let call_id = rerank_call_id();
     let max_retries = max_retries.unwrap_or(DEFAULT_MAX_RETRIES);
     let start_documents = documents.to_event_documents();
+    let telemetry_dispatcher = create_telemetry_dispatcher(telemetry);
 
-    if let Some(on_start) = &on_start {
-        on_start
-            .start(RerankStartEvent {
-                call_id: call_id.clone(),
-                operation_id: "ai.rerank".to_string(),
-                provider: model.provider().to_string(),
-                model_id: model.model_id().to_string(),
-                documents: start_documents.clone(),
-                query: query.clone(),
-                top_n,
-                max_retries,
-                headers: headers.clone(),
-                provider_options: provider_options.clone(),
-            })
-            .await;
+    if on_start.is_some() || telemetry_dispatcher.is_enabled() {
+        let start_event = RerankStartEvent {
+            call_id: call_id.clone(),
+            operation_id: "ai.rerank".to_string(),
+            provider: model.provider().to_string(),
+            model_id: model.model_id().to_string(),
+            documents: start_documents.clone(),
+            query: query.clone(),
+            top_n,
+            max_retries,
+            headers: headers.clone(),
+            provider_options: provider_options.clone(),
+        };
+        if let Some(on_start) = &on_start {
+            on_start.start(start_event.clone()).await;
+        }
+        telemetry_dispatcher.on_rerank_start(&start_event);
     }
 
     if documents.is_empty() {
         let response = RerankResponse::new(OffsetDateTime::now_utc(), model.model_id());
         let result = RerankResult::new(start_documents, Vec::new(), response.clone());
 
-        if let Some(on_end) = &on_end {
-            on_end
-                .end(RerankEndEvent {
-                    call_id,
-                    operation_id: "ai.rerank".to_string(),
-                    provider: model.provider().to_string(),
-                    model_id: model.model_id().to_string(),
-                    documents: result.original_documents.clone(),
-                    query,
-                    ranking: Vec::new(),
-                    warnings: Vec::new(),
-                    provider_metadata: None,
-                    response,
-                })
-                .await;
+        if on_end.is_some() || telemetry_dispatcher.is_enabled() {
+            let end_event = RerankEndEvent {
+                call_id,
+                operation_id: "ai.rerank".to_string(),
+                provider: model.provider().to_string(),
+                model_id: model.model_id().to_string(),
+                documents: result.original_documents.clone(),
+                query,
+                ranking: Vec::new(),
+                warnings: Vec::new(),
+                provider_metadata: None,
+                response,
+            };
+            if let Some(on_end) = &on_end {
+                on_end.end(end_event.clone()).await;
+            }
+            telemetry_dispatcher.on_rerank_end(&end_event);
         }
 
         return result;
@@ -673,21 +690,23 @@ pub async fn rerank<M: RerankingModel + ?Sized>(options: RerankOptions<'_, M>) -
         result = result.with_provider_metadata(provider_metadata);
     }
 
-    if let Some(on_end) = &on_end {
-        on_end
-            .end(RerankEndEvent {
-                call_id,
-                operation_id: "ai.rerank".to_string(),
-                provider: model.provider().to_string(),
-                model_id: model.model_id().to_string(),
-                documents: result.original_documents.clone(),
-                query,
-                ranking,
-                warnings: model_result.warnings,
-                provider_metadata: model_result.provider_metadata,
-                response,
-            })
-            .await;
+    if on_end.is_some() || telemetry_dispatcher.is_enabled() {
+        let end_event = RerankEndEvent {
+            call_id,
+            operation_id: "ai.rerank".to_string(),
+            provider: model.provider().to_string(),
+            model_id: model.model_id().to_string(),
+            documents: result.original_documents.clone(),
+            query,
+            ranking,
+            warnings: model_result.warnings,
+            provider_metadata: model_result.provider_metadata,
+            response,
+        };
+        if let Some(on_end) = &on_end {
+            on_end.end(end_event.clone()).await;
+        }
+        telemetry_dispatcher.on_rerank_end(&end_event);
     }
 
     result
@@ -732,6 +751,9 @@ mod tests {
         RerankingModelResult,
     };
     use crate::retry::DEFAULT_MAX_RETRIES;
+    use crate::telemetry::{
+        TelemetryEvent, TelemetryEventKind, TelemetryIntegration, TelemetryOptions,
+    };
     use crate::warning::Warning;
     use serde_json::json;
     use std::cell::RefCell;
@@ -739,7 +761,7 @@ mod tests {
     use std::future::{Future, Ready, ready};
     use std::pin::Pin;
     use std::rc::Rc;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Waker};
     use time::OffsetDateTime;
 
@@ -1107,6 +1129,81 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn rerank_dispatches_telemetry_lifecycle_events() {
+        let model = RecordingRerankingModel::new(vec![RerankingModelResult::new(vec![
+            RerankingModelRanking::new(1, 0.95),
+        ])]);
+        let events = Arc::new(Mutex::new(Vec::<TelemetryEvent>::new()));
+        let start_events = Arc::clone(&events);
+        let end_events = Arc::clone(&events);
+        let integration = TelemetryIntegration::new()
+            .with_callback(TelemetryEventKind::OnRerankStart, move |event| {
+                start_events
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push(event);
+            })
+            .with_callback(TelemetryEventKind::OnRerankEnd, move |event| {
+                end_events.lock().expect("telemetry event lock").push(event);
+            });
+
+        let result = poll_ready(super::rerank(
+            RerankOptions::new(
+                &model,
+                RerankDocuments::text(["sunny day", "rainy day"]),
+                "rainy day",
+            )
+            .with_top_n(1)
+            .with_telemetry(
+                TelemetryOptions::new()
+                    .with_function_id("rerank-test")
+                    .with_record_inputs(false)
+                    .with_record_outputs(true)
+                    .with_integration(integration),
+            ),
+        ));
+
+        assert_eq!(
+            result.reranked_documents,
+            vec![RerankDocument::text("rainy day")]
+        );
+        let events = events.lock().expect("telemetry event lock");
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![
+                TelemetryEventKind::OnRerankStart,
+                TelemetryEventKind::OnRerankEnd,
+            ]
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.function_id.as_deref() == Some("rerank-test"))
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.record_inputs == Some(false))
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.record_outputs == Some(true))
+        );
+        assert_eq!(events[0].event["operationId"], json!("ai.rerank"));
+        assert_eq!(
+            events[0].event["documents"],
+            json!(["sunny day", "rainy day"])
+        );
+        assert_eq!(events[0].event["query"], json!("rainy day"));
+        assert_eq!(
+            events[1].event["ranking"][0]["document"],
+            json!("rainy day")
+        );
+        assert_eq!(events[1].event["ranking"][0]["score"], json!(0.95));
     }
 
     #[test]
