@@ -330,12 +330,15 @@ fn convert_system_ui_message(
 
     for part in &message.parts {
         let kind = ui_message_part_type(part)?;
-        if kind != "text" {
-            return Err(unsupported_part_error(message, kind));
-        }
-        content.push_str(ui_message_text(part)?);
-        if let Some(options) = ui_message_provider_options(part)? {
-            provider_options.extend(options);
+        match kind {
+            "text" => {
+                content.push_str(ui_message_text(part)?);
+                if let Some(options) = ui_message_provider_options(part)? {
+                    provider_options.extend(options);
+                }
+            }
+            kind if ui_message_part_is_data(kind) => {}
+            _ => return Err(unsupported_part_error(message, kind)),
         }
     }
 
@@ -366,6 +369,7 @@ fn convert_user_ui_message(
                     part,
                 )?));
             }
+            kind if ui_message_part_is_data(kind) => {}
             _ => return Err(unsupported_part_error(message, kind)),
         }
     }
@@ -451,6 +455,7 @@ fn flush_assistant_ui_message_block(
             kind if kind == "dynamic-tool" || kind.starts_with("tool-") => {
                 convert_assistant_tool_ui_part(part, kind, &mut content, &mut tool_content)?;
             }
+            kind if ui_message_part_is_data(kind) => {}
             _ => {
                 return Err(ChatTransportError::InvalidMessage(format!(
                     "Unsupported UI message part type `{kind}` for assistant message."
@@ -772,6 +777,10 @@ fn ui_message_part_type(part: &JsonValue) -> Result<&str, ChatTransportError> {
                 "UI message part must be an object with a string type.".to_string(),
             )
         })
+}
+
+fn ui_message_part_is_data(kind: &str) -> bool {
+    kind.starts_with("data-")
 }
 
 fn ui_message_text(part: &JsonValue) -> Result<&str, ChatTransportError> {
@@ -2190,6 +2199,170 @@ mod tests {
                             "providerOptions": {
                                 "testProvider": { "signature": "sig-1" }
                             }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_skips_unconverted_data_parts() {
+        let messages = convert_ui_messages_to_model_messages(&[
+            UiMessage::new("msg-1", UiMessageRole::System)
+                .with_part(json!({ "type": "data-context", "data": { "ignored": true } }))
+                .with_part(json!({ "type": "text", "text": "Use concise answers." }))
+                .with_part(json!({ "type": "data-tail", "data": "ignored" })),
+            UiMessage::new("msg-2", UiMessageRole::User)
+                .with_part(json!({ "type": "data-input", "data": { "ignored": true } }))
+                .with_part(json!({ "type": "text", "text": "Hello" })),
+            UiMessage::new("msg-3", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({ "type": "data-status", "data": "ignored" }))
+                .with_part(json!({ "type": "text", "text": "Hi there" }))
+                .with_part(json!({ "type": "data-result", "data": { "ignored": true } })),
+        ])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "system",
+                    "content": "Use concise answers."
+                },
+                {
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "Hello" }]
+                },
+                {
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "Hi there" }]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_file_provider_reference_and_metadata_parts() {
+        let messages = convert_ui_messages_to_model_messages(&[
+            UiMessage::new("msg-1", UiMessageRole::User)
+                .with_part(json!({
+                    "type": "file",
+                    "mediaType": "image/png",
+                    "filename": "input.png",
+                    "url": "https://example.com/input.png",
+                    "providerMetadata": {
+                        "testProvider": { "purpose": "vision" }
+                    }
+                }))
+                .with_part(json!({
+                    "type": "file",
+                    "mediaType": "application/pdf",
+                    "providerReference": {
+                        "openai": "file-abc123"
+                    }
+                })),
+            UiMessage::new("msg-2", UiMessageRole::Assistant)
+                .with_part(json!({
+                    "type": "reasoning",
+                    "text": "I should include the image.",
+                    "providerMetadata": {
+                        "testProvider": { "signature": "reasoning-sig" }
+                    }
+                }))
+                .with_part(json!({
+                    "type": "reasoning-file",
+                    "mediaType": "application/json",
+                    "url": "https://example.com/reasoning.json",
+                    "providerMetadata": {
+                        "testProvider": { "signature": "reasoning-file-sig" }
+                    }
+                }))
+                .with_part(json!({
+                    "type": "custom",
+                    "kind": "openai.audio",
+                    "providerMetadata": {
+                        "testProvider": { "signature": "custom-sig" }
+                    }
+                }))
+                .with_part(json!({
+                    "type": "file",
+                    "mediaType": "image/jpeg",
+                    "providerReference": {
+                        "gateway": "file-gw123"
+                    }
+                })),
+        ])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "file",
+                            "filename": "input.png",
+                            "data": {
+                                "type": "url",
+                                "url": "https://example.com/input.png"
+                            },
+                            "mediaType": "image/png",
+                            "providerOptions": {
+                                "testProvider": { "purpose": "vision" }
+                            }
+                        },
+                        {
+                            "type": "file",
+                            "data": {
+                                "type": "reference",
+                                "reference": {
+                                    "openai": "file-abc123"
+                                }
+                            },
+                            "mediaType": "application/pdf"
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "reasoning",
+                            "text": "I should include the image.",
+                            "providerOptions": {
+                                "testProvider": { "signature": "reasoning-sig" }
+                            }
+                        },
+                        {
+                            "type": "reasoning-file",
+                            "data": {
+                                "type": "url",
+                                "url": "https://example.com/reasoning.json"
+                            },
+                            "mediaType": "application/json",
+                            "providerOptions": {
+                                "testProvider": { "signature": "reasoning-file-sig" }
+                            }
+                        },
+                        {
+                            "type": "custom",
+                            "kind": "openai.audio",
+                            "providerOptions": {
+                                "testProvider": { "signature": "custom-sig" }
+                            }
+                        },
+                        {
+                            "type": "file",
+                            "data": {
+                                "type": "reference",
+                                "reference": {
+                                    "gateway": "file-gw123"
+                                }
+                            },
+                            "mediaType": "image/jpeg"
                         }
                     ]
                 }
