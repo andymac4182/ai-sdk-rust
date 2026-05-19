@@ -207,6 +207,7 @@ inventory.
 | Open Responses assistant function-call prompt arguments | verified | `src/open_responses.rs` | `open_responses_provider_stringifies_assistant_function_call_arguments` | Assistant prompt tool-call conversion now sends Open Responses `function_call.arguments` as a string, stringifying JSON object inputs, passing through already-string inputs, and converting Rust null inputs to `{}` as the equivalent of upstream missing tool input. |
 | Open Responses function tool strict modes | verified | `src/open_responses.rs` | `open_responses_provider_prepares_function_tool_strict_modes` | Open Responses function-tool request preparation now mirrors upstream strict-mode passthrough: `strict: true` and `strict: false` are preserved on the tool definition, while omitted strict mode leaves the request field absent. |
 | Open Responses reasoning request options | verified | `src/open_responses.rs` | `open_responses_provider_maps_reasoning_effort_and_summary_options` | Top-level reasoning now maps to Responses `reasoning.effort`, including upstream `high`, `xhigh`, `minimal` to `low` compatibility warnings, `none`, and omitted/default passthrough, while provider `reasoningSummary` maps `detailed`, `auto`, and `concise` to `reasoning.summary` without leaking provider-option fields into the request body. |
+| Open Responses unsupported standard call options | verified | `crates/ai-sdk-open-responses/src/open_responses.rs` | `open_responses_provider_warns_for_unsupported_standard_call_options` | Open Responses call preparation now has explicit coverage for upstream warning behavior: `stopSequences`, `topK`, and `seed` emit unsupported warnings and do not leak into the Responses request body. |
 | Open Responses generic provider option filtering | verified | `src/open_responses.rs` | `open_responses_provider_maps_reasoning_effort_and_summary_options`; `vercel_ai_gateway_openai_responses_passes_gateway_provider_options` | Generic Open Responses providers now mirror upstream by accepting only `reasoningSummary` from provider options; broader request-body passthrough remains scoped to OpenAI, Azure, and Gateway wrapper routes that own those Responses API options. |
 | Open Responses OpenAI wrapper request option mapping | verified | `src/open_responses.rs` | `open_responses_provider_maps_openai_responses_provider_options_to_request_body`; `vercel_ai_gateway_openai_responses_passes_gateway_provider_options` | OpenAI/Gateway wrapper provider options now map upstream camelCase fields such as `previousResponseId`, `maxToolCalls`, `parallelToolCalls`, `promptCacheKey`, `promptCacheRetention`, `safetyIdentifier`, `serviceTier`, `textVerbosity`, `strictJsonSchema`, `reasoningEffort`, `reasoningSummary`, `contextManagement`, and `logprobs` to Responses request keys or nested fields, preserve wrapper-owned passthrough fields such as Gateway `caching`, and prevent SDK-only flags from leaking into the request body. |
 | Open Responses allowed tools request option | verified | `src/open_responses.rs` | `open_responses_provider_maps_allowed_tools_to_tool_choice` | OpenAI/Gateway wrapper provider `allowedTools` now mirrors upstream by keeping the full `tools` array for prompt caching while overriding request-level `toolChoice` with Responses `tool_choice: { type: "allowed_tools", mode, tools }`, defaulting mode to `auto`, mapping tool names through provider-tool aliases, and preventing the SDK-only provider option from leaking into the request body. |
@@ -378,6 +379,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   `crates/ai-sdk-open-responses/src/open_responses.rs`, covering upstream
   assistant prompt conversion behavior where file and reasoning-file parts are
   ignored while text and tool-call parts still serialize.
+- 2026-05-19: Open Responses unsupported standard call option parity added
+  `open_responses_provider_warns_for_unsupported_standard_call_options` in
+  `crates/ai-sdk-open-responses/src/open_responses.rs`, covering upstream
+  `stopSequences`, `topK`, and `seed` warning behavior without leaking those
+  unsupported options into the Responses request body.
 
 ## Next Unported Work Queue
 
@@ -416,6 +422,7 @@ focused tests for each portable behavior before changing rows to `verified`.
    image-generation request options, user file provider references, prompt file
    defaults/unsupported-file handling, deprecated file id prefixes,
    unsupported assistant file/reasoning-file prompt part filtering,
+   unsupported standard call-option warnings,
    `allowedTools` tool-choice override, shell request/history, apply-patch
    request/history, and custom provider-tool request/prompt reconstruction are
    represented.
