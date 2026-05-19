@@ -656,6 +656,7 @@ fn open_responses_request_body(
         &mut body,
         &mut warnings,
     );
+    add_open_responses_hosted_tool_includes(&options.tools, &mut body);
     apply_open_responses_reasoning_options(options.reasoning.as_ref(), &mut body, &mut warnings);
     apply_open_responses_model_capability_rules(
         model_id,
@@ -800,6 +801,35 @@ fn apply_open_responses_model_capability_rules(
     }
 
     validate_open_responses_service_tier(body, capabilities, warnings);
+}
+
+fn add_open_responses_hosted_tool_includes(
+    tools: &Option<Vec<LanguageModelTool>>,
+    body: &mut JsonObject,
+) {
+    let Some(tools) = tools.as_ref() else {
+        return;
+    };
+
+    if tools.iter().any(|tool| {
+        matches!(
+            tool,
+            LanguageModelTool::Provider(LanguageModelProviderTool { id, .. })
+                if id == "openai.web_search" || id == "openai.web_search_preview"
+        )
+    }) {
+        open_responses_add_include(body, "web_search_call.action.sources");
+    }
+
+    if tools.iter().any(|tool| {
+        matches!(
+            tool,
+            LanguageModelTool::Provider(LanguageModelProviderTool { id, .. })
+                if id == "openai.code_interpreter"
+        )
+    }) {
+        open_responses_add_include(body, "code_interpreter_call.outputs");
+    }
 }
 
 fn open_responses_force_reasoning(
@@ -10770,6 +10800,109 @@ mod tests {
         assert!(bodies[0].get("service_tier").is_none());
         assert!(bodies[1].get("service_tier").is_none());
         assert_eq!(bodies[2]["service_tier"], json!("flex"));
+    }
+
+    #[test]
+    fn open_responses_provider_adds_hosted_tool_include_options() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_hosted_tool_includes",
+                        "created_at": 1711115037,
+                        "model": "gpt-4o",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 2,
+                            "output_tokens": 1
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "include": ["file_search_call.results"]
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            provider.language_model("gpt-4o").do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Search and run code"),
+                    )]),
+                )])
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.web_search",
+                    "web_search",
+                    JsonObject::new(),
+                )))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.code_interpreter",
+                    "code_interpreter",
+                    JsonObject::new(),
+                )))
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+        assert_eq!(
+            request_body["include"],
+            json!([
+                "file_search_call.results",
+                "web_search_call.action.sources",
+                "code_interpreter_call.outputs"
+            ])
+        );
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                { "type": "web_search" },
+                {
+                    "type": "code_interpreter",
+                    "container": {
+                        "type": "auto"
+                    }
+                }
+            ])
+        );
     }
 
     #[test]
