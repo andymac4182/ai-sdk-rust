@@ -17130,6 +17130,116 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_generates_computer_use_tool_calls() {
+        let transport: OpenResponsesTransport =
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_computer_test",
+                        "object": "response",
+                        "created_at": 1741630255,
+                        "status": "completed",
+                        "error": null,
+                        "incomplete_details": null,
+                        "instructions": null,
+                        "max_output_tokens": null,
+                        "model": "gpt-4o-mini",
+                        "output": [
+                            {
+                                "type": "computer_call",
+                                "id": "computer_67cf2b3051e88190b006770db6fdb13d",
+                                "status": "completed"
+                            },
+                            {
+                                "type": "message",
+                                "id": "msg_computer_test",
+                                "status": "completed",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "I've completed the computer task.",
+                                        "annotations": []
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 100,
+                            "output_tokens": 50
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4o-mini");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Use the computer to complete a task."),
+                    )]),
+                )])
+                .with_tool(LanguageModelTool::Provider(
+                    LanguageModelProviderTool::new(
+                        "openai.computer_use",
+                        "computerUse",
+                        JsonObject::new(),
+                    ),
+                )),
+            ),
+        );
+
+        assert_eq!(result.usage.input_tokens.total, Some(100));
+        assert_eq!(result.usage.output_tokens.total, Some(50));
+        assert_eq!(result.content.len(), 3);
+
+        let LanguageModelContent::ToolCall(tool_call) = &result.content[0] else {
+            panic!("first content part is a computer-use tool call");
+        };
+        assert_eq!(
+            tool_call.tool_call_id,
+            "computer_67cf2b3051e88190b006770db6fdb13d"
+        );
+        assert_eq!(tool_call.tool_name, "computer_use");
+        assert_eq!(tool_call.input, "");
+        assert_eq!(tool_call.provider_executed, Some(true));
+
+        let LanguageModelContent::ToolResult(tool_result) = &result.content[1] else {
+            panic!("second content part is a computer-use tool result");
+        };
+        assert_eq!(
+            tool_result.tool_call_id,
+            "computer_67cf2b3051e88190b006770db6fdb13d"
+        );
+        assert_eq!(tool_result.tool_name, "computer_use");
+        assert_eq!(
+            tool_result.result.as_value(),
+            &json!({
+                "type": "computer_use_tool_result",
+                "status": "completed"
+            })
+        );
+
+        let LanguageModelContent::Text(text) = &result.content[2] else {
+            panic!("third content part is assistant text");
+        };
+        assert_eq!(text.text, "I've completed the computer task.");
+        assert_eq!(
+            openai_metadata_value(&text.provider_metadata, "itemId").and_then(JsonValue::as_str),
+            Some("msg_computer_test")
+        );
+    }
+
+    #[test]
     fn open_responses_provider_generates_mixed_url_and_file_citations() {
         const TEXT: &str = "Based on web search and file content.";
         let annotations = json!([
