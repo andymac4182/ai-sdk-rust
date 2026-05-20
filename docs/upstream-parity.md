@@ -82,6 +82,9 @@ package.
 The minimum passing Rust suite for a package is therefore the full portable
 original TypeScript test inventory, plus any additional Rust-only tests; no
 Rust-only coverage can offset a missing upstream test.
+In short: potentially more Rust tests, never fewer, and every portable original
+TypeScript test/case must remain individually visible in the ledger until it has
+a Rust counterpart or an explicit non-portable justification.
 
 ## Required Work Order
 

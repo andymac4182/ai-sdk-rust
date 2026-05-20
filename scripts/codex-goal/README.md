@@ -46,3 +46,5 @@ fewer portable tests than the original TypeScript package.
 Put plainly: EVERY portable original TypeScript test/case must exist in Rust;
 additional Rust tests are welcome, but a crate with even one fewer portable
 original TypeScript test/case is incomplete.
+The non-negotiable rule is potentially more Rust tests, but never fewer than
+the full portable original TypeScript test inventory.
