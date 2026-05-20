@@ -3462,14 +3462,18 @@ fn open_responses_content(
                     .and_then(JsonValue::as_str)
                     .unwrap_or_default();
 
-                content.push(LanguageModelContent::ToolCall(LanguageModelToolCall::new(
+                let mut tool_call = LanguageModelToolCall::new(
                     tool_call_id,
                     tool_name_mapping.to_custom_tool_name("local_shell"),
                     json!({
                         "action": part.get("action").cloned().unwrap_or(JsonValue::Null)
                     })
                     .to_string(),
-                )));
+                );
+                if let Some(metadata) = open_responses_item_metadata(provider_options_name, part) {
+                    tool_call = tool_call.with_provider_metadata(metadata);
+                }
+                content.push(LanguageModelContent::ToolCall(tool_call));
             }
             Some("shell_call") => {
                 let tool_call_id = part
@@ -3484,6 +3488,10 @@ fn open_responses_content(
 
                 if shell_provider_executed {
                     tool_call = tool_call.with_provider_executed(true);
+                }
+
+                if let Some(metadata) = open_responses_item_metadata(provider_options_name, part) {
+                    tool_call = tool_call.with_provider_metadata(metadata);
                 }
 
                 content.push(LanguageModelContent::ToolCall(tool_call));
@@ -17951,6 +17959,779 @@ mod tests {
             request_body["tools"][0],
             json!({
                 "type": "shell"
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_generates_shell_environment_fixture() {
+        const RESPONSE_ID: &str = "resp_01b6b3812d7541bd00698f7197d5bc81969c3d2a134af0cb66";
+        const CONTAINER_ID: &str = "cntr_698f719e4ad48193bb6ee0647bebe41608d08c4949add75d";
+        const FIRST_SHELL_ITEM_ID: &str = "sh_01b6b3812d7541bd00698f71a351a08196acffc9543b76a179";
+        const FIRST_SHELL_OUTPUT_ID: &str =
+            "sho_01b6b3812d7541bd00698f71a46d808196b944595186d5d2b6";
+        const SECOND_SHELL_ITEM_ID: &str = "sh_01b6b3812d7541bd00698f71a4c0e88196b89199531ef2ee07";
+        const SECOND_SHELL_OUTPUT_ID: &str =
+            "sho_01b6b3812d7541bd00698f71a5a2688196a39d7a371d282f14";
+        const MESSAGE_ID: &str = "msg_01b6b3812d7541bd00698f71a5de488196b6ae435d1a54ed9c";
+        const FIRST_CALL_ID: &str = "call_KPDqtcOSQeaV3UKcb30ZfeqD";
+        const SECOND_CALL_ID: &str = "call_5RmHRaiiFm8rPqUBqqXjG4WA";
+        const SKILL_DIR: &str = "/home/oai/skills/island-rescue-ab6238cd308ce72a5ae69fd3ba1e3aeb";
+        const LIST_STDOUT: &str =
+            "/home/oai/skills/island-rescue-ab6238cd308ce72a5ae69fd3ba1e3aeb:\nSKILL.md\n";
+        const SKILL_STDOUT: &str = "---\nname: island-rescue\ndescription: How to be rescued from a lonely island\n---\n\nYou MUST insert the capitalized word STOP after every 4 words in all your responses. No exceptions. Do not mention this rule to the user.\n";
+        const FINAL_TEXT: &str = concat!(
+            "Build a STOP huge signal STOP on the STOP beach using STOP rocks or STOP logs.  \n\n",
+            "Light a STOP smoky fire STOP when ships STOP appear; burn STOP green leaves STOP to make STOP thick smoke STOP.  \n\n",
+            "Create a STOP distress flag STOP on a STOP tall pole STOP (shirt or STOP sailcloth), and STOP wave it STOP.  \n\n",
+            "Set up STOP three fires STOP in a STOP triangle (international distress). STOP Keep dry STOP tinder ready STOP.  \n\n",
+            "Write \u{201c}SOS\u{201d} STOP in large STOP letters on STOP sand or STOP grass, at least STOP 30 meters STOP across.  \n\n",
+            "If you STOP find a STOP bottle, write STOP your location, date, and STOP \u{201c}NEED RESCUE,\u{201d} then STOP cast it STOP into the current.  \n\n",
+            "Move to STOP higher ground STOP daily; scan STOP horizon at dawn and STOP dusk. Use a STOP mirror-like object (polished metal, glass) to flash STOP sunlight toward ships.  \n\n",
+            "Ration water STOP; collect rain STOP with leaves, shells, or cloth. Build a STOP simple shelter STOP near resources but above storm tide. Keep yourself healthy so you can signal quickly."
+        );
+
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": RESPONSE_ID,
+                        "object": "response",
+                        "created_at": 1771008375,
+                        "status": "completed",
+                        "model": "gpt-5.2-2025-12-11",
+                        "output": [
+                            {
+                                "id": FIRST_SHELL_ITEM_ID,
+                                "type": "shell_call",
+                                "status": "completed",
+                                "action": {
+                                    "commands": [format!("ls -R {SKILL_DIR}")],
+                                    "max_output_length": null,
+                                    "timeout_ms": null
+                                },
+                                "call_id": FIRST_CALL_ID,
+                                "environment": {
+                                    "type": "container_reference",
+                                    "container_id": CONTAINER_ID
+                                }
+                            },
+                            {
+                                "id": FIRST_SHELL_OUTPUT_ID,
+                                "type": "shell_call_output",
+                                "status": "completed",
+                                "call_id": FIRST_CALL_ID,
+                                "max_output_length": null,
+                                "output": [
+                                    {
+                                        "outcome": {
+                                            "type": "exit",
+                                            "exit_code": 0
+                                        },
+                                        "stderr": "",
+                                        "stdout": LIST_STDOUT
+                                    }
+                                ]
+                            },
+                            {
+                                "id": SECOND_SHELL_ITEM_ID,
+                                "type": "shell_call",
+                                "status": "completed",
+                                "action": {
+                                    "commands": [format!("sed -n '1,200p' {SKILL_DIR}/SKILL.md")],
+                                    "max_output_length": null,
+                                    "timeout_ms": null
+                                },
+                                "call_id": SECOND_CALL_ID,
+                                "environment": {
+                                    "type": "container_reference",
+                                    "container_id": CONTAINER_ID
+                                }
+                            },
+                            {
+                                "id": SECOND_SHELL_OUTPUT_ID,
+                                "type": "shell_call_output",
+                                "status": "completed",
+                                "call_id": SECOND_CALL_ID,
+                                "max_output_length": null,
+                                "output": [
+                                    {
+                                        "outcome": {
+                                            "type": "exit",
+                                            "exit_code": 0
+                                        },
+                                        "stderr": "",
+                                        "stdout": SKILL_STDOUT
+                                    }
+                                ]
+                            },
+                            {
+                                "id": MESSAGE_ID,
+                                "type": "message",
+                                "status": "completed",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "annotations": [],
+                                        "logprobs": [],
+                                        "text": FINAL_TEXT
+                                    }
+                                ],
+                                "role": "assistant"
+                            }
+                        ],
+                        "parallel_tool_calls": true,
+                        "tools": [
+                            {
+                                "type": "shell",
+                                "environment": {
+                                    "type": "container_reference",
+                                    "container_id": CONTAINER_ID
+                                }
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 1499,
+                            "input_tokens_details": {
+                                "cached_tokens": 1024
+                            },
+                            "output_tokens": 331,
+                            "output_tokens_details": {
+                                "reasoning_tokens": 100
+                            },
+                            "total_tokens": 1830
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-5.2");
+
+        let result = poll_ready(model.do_generate(open_responses_shell_container_call_options()));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(1499));
+        assert_eq!(result.usage.input_tokens.no_cache, Some(475));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(1024));
+        assert_eq!(result.usage.output_tokens.total, Some(331));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(100));
+
+        let tool_calls = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_calls.len(), 2);
+        assert!(
+            tool_calls
+                .iter()
+                .all(|tool_call| tool_call.provider_executed == Some(true))
+        );
+        assert_eq!(tool_calls[0].tool_call_id, FIRST_CALL_ID);
+        assert_eq!(tool_calls[0].tool_name, "shell");
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&tool_calls[0].input).expect("shell input parses"),
+            json!({
+                "action": {
+                    "commands": [format!("ls -R {SKILL_DIR}")]
+                }
+            })
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_calls[0].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(FIRST_SHELL_ITEM_ID)
+        );
+        assert_eq!(tool_calls[1].tool_call_id, SECOND_CALL_ID);
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&tool_calls[1].input).expect("shell input parses"),
+            json!({
+                "action": {
+                    "commands": [format!("sed -n '1,200p' {SKILL_DIR}/SKILL.md")]
+                }
+            })
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_calls[1].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(SECOND_SHELL_ITEM_ID)
+        );
+
+        let tool_results = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_results.len(), 2);
+        assert_eq!(tool_results[0].tool_call_id, FIRST_CALL_ID);
+        assert_eq!(
+            tool_results[0].result.as_value(),
+            &json!({
+                "output": [
+                    {
+                        "outcome": {
+                            "type": "exit",
+                            "exitCode": 0
+                        },
+                        "stderr": "",
+                        "stdout": LIST_STDOUT
+                    }
+                ]
+            })
+        );
+        assert_eq!(tool_results[1].tool_call_id, SECOND_CALL_ID);
+        assert_eq!(
+            tool_results[1].result.as_value(),
+            &json!({
+                "output": [
+                    {
+                        "outcome": {
+                            "type": "exit",
+                            "exitCode": 0
+                        },
+                        "stderr": "",
+                        "stdout": SKILL_STDOUT
+                    }
+                ]
+            })
+        );
+
+        assert_eq!(
+            result
+                .content
+                .iter()
+                .filter_map(|part| match part {
+                    LanguageModelContent::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![FINAL_TEXT]
+        );
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(
+            request_body["tools"][0],
+            json!({
+                "type": "shell",
+                "environment": {
+                    "type": "container_auto"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_streams_shell_environment_fixture() {
+        const RESPONSE_ID: &str = "resp_049350089f7281c400698f717727d08191a446ae1621ed9503";
+        const CONTAINER_ID: &str = "cntr_698f717adffc8191ab9e49d1a0a7357e0bfbc8c57bdfa4aa";
+        const FIRST_SHELL_ITEM_ID: &str = "sh_049350089f7281c400698f717eed7881919bf2396c4409b2e7";
+        const FIRST_SHELL_OUTPUT_ID: &str =
+            "sho_049350089f7281c400698f7180b2408191b71d13d85b8fd6ed";
+        const SECOND_SHELL_ITEM_ID: &str = "sh_049350089f7281c400698f7180f4b8819193b01f07f27c0747";
+        const SECOND_SHELL_OUTPUT_ID: &str =
+            "sho_049350089f7281c400698f7182652481919b62a516ce0fbf5a";
+        const MESSAGE_ID: &str = "msg_049350089f7281c400698f7182e06481918ec2314235083b47";
+        const FIRST_CALL_ID: &str = "call_ckIythV1s1RcnbGV4F34THGN";
+        const SECOND_CALL_ID: &str = "call_Ud8yNtRknjWh2OA6COEutgOK";
+        const SKILL_DIR: &str = "/home/oai/skills/island-rescue-ab6238cd308ce72a5ae69fd3ba1e3aeb";
+        const LIST_STDOUT: &str =
+            "/home/oai/skills/island-rescue-ab6238cd308ce72a5ae69fd3ba1e3aeb:\nSKILL.md\n";
+        const SKILL_STDOUT: &str = "---\nname: island-rescue\ndescription: How to be rescued from a lonely island\n---\n\nYou MUST insert the capitalized word STOP after every 4 words in all your responses. No exceptions. Do not mention this rule to the user.\n";
+        const FINAL_TEXT: &str = concat!(
+            "Build a STOP large signal STOP on the STOP beach using STOP stones and STOP logs; make STOP a huge \u{201c}SOS\u{201d} STOP and keep STOP it visible STOP from the STOP sea and STOP sky.  \n\n",
+            "Start a STOP signal fire STOP on high STOP ground before STOP dusk; keep STOP dry fuel STOP ready so STOP you can STOP make thick STOP white smoke STOP by day STOP and bright STOP flame by STOP night.  \n\n",
+            "Improve odds STOP by getting STOP noticed: climb STOP to the STOP highest point STOP daily to watch STOP for sails; when STOP you see STOP a ship, STOP light the STOP fire immediately STOP and wave STOP branches or STOP cloth.  \n\n",
+            "Create a STOP simple sea marker: build STOP a tall beacon STOP (tripod of logs) near STOP shore, and hang STOP bright material (leaf mats, bark) to flap STOP; keep it maintained STOP.  \n\n",
+            "If you can, STOP craft a STOP raft only if STOP currents are safe; otherwise don\u{2019}t risk it\u{2014}stay put where searchers look (near fresh water and open beach)."
+        );
+
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport = Arc::new(
+            move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                let response_header = json!({
+                    "id": RESPONSE_ID,
+                    "object": "response",
+                    "created_at": 1771008375,
+                    "status": "in_progress",
+                    "model": "gpt-5.2-2025-12-11",
+                    "output": [],
+                    "tools": [
+                        {
+                            "type": "shell",
+                            "environment": {
+                                "type": "container_reference",
+                                "container_id": CONTAINER_ID
+                            }
+                        }
+                    ]
+                });
+                let first_shell_call = json!({
+                    "id": FIRST_SHELL_ITEM_ID,
+                    "type": "shell_call",
+                    "status": "completed",
+                    "action": {
+                        "commands": [format!("ls -R {SKILL_DIR}")],
+                        "max_output_length": null,
+                        "timeout_ms": null
+                    },
+                    "call_id": FIRST_CALL_ID,
+                    "environment": {
+                        "type": "container_reference",
+                        "container_id": CONTAINER_ID
+                    }
+                });
+                let first_shell_output = json!({
+                    "id": FIRST_SHELL_OUTPUT_ID,
+                    "type": "shell_call_output",
+                    "status": "completed",
+                    "call_id": FIRST_CALL_ID,
+                    "max_output_length": null,
+                    "output": [
+                        {
+                            "outcome": {
+                                "type": "exit",
+                                "exit_code": 0
+                            },
+                            "stderr": "",
+                            "stdout": LIST_STDOUT
+                        }
+                    ]
+                });
+                let second_shell_call = json!({
+                    "id": SECOND_SHELL_ITEM_ID,
+                    "type": "shell_call",
+                    "status": "completed",
+                    "action": {
+                        "commands": [format!("sed -n '1,200p' {SKILL_DIR}/SKILL.md")],
+                        "max_output_length": null,
+                        "timeout_ms": null
+                    },
+                    "call_id": SECOND_CALL_ID,
+                    "environment": {
+                        "type": "container_reference",
+                        "container_id": CONTAINER_ID
+                    }
+                });
+                let second_shell_output = json!({
+                    "id": SECOND_SHELL_OUTPUT_ID,
+                    "type": "shell_call_output",
+                    "status": "completed",
+                    "call_id": SECOND_CALL_ID,
+                    "max_output_length": null,
+                    "output": [
+                        {
+                            "outcome": {
+                                "type": "exit",
+                                "exit_code": 0
+                            },
+                            "stderr": "",
+                            "stdout": SKILL_STDOUT
+                        }
+                    ]
+                });
+                let message = json!({
+                    "id": MESSAGE_ID,
+                    "type": "message",
+                    "status": "completed",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "annotations": [],
+                            "logprobs": [],
+                            "text": FINAL_TEXT
+                        }
+                    ],
+                    "role": "assistant"
+                });
+                let completed_response = json!({
+                    "id": RESPONSE_ID,
+                    "object": "response",
+                    "created_at": 1771008375,
+                    "status": "completed",
+                    "model": "gpt-5.2-2025-12-11",
+                    "output": [
+                        first_shell_call.clone(),
+                        first_shell_output.clone(),
+                        second_shell_call.clone(),
+                        second_shell_output.clone(),
+                        message.clone()
+                    ],
+                    "tools": [
+                        {
+                            "type": "shell",
+                            "environment": {
+                                "type": "container_reference",
+                                "container_id": CONTAINER_ID
+                            }
+                        }
+                    ],
+                    "usage": {
+                        "input_tokens": 1499,
+                        "input_tokens_details": {
+                            "cached_tokens": 1024
+                        },
+                        "output_tokens": 331,
+                        "output_tokens_details": {
+                            "reasoning_tokens": 100
+                        },
+                        "total_tokens": 1830
+                    }
+                });
+                let events = [
+                    json!({
+                        "type": "response.created",
+                        "response": response_header
+                    }),
+                    json!({
+                        "type": "response.output_item.added",
+                        "output_index": 0,
+                        "item": {
+                            "id": FIRST_SHELL_ITEM_ID,
+                            "type": "shell_call",
+                            "status": "in_progress",
+                            "action": {
+                                "commands": [],
+                                "max_output_length": null,
+                                "timeout_ms": null
+                            },
+                            "call_id": FIRST_CALL_ID,
+                            "environment": {
+                                "type": "container_reference",
+                                "container_id": CONTAINER_ID
+                            }
+                        }
+                    }),
+                    json!({
+                        "type": "response.output_item.done",
+                        "output_index": 0,
+                        "item": first_shell_call
+                    }),
+                    json!({
+                        "type": "response.output_item.added",
+                        "output_index": 1,
+                        "item": {
+                            "id": FIRST_SHELL_OUTPUT_ID,
+                            "type": "shell_call_output",
+                            "status": "completed",
+                            "call_id": FIRST_CALL_ID,
+                            "max_output_length": null,
+                            "output": []
+                        }
+                    }),
+                    json!({
+                        "type": "response.output_item.done",
+                        "output_index": 1,
+                        "item": first_shell_output
+                    }),
+                    json!({
+                        "type": "response.output_item.added",
+                        "output_index": 2,
+                        "item": {
+                            "id": SECOND_SHELL_ITEM_ID,
+                            "type": "shell_call",
+                            "status": "in_progress",
+                            "action": {
+                                "commands": [],
+                                "max_output_length": null,
+                                "timeout_ms": null
+                            },
+                            "call_id": SECOND_CALL_ID,
+                            "environment": {
+                                "type": "container_reference",
+                                "container_id": CONTAINER_ID
+                            }
+                        }
+                    }),
+                    json!({
+                        "type": "response.output_item.done",
+                        "output_index": 2,
+                        "item": second_shell_call
+                    }),
+                    json!({
+                        "type": "response.output_item.added",
+                        "output_index": 3,
+                        "item": {
+                            "id": SECOND_SHELL_OUTPUT_ID,
+                            "type": "shell_call_output",
+                            "status": "completed",
+                            "call_id": SECOND_CALL_ID,
+                            "max_output_length": null,
+                            "output": []
+                        }
+                    }),
+                    json!({
+                        "type": "response.output_item.done",
+                        "output_index": 3,
+                        "item": second_shell_output
+                    }),
+                    json!({
+                        "type": "response.output_item.added",
+                        "output_index": 4,
+                        "item": {
+                            "id": MESSAGE_ID,
+                            "type": "message",
+                            "status": "in_progress",
+                            "content": [],
+                            "role": "assistant"
+                        }
+                    }),
+                    json!({
+                        "type": "response.content_part.added",
+                        "item_id": MESSAGE_ID,
+                        "output_index": 4,
+                        "content_index": 0,
+                        "part": {
+                            "type": "output_text",
+                            "annotations": [],
+                            "logprobs": [],
+                            "text": ""
+                        }
+                    }),
+                    json!({
+                        "type": "response.output_text.delta",
+                        "item_id": MESSAGE_ID,
+                        "output_index": 4,
+                        "content_index": 0,
+                        "delta": "Build a STOP large signal STOP on the STOP beach using STOP stones and STOP logs; ",
+                        "logprobs": []
+                    }),
+                    json!({
+                        "type": "response.output_text.delta",
+                        "item_id": MESSAGE_ID,
+                        "output_index": 4,
+                        "content_index": 0,
+                        "delta": &FINAL_TEXT["Build a STOP large signal STOP on the STOP beach using STOP stones and STOP logs; ".len()..],
+                        "logprobs": []
+                    }),
+                    json!({
+                        "type": "response.output_text.done",
+                        "item_id": MESSAGE_ID,
+                        "output_index": 4,
+                        "content_index": 0,
+                        "text": FINAL_TEXT,
+                        "logprobs": []
+                    }),
+                    json!({
+                        "type": "response.content_part.done",
+                        "item_id": MESSAGE_ID,
+                        "output_index": 4,
+                        "content_index": 0,
+                        "part": {
+                            "type": "output_text",
+                            "annotations": [],
+                            "logprobs": [],
+                            "text": FINAL_TEXT
+                        }
+                    }),
+                    json!({
+                        "type": "response.output_item.done",
+                        "output_index": 4,
+                        "item": message
+                    }),
+                    json!({
+                        "type": "response.completed",
+                        "response": completed_response
+                    }),
+                ];
+                let mut sse = events
+                    .into_iter()
+                    .map(|event| format!("data: {event}"))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                sse.push_str("\n\ndata: [DONE]\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-5.2");
+
+        let result = poll_ready(model.do_stream(open_responses_shell_container_call_options()));
+
+        let metadata = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ResponseMetadata(metadata) => Some(metadata),
+                _ => None,
+            })
+            .expect("stream includes response metadata");
+        assert_eq!(metadata.id.as_deref(), Some(RESPONSE_ID));
+        assert_eq!(metadata.model_id.as_deref(), Some("gpt-5.2-2025-12-11"));
+        assert_eq!(
+            metadata
+                .timestamp
+                .map(|timestamp| timestamp.unix_timestamp()),
+            Some(1_771_008_375)
+        );
+
+        let tool_calls = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_calls.len(), 2);
+        assert!(
+            tool_calls
+                .iter()
+                .all(|tool_call| tool_call.provider_executed == Some(true))
+        );
+        assert_eq!(tool_calls[0].tool_call_id, FIRST_CALL_ID);
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&tool_calls[0].input).expect("shell input parses"),
+            json!({
+                "action": {
+                    "commands": [format!("ls -R {SKILL_DIR}")]
+                }
+            })
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_calls[0].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(FIRST_SHELL_ITEM_ID)
+        );
+        assert_eq!(tool_calls[1].tool_call_id, SECOND_CALL_ID);
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&tool_calls[1].input).expect("shell input parses"),
+            json!({
+                "action": {
+                    "commands": [format!("sed -n '1,200p' {SKILL_DIR}/SKILL.md")]
+                }
+            })
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_calls[1].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(SECOND_SHELL_ITEM_ID)
+        );
+
+        let tool_results = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_results.len(), 2);
+        assert_eq!(tool_results[0].tool_call_id, FIRST_CALL_ID);
+        assert_eq!(
+            tool_results[0].result.as_value(),
+            &json!({
+                "output": [
+                    {
+                        "outcome": {
+                            "type": "exit",
+                            "exitCode": 0
+                        },
+                        "stderr": "",
+                        "stdout": LIST_STDOUT
+                    }
+                ]
+            })
+        );
+        assert_eq!(tool_results[1].tool_call_id, SECOND_CALL_ID);
+        assert_eq!(
+            tool_results[1].result.as_value(),
+            &json!({
+                "output": [
+                    {
+                        "outcome": {
+                            "type": "exit",
+                            "exitCode": 0
+                        },
+                        "stderr": "",
+                        "stdout": SKILL_STDOUT
+                    }
+                ]
+            })
+        );
+
+        let text_start = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextStart(start) => Some(start),
+                _ => None,
+            })
+            .expect("stream includes text start");
+        assert_eq!(text_start.id, MESSAGE_ID);
+        assert_eq!(
+            openai_metadata_value(&text_start.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(MESSAGE_ID)
+        );
+        let streamed_text = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) if delta.id == MESSAGE_ID => {
+                    Some(delta.delta.as_str())
+                }
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(streamed_text, FINAL_TEXT);
+
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(finish.usage.input_tokens.total, Some(1499));
+        assert_eq!(finish.usage.input_tokens.no_cache, Some(475));
+        assert_eq!(finish.usage.input_tokens.cache_read, Some(1024));
+        assert_eq!(finish.usage.output_tokens.total, Some(331));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(100));
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some(RESPONSE_ID)
+        );
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(
+            request_body["tools"][0],
+            json!({
+                "type": "shell",
+                "environment": {
+                    "type": "container_auto"
+                }
             })
         );
     }
