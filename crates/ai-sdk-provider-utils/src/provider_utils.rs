@@ -10225,6 +10225,131 @@ mod tests {
     }
 
     #[test]
+    fn serialize_model_options_upstream_returns_model_id_and_serializable_config() {
+        let result = serialize_model_options(
+            "claude-sonnet-4-20250514",
+            [
+                ("provider", Some(json!("anthropic.messages"))),
+                ("baseURL", Some(json!("https://api.anthropic.com/v1"))),
+                ("headers", Some(json!({ "x-api-key": "sk-test" }))),
+                ("fetch", None),
+                ("generateId", None),
+                ("supportedUrls", None),
+                ("supportsNativeStructuredOutput", Some(json!(true))),
+                ("supportsStrictTools", Some(json!(false))),
+            ],
+        );
+
+        assert_eq!(
+            serde_json::to_value(&result).expect("result serializes"),
+            json!({
+                "modelId": "claude-sonnet-4-20250514",
+                "config": {
+                    "provider": "anthropic.messages",
+                    "baseURL": "https://api.anthropic.com/v1",
+                    "headers": { "x-api-key": "sk-test" },
+                    "supportsNativeStructuredOutput": true,
+                    "supportsStrictTools": false
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn serialize_model_options_upstream_resolves_headers_functions_but_filters_out_other_functions()
+    {
+        let result = serialize_model_options(
+            "gpt-4",
+            [
+                ("provider", Some(json!("openai"))),
+                (
+                    "headers",
+                    Some(json!({ "authorization": "Bearer sk-test" })),
+                ),
+                ("url", None),
+            ],
+        );
+
+        assert_eq!(
+            serde_json::to_value(&result).expect("result serializes"),
+            json!({
+                "modelId": "gpt-4",
+                "config": {
+                    "provider": "openai",
+                    "headers": { "authorization": "Bearer sk-test" }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn serialize_model_options_upstream_filters_out_objects_containing_functions() {
+        let result = serialize_model_options(
+            "model",
+            [
+                ("provider", Some(json!("openai-compatible"))),
+                ("errorStructure", None),
+                ("metadataExtractor", None),
+            ],
+        );
+
+        assert_eq!(
+            serde_json::to_value(&result).expect("result serializes"),
+            json!({
+                "modelId": "model",
+                "config": {
+                    "provider": "openai-compatible"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn serialize_model_options_upstream_keeps_arrays_of_primitives() {
+        let result = serialize_model_options(
+            "model",
+            [
+                ("provider", Some(json!("test"))),
+                ("tags", Some(json!(["a", "b"]))),
+                ("fn", None),
+            ],
+        );
+
+        assert_eq!(
+            serde_json::to_value(&result).expect("result serializes"),
+            json!({
+                "modelId": "model",
+                "config": {
+                    "provider": "test",
+                    "tags": ["a", "b"]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn serialize_model_options_upstream_filters_out_class_instances() {
+        let result = serialize_model_options(
+            "model",
+            [
+                ("provider", Some(json!("test"))),
+                ("date", None),
+                ("regex", None),
+            ],
+        );
+
+        assert_eq!(
+            serde_json::to_value(&result).expect("result serializes"),
+            json!({
+                "modelId": "model",
+                "config": {
+                    "provider": "test"
+                }
+            })
+        );
+    }
+
+    #[test]
     fn serialize_model_options_filters_missing_entries_and_preserves_json_null() {
         let result = serialize_model_options(
             "gpt-4",
