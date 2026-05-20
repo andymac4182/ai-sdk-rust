@@ -19468,6 +19468,356 @@ mod tests {
         );
     }
 
+    fn open_responses_prepared_shell_tool(args: JsonValue) -> JsonValue {
+        let (provider, captured_request) =
+            open_responses_captured_provider("openai", "gpt-4.1-mini");
+        let model = provider.language_model("gpt-4.1-mini");
+        let result = poll_ready(model.do_generate(
+            LanguageModelCallOptions::new(open_responses_hello_prompt()).with_tool(
+                LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.shell",
+                    "shell",
+                    json_object(args),
+                )),
+            ),
+        ));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        captured_open_responses_request_body(&captured_request)["tools"][0].clone()
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_shell_tool_without_environment_args() {
+        let tool = open_responses_prepared_shell_tool(json!({}));
+
+        assert_eq!(tool, json!({ "type": "shell" }));
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_shell_container_auto_without_skills() {
+        let tool = open_responses_prepared_shell_tool(json!({
+            "environment": {
+                "type": "containerAuto"
+            }
+        }));
+
+        assert_eq!(
+            tool,
+            json!({
+                "type": "shell",
+                "environment": {
+                    "type": "container_auto"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_shell_container_auto_provider_reference_skill() {
+        let tool = open_responses_prepared_shell_tool(json!({
+            "environment": {
+                "type": "containerAuto",
+                "skills": [
+                    {
+                        "type": "skillReference",
+                        "providerReference": {
+                            "openai": "skill_abc"
+                        },
+                        "version": "1.0.0"
+                    }
+                ]
+            }
+        }));
+
+        assert_eq!(
+            tool,
+            json!({
+                "type": "shell",
+                "environment": {
+                    "type": "container_auto",
+                    "skills": [
+                        {
+                            "type": "skill_reference",
+                            "skill_id": "skill_abc",
+                            "version": "1.0.0"
+                        }
+                    ]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_defaults_shell_skill_reference_version_to_latest() {
+        let tool = open_responses_prepared_shell_tool(json!({
+            "environment": {
+                "type": "containerAuto",
+                "skills": [
+                    {
+                        "type": "skillReference",
+                        "providerReference": {
+                            "openai": "skill_abc"
+                        }
+                    }
+                ]
+            }
+        }));
+
+        assert_eq!(
+            tool,
+            json!({
+                "type": "shell",
+                "environment": {
+                    "type": "container_auto",
+                    "skills": [
+                        {
+                            "type": "skill_reference",
+                            "skill_id": "skill_abc",
+                            "version": "latest"
+                        }
+                    ]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_shell_container_auto_inline_skill() {
+        let tool = open_responses_prepared_shell_tool(json!({
+            "environment": {
+                "type": "containerAuto",
+                "skills": [
+                    {
+                        "type": "inline",
+                        "name": "my-skill",
+                        "description": "A test skill",
+                        "source": {
+                            "type": "base64",
+                            "mediaType": "application/zip",
+                            "data": "dGVzdA=="
+                        }
+                    }
+                ]
+            }
+        }));
+
+        assert_eq!(
+            tool,
+            json!({
+                "type": "shell",
+                "environment": {
+                    "type": "container_auto",
+                    "skills": [
+                        {
+                            "type": "inline",
+                            "name": "my-skill",
+                            "description": "A test skill",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/zip",
+                                "data": "dGVzdA=="
+                            }
+                        }
+                    ]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_shell_container_auto_network_policy_disabled() {
+        let tool = open_responses_prepared_shell_tool(json!({
+            "environment": {
+                "type": "containerAuto",
+                "networkPolicy": {
+                    "type": "disabled"
+                }
+            }
+        }));
+
+        assert_eq!(
+            tool,
+            json!({
+                "type": "shell",
+                "environment": {
+                    "type": "container_auto",
+                    "network_policy": {
+                        "type": "disabled"
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_shell_container_auto_network_policy_allowlist() {
+        let tool = open_responses_prepared_shell_tool(json!({
+            "environment": {
+                "type": "containerAuto",
+                "networkPolicy": {
+                    "type": "allowlist",
+                    "allowedDomains": ["example.com", "api.test.org"],
+                    "domainSecrets": [
+                        {
+                            "domain": "api.test.org",
+                            "name": "API_KEY",
+                            "value": "secret123"
+                        }
+                    ]
+                }
+            }
+        }));
+
+        assert_eq!(
+            tool,
+            json!({
+                "type": "shell",
+                "environment": {
+                    "type": "container_auto",
+                    "network_policy": {
+                        "type": "allowlist",
+                        "allowed_domains": ["example.com", "api.test.org"],
+                        "domain_secrets": [
+                            {
+                                "domain": "api.test.org",
+                                "name": "API_KEY",
+                                "value": "secret123"
+                            }
+                        ]
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_shell_container_auto_file_ids_and_memory_limit() {
+        let tool = open_responses_prepared_shell_tool(json!({
+            "environment": {
+                "type": "containerAuto",
+                "fileIds": ["file-1", "file-2"],
+                "memoryLimit": "16g"
+            }
+        }));
+
+        assert_eq!(
+            tool,
+            json!({
+                "type": "shell",
+                "environment": {
+                    "type": "container_auto",
+                    "file_ids": ["file-1", "file-2"],
+                    "memory_limit": "16g"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_shell_container_reference() {
+        let tool = open_responses_prepared_shell_tool(json!({
+            "environment": {
+                "type": "containerReference",
+                "containerId": "ctr_abc123"
+            }
+        }));
+
+        assert_eq!(
+            tool,
+            json!({
+                "type": "shell",
+                "environment": {
+                    "type": "container_reference",
+                    "container_id": "ctr_abc123"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_shell_local_environment_with_skills() {
+        let tool = open_responses_prepared_shell_tool(json!({
+            "environment": {
+                "type": "local",
+                "skills": [
+                    {
+                        "name": "calculator",
+                        "description": "Perform math calculations",
+                        "path": "/path/to/calculator"
+                    }
+                ]
+            }
+        }));
+
+        assert_eq!(
+            tool,
+            json!({
+                "type": "shell",
+                "environment": {
+                    "type": "local",
+                    "skills": [
+                        {
+                            "name": "calculator",
+                            "description": "Perform math calculations",
+                            "path": "/path/to/calculator"
+                        }
+                    ]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_shell_local_environment_without_explicit_type() {
+        let tool = open_responses_prepared_shell_tool(json!({
+            "environment": {
+                "skills": [
+                    {
+                        "name": "calculator",
+                        "description": "Perform math calculations",
+                        "path": "/path/to/calculator"
+                    }
+                ]
+            }
+        }));
+
+        assert_eq!(
+            tool,
+            json!({
+                "type": "shell",
+                "environment": {
+                    "type": "local",
+                    "skills": [
+                        {
+                            "name": "calculator",
+                            "description": "Perform math calculations",
+                            "path": "/path/to/calculator"
+                        }
+                    ]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_shell_local_environment_without_skills() {
+        let tool = open_responses_prepared_shell_tool(json!({
+            "environment": {
+                "type": "local"
+            }
+        }));
+
+        assert_eq!(
+            tool,
+            json!({
+                "type": "shell",
+                "environment": {
+                    "type": "local"
+                }
+            })
+        );
+    }
+
     #[test]
     fn open_responses_provider_prepares_shell_tool_environment_skills() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
