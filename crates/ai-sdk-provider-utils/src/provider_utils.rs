@@ -11536,6 +11536,21 @@ mod tests {
     }
 
     #[test]
+    fn validate_types_upstream_should_return_validated_object_for_valid_input() {
+        let input = json!({ "name": "John", "age": 30 });
+
+        let person = validate_types(input, person_schema(), None).expect("person validates");
+
+        assert_eq!(
+            person,
+            Person {
+                name: "John".to_string(),
+                age: 30,
+            }
+        );
+    }
+
+    #[test]
     fn validate_types_wraps_validation_errors_with_context() {
         let value = json!({ "name": "John", "age": "30" });
         let context = TypeValidationContext::new()
@@ -11554,6 +11569,18 @@ mod tests {
                 .message()
                 .starts_with("Type validation failed for person.age (person, id: \"user-1\"):")
         );
+    }
+
+    #[test]
+    fn validate_types_upstream_should_throw_type_validation_error_for_invalid_input() {
+        let input = json!({ "name": "John", "age": "30" });
+
+        let error =
+            validate_types(input.clone(), person_schema(), None).expect_err("input is invalid");
+
+        assert_eq!(error.value(), &input);
+        assert_eq!(error.cause_message(), "Invalid input");
+        assert!(error.message().contains("Type validation failed"));
     }
 
     #[test]
@@ -11584,6 +11611,24 @@ mod tests {
     }
 
     #[test]
+    fn safe_validate_types_upstream_should_return_validated_object_for_valid_input() {
+        let input = json!({ "name": "John", "age": 30 });
+
+        let result = safe_validate_types(input.clone(), person_schema(), None);
+
+        assert_eq!(
+            result,
+            ValidateTypesResult::success(
+                Person {
+                    name: "John".to_string(),
+                    age: 30,
+                },
+                input,
+            )
+        );
+    }
+
+    #[test]
     fn safe_validate_types_returns_error_and_raw_value_on_failure() {
         let value = json!({ "name": "John", "age": "30" });
         let parsed = safe_validate_types(value.clone(), person_schema(), None);
@@ -11595,6 +11640,20 @@ mod tests {
         let error = parsed.error().expect("validation error is returned");
         assert_eq!(error.value(), &value);
         assert_eq!(error.cause_message(), "Invalid input");
+    }
+
+    #[test]
+    fn safe_validate_types_upstream_should_return_error_object_for_invalid_input() {
+        let input = json!({ "name": "John", "age": "30" });
+
+        let result = safe_validate_types(input.clone(), person_schema(), None);
+
+        assert!(result.is_failure());
+        assert_eq!(result.raw_value(), &input);
+
+        let error = result.error().expect("validation error is returned");
+        assert_eq!(error.value(), &input);
+        assert!(error.message().contains("Type validation failed"));
     }
 
     #[test]
