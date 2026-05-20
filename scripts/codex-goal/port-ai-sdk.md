@@ -150,6 +150,10 @@ still open.
    never fewer. Missing one original upstream test/case is a parity failure
    until it is ported or explicitly documented as JavaScript-only/non-portable
    in the ledger.
+   The acceptance rule is strict: EVERY original portable TypeScript test/case
+   must exist in Rust in the matching crate. Rust can add extra coverage on top,
+   but it cannot have a smaller test inventory than the original TypeScript
+   package for any portable surface.
 5. For provider-backed behavior, require two layers of proof before marking a
    row `verified`: deterministic fake/mock/transport tests that run in normal
    validation, plus credential-gated live provider validation when a usable
