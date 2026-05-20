@@ -64,6 +64,13 @@ counterpart or an explicit `js-only-documented` justification. Passing a
 smaller hand-picked Rust suite is not enough, even if the implemented behavior
 looks correct.
 
+In practical terms, the matching Rust crate must contain every original
+portable upstream TypeScript test/case and may contain additional Rust-specific
+tests on top. More tests are encouraged; fewer tests than the original
+TypeScript package is a parity failure. Do not merge or mark a package
+`verified` until the ledger shows that the upstream test list is fully mapped
+one-to-one or explicitly documented as non-portable.
+
 ## Required Work Order
 
 The queue is two-phase and gated:
