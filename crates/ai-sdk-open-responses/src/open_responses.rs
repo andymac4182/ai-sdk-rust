@@ -18737,6 +18737,474 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_streams_mcp_tool_fixture() {
+        const RESPONSE_ID: &str = "resp_0c72b1033351981300690ccf79c6d88193b7d054f4f83ad50a";
+        const LIST_TOOLS_ID: &str = "mcpl_0c72b1033351981300690ccf79e488819386bcc68bc55afd27";
+        const FIRST_REASONING_ID: &str = "rs_0c72b1033351981300690ccf7c6ea4819383a27ac8faae82a2";
+        const FIRST_MCP_ID: &str = "mcp_0c72b1033351981300690ccf7fa1f0819392a313d0805746c8";
+        const SECOND_REASONING_ID: &str = "rs_0c72b1033351981300690ccf8826a88193bf4cb6521d9da046";
+        const SECOND_MCP_ID: &str = "mcp_0c72b1033351981300690ccf8bdcd8819383bd64316c8519a2";
+        const THIRD_REASONING_ID: &str = "rs_0c72b1033351981300690ccf94bc0c8193ab4a01ae62e95577";
+        const MESSAGE_ID: &str = "msg_0c72b1033351981300690ccf97df988193b9c062fa247e6257";
+        const FIRST_ARGUMENTS: &str = r#"{"query":"2025 New York City mayoral election results Nov 2025 latest results", "numResults": 5}"#;
+        const SECOND_ARGUMENTS: &str = r#"{"query":"NYC Board of Elections 2025 mayoral results Zohran Mamdani NYC Board of Elections results 2025 mayor", "numResults":5}"#;
+        const FIRST_OUTPUT: &str = r#"{"requestId":"d9c62fa7c1129e16e2131c3996ea8f6b","results":[{"title":"NYC Mayor Election 2025 Live Results - NBC News","url":"https://www.nbcnews.com/politics/2025-elections/new-york-city-mayor-results"}]}"#;
+        const SECOND_OUTPUT: &str = r#"{"requestId":"7ff4bca9a3c9eadc6acd476d6aa02547","results":[{"title":"New York City mayoral election results | CNN Politics","url":"https://www.cnn.com/election/2025/results/new-york-city-mayor"}]}"#;
+        const FINAL_TEXT: &str = concat!(
+            "Yes \u{2014} I searched the web. Major outlets are projecting Zohran Mamdani as the winner of the 2025 New York City mayoral race.\n\n",
+            "Summary (from multiple live-results pages and AP projections)\n",
+            "- Projected winner: Zohran Mamdani (Democrat)\n",
+            "- Main challengers: Andrew Cuomo (running independent), Curtis Sliwa (Republican)\n",
+            "- Reported vote shares from live trackers as results came in: Mamdani \u{2248} 50\u{2013}50.4%, Cuomo \u{2248} 41\u{2013}42%, Sliwa \u{2248} 7\u{2013}8% (percentages vary slightly by outlet/time reporting)\n\n",
+            "Sources / live result pages\n",
+            "- NBC News (live results): https://www.nbcnews.com/politics/2025-elections/new-york-city-mayor-results\n",
+            "- Washington Post (live updates / AP projection): https://www.washingtonpost.com/elections/results/2025/11/04/new-york-city-mayor-results/\n",
+            "- CNN (race page / projection): https://www.cnn.com/election/2025/results/new-york-city-mayor\n",
+            "- ABC News (projection article): https://abcnews.go.com/Politics/new-york-city-2025-mayoral-election-results-mamdani/story?id=126345335\n",
+            "- NPR (coverage): https://www.npr.org/2025/11/04/nx-s1-5597788/election-results-zohran-mamdani-new-york-city-mayor\n\n",
+            "Would you like me to:\n",
+            "- Pull the official NYC Board of Elections final results page?\n",
+            "- Send a link to a specific news outlet\u{2019}s detailed breakdown (by borough/district)?"
+        );
+
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                let first_mcp_call = json!({
+                    "id": FIRST_MCP_ID,
+                    "type": "mcp_call",
+                    "status": "completed",
+                    "approval_request_id": null,
+                    "arguments": FIRST_ARGUMENTS,
+                    "error": null,
+                    "name": "web_search_exa",
+                    "output": FIRST_OUTPUT,
+                    "server_label": "dmcp"
+                });
+                let second_mcp_call = json!({
+                    "id": SECOND_MCP_ID,
+                    "type": "mcp_call",
+                    "status": "completed",
+                    "approval_request_id": null,
+                    "arguments": SECOND_ARGUMENTS,
+                    "error": null,
+                    "name": "web_search_exa",
+                    "output": SECOND_OUTPUT,
+                    "server_label": "dmcp"
+                });
+                let message = json!({
+                    "id": MESSAGE_ID,
+                    "type": "message",
+                    "status": "completed",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "annotations": [],
+                            "logprobs": [],
+                            "text": FINAL_TEXT
+                        }
+                    ],
+                    "role": "assistant"
+                });
+                let completed_response = json!({
+                    "id": RESPONSE_ID,
+                    "object": "response",
+                    "created_at": 1762447225,
+                    "status": "completed",
+                    "model": "gpt-5-mini-2025-08-07",
+                    "output": [
+                        {
+                            "id": LIST_TOOLS_ID,
+                            "type": "mcp_list_tools",
+                            "server_label": "dmcp",
+                            "tools": [
+                                {
+                                    "name": "web_search_exa",
+                                    "description": "Search the web using Exa AI",
+                                    "input_schema": {
+                                        "type": "object"
+                                    }
+                                }
+                            ]
+                        },
+                        {
+                            "id": FIRST_REASONING_ID,
+                            "type": "reasoning",
+                            "summary": []
+                        },
+                        first_mcp_call.clone(),
+                        {
+                            "id": SECOND_REASONING_ID,
+                            "type": "reasoning",
+                            "summary": []
+                        },
+                        second_mcp_call.clone(),
+                        {
+                            "id": THIRD_REASONING_ID,
+                            "type": "reasoning",
+                            "summary": []
+                        },
+                        message.clone()
+                    ],
+                    "service_tier": "default",
+                    "usage": {
+                        "input_tokens": 11791,
+                        "input_tokens_details": {
+                            "cached_tokens": 0
+                        },
+                        "output_tokens": 963,
+                        "output_tokens_details": {
+                            "reasoning_tokens": 512
+                        },
+                        "total_tokens": 12754
+                    }
+                });
+                let events = [
+                    json!({
+                        "type": "response.created",
+                        "sequence_number": 0,
+                        "response": {
+                            "id": RESPONSE_ID,
+                            "object": "response",
+                            "created_at": 1762447225,
+                            "status": "in_progress",
+                            "model": "gpt-5-mini-2025-08-07",
+                            "output": [],
+                            "tools": [
+                                {
+                                    "type": "mcp",
+                                    "allowed_tools": null,
+                                    "headers": null,
+                                    "require_approval": "never",
+                                    "server_description": "A web-search API for AI agents",
+                                    "server_label": "dmcp",
+                                    "server_url": "https://mcp.exa.ai/mcp"
+                                }
+                            ]
+                        }
+                    }),
+                    json!({
+                        "type": "response.output_item.done",
+                        "sequence_number": 5,
+                        "output_index": 0,
+                        "item": {
+                            "id": LIST_TOOLS_ID,
+                            "type": "mcp_list_tools",
+                            "server_label": "dmcp",
+                            "tools": [
+                                {
+                                    "name": "web_search_exa",
+                                    "description": "Search the web using Exa AI",
+                                    "input_schema": {
+                                        "type": "object"
+                                    }
+                                }
+                            ]
+                        }
+                    }),
+                    json!({
+                        "type": "response.output_item.done",
+                        "sequence_number": 7,
+                        "output_index": 1,
+                        "item": {
+                            "id": FIRST_REASONING_ID,
+                            "type": "reasoning",
+                            "summary": []
+                        }
+                    }),
+                    json!({
+                        "type": "response.output_item.done",
+                        "sequence_number": 13,
+                        "output_index": 2,
+                        "item": first_mcp_call
+                    }),
+                    json!({
+                        "type": "response.output_item.done",
+                        "sequence_number": 15,
+                        "output_index": 3,
+                        "item": {
+                            "id": SECOND_REASONING_ID,
+                            "type": "reasoning",
+                            "summary": []
+                        }
+                    }),
+                    json!({
+                        "type": "response.output_item.done",
+                        "sequence_number": 24,
+                        "output_index": 4,
+                        "item": second_mcp_call
+                    }),
+                    json!({
+                        "type": "response.output_item.done",
+                        "sequence_number": 26,
+                        "output_index": 5,
+                        "item": {
+                            "id": THIRD_REASONING_ID,
+                            "type": "reasoning",
+                            "summary": []
+                        }
+                    }),
+                    json!({
+                        "type": "response.output_item.added",
+                        "sequence_number": 27,
+                        "output_index": 6,
+                        "item": {
+                            "id": MESSAGE_ID,
+                            "type": "message",
+                            "status": "in_progress",
+                            "content": [],
+                            "role": "assistant"
+                        }
+                    }),
+                    json!({
+                        "type": "response.content_part.added",
+                        "sequence_number": 28,
+                        "item_id": MESSAGE_ID,
+                        "output_index": 6,
+                        "content_index": 0,
+                        "part": {
+                            "type": "output_text",
+                            "annotations": [],
+                            "logprobs": [],
+                            "text": ""
+                        }
+                    }),
+                    json!({
+                        "type": "response.output_text.delta",
+                        "sequence_number": 29,
+                        "item_id": MESSAGE_ID,
+                        "output_index": 6,
+                        "content_index": 0,
+                        "delta": "Yes",
+                        "logprobs": []
+                    }),
+                    json!({
+                        "type": "response.output_text.delta",
+                        "sequence_number": 30,
+                        "item_id": MESSAGE_ID,
+                        "output_index": 6,
+                        "content_index": 0,
+                        "delta": &FINAL_TEXT["Yes".len()..],
+                        "logprobs": []
+                    }),
+                    json!({
+                        "type": "response.output_text.done",
+                        "sequence_number": 281,
+                        "item_id": MESSAGE_ID,
+                        "output_index": 6,
+                        "content_index": 0,
+                        "text": FINAL_TEXT,
+                        "logprobs": []
+                    }),
+                    json!({
+                        "type": "response.content_part.done",
+                        "sequence_number": 282,
+                        "item_id": MESSAGE_ID,
+                        "output_index": 6,
+                        "content_index": 0,
+                        "part": {
+                            "type": "output_text",
+                            "annotations": [],
+                            "logprobs": [],
+                            "text": FINAL_TEXT
+                        }
+                    }),
+                    json!({
+                        "type": "response.output_item.done",
+                        "sequence_number": 283,
+                        "output_index": 6,
+                        "item": message
+                    }),
+                    json!({
+                        "type": "response.completed",
+                        "sequence_number": 284,
+                        "response": completed_response
+                    }),
+                ];
+                let mut sse = events
+                    .into_iter()
+                    .map(|event| format!("data: {event}"))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                sse.push_str("\n\ndata: [DONE]\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-5-mini");
+
+        let result = poll_ready(model.do_stream(
+            LanguageModelCallOptions::new(open_responses_hello_prompt()).with_tool(
+                LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.mcp",
+                    "MCP",
+                    json_object(json!({
+                        "serverLabel": "dmcp",
+                        "serverUrl": "https://mcp.exa.ai/mcp",
+                        "serverDescription": "A web-search API for AI agents"
+                    })),
+                )),
+            ),
+        ));
+
+        let metadata = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ResponseMetadata(metadata) => Some(metadata),
+                _ => None,
+            })
+            .expect("stream includes response metadata");
+        assert_eq!(metadata.id.as_deref(), Some(RESPONSE_ID));
+        assert_eq!(metadata.model_id.as_deref(), Some("gpt-5-mini-2025-08-07"));
+        assert_eq!(
+            metadata
+                .timestamp
+                .map(|timestamp| timestamp.unix_timestamp()),
+            Some(1_762_447_225)
+        );
+
+        let reasoning_starts = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ReasoningStart(start) => Some(start),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reasoning_starts.len(), 3);
+        assert_eq!(
+            reasoning_starts
+                .iter()
+                .map(
+                    |start| openai_metadata_value(&start.provider_metadata, "itemId")
+                        .and_then(JsonValue::as_str)
+                        .unwrap_or_default()
+                )
+                .collect::<Vec<_>>(),
+            vec![FIRST_REASONING_ID, SECOND_REASONING_ID, THIRD_REASONING_ID]
+        );
+
+        let tool_calls = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(tool_calls[0].tool_call_id, FIRST_MCP_ID);
+        assert_eq!(tool_calls[0].tool_name, "mcp.web_search_exa");
+        assert_eq!(tool_calls[0].provider_executed, Some(true));
+        assert_eq!(tool_calls[0].dynamic, Some(true));
+        assert_eq!(tool_calls[0].input, FIRST_ARGUMENTS);
+        assert_eq!(tool_calls[1].tool_call_id, SECOND_MCP_ID);
+        assert_eq!(tool_calls[1].tool_name, "mcp.web_search_exa");
+        assert_eq!(tool_calls[1].input, SECOND_ARGUMENTS);
+
+        let tool_results = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_results.len(), 2);
+        assert_eq!(tool_results[0].tool_call_id, FIRST_MCP_ID);
+        assert_eq!(tool_results[0].tool_name, "mcp.web_search_exa");
+        assert_eq!(tool_results[0].dynamic, Some(true));
+        assert_eq!(
+            openai_metadata_value(&tool_results[0].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(FIRST_MCP_ID)
+        );
+        assert_eq!(
+            tool_results[0].result.as_value(),
+            &json!({
+                "type": "call",
+                "serverLabel": "dmcp",
+                "name": "web_search_exa",
+                "arguments": FIRST_ARGUMENTS,
+                "output": FIRST_OUTPUT
+            })
+        );
+        assert_eq!(tool_results[1].tool_call_id, SECOND_MCP_ID);
+        assert_eq!(
+            tool_results[1].result.as_value(),
+            &json!({
+                "type": "call",
+                "serverLabel": "dmcp",
+                "name": "web_search_exa",
+                "arguments": SECOND_ARGUMENTS,
+                "output": SECOND_OUTPUT
+            })
+        );
+
+        assert!(
+            !result.stream.iter().any(|part| matches!(
+                part,
+                LanguageModelStreamPart::ToolCall(tool_call)
+                    if tool_call.tool_call_id == LIST_TOOLS_ID
+            )),
+            "mcp_list_tools items are not emitted as model tool calls"
+        );
+
+        let streamed_text = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) if delta.id == MESSAGE_ID => {
+                    Some(delta.delta.as_str())
+                }
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(streamed_text, FINAL_TEXT);
+
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(finish.usage.input_tokens.total, Some(11791));
+        assert_eq!(finish.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(finish.usage.output_tokens.total, Some(963));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(512));
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some(RESPONSE_ID)
+        );
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(
+            request_body["tools"][0],
+            json!({
+                "type": "mcp",
+                "server_label": "dmcp",
+                "server_url": "https://mcp.exa.ai/mcp",
+                "server_description": "A web-search API for AI agents",
+                "require_approval": "never"
+            })
+        );
+    }
+
+    #[test]
     fn open_responses_provider_maps_web_search_api_sources_and_missing_action() {
         let transport: OpenResponsesTransport =
             Arc::new(move |_request| -> OpenResponsesTransportFuture {
