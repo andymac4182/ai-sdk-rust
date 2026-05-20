@@ -23501,6 +23501,45 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_sends_code_interpreter_request_body_with_include_and_tool() {
+        let (_, request_body) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5-nano",
+            OPEN_RESPONSES_CODE_INTERPRETER_TOOL_JSON_FIXTURE,
+            open_responses_code_interpreter_call_options(),
+        );
+
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-5-nano",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "code_interpreter",
+                        "container": {
+                            "type": "auto"
+                        }
+                    }
+                ],
+                "include": [
+                    "code_interpreter_call.outputs"
+                ]
+            })
+        );
+    }
+
+    #[test]
     fn open_responses_provider_generates_code_interpreter_fixture_results() {
         let fixture: JsonValue =
             serde_json::from_str(OPEN_RESPONSES_CODE_INTERPRETER_TOOL_JSON_FIXTURE)
@@ -23625,6 +23664,43 @@ mod tests {
         assert_eq!(result.usage.input_tokens.cache_read, Some(0));
         assert_eq!(result.usage.output_tokens.total, Some(1928));
         assert_eq!(result.usage.output_tokens.reasoning, Some(1792));
+    }
+
+    #[test]
+    fn open_responses_provider_sends_image_generation_request_body_with_tool() {
+        let (_, request_body) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5-nano",
+            OPEN_RESPONSES_IMAGE_GENERATION_TOOL_JSON_FIXTURE,
+            open_responses_image_generation_fixture_call_options(),
+        );
+
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-5-nano",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "image_generation",
+                        "output_format": "webp",
+                        "quality": "low",
+                        "size": "1024x1024",
+                        "partial_images": 2
+                    }
+                ]
+            })
+        );
     }
 
     #[test]
