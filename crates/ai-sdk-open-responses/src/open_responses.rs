@@ -4500,7 +4500,8 @@ fn open_responses_stream_result_from_response(
     let mut response_id = None::<String>;
     let mut service_tier = None::<String>;
     let mut logprobs = Vec::<JsonValue>::new();
-    let mut emitted_response_metadata = false;
+    let mut emitted_response_metadata_ids = BTreeSet::<String>::new();
+    let mut emitted_response_metadata_without_id = false;
     let mut has_tool_calls = false;
     let mut emitted_tool_calls = BTreeSet::<String>::new();
     let mut text_buffers = BTreeMap::<String, String>::new();
@@ -4560,7 +4561,8 @@ fn open_responses_stream_result_from_response(
                 if let Some(response) = open_responses_event_response(&value) {
                     open_responses_push_response_metadata(
                         &mut stream,
-                        &mut emitted_response_metadata,
+                        &mut emitted_response_metadata_ids,
+                        &mut emitted_response_metadata_without_id,
                         response,
                     );
                 }
@@ -5724,16 +5726,22 @@ fn open_responses_failed_raw_finish_reason(response: &JsonValue) -> Option<Strin
 
 fn open_responses_push_response_metadata(
     stream: &mut Vec<LanguageModelStreamPart>,
-    emitted_response_metadata: &mut bool,
+    emitted_response_metadata_ids: &mut BTreeSet<String>,
+    emitted_response_metadata_without_id: &mut bool,
     response: &JsonValue,
 ) {
-    if *emitted_response_metadata {
-        return;
-    }
-
     if let Some(metadata) = open_responses_stream_response_metadata(response) {
+        if let Some(id) = metadata.id.as_deref() {
+            if !emitted_response_metadata_ids.insert(id.to_string()) {
+                return;
+            }
+        } else if *emitted_response_metadata_without_id {
+            return;
+        } else {
+            *emitted_response_metadata_without_id = true;
+        }
+
         stream.push(LanguageModelStreamPart::ResponseMetadata(metadata));
-        *emitted_response_metadata = true;
     }
 }
 
@@ -17161,6 +17169,219 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_streams_shell_fixture_multiresponse() {
+        const FIRST_RESPONSE_ID: &str = "resp_0434d6d64b12b08900692f639c40408195a50fd07b77ce08a7";
+        const SECOND_RESPONSE_ID: &str = "resp_0434d6d64b12b08900692f639d784481959af65f985b9c13e2";
+        const SHELL_ITEM_ID: &str = "sh_0434d6d64b12b08900692f639c9f0481959c30e03ca0bb2ef8";
+        const SHELL_CALL_ID: &str = "call_pbxjNs1tMJUahLZKAS9qLtvw";
+        const MESSAGE_ID: &str = "msg_0434d6d64b12b08900692f639dc53c819594ea97586113d73b";
+        const FINAL_TEXT: &str = "Here are the files and folders in your `~/Desktop` directory:\n\n- .\n- ..\n- .DS_Store\n- test-server";
+
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport = Arc::new(
+            move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                let sse = [
+                    r#"data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_0434d6d64b12b08900692f639c40408195a50fd07b77ce08a7","object":"response","created_at":1764713372,"status":"in_progress","background":false,"error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5.1-2025-11-13","output":[],"parallel_tool_calls":true,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"none","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"shell"}],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":null,"user":null,"metadata":{}}}"#,
+                    "",
+                    r#"data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_0434d6d64b12b08900692f639c40408195a50fd07b77ce08a7","object":"response","created_at":1764713372,"status":"in_progress","background":false,"error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5.1-2025-11-13","output":[],"parallel_tool_calls":true,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"none","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"shell"}],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":null,"user":null,"metadata":{}}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"sh_0434d6d64b12b08900692f639c9f0481959c30e03ca0bb2ef8","type":"shell_call","status":"in_progress","action":{"commands":[],"max_output_length":null,"timeout_ms":null},"call_id":"call_pbxjNs1tMJUahLZKAS9qLtvw"}}"#,
+                    "",
+                    r#"data: {"type":"response.shell_call_command.added","sequence_number":3,"output_index":0,"command_index":0,"command":""}"#,
+                    "",
+                    r#"data: {"type":"response.shell_call_command.delta","sequence_number":4,"output_index":0,"command_index":0,"delta":"ls","obfuscation":"MqLFIoYeoXYWld"}"#,
+                    "",
+                    r#"data: {"type":"response.shell_call_command.delta","sequence_number":5,"output_index":0,"command_index":0,"delta":" -","obfuscation":"wC9C8WrfqTnmmt"}"#,
+                    "",
+                    r#"data: {"type":"response.shell_call_command.delta","sequence_number":6,"output_index":0,"command_index":0,"delta":"a","obfuscation":"QI5dEpZ4Riq8k4Y"}"#,
+                    "",
+                    r#"data: {"type":"response.shell_call_command.delta","sequence_number":7,"output_index":0,"command_index":0,"delta":" ~/","obfuscation":"f4XrgYSKAsglr"}"#,
+                    "",
+                    r#"data: {"type":"response.shell_call_command.delta","sequence_number":8,"output_index":0,"command_index":0,"delta":"Desktop","obfuscation":"hqHnUp5jX"}"#,
+                    "",
+                    r#"data: {"type":"response.shell_call_command.done","sequence_number":9,"output_index":0,"command_index":0,"command":"ls -a ~/Desktop"}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","sequence_number":10,"output_index":0,"item":{"id":"sh_0434d6d64b12b08900692f639c9f0481959c30e03ca0bb2ef8","type":"shell_call","status":"completed","action":{"commands":["ls -a ~/Desktop"],"max_output_length":8912,"timeout_ms":null},"call_id":"call_pbxjNs1tMJUahLZKAS9qLtvw"}}"#,
+                    "",
+                    r#"data: {"type":"response.completed","sequence_number":11,"response":{"id":"resp_0434d6d64b12b08900692f639c40408195a50fd07b77ce08a7","object":"response","created_at":1764713372,"status":"completed","background":false,"error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5.1-2025-11-13","output":[{"id":"sh_0434d6d64b12b08900692f639c9f0481959c30e03ca0bb2ef8","type":"shell_call","status":"completed","action":{"commands":["ls -a ~/Desktop"],"max_output_length":8912,"timeout_ms":null},"call_id":"call_pbxjNs1tMJUahLZKAS9qLtvw"}],"parallel_tool_calls":true,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"none","summary":null},"safety_identifier":null,"service_tier":"default","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"shell"}],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":{"input_tokens":145,"input_tokens_details":{"cached_tokens":0},"output_tokens":41,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":186},"user":null,"metadata":{}}}"#,
+                    "",
+                    r#"data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_0434d6d64b12b08900692f639d784481959af65f985b9c13e2","object":"response","created_at":1764713373,"status":"in_progress","background":false,"error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5.1-2025-11-13","output":[],"parallel_tool_calls":true,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"none","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"shell"}],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":null,"user":null,"metadata":{}}}"#,
+                    "",
+                    r#"data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_0434d6d64b12b08900692f639d784481959af65f985b9c13e2","object":"response","created_at":1764713373,"status":"in_progress","background":false,"error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5.1-2025-11-13","output":[],"parallel_tool_calls":true,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"none","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"shell"}],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":null,"user":null,"metadata":{}}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"msg_0434d6d64b12b08900692f639dc53c819594ea97586113d73b","type":"message","status":"in_progress","content":[],"role":"assistant"}}"#,
+                    "",
+                    r#"data: {"type":"response.content_part.added","sequence_number":3,"item_id":"msg_0434d6d64b12b08900692f639dc53c819594ea97586113d73b","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","sequence_number":4,"item_id":"msg_0434d6d64b12b08900692f639dc53c819594ea97586113d73b","output_index":0,"content_index":0,"delta":"Here are the files and folders in your `~/Desktop` directory:\n\n","logprobs":[],"obfuscation":"J4mkASepgs2g"}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","sequence_number":5,"item_id":"msg_0434d6d64b12b08900692f639dc53c819594ea97586113d73b","output_index":0,"content_index":0,"delta":"- .\n- ..\n- .DS_Store\n- test-server","logprobs":[],"obfuscation":"8u29nzVgDXst"}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.done","sequence_number":6,"item_id":"msg_0434d6d64b12b08900692f639dc53c819594ea97586113d73b","output_index":0,"content_index":0,"text":"Here are the files and folders in your `~/Desktop` directory:\n\n- .\n- ..\n- .DS_Store\n- test-server","logprobs":[]}"#,
+                    "",
+                    r#"data: {"type":"response.content_part.done","sequence_number":7,"item_id":"msg_0434d6d64b12b08900692f639dc53c819594ea97586113d73b","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":"Here are the files and folders in your `~/Desktop` directory:\n\n- .\n- ..\n- .DS_Store\n- test-server"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","sequence_number":8,"output_index":0,"item":{"id":"msg_0434d6d64b12b08900692f639dc53c819594ea97586113d73b","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":"Here are the files and folders in your `~/Desktop` directory:\n\n- .\n- ..\n- .DS_Store\n- test-server"}],"role":"assistant"}}"#,
+                    "",
+                    r#"data: {"type":"response.completed","sequence_number":9,"response":{"id":"resp_0434d6d64b12b08900692f639d784481959af65f985b9c13e2","object":"response","created_at":1764713373,"status":"completed","background":false,"error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5.1-2025-11-13","output":[{"id":"msg_0434d6d64b12b08900692f639dc53c819594ea97586113d73b","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":"Here are the files and folders in your `~/Desktop` directory:\n\n- .\n- ..\n- .DS_Store\n- test-server"}],"role":"assistant"}],"parallel_tool_calls":true,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"none","summary":null},"safety_identifier":null,"service_tier":"default","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"shell"}],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":{"input_tokens":331,"input_tokens_details":{"cached_tokens":0},"output_tokens":166,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":497},"user":null,"metadata":{}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-5.1");
+
+        let result = poll_ready(model.do_stream(open_responses_shell_call_options()));
+
+        let metadata = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ResponseMetadata(metadata) => Some(metadata),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(metadata.len(), 2);
+        assert_eq!(metadata[0].id.as_deref(), Some(FIRST_RESPONSE_ID));
+        assert_eq!(metadata[0].model_id.as_deref(), Some("gpt-5.1-2025-11-13"));
+        assert_eq!(
+            metadata[0]
+                .timestamp
+                .map(|timestamp| timestamp.unix_timestamp()),
+            Some(1_764_713_372)
+        );
+        assert_eq!(metadata[1].id.as_deref(), Some(SECOND_RESPONSE_ID));
+        assert_eq!(metadata[1].model_id.as_deref(), Some("gpt-5.1-2025-11-13"));
+        assert_eq!(
+            metadata[1]
+                .timestamp
+                .map(|timestamp| timestamp.unix_timestamp()),
+            Some(1_764_713_373)
+        );
+
+        let tool_calls = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].tool_call_id, SHELL_CALL_ID);
+        assert_eq!(tool_calls[0].tool_name, "shell");
+        assert_eq!(tool_calls[0].provider_executed, None);
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&tool_calls[0].input).expect("shell input parses"),
+            json!({
+                "action": {
+                    "commands": ["ls -a ~/Desktop"]
+                }
+            })
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_calls[0].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(SHELL_ITEM_ID)
+        );
+        assert!(!result.stream.iter().any(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::ToolResult(tool_result)
+                    if tool_result.tool_call_id == SHELL_CALL_ID
+            )
+        }));
+
+        let text_start = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextStart(start) => Some(start),
+                _ => None,
+            })
+            .expect("stream includes text start");
+        assert_eq!(text_start.id, MESSAGE_ID);
+        assert_eq!(
+            openai_metadata_value(&text_start.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(MESSAGE_ID)
+        );
+        let streamed_text = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) if delta.id == MESSAGE_ID => {
+                    Some(delta.delta.as_str())
+                }
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(streamed_text, FINAL_TEXT);
+        let text_end = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextEnd(end) => Some(end),
+                _ => None,
+            })
+            .expect("stream includes text end");
+        assert_eq!(text_end.id, MESSAGE_ID);
+        assert_eq!(
+            openai_metadata_value(&text_end.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(MESSAGE_ID)
+        );
+
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(finish.usage.input_tokens.total, Some(331));
+        assert_eq!(finish.usage.input_tokens.no_cache, Some(331));
+        assert_eq!(finish.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(finish.usage.output_tokens.total, Some(166));
+        assert_eq!(finish.usage.output_tokens.text, Some(166));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(0));
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some(SECOND_RESPONSE_ID)
+        );
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "serviceTier")
+                .and_then(JsonValue::as_str),
+            Some("default")
+        );
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(
+            request_body["tools"][0],
+            json!({
+                "type": "shell"
+            })
+        );
+    }
+
+    #[test]
     fn open_responses_provider_maps_web_search_api_sources_and_missing_action() {
         let transport: OpenResponsesTransport =
             Arc::new(move |_request| -> OpenResponsesTransportFuture {
@@ -18294,6 +18515,16 @@ mod tests {
         LanguageModelCallOptions::new(open_responses_hello_prompt()).with_tool(
             LanguageModelTool::Provider(LanguageModelProviderTool::new(
                 "openai.local_shell",
+                "shell",
+                JsonObject::new(),
+            )),
+        )
+    }
+
+    fn open_responses_shell_call_options() -> LanguageModelCallOptions {
+        LanguageModelCallOptions::new(open_responses_hello_prompt()).with_tool(
+            LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                "openai.shell",
                 "shell",
                 JsonObject::new(),
             )),
