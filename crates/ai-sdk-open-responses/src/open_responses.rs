@@ -19437,6 +19437,112 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_generates_upstream_function_tool_calls() {
+        let result = open_responses_generate_result_from_body_with_options(
+            "gpt-4o",
+            open_responses_upstream_function_tool_calls_body(),
+            open_responses_upstream_function_tool_options(),
+        );
+
+        let tool_calls = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(tool_calls[0].tool_call_id, "call_0NdsJqOS8N3J9l2p0p4WpYU9");
+        assert_eq!(tool_calls[0].tool_name, "weather");
+        assert_eq!(tool_calls[0].input, r#"{"location":"San Francisco"}"#);
+        assert_eq!(
+            openai_metadata_value(&tool_calls[0].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some("fc_67caf7f4c1ec8190b27edfb5580cfd31")
+        );
+        assert!(openai_metadata_value(&tool_calls[0].provider_metadata, "namespace").is_none());
+
+        assert_eq!(tool_calls[1].tool_call_id, "call_gexo0HtjUfmAIW4gjNOgyrcr");
+        assert_eq!(tool_calls[1].tool_name, "cityAttractions");
+        assert_eq!(tool_calls[1].input, r#"{"city":"San Francisco"}"#);
+        assert_eq!(
+            openai_metadata_value(&tool_calls[1].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some("fc_67caf7f5071c81908209c2909c77af05")
+        );
+        assert!(openai_metadata_value(&tool_calls[1].provider_metadata, "namespace").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_sets_tool_calls_finish_reason_for_function_calls() {
+        let result = open_responses_generate_result_from_body_with_options(
+            "gpt-4o",
+            open_responses_upstream_function_tool_calls_body(),
+            open_responses_upstream_function_tool_options(),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::ToolCalls);
+        assert_eq!(result.finish_reason.raw, None);
+        assert_eq!(result.usage.input_tokens.total, Some(34));
+        assert_eq!(result.usage.output_tokens.total, Some(538));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(0));
+    }
+
+    #[test]
+    fn open_responses_provider_preserves_namespace_on_function_call_output() {
+        let result = open_responses_generate_result_from_body(
+            "gpt-5.4",
+            open_responses_function_call_namespace_body(Some("weather_ns")),
+        );
+
+        let tool_call = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .expect("content includes tool call");
+        assert_eq!(tool_call.tool_call_id, "call_ns_1");
+        assert_eq!(tool_call.tool_name, "get_weather");
+        assert_eq!(tool_call.input, r#"{"location":"NYC"}"#);
+        assert_eq!(
+            openai_metadata_value(&tool_call.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some("fc_ns_1")
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_call.provider_metadata, "namespace")
+                .and_then(JsonValue::as_str),
+            Some("weather_ns")
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_omits_namespace_on_function_call_when_absent() {
+        let result = open_responses_generate_result_from_body(
+            "gpt-4o",
+            open_responses_function_call_namespace_body(None),
+        );
+
+        let tool_call = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .expect("content includes tool call");
+        assert_eq!(
+            openai_metadata_value(&tool_call.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some("fc_ns_1")
+        );
+        assert!(openai_metadata_value(&tool_call.provider_metadata, "namespace").is_none());
+    }
+
+    #[test]
     fn open_responses_provider_maps_function_call_response_and_usage() {
         let transport: OpenResponsesTransport =
             Arc::new(move |_request| -> OpenResponsesTransportFuture {
@@ -30166,6 +30272,161 @@ mod tests {
             )))
     }
 
+    fn open_responses_upstream_function_tool_options() -> LanguageModelCallOptions {
+        LanguageModelCallOptions::new(open_responses_hello_prompt())
+            .with_tool(weather_function_tool())
+            .with_tool(city_attractions_function_tool())
+    }
+
+    fn open_responses_upstream_function_tool_calls_body() -> JsonValue {
+        json!({
+            "id": "resp_67c97c0203188190a025beb4a75242bc",
+            "object": "response",
+            "created_at": 1741257730,
+            "status": "completed",
+            "error": null,
+            "incomplete_details": null,
+            "input": [],
+            "instructions": null,
+            "max_output_tokens": null,
+            "model": "gpt-4o-2024-07-18",
+            "output": [
+                {
+                    "type": "function_call",
+                    "id": "fc_67caf7f4c1ec8190b27edfb5580cfd31",
+                    "call_id": "call_0NdsJqOS8N3J9l2p0p4WpYU9",
+                    "name": "weather",
+                    "arguments": "{\"location\":\"San Francisco\"}",
+                    "status": "completed"
+                },
+                {
+                    "type": "function_call",
+                    "id": "fc_67caf7f5071c81908209c2909c77af05",
+                    "call_id": "call_gexo0HtjUfmAIW4gjNOgyrcr",
+                    "name": "cityAttractions",
+                    "arguments": "{\"city\":\"San Francisco\"}",
+                    "status": "completed"
+                }
+            ],
+            "parallel_tool_calls": true,
+            "previous_response_id": null,
+            "reasoning": {
+                "effort": null,
+                "summary": null
+            },
+            "store": true,
+            "temperature": 1,
+            "text": {
+                "format": {
+                    "type": "text"
+                }
+            },
+            "tool_choice": "auto",
+            "tools": [
+                {
+                    "type": "function",
+                    "description": "Get the weather in a location",
+                    "name": "weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {
+                                "type": "string",
+                                "description": "The location to get the weather for"
+                            }
+                        },
+                        "required": ["location"],
+                        "additionalProperties": false
+                    },
+                    "strict": true
+                },
+                {
+                    "type": "function",
+                    "description": null,
+                    "name": "cityAttractions",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": {
+                                "type": "string"
+                            }
+                        },
+                        "required": ["city"],
+                        "additionalProperties": false
+                    },
+                    "strict": true
+                }
+            ],
+            "top_p": 1,
+            "truncation": "disabled",
+            "usage": {
+                "input_tokens": 34,
+                "output_tokens": 538,
+                "output_tokens_details": {
+                    "reasoning_tokens": 0
+                },
+                "total_tokens": 572
+            },
+            "user": null,
+            "metadata": {}
+        })
+    }
+
+    fn open_responses_function_call_namespace_body(namespace: Option<&str>) -> JsonValue {
+        let mut item = json!({
+            "type": "function_call",
+            "id": "fc_ns_1",
+            "call_id": "call_ns_1",
+            "name": "get_weather",
+            "arguments": "{\"location\":\"NYC\"}",
+            "status": "completed"
+        });
+        if let Some(namespace) = namespace {
+            item["namespace"] = json!(namespace);
+        }
+
+        json!({
+            "id": "resp_ns",
+            "object": "response",
+            "created_at": 1741257730,
+            "status": "completed",
+            "error": null,
+            "incomplete_details": null,
+            "input": [],
+            "instructions": null,
+            "max_output_tokens": null,
+            "model": "gpt-5.4",
+            "output": [item],
+            "parallel_tool_calls": true,
+            "previous_response_id": null,
+            "reasoning": {
+                "effort": null,
+                "summary": null
+            },
+            "store": true,
+            "temperature": 1,
+            "text": {
+                "format": {
+                    "type": "text"
+                }
+            },
+            "tool_choice": "auto",
+            "tools": [],
+            "top_p": 1,
+            "truncation": "disabled",
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "output_tokens_details": {
+                    "reasoning_tokens": 0
+                },
+                "total_tokens": 0
+            },
+            "user": null,
+            "metadata": {}
+        })
+    }
+
     fn weather_function_tool() -> LanguageModelTool {
         LanguageModelTool::Function(
             LanguageModelFunctionTool::new(
@@ -30184,6 +30445,22 @@ mod tests {
             )
             .with_description("Get the weather in a location"),
         )
+    }
+
+    fn city_attractions_function_tool() -> LanguageModelTool {
+        LanguageModelTool::Function(LanguageModelFunctionTool::new(
+            "cityAttractions",
+            json_object(json!({
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string"
+                    }
+                },
+                "required": ["city"],
+                "additionalProperties": false
+            })),
+        ))
     }
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
