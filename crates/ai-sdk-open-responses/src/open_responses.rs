@@ -4535,7 +4535,7 @@ fn open_responses_stream_result_from_response(
                 if has_error {
                     finish_reason = LanguageModelFinishReason {
                         unified: FinishReason::Error,
-                        raw: Some("open-responses-error".to_string()),
+                        raw: Some(event_type.unwrap_or("open-responses-error").to_string()),
                     };
                     stream.push(open_responses_stream_event_error(
                         &value,
@@ -6520,9 +6520,11 @@ fn open_responses_stream_event_error(
 ) -> LanguageModelStreamPart {
     let mut error = value.as_object().cloned().unwrap_or_default();
 
-    error
-        .entry("message".to_string())
-        .or_insert_with(|| JsonValue::String(open_responses_error_message(value)));
+    if !error.contains_key("error") {
+        error
+            .entry("message".to_string())
+            .or_insert_with(|| JsonValue::String(open_responses_error_message(value)));
+    }
 
     if let Some(raw_body) = raw_body {
         error
@@ -15183,6 +15185,138 @@ mod tests {
         let trait_model =
             Provider::language_model(&provider, "gpt-4.1-mini").expect("language model exists");
         assert_eq!(trait_model.provider(), "openai.responses");
+    }
+
+    #[test]
+    fn open_responses_provider_maps_openai_numeric_error_code() {
+        let openrouter_message = "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"Resource has been exhausted (e.g. check quota).\",\n    \"status\": \"RESOURCE_EXHAUSTED\"\n  }\n}\n";
+        let transport: OpenResponsesTransport =
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    429,
+                    "Too Many Requests",
+                    json!({
+                        "error": {
+                            "message": openrouter_message,
+                            "code": 429
+                        }
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from([(
+                    "x-request-id".to_string(),
+                    "req_openrouter_quota".to_string(),
+                )])))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4o");
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Say hello")),
+            ])),
+        ])));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Error);
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "errorMessage")
+                .and_then(JsonValue::as_str),
+            Some(openrouter_message)
+        );
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "errorCode"),
+            Some(&json!(429))
+        );
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "statusCode"),
+            Some(&json!(429))
+        );
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "isRetryable"),
+            Some(&json!(true))
+        );
+        assert_eq!(
+            result
+                .response
+                .as_ref()
+                .and_then(|response| response.headers.as_ref())
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("req_openrouter_quota")
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_streams_openai_error_event_without_synthetic_message() {
+        let transport: OpenResponsesTransport = Arc::new(
+            move |_request| -> OpenResponsesTransportFuture {
+                let sse = [
+                    r#"data: {"type":"response.created","sequence_number":1,"response":{"id":"resp_stream_openai_error","created_at":1711115037,"model":"gpt-4o-mini"}}"#,
+                    "",
+                    r#"data: {"type":"error","sequence_number":2,"error":{"type":"insufficient_quota","code":"insufficient_quota","message":"You exceeded your current quota, please check your plan and billing details.","param":null}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse)
+                    .with_headers(Headers::from([(
+                        "content-type".to_string(),
+                        "text/event-stream".to_string(),
+                    )])))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4o-mini");
+
+        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Say hello")),
+            ])),
+        ])));
+
+        let error = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Error(error) => Some(&error.error),
+                _ => None,
+            })
+            .expect("stream includes error event");
+        assert_eq!(error.get("type").and_then(JsonValue::as_str), Some("error"));
+        assert_eq!(error.get("sequence_number"), Some(&json!(2)));
+        assert_eq!(
+            error
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(JsonValue::as_str),
+            Some("You exceeded your current quota, please check your plan and billing details.")
+        );
+        assert!(error.get("message").is_none());
+
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Error);
+        assert_eq!(finish.finish_reason.raw.as_deref(), Some("error"));
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId"),
+            Some(&json!("resp_stream_openai_error"))
+        );
     }
 
     #[test]
