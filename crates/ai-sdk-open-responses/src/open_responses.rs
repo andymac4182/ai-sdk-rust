@@ -4586,17 +4586,16 @@ fn open_responses_stream_result_from_response(
                     continue;
                 }
 
-                if let Some(response) = open_responses_event_response(&value) {
-                    open_responses_push_response_metadata(
-                        &mut stream,
-                        &mut emitted_response_metadata_ids,
-                        &mut emitted_response_metadata_without_id,
-                        response,
-                    );
-                }
-
                 match event_type {
                     Some("response.created") => {
+                        if let Some(response) = open_responses_event_response(&value) {
+                            open_responses_push_response_metadata(
+                                &mut stream,
+                                &mut emitted_response_metadata_ids,
+                                &mut emitted_response_metadata_without_id,
+                                response,
+                            );
+                        }
                         has_tool_calls = false;
                         response_id = open_responses_response_id(&value);
                     }
@@ -4627,7 +4626,7 @@ fn open_responses_stream_result_from_response(
                     Some("response.output_text.done") => {
                         let id = open_responses_stream_text_id(&value);
                         let text = value.get("text").and_then(JsonValue::as_str);
-                        if active_message_items.contains(&id) {
+                        if !active_message_items.is_empty() {
                             if let Some(text) = text {
                                 completed_message_text.insert(id, text.to_string());
                             }
@@ -4701,7 +4700,7 @@ fn open_responses_stream_result_from_response(
                                 .and_then(JsonValue::as_array)
                                 .cloned()
                                 .unwrap_or_default();
-                            if active_message_items.contains(&id) {
+                            if !active_message_items.is_empty() {
                                 if let Some(text) = text {
                                     completed_message_text.insert(id, text.to_string());
                                 }
@@ -5567,21 +5566,38 @@ fn open_responses_stream_result_from_response(
                                             .and_then(JsonValue::as_str)
                                             .or(active_message_phase.as_deref());
                                         let final_text = completed_message_text.remove(id);
-                                        open_responses_finish_text_block(
-                                            &mut stream,
-                                            &mut text_buffers,
-                                            &mut active_text,
-                                            &mut ended_text,
-                                            id,
-                                            final_text.as_deref(),
-                                            open_responses_stream_text_metadata(
-                                                provider_name,
-                                                Some(id),
-                                                phase,
-                                                &ongoing_annotations,
-                                            ),
+                                        let provider_metadata = open_responses_stream_text_metadata(
+                                            provider_name,
+                                            Some(id),
+                                            phase,
+                                            &ongoing_annotations,
                                         );
-                                        active_message_items.remove(id);
+                                        if !active_message_items.contains(id)
+                                            && !active_message_items.is_empty()
+                                        {
+                                            for provisional_id in active_message_items.iter() {
+                                                active_text.remove(provisional_id);
+                                                text_buffers.remove(provisional_id);
+                                            }
+                                            open_responses_push_text_end(
+                                                &mut stream,
+                                                &mut ended_text,
+                                                id,
+                                                provider_metadata,
+                                            );
+                                            active_message_items.clear();
+                                        } else {
+                                            open_responses_finish_text_block(
+                                                &mut stream,
+                                                &mut text_buffers,
+                                                &mut active_text,
+                                                &mut ended_text,
+                                                id,
+                                                final_text.as_deref(),
+                                                provider_metadata,
+                                            );
+                                            active_message_items.remove(id);
+                                        }
                                     }
                                     active_message_phase = None;
                                 }
@@ -6005,13 +6021,26 @@ fn open_responses_finish_text_block(
     }
 
     if active_text.remove(id) || !buffered.is_empty() || emitted_final_text {
-        let mut end = LanguageModelTextEnd::new(id);
-        if let Some(provider_metadata) = provider_metadata {
-            end = end.with_provider_metadata(provider_metadata);
-        }
-        stream.push(LanguageModelStreamPart::TextEnd(end));
-        ended_text.insert(id.to_string());
+        open_responses_push_text_end(stream, ended_text, id, provider_metadata);
     }
+}
+
+fn open_responses_push_text_end(
+    stream: &mut Vec<LanguageModelStreamPart>,
+    ended_text: &mut BTreeSet<String>,
+    id: &str,
+    provider_metadata: Option<ProviderMetadata>,
+) {
+    if ended_text.contains(id) {
+        return;
+    }
+
+    let mut end = LanguageModelTextEnd::new(id);
+    if let Some(provider_metadata) = provider_metadata {
+        end = end.with_provider_metadata(provider_metadata);
+    }
+    stream.push(LanguageModelStreamPart::TextEnd(end));
+    ended_text.insert(id.to_string());
 }
 
 fn open_responses_start_reasoning_block(
@@ -13926,6 +13955,402 @@ mod tests {
                 .as_ref()
                 .is_some_and(|metadata| !metadata.contains_key("openai"))
         );
+    }
+
+    #[test]
+    fn open_responses_provider_uses_openai_metadata_key_for_text_result() {
+        let result = open_responses_generate_result_from_body(
+            "gpt-4o",
+            json!({
+                "id": "resp_provider_metadata_openai",
+                "object": "response",
+                "created_at": 1234567890,
+                "status": "completed",
+                "error": null,
+                "incomplete_details": null,
+                "input": [],
+                "instructions": null,
+                "max_output_tokens": null,
+                "model": "gpt-4o",
+                "parallel_tool_calls": true,
+                "previous_response_id": null,
+                "reasoning": {
+                    "effort": null,
+                    "summary": null
+                },
+                "store": true,
+                "temperature": 0,
+                "text": {
+                    "format": {
+                        "type": "text"
+                    }
+                },
+                "tool_choice": "auto",
+                "tools": [],
+                "top_p": 1,
+                "truncation": "disabled",
+                "usage": {
+                    "input_tokens": 10,
+                    "input_tokens_details": {
+                        "cached_tokens": 0
+                    },
+                    "output_tokens": 5,
+                    "output_tokens_details": {
+                        "reasoning_tokens": 0
+                    },
+                    "total_tokens": 15
+                },
+                "user": null,
+                "metadata": {},
+                "output": [
+                    {
+                        "id": "msg_openai_text",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "Hello from OpenAI!",
+                                "annotations": []
+                            }
+                        ]
+                    }
+                ]
+            }),
+        );
+
+        assert!(result.provider_metadata.as_ref().is_some_and(|metadata| {
+            metadata.contains_key("openai") && !metadata.contains_key("azure")
+        }));
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some("resp_provider_metadata_openai")
+        );
+        let text = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::Text(text) => Some(text),
+                _ => None,
+            })
+            .expect("content includes OpenAI text part");
+        assert_eq!(text.text, "Hello from OpenAI!");
+        assert_eq!(
+            openai_metadata_value(&text.provider_metadata, "itemId").and_then(JsonValue::as_str),
+            Some("msg_openai_text")
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_streams_text_deltas_and_openai_finish_metadata() {
+        const CREATED_RESPONSE_ID: &str = "resp_67c9a81b6a048190a9ee441c5755a4e8";
+        const COMPLETED_RESPONSE_ID: &str = "resp_67c9a878139c8190aa2e3105411b408b";
+        const DELTA_MESSAGE_ID: &str = "msg_67c9a81dea8c8190b79651a2b3adf91e";
+        const DONE_MESSAGE_ID: &str = "msg_67c9a8787f4c8190b49c858d4c1cf20c";
+
+        let stream = open_responses_stream_parts_from_events(
+            "gpt-4o",
+            vec![
+                json!({
+                    "type": "response.created",
+                    "response": {
+                        "id": CREATED_RESPONSE_ID,
+                        "object": "response",
+                        "created_at": 1741269019,
+                        "status": "in_progress",
+                        "error": null,
+                        "incomplete_details": null,
+                        "input": [],
+                        "instructions": null,
+                        "max_output_tokens": null,
+                        "model": "gpt-4o-2024-07-18",
+                        "output": [],
+                        "parallel_tool_calls": true,
+                        "previous_response_id": null,
+                        "reasoning": {
+                            "effort": null,
+                            "summary": null
+                        },
+                        "store": true,
+                        "temperature": 0.3,
+                        "text": {
+                            "format": {
+                                "type": "text"
+                            }
+                        },
+                        "tool_choice": "auto",
+                        "tools": [],
+                        "top_p": 1,
+                        "truncation": "disabled",
+                        "usage": null,
+                        "user": null,
+                        "metadata": {}
+                    }
+                }),
+                json!({
+                    "type": "response.in_progress",
+                    "response": {
+                        "id": CREATED_RESPONSE_ID,
+                        "object": "response",
+                        "created_at": 1741269019,
+                        "status": "in_progress",
+                        "error": null,
+                        "incomplete_details": null,
+                        "input": [],
+                        "instructions": null,
+                        "max_output_tokens": null,
+                        "model": "gpt-4o-2024-07-18",
+                        "output": [],
+                        "parallel_tool_calls": true,
+                        "previous_response_id": null,
+                        "reasoning": {
+                            "effort": null,
+                            "summary": null
+                        },
+                        "store": true,
+                        "temperature": 0.3,
+                        "text": {
+                            "format": {
+                                "type": "text"
+                            }
+                        },
+                        "tool_choice": "auto",
+                        "tools": [],
+                        "top_p": 1,
+                        "truncation": "disabled",
+                        "usage": null,
+                        "user": null,
+                        "metadata": {}
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        "id": DELTA_MESSAGE_ID,
+                        "type": "message",
+                        "status": "in_progress",
+                        "role": "assistant",
+                        "content": []
+                    }
+                }),
+                json!({
+                    "type": "response.content_part.added",
+                    "item_id": DELTA_MESSAGE_ID,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "text": "",
+                        "annotations": [],
+                        "logprobs": []
+                    }
+                }),
+                json!({
+                    "type": "response.output_text.delta",
+                    "item_id": DELTA_MESSAGE_ID,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": "Hello,",
+                    "logprobs": []
+                }),
+                json!({
+                    "type": "response.output_text.delta",
+                    "item_id": DELTA_MESSAGE_ID,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": " World!",
+                    "logprobs": []
+                }),
+                json!({
+                    "type": "response.output_text.done",
+                    "item_id": DONE_MESSAGE_ID,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "text": "Hello, World!"
+                }),
+                json!({
+                    "type": "response.content_part.done",
+                    "item_id": DONE_MESSAGE_ID,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "text": "Hello, World!",
+                        "annotations": [],
+                        "logprobs": []
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "id": DONE_MESSAGE_ID,
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "Hello, World!",
+                                "annotations": [],
+                                "logprobs": []
+                            }
+                        ]
+                    }
+                }),
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": COMPLETED_RESPONSE_ID,
+                        "object": "response",
+                        "created_at": 1741269112,
+                        "status": "completed",
+                        "error": null,
+                        "incomplete_details": null,
+                        "input": [],
+                        "instructions": null,
+                        "max_output_tokens": null,
+                        "model": "gpt-4o-2024-07-18",
+                        "output": [
+                            {
+                                "id": DONE_MESSAGE_ID,
+                                "type": "message",
+                                "status": "completed",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Hello, World!",
+                                        "annotations": []
+                                    }
+                                ]
+                            }
+                        ],
+                        "parallel_tool_calls": true,
+                        "previous_response_id": null,
+                        "reasoning": {
+                            "effort": null,
+                            "summary": null
+                        },
+                        "store": true,
+                        "temperature": 0.3,
+                        "text": {
+                            "format": {
+                                "type": "text"
+                            }
+                        },
+                        "tool_choice": "auto",
+                        "tools": [],
+                        "top_p": 1,
+                        "truncation": "disabled",
+                        "usage": {
+                            "input_tokens": 543,
+                            "input_tokens_details": {
+                                "cached_tokens": 234
+                            },
+                            "output_tokens": 478,
+                            "output_tokens_details": {
+                                "reasoning_tokens": 123
+                            },
+                            "total_tokens": 512
+                        },
+                        "user": null,
+                        "metadata": {}
+                    }
+                }),
+            ],
+        );
+
+        let response_metadata = stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ResponseMetadata(metadata) => Some(metadata),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(response_metadata.len(), 1);
+        assert_eq!(
+            response_metadata[0].id.as_deref(),
+            Some(CREATED_RESPONSE_ID)
+        );
+        assert_eq!(
+            response_metadata[0]
+                .timestamp
+                .map(|timestamp| timestamp.unix_timestamp()),
+            Some(1_741_269_019)
+        );
+        assert_eq!(
+            response_metadata[0].model_id.as_deref(),
+            Some("gpt-4o-2024-07-18")
+        );
+
+        let text_start = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextStart(text_start) => Some(text_start),
+                _ => None,
+            })
+            .expect("stream includes text start");
+        assert_eq!(text_start.id, DELTA_MESSAGE_ID);
+        assert_eq!(
+            openai_metadata_value(&text_start.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(DELTA_MESSAGE_ID)
+        );
+
+        let text_deltas = stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) => {
+                    Some((delta.id.as_str(), delta.delta.as_str()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            text_deltas,
+            vec![(DELTA_MESSAGE_ID, "Hello,"), (DELTA_MESSAGE_ID, " World!")]
+        );
+
+        let text_end = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextEnd(text_end) => Some(text_end),
+                _ => None,
+            })
+            .expect("stream includes text end");
+        assert_eq!(text_end.id, DONE_MESSAGE_ID);
+        assert_eq!(
+            openai_metadata_value(&text_end.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(DONE_MESSAGE_ID)
+        );
+
+        let finish = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
+        assert!(finish.provider_metadata.as_ref().is_some_and(|metadata| {
+            metadata.contains_key("openai") && !metadata.contains_key("azure")
+        }));
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some(CREATED_RESPONSE_ID)
+        );
+        assert_eq!(finish.usage.input_tokens.total, Some(543));
+        assert_eq!(finish.usage.input_tokens.cache_read, Some(234));
+        assert_eq!(finish.usage.input_tokens.no_cache, Some(309));
+        assert_eq!(finish.usage.output_tokens.total, Some(478));
+        assert_eq!(finish.usage.output_tokens.text, Some(355));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(123));
     }
 
     #[test]
