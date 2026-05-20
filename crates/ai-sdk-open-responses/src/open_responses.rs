@@ -18118,6 +18118,169 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_passes_strict_true_function_tool() {
+        let request_body = open_responses_request_body_for_options(
+            LanguageModelCallOptions::new(open_responses_hello_prompt()).with_tool(
+                LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "testFunction",
+                        open_responses_empty_object_schema(),
+                    )
+                    .with_description("A test function")
+                    .with_strict(true),
+                ),
+            ),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "function",
+                    "name": "testFunction",
+                    "description": "A test function",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    },
+                    "strict": true
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_passes_strict_false_function_tool() {
+        let request_body = open_responses_request_body_for_options(
+            LanguageModelCallOptions::new(open_responses_hello_prompt()).with_tool(
+                LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "testFunction",
+                        open_responses_empty_object_schema(),
+                    )
+                    .with_description("A test function")
+                    .with_strict(false),
+                ),
+            ),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "function",
+                    "name": "testFunction",
+                    "description": "A test function",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    },
+                    "strict": false
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_omits_undefined_strict_function_tool() {
+        let request_body = open_responses_request_body_for_options(
+            LanguageModelCallOptions::new(open_responses_hello_prompt()).with_tool(
+                LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "testFunction",
+                        open_responses_empty_object_schema(),
+                    )
+                    .with_description("A test function"),
+                ),
+            ),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "function",
+                    "name": "testFunction",
+                    "description": "A test function",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_passes_mixed_strict_function_tools() {
+        let request_body = open_responses_request_body_for_options(
+            LanguageModelCallOptions::new(open_responses_hello_prompt())
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "strictTool",
+                        open_responses_empty_object_schema(),
+                    )
+                    .with_description("A strict tool")
+                    .with_strict(true),
+                ))
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "nonStrictTool",
+                        open_responses_empty_object_schema(),
+                    )
+                    .with_description("A non-strict tool")
+                    .with_strict(false),
+                ))
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "defaultTool",
+                        open_responses_empty_object_schema(),
+                    )
+                    .with_description("A tool without strict setting"),
+                )),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "function",
+                    "name": "strictTool",
+                    "description": "A strict tool",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    },
+                    "strict": true
+                },
+                {
+                    "type": "function",
+                    "name": "nonStrictTool",
+                    "description": "A non-strict tool",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    },
+                    "strict": false
+                },
+                {
+                    "type": "function",
+                    "name": "defaultTool",
+                    "description": "A tool without strict setting",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
     fn open_responses_provider_prepares_function_tool_strict_modes() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -19813,6 +19976,13 @@ mod tests {
 
         assert_eq!(result.finish_reason.unified, FinishReason::Stop);
         captured_open_responses_request_body(&captured_request)
+    }
+
+    fn open_responses_empty_object_schema() -> JsonObject {
+        json_object(json!({
+            "type": "object",
+            "properties": {}
+        }))
     }
 
     fn open_responses_prepared_shell_tool(args: JsonValue) -> JsonValue {
