@@ -6966,6 +6966,14 @@ mod tests {
         include_str!("fixtures/openai-client-tool-search.1.json");
     const OPEN_RESPONSES_LOCAL_SHELL_TOOL_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-local-shell-tool.1.json");
+    const OPEN_RESPONSES_SHELL_TOOL_JSON_FIXTURE: &str =
+        include_str!("fixtures/openai-shell-tool.1.json");
+    const OPEN_RESPONSES_SHELL_CONTAINER_JSON_FIXTURE: &str =
+        include_str!("fixtures/openai-shell-container.1.json");
+    const OPEN_RESPONSES_SHELL_CONTAINER_MULTITURN_JSON_FIXTURE: &str =
+        include_str!("fixtures/openai-shell-container-multiturn.1.json");
+    const OPEN_RESPONSES_SHELL_LOCAL_MULTITURN_JSON_FIXTURE: &str =
+        include_str!("fixtures/openai-shell-local-multiturn.1.json");
     const OPEN_RESPONSES_WEB_SEARCH_TOOL_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-web-search-tool.1.json");
     const OPEN_RESPONSES_WEB_SEARCH_TOOL_CHUNKS_FIXTURE: &str =
@@ -23541,6 +23549,472 @@ mod tests {
         assert_eq!(result.usage.input_tokens.total, Some(407));
         assert_eq!(result.usage.input_tokens.cache_read, Some(0));
         assert_eq!(result.usage.output_tokens.total, Some(24));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(0));
+    }
+
+    #[test]
+    fn open_responses_provider_generates_shell_fixture_request_body() {
+        let (_, request_body) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5.1",
+            OPEN_RESPONSES_SHELL_TOOL_JSON_FIXTURE,
+            open_responses_shell_call_options(),
+        );
+
+        assert_eq!(request_body["model"], "gpt-5.1");
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Hello"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "shell"
+                }
+            ])
+        );
+        assert!(request_body.get("include").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_generates_shell_fixture_call() {
+        let fixture: JsonValue = serde_json::from_str(OPEN_RESPONSES_SHELL_TOOL_JSON_FIXTURE)
+            .expect("fixture JSON parses");
+        let output = fixture["output"]
+            .as_array()
+            .expect("fixture output is array");
+        let shell_item = output
+            .iter()
+            .find(|item| item["type"].as_str() == Some("shell_call"))
+            .expect("fixture includes shell call");
+
+        let (result, _) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5.1",
+            OPEN_RESPONSES_SHELL_TOOL_JSON_FIXTURE,
+            open_responses_shell_call_options(),
+        );
+
+        let tool_call = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::ToolCall(tool_call) if tool_call.tool_name == "shell" => {
+                    Some(tool_call)
+                }
+                _ => None,
+            })
+            .expect("content includes shell tool call");
+        assert_eq!(
+            tool_call.tool_call_id,
+            shell_item["call_id"].as_str().unwrap()
+        );
+        assert_eq!(tool_call.provider_executed, None);
+        let tool_input =
+            serde_json::from_str::<JsonValue>(&tool_call.input).expect("tool input is JSON");
+        assert_eq!(
+            tool_input["action"]["commands"],
+            shell_item["action"]["commands"]
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_call.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            shell_item["id"].as_str()
+        );
+        assert!(
+            !result
+                .content
+                .iter()
+                .any(|part| matches!(part, LanguageModelContent::ToolResult(_)))
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(157));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(result.usage.output_tokens.total, Some(73));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(0));
+    }
+
+    #[test]
+    fn open_responses_provider_generates_shell_container_fixture_request_body() {
+        let (_, request_body) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5.2",
+            OPEN_RESPONSES_SHELL_CONTAINER_JSON_FIXTURE,
+            open_responses_shell_container_call_options(),
+        );
+
+        assert_eq!(request_body["model"], "gpt-5.2");
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Hello"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "shell",
+                    "environment": {
+                        "type": "container_auto"
+                    }
+                }
+            ])
+        );
+        assert!(request_body.get("include").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_generates_shell_container_fixture_content() {
+        let fixture: JsonValue = serde_json::from_str(OPEN_RESPONSES_SHELL_CONTAINER_JSON_FIXTURE)
+            .expect("fixture JSON parses");
+        let output = fixture["output"]
+            .as_array()
+            .expect("fixture output is array");
+        let shell_item = output
+            .iter()
+            .find(|item| item["type"].as_str() == Some("shell_call"))
+            .expect("fixture includes shell call");
+        let shell_output_item = output
+            .iter()
+            .find(|item| item["type"].as_str() == Some("shell_call_output"))
+            .expect("fixture includes shell output");
+        let message_item = output
+            .iter()
+            .find(|item| item["type"].as_str() == Some("message"))
+            .expect("fixture includes final message");
+        let message_content = &message_item["content"][0];
+        let shell_output = &shell_output_item["output"][0];
+
+        let (result, _) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5.2",
+            OPEN_RESPONSES_SHELL_CONTAINER_JSON_FIXTURE,
+            open_responses_shell_container_call_options(),
+        );
+
+        let tool_call = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::ToolCall(tool_call) if tool_call.tool_name == "shell" => {
+                    Some(tool_call)
+                }
+                _ => None,
+            })
+            .expect("content includes shell tool call");
+        assert_eq!(
+            tool_call.tool_call_id,
+            shell_item["call_id"].as_str().unwrap()
+        );
+        assert_eq!(tool_call.provider_executed, Some(true));
+        let tool_input =
+            serde_json::from_str::<JsonValue>(&tool_call.input).expect("tool input is JSON");
+        assert_eq!(
+            tool_input["action"]["commands"],
+            shell_item["action"]["commands"]
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_call.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            shell_item["id"].as_str()
+        );
+
+        let tool_result = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::ToolResult(tool_result)
+                    if tool_result.tool_name == "shell" =>
+                {
+                    Some(tool_result)
+                }
+                _ => None,
+            })
+            .expect("content includes shell tool result");
+        assert_eq!(
+            tool_result.tool_call_id,
+            shell_output_item["call_id"].as_str().unwrap()
+        );
+        assert_eq!(
+            tool_result.result.as_value(),
+            &json!({
+                "output": [
+                    {
+                        "outcome": {
+                            "type": "exit",
+                            "exitCode": shell_output["outcome"]["exit_code"]
+                        },
+                        "stderr": shell_output["stderr"],
+                        "stdout": shell_output["stdout"]
+                    }
+                ]
+            })
+        );
+
+        let text = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::Text(text) => Some(text),
+                _ => None,
+            })
+            .expect("content includes final text");
+        assert_eq!(text.text, message_content["text"].as_str().unwrap());
+        assert_eq!(
+            openai_metadata_value(&text.provider_metadata, "itemId").and_then(JsonValue::as_str),
+            message_item["id"].as_str()
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(200));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(result.usage.output_tokens.total, Some(120));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(0));
+    }
+
+    #[test]
+    fn open_responses_provider_generates_shell_container_multiturn_fixture_request_body() {
+        let (_, request_body) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5.2",
+            OPEN_RESPONSES_SHELL_CONTAINER_MULTITURN_JSON_FIXTURE,
+            open_responses_shell_container_multiturn_call_options(),
+        );
+
+        assert_eq!(request_body["model"], "gpt-5.2");
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Run uname -a"
+                        }
+                    ]
+                },
+                {
+                    "type": "item_reference",
+                    "id": "sh_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e50"
+                },
+                {
+                    "type": "shell_call_output",
+                    "call_id": "call_abc123def456ghi789jkl012",
+                    "output": [
+                        {
+                            "stdout": "Linux container-host 6.1.0 #1 SMP x86_64 GNU/Linux\n",
+                            "stderr": "",
+                            "outcome": {
+                                "type": "exit",
+                                "exit_code": 0
+                            }
+                        }
+                    ]
+                },
+                {
+                    "type": "item_reference",
+                    "id": "msg_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e52"
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "What architecture do you run in?"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "shell",
+                    "environment": {
+                        "type": "container_auto"
+                    }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_generates_shell_container_multiturn_fixture_content() {
+        let fixture: JsonValue =
+            serde_json::from_str(OPEN_RESPONSES_SHELL_CONTAINER_MULTITURN_JSON_FIXTURE)
+                .expect("fixture JSON parses");
+        let message_item = fixture["output"]
+            .as_array()
+            .expect("fixture output is array")
+            .iter()
+            .find(|item| item["type"].as_str() == Some("message"))
+            .expect("fixture includes final message");
+        let message_content = &message_item["content"][0];
+
+        let (result, _) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5.2",
+            OPEN_RESPONSES_SHELL_CONTAINER_MULTITURN_JSON_FIXTURE,
+            open_responses_shell_container_multiturn_call_options(),
+        );
+
+        assert!(!result.content.iter().any(|part| {
+            matches!(
+                part,
+                LanguageModelContent::ToolCall(_) | LanguageModelContent::ToolResult(_)
+            )
+        }));
+        let text = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::Text(text) => Some(text),
+                _ => None,
+            })
+            .expect("content includes final text");
+        assert_eq!(text.text, message_content["text"].as_str().unwrap());
+        assert_eq!(
+            openai_metadata_value(&text.provider_metadata, "itemId").and_then(JsonValue::as_str),
+            message_item["id"].as_str()
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(800));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(result.usage.output_tokens.total, Some(19));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(0));
+    }
+
+    #[test]
+    fn open_responses_provider_generates_shell_local_multiturn_fixture_request_body() {
+        let (_, request_body) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5.2",
+            OPEN_RESPONSES_SHELL_LOCAL_MULTITURN_JSON_FIXTURE,
+            open_responses_shell_local_multiturn_call_options(),
+        );
+
+        assert_eq!(request_body["model"], "gpt-5.2");
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Run uname -a"
+                        }
+                    ]
+                },
+                {
+                    "type": "item_reference",
+                    "id": "sh_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e50"
+                },
+                {
+                    "type": "shell_call_output",
+                    "call_id": "call_abc123def456ghi789jkl012",
+                    "output": [
+                        {
+                            "stdout": "Darwin mac-host 24.6.0 Darwin Kernel Version 24.6.0 root:xnu-11417.60.45.601.5~1/RELEASE_ARM64_T6041 arm64\n",
+                            "stderr": "",
+                            "outcome": {
+                                "type": "exit",
+                                "exit_code": 0
+                            }
+                        }
+                    ]
+                },
+                {
+                    "type": "item_reference",
+                    "id": "msg_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e52"
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "What architecture do you run in?"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "shell"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_generates_shell_local_multiturn_fixture_content() {
+        let fixture: JsonValue =
+            serde_json::from_str(OPEN_RESPONSES_SHELL_LOCAL_MULTITURN_JSON_FIXTURE)
+                .expect("fixture JSON parses");
+        let message_item = fixture["output"]
+            .as_array()
+            .expect("fixture output is array")
+            .iter()
+            .find(|item| item["type"].as_str() == Some("message"))
+            .expect("fixture includes final message");
+        let message_content = &message_item["content"][0];
+
+        let (result, _) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5.2",
+            OPEN_RESPONSES_SHELL_LOCAL_MULTITURN_JSON_FIXTURE,
+            open_responses_shell_local_multiturn_call_options(),
+        );
+
+        assert!(!result.content.iter().any(|part| {
+            matches!(
+                part,
+                LanguageModelContent::ToolCall(_) | LanguageModelContent::ToolResult(_)
+            )
+        }));
+        let text = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::Text(text) => Some(text),
+                _ => None,
+            })
+            .expect("content includes final text");
+        assert_eq!(text.text, message_content["text"].as_str().unwrap());
+        assert_eq!(
+            openai_metadata_value(&text.provider_metadata, "itemId").and_then(JsonValue::as_str),
+            message_item["id"].as_str()
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(444));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(result.usage.output_tokens.total, Some(12));
         assert_eq!(result.usage.output_tokens.reasoning, Some(0));
     }
 
