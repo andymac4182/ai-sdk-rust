@@ -27716,222 +27716,537 @@ mod tests {
     }
 
     #[test]
-    fn open_responses_provider_maps_web_search_api_sources_and_missing_action() {
-        let transport: OpenResponsesTransport =
-            Arc::new(move |_request| -> OpenResponsesTransportFuture {
-                Box::pin(ready(Ok(ProviderApiResponse::text(
-                    200,
-                    "OK",
-                    json!({
-                        "id": "resp_web_search_schema_edges",
-                        "created_at": 1711115037,
-                        "model": "gpt-4o",
+    fn open_responses_provider_maps_web_search_api_sources() {
+        let result = open_responses_generate_result_from_body_with_options(
+            "gpt-4o",
+            json!({
+                "id": "resp_api_sources",
+                "object": "response",
+                "created_at": 1741631111,
+                "status": "completed",
+                "error": null,
+                "incomplete_details": null,
+                "instructions": null,
+                "max_output_tokens": null,
+                "model": "gpt-4o",
+                "output": [
+                    {
+                        "id": "ws_api_sources",
+                        "type": "web_search_call",
+                        "status": "completed",
+                        "action": {
+                            "type": "search",
+                            "query": "current price of BTC",
+                            "sources": [
+                                {
+                                    "type": "url",
+                                    "url": "https://example.com?a=1&utm_source=openai"
+                                },
+                                {
+                                    "type": "api",
+                                    "name": "oai-finance"
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "id": "msg_done",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "BTC is trading at ...",
+                                "annotations": []
+                            }
+                        ]
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "total_tokens": 15
+                },
+                "previous_response_id": null,
+                "parallel_tool_calls": true,
+                "reasoning": {
+                    "effort": null,
+                    "summary": null
+                },
+                "store": true,
+                "temperature": 0,
+                "text": {
+                    "format": {
+                        "type": "text"
+                    }
+                },
+                "tool_choice": "auto",
+                "tools": [
+                    {
+                        "type": "web_search",
+                        "search_context_size": "medium"
+                    }
+                ],
+                "top_p": 1,
+                "truncation": "disabled",
+                "user": null,
+                "metadata": {}
+            }),
+            open_responses_web_search_call_options(),
+        );
+
+        assert_eq!(result.usage.input_tokens.total, Some(10));
+        assert_eq!(result.usage.output_tokens.total, Some(5));
+        assert_eq!(result.content.len(), 3);
+
+        let LanguageModelContent::ToolCall(tool_call) = &result.content[0] else {
+            panic!("first content part is a web-search tool call");
+        };
+        assert_eq!(tool_call.tool_call_id, "ws_api_sources");
+        assert_eq!(tool_call.tool_name, "webSearch");
+        assert_eq!(tool_call.input, "{}");
+        assert_eq!(tool_call.provider_executed, Some(true));
+
+        let LanguageModelContent::ToolResult(tool_result) = &result.content[1] else {
+            panic!("second content part is a web-search tool result");
+        };
+        assert_eq!(tool_result.tool_call_id, "ws_api_sources");
+        assert_eq!(tool_result.tool_name, "webSearch");
+        assert_eq!(
+            tool_result.result.as_value(),
+            &json!({
+                "action": {
+                    "type": "search",
+                    "query": "current price of BTC"
+                },
+                "sources": [
+                    {
+                        "type": "url",
+                        "url": "https://example.com?a=1&utm_source=openai"
+                    },
+                    {
+                        "type": "api",
+                        "name": "oai-finance"
+                    }
+                ]
+            })
+        );
+
+        let LanguageModelContent::Text(text) = &result.content[2] else {
+            panic!("third content part is assistant text");
+        };
+        assert_eq!(text.text, "BTC is trading at ...");
+        assert_eq!(
+            openai_metadata_value(&text.provider_metadata, "itemId").and_then(JsonValue::as_str),
+            Some("msg_done")
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_maps_web_search_missing_action() {
+        let result = open_responses_generate_result_from_body_with_options(
+            "gpt-4o",
+            json!({
+                "id": "resp_missing_web_search_action",
+                "object": "response",
+                "created_at": 1741631111,
+                "status": "completed",
+                "error": null,
+                "incomplete_details": null,
+                "instructions": null,
+                "max_output_tokens": null,
+                "model": "gpt-4o",
+                "output": [
+                    {
+                        "id": "ws_missing_action",
+                        "type": "web_search_call",
+                        "status": "completed"
+                    },
+                    {
+                        "id": "msg_done",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "No action payload was returned.",
+                                "annotations": []
+                            }
+                        ]
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "total_tokens": 15
+                },
+                "previous_response_id": null,
+                "parallel_tool_calls": true,
+                "reasoning": {
+                    "effort": null,
+                    "summary": null
+                },
+                "store": true,
+                "temperature": 0,
+                "text": {
+                    "format": {
+                        "type": "text"
+                    }
+                },
+                "tool_choice": "auto",
+                "tools": [
+                    {
+                        "type": "web_search",
+                        "search_context_size": "medium"
+                    }
+                ],
+                "top_p": 1,
+                "truncation": "disabled",
+                "user": null,
+                "metadata": {}
+            }),
+            open_responses_web_search_call_options(),
+        );
+
+        let tool_result = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .expect("content includes web-search tool result");
+
+        assert_eq!(tool_result.tool_name, "webSearch");
+        assert_eq!(tool_result.result.as_value(), &json!({}));
+    }
+
+    #[test]
+    fn open_responses_provider_streams_web_search_action_query() {
+        let stream = open_responses_stream_parts_from_events_with_options(
+            "o3-2025-04-16",
+            vec![
+                json!({
+                    "type": "response.created",
+                    "response": {
+                        "id": "resp_test",
+                        "object": "response",
+                        "created_at": 1741630255,
+                        "status": "in_progress",
+                        "model": "o3-2025-04-16",
+                        "output": [],
+                        "usage": null
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        "type": "web_search_call",
+                        "id": "ws_test",
+                        "status": "in_progress",
+                        "action": {
+                            "type": "search",
+                            "query": "Vercel AI SDK next version features"
+                        }
+                    }
+                }),
+                json!({
+                    "type": "response.web_search_call.in_progress",
+                    "output_index": 0,
+                    "item_id": "ws_test"
+                }),
+                json!({
+                    "type": "response.web_search_call.searching",
+                    "output_index": 0,
+                    "item_id": "ws_test"
+                }),
+                json!({
+                    "type": "response.web_search_call.completed",
+                    "output_index": 0,
+                    "item_id": "ws_test"
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "type": "web_search_call",
+                        "id": "ws_test",
+                        "status": "completed",
+                        "action": {
+                            "type": "search",
+                            "query": "Vercel AI SDK next version features"
+                        }
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": 1,
+                    "item": {
+                        "type": "message",
+                        "id": "msg_test",
+                        "status": "in_progress",
+                        "role": "assistant",
+                        "content": []
+                    }
+                }),
+                json!({
+                    "type": "response.content_part.added",
+                    "item_id": "msg_test",
+                    "output_index": 1,
+                    "content_index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "text": "",
+                        "annotations": []
+                    }
+                }),
+                json!({
+                    "type": "response.output_text.delta",
+                    "item_id": "msg_test",
+                    "output_index": 1,
+                    "content_index": 0,
+                    "delta": "Based on the search results, here are the upcoming features."
+                }),
+                json!({
+                    "type": "response.output_text.done",
+                    "item_id": "msg_test",
+                    "output_index": 1,
+                    "content_index": 0,
+                    "text": "Based on the search results, here are the upcoming features."
+                }),
+                json!({
+                    "type": "response.content_part.done",
+                    "item_id": "msg_test",
+                    "output_index": 1,
+                    "content_index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "text": "Based on the search results, here are the upcoming features.",
+                        "annotations": []
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": 1,
+                    "item": {
+                        "type": "message",
+                        "id": "msg_test",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "Based on the search results, here are the upcoming features.",
+                                "annotations": []
+                            }
+                        ]
+                    }
+                }),
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_test",
+                        "object": "response",
+                        "created_at": 1741630255,
+                        "status": "completed",
+                        "model": "o3-2025-04-16",
                         "output": [
                             {
-                                "id": "ws_api_sources",
                                 "type": "web_search_call",
+                                "id": "ws_test",
                                 "status": "completed",
                                 "action": {
                                     "type": "search",
-                                    "query": "current price of BTC",
-                                    "sources": [
-                                        {
-                                            "type": "url",
-                                            "url": "https://example.com?a=1&utm_source=openai"
-                                        },
-                                        {
-                                            "type": "api",
-                                            "name": "oai-finance"
-                                        }
-                                    ]
+                                    "query": "Vercel AI SDK next version features"
                                 }
                             },
                             {
-                                "id": "ws_missing_action",
-                                "type": "web_search_call",
-                                "status": "completed"
-                            },
-                            {
-                                "id": "msg_done",
                                 "type": "message",
+                                "id": "msg_test",
                                 "status": "completed",
                                 "role": "assistant",
                                 "content": [
                                     {
                                         "type": "output_text",
-                                        "text": "BTC is trading at ..."
+                                        "text": "Based on the search results, here are the upcoming features.",
+                                        "annotations": []
                                     }
                                 ]
                             }
                         ],
                         "usage": {
-                            "input_tokens": 10,
-                            "output_tokens": 5
+                            "input_tokens": 50,
+                            "input_tokens_details": {
+                                "cached_tokens": 0
+                            },
+                            "output_tokens": 25,
+                            "output_tokens_details": {
+                                "reasoning_tokens": 0
+                            },
+                            "total_tokens": 75
                         }
-                    })
-                    .to_string(),
-                ))))
-            });
-        let provider = create_open_responses(
-            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
-                .with_api_key("test-api-key"),
-        )
-        .with_transport(transport);
-        let model = provider.language_model("gpt-4o");
-
-        let result = poll_ready(
-            model.do_generate(
-                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
-                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
-                        LanguageModelTextPart::new("Use web search"),
-                    )]),
-                )])
-                .with_tool(LanguageModelTool::Provider(
-                    LanguageModelProviderTool::new(
-                        "openai.web_search",
-                        "webSearch",
-                        JsonObject::new(),
-                    ),
-                )),
-            ),
-        );
-
-        let tool_calls = result
-            .content
-            .iter()
-            .filter_map(|part| match part {
-                LanguageModelContent::ToolCall(tool_call) => Some(tool_call),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let tool_results = result
-            .content
-            .iter()
-            .filter_map(|part| match part {
-                LanguageModelContent::ToolResult(tool_result) => Some(tool_result),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(tool_calls.len(), 2);
-        assert!(
-            tool_calls
-                .iter()
-                .all(|tool_call| tool_call.provider_executed == Some(true))
-        );
-        assert_eq!(tool_calls[0].tool_call_id, "ws_api_sources");
-        assert_eq!(tool_calls[0].tool_name, "webSearch");
-        assert_eq!(
-            tool_results[0].result.as_value(),
-            &json!({
-                "action": {
-                    "type": "search",
-                    "query": "current price of BTC"
-                },
-                "sources": [
-                    {
-                        "type": "url",
-                        "url": "https://example.com?a=1&utm_source=openai"
-                    },
-                    {
-                        "type": "api",
-                        "name": "oai-finance"
                     }
-                ]
-            })
-        );
-        assert_eq!(tool_calls[1].tool_call_id, "ws_missing_action");
-        assert_eq!(tool_results[1].result.as_value(), &json!({}));
-    }
-
-    #[test]
-    fn open_responses_provider_streams_web_search_api_sources_and_missing_action() {
-        let transport: OpenResponsesTransport = Arc::new(
-            move |_request| -> OpenResponsesTransportFuture {
-                let sse = [
-                    r#"data: {"type":"response.created","response":{"id":"resp_stream_web_search_schema_edges","created_at":1711115037,"model":"gpt-4o"}}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.added","output_index":0,"item":{"id":"ws_api_sources","type":"web_search_call","status":"in_progress"}}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.done","output_index":0,"item":{"id":"ws_api_sources","type":"web_search_call","status":"completed","action":{"type":"search","query":"current price of BTC","sources":[{"type":"url","url":"https://example.com?a=1&utm_source=openai"},{"type":"api","name":"oai-finance"}]}}}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.added","output_index":1,"item":{"id":"ws_missing_action","type":"web_search_call","status":"in_progress"}}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.done","output_index":1,"item":{"id":"ws_missing_action","type":"web_search_call","status":"completed"}}"#,
-                    "",
-                    r#"data: {"type":"response.completed","response":{"id":"resp_stream_web_search_schema_edges","created_at":1711115037,"model":"gpt-4o","usage":{"input_tokens":10,"output_tokens":5}}}"#,
-                    "",
-                    "data: [DONE]",
-                    "",
-                ]
-                .join("\n");
-
-                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
-            },
-        );
-        let provider = create_open_responses(
-            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
-                .with_api_key("test-api-key"),
-        )
-        .with_transport(transport);
-        let model = provider.language_model("gpt-4o");
-
-        let result = poll_ready(
-            model.do_stream(
-                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
-                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
-                        LanguageModelTextPart::new("Use web search"),
-                    )]),
-                )])
-                .with_tool(LanguageModelTool::Provider(
-                    LanguageModelProviderTool::new(
-                        "openai.web_search",
-                        "webSearch",
-                        JsonObject::new(),
-                    ),
-                )),
-            ),
+                }),
+            ],
+            open_responses_web_search_call_options(),
         );
 
-        let tool_results = result
-            .stream
+        assert!(
+            stream
+                .iter()
+                .any(|part| matches!(part, LanguageModelStreamPart::ToolInputStart(start) if start.id == "ws_test" && start.provider_executed == Some(true)))
+        );
+        assert!(stream.iter().any(
+            |part| matches!(part, LanguageModelStreamPart::ToolInputEnd(end) if end.id == "ws_test")
+        ));
+        let tool_call = stream
             .iter()
-            .filter_map(|part| match part {
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .expect("stream includes web-search tool call");
+        assert_eq!(tool_call.tool_call_id, "ws_test");
+        assert_eq!(tool_call.tool_name, "webSearch");
+        assert_eq!(tool_call.input, "{}");
+        assert_eq!(tool_call.provider_executed, Some(true));
+
+        let tool_result = stream
+            .iter()
+            .find_map(|part| match part {
                 LanguageModelStreamPart::ToolResult(tool_result) => Some(tool_result),
                 _ => None,
             })
-            .collect::<Vec<_>>();
+            .expect("stream includes web-search tool result");
 
-        assert_eq!(tool_results.len(), 2);
         assert_eq!(
-            tool_results[0].result.as_value(),
+            tool_result.result.as_value(),
             &json!({
                 "action": {
                     "type": "search",
-                    "query": "current price of BTC"
-                },
-                "sources": [
-                    {
-                        "type": "url",
-                        "url": "https://example.com?a=1&utm_source=openai"
-                    },
-                    {
-                        "type": "api",
-                        "name": "oai-finance"
-                    }
-                ]
+                    "query": "Vercel AI SDK next version features"
+                }
             })
         );
-        assert_eq!(tool_results[1].result.as_value(), &json!({}));
-        assert!(
-            result
-                .stream
-                .iter()
-                .any(|part| matches!(part, LanguageModelStreamPart::ToolInputStart(start) if start.id == "ws_api_sources" && start.provider_executed == Some(true)))
+
+        let text_delta = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) => Some(delta),
+                _ => None,
+            })
+            .expect("stream includes assistant text delta");
+        assert_eq!(
+            text_delta.delta,
+            "Based on the search results, here are the upcoming features."
         );
+
+        let finish = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(finish.usage.input_tokens.total, Some(50));
+        assert_eq!(finish.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(finish.usage.output_tokens.total, Some(25));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(0));
+    }
+
+    #[test]
+    fn open_responses_provider_streams_web_search_missing_action() {
+        let stream = open_responses_stream_parts_from_events_with_options(
+            "o3-2025-04-16",
+            vec![
+                json!({
+                    "type": "response.created",
+                    "response": {
+                        "id": "resp_missing_action",
+                        "object": "response",
+                        "created_at": 1741630255,
+                        "status": "in_progress",
+                        "model": "o3-2025-04-16",
+                        "output": [],
+                        "usage": null
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        "type": "web_search_call",
+                        "id": "ws_missing_action",
+                        "status": "in_progress"
+                    }
+                }),
+                json!({
+                    "type": "response.web_search_call.in_progress",
+                    "output_index": 0,
+                    "item_id": "ws_missing_action"
+                }),
+                json!({
+                    "type": "response.web_search_call.completed",
+                    "output_index": 0,
+                    "item_id": "ws_missing_action"
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "type": "web_search_call",
+                        "id": "ws_missing_action",
+                        "status": "completed"
+                    }
+                }),
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_missing_action",
+                        "object": "response",
+                        "created_at": 1741630255,
+                        "status": "completed",
+                        "model": "o3-2025-04-16",
+                        "output": [
+                            {
+                                "type": "web_search_call",
+                                "id": "ws_missing_action",
+                                "status": "completed"
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 10,
+                            "input_tokens_details": {
+                                "cached_tokens": 0
+                            },
+                            "output_tokens": 2,
+                            "output_tokens_details": {
+                                "reasoning_tokens": 0
+                            },
+                            "total_tokens": 12
+                        }
+                    }
+                }),
+            ],
+            open_responses_web_search_call_options(),
+        );
+
+        let tool_result = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .expect("stream includes web-search tool result");
+
+        assert_eq!(tool_result.tool_name, "webSearch");
+        assert_eq!(tool_result.result.as_value(), &json!({}));
         assert!(
-            result
-                .stream
+            stream
                 .iter()
                 .any(|part| matches!(part, LanguageModelStreamPart::ToolInputStart(start) if start.id == "ws_missing_action" && start.provider_executed == Some(true)))
         );
