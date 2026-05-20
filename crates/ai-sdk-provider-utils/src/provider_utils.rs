@@ -573,16 +573,21 @@ pub struct DownloadError {
     url: String,
     status_code: Option<u16>,
     status_text: Option<String>,
+    cause_message: Option<String>,
     message: String,
 }
 
 impl DownloadError {
+    /// Upstream JavaScript error name.
+    pub const NAME: &'static str = "AI_DownloadError";
+
     /// Creates a download error with a caller-supplied message.
     pub fn new(url: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             url: url.into(),
             status_code: None,
             status_text: None,
+            cause_message: None,
             message: message.into(),
         }
     }
@@ -600,18 +605,26 @@ impl DownloadError {
             url,
             status_code: Some(status_code),
             status_text: Some(status_text),
+            cause_message: None,
         }
     }
 
     /// Creates a download error from a lower-level failure message.
     pub fn with_cause_message(url: impl Into<String>, cause_message: impl fmt::Display) -> Self {
         let url = url.into();
+        let cause_message = cause_message.to_string();
         Self {
             message: format!("Failed to download {url}: {cause_message}"),
             url,
             status_code: None,
             status_text: None,
+            cause_message: Some(cause_message),
         }
+    }
+
+    /// Returns the upstream JavaScript error name.
+    pub fn name(&self) -> &'static str {
+        Self::NAME
     }
 
     /// Returns the URL that failed validation or download.
@@ -627,6 +640,11 @@ impl DownloadError {
     /// Returns the response status text when one was available.
     pub fn status_text(&self) -> Option<&str> {
         self.status_text.as_deref()
+    }
+
+    /// Returns the lower-level failure message when one was supplied.
+    pub fn cause_message(&self) -> Option<&str> {
+        self.cause_message.as_deref()
     }
 
     /// Returns the human-readable error message.
@@ -11503,6 +11521,287 @@ mod tests {
             error.message(),
             "Failed to download https://example.com/network-error.png: Network error"
         );
+    }
+
+    fn expect_download_blob_rejected_before_transport(url: &str) -> DownloadError {
+        let called = Arc::new(AtomicUsize::new(0));
+        let called_by_transport = Arc::clone(&called);
+
+        let error = poll_ready(download_blob(DownloadBlobOptions::new(url), move |_| {
+            called_by_transport.fetch_add(1, Ordering::SeqCst);
+            ready(Ok(DownloadBlobResponse::new(200, "OK")))
+        }))
+        .expect_err("unsafe URL should be rejected before transport");
+
+        assert_eq!(
+            called.load(Ordering::SeqCst),
+            0,
+            "transport must not be called for unsafe URL"
+        );
+
+        error
+    }
+
+    #[test]
+    fn download_blob_upstream_should_download_a_blob_successfully() {
+        let called_with = Arc::new(Mutex::new(Vec::<String>::new()));
+        let called_with_transport = Arc::clone(&called_with);
+        let content = b"test content".to_vec();
+
+        let result = poll_ready(download_blob(
+            DownloadBlobOptions::new("https://example.com/image.png"),
+            move |url| {
+                called_with_transport.lock().unwrap().push(url.to_string());
+                ready(Ok(DownloadBlobResponse::bytes(200, "OK", content)
+                    .with_headers(BTreeMap::from([(
+                        "content-type".to_string(),
+                        "image/png".to_string(),
+                    )]))))
+            },
+        ))
+        .expect("download succeeds");
+
+        assert_eq!(result.media_type.as_deref(), Some("image/png"));
+        assert_eq!(result.data, b"test content");
+        assert_eq!(
+            called_with.lock().unwrap().as_slice(),
+            ["https://example.com/image.png"]
+        );
+    }
+
+    #[test]
+    fn download_blob_upstream_should_throw_download_error_on_non_ok_response() {
+        let first_error = poll_ready(download_blob(
+            DownloadBlobOptions::new("https://example.com/not-found.png"),
+            |_| ready(Ok(DownloadBlobResponse::new(404, "Not Found"))),
+        ))
+        .expect_err("non-ok response throws DownloadError");
+
+        assert_eq!(first_error.name(), DownloadError::NAME);
+
+        let error = poll_ready(download_blob(
+            DownloadBlobOptions::new("https://example.com/not-found.png"),
+            |_| ready(Ok(DownloadBlobResponse::new(404, "Not Found"))),
+        ))
+        .expect_err("non-ok response exposes DownloadError details");
+
+        assert_eq!(error.url(), "https://example.com/not-found.png");
+        assert_eq!(error.status_code(), Some(404));
+        assert_eq!(error.status_text(), Some("Not Found"));
+        assert_eq!(
+            error.message(),
+            "Failed to download https://example.com/not-found.png: 404 Not Found"
+        );
+    }
+
+    #[test]
+    fn download_blob_upstream_should_throw_download_error_on_network_error() {
+        let error = poll_ready(download_blob(
+            DownloadBlobOptions::new("https://example.com/network-error.png"),
+            |_| {
+                ready(Err(DownloadError::with_cause_message(
+                    "https://example.com/network-error.png",
+                    "Network error",
+                )))
+            },
+        ))
+        .expect_err("network error throws DownloadError");
+
+        assert_eq!(error.name(), DownloadError::NAME);
+        assert_eq!(error.url(), "https://example.com/network-error.png");
+        assert_eq!(error.cause_message(), Some("Network error"));
+        assert!(
+            error.message().contains("Network error"),
+            "message should include the lower-level network error"
+        );
+    }
+
+    #[test]
+    fn download_blob_upstream_should_rethrow_download_error_without_wrapping() {
+        let original_error = DownloadError::with_status(
+            "https://example.com/original.png",
+            500,
+            "Internal Server Error",
+        );
+        let expected_error = original_error.clone();
+
+        let error = poll_ready(download_blob(
+            DownloadBlobOptions::new("https://example.com/test.png"),
+            move |_| ready(Err(original_error)),
+        ))
+        .expect_err("DownloadError from transport is propagated");
+
+        assert_eq!(error, expected_error);
+        assert_eq!(error.url(), "https://example.com/original.png");
+        assert_eq!(error.status_code(), Some(500));
+    }
+
+    #[test]
+    fn download_blob_upstream_should_abort_when_response_exceeds_default_size_limit() {
+        let error = poll_ready(download_blob(
+            DownloadBlobOptions::new("https://example.com/huge.bin"),
+            |_| {
+                ready(Ok(DownloadBlobResponse::bytes(200, "OK", vec![0; 10])
+                    .with_headers(BTreeMap::from([(
+                        "content-length".to_string(),
+                        (3_u128 * 1024 * 1024 * 1024).to_string(),
+                    )]))))
+            },
+        ))
+        .expect_err("oversized default content-length should fail");
+
+        assert_eq!(error.name(), DownloadError::NAME);
+        assert!(
+            error.message().contains("exceeded maximum size"),
+            "message should explain the size-limit failure"
+        );
+    }
+
+    #[test]
+    fn download_blob_ssrf_upstream_should_reject_private_ipv4_addresses() {
+        for url in [
+            "http://127.0.0.1/file",
+            "http://10.0.0.1/file",
+            "http://169.254.169.254/latest/meta-data/",
+        ] {
+            let error = expect_download_blob_rejected_before_transport(url);
+            assert_eq!(error.name(), DownloadError::NAME);
+        }
+    }
+
+    #[test]
+    fn download_blob_ssrf_upstream_should_reject_localhost() {
+        let error = expect_download_blob_rejected_before_transport("http://localhost/file");
+        assert_eq!(error.name(), DownloadError::NAME);
+        assert_eq!(
+            error.message(),
+            "URL with hostname localhost is not allowed"
+        );
+    }
+
+    #[test]
+    fn download_blob_ssrf_upstream_should_reject_non_http_protocols() {
+        let error = expect_download_blob_rejected_before_transport("file:///etc/passwd");
+        assert_eq!(error.name(), DownloadError::NAME);
+        assert_eq!(
+            error.message(),
+            "URL scheme must be http, https, or data, got file:"
+        );
+    }
+
+    #[test]
+    fn download_blob_ssrf_upstream_should_reject_redirects_to_private_ip_addresses() {
+        let error = poll_ready(download_blob(
+            DownloadBlobOptions::new("https://evil.com/redirect"),
+            |_| {
+                ready(Ok(DownloadBlobResponse::bytes(
+                    200,
+                    "OK",
+                    b"secret".to_vec(),
+                )
+                .with_headers(BTreeMap::from([(
+                    "content-type".to_string(),
+                    "text/plain".to_string(),
+                )]))
+                .with_final_url("http://169.254.169.254/latest/meta-data/")))
+            },
+        ))
+        .expect_err("redirect to private IP should fail");
+
+        assert_eq!(error.name(), DownloadError::NAME);
+    }
+
+    #[test]
+    fn download_blob_ssrf_upstream_should_reject_redirects_to_localhost() {
+        let error = poll_ready(download_blob(
+            DownloadBlobOptions::new("https://evil.com/redirect"),
+            |_| {
+                ready(Ok(DownloadBlobResponse::bytes(
+                    200,
+                    "OK",
+                    b"secret".to_vec(),
+                )
+                .with_headers(BTreeMap::from([(
+                    "content-type".to_string(),
+                    "text/plain".to_string(),
+                )]))
+                .with_final_url("http://localhost:8080/admin")))
+            },
+        ))
+        .expect_err("redirect to localhost should fail");
+
+        assert_eq!(error.name(), DownloadError::NAME);
+        assert_eq!(
+            error.message(),
+            "URL with hostname localhost is not allowed"
+        );
+    }
+
+    #[test]
+    fn download_blob_ssrf_upstream_should_allow_redirects_to_safe_urls() {
+        let content = b"safe content".to_vec();
+
+        let result = poll_ready(download_blob(
+            DownloadBlobOptions::new("https://example.com/image.png"),
+            |_| {
+                ready(Ok(DownloadBlobResponse::bytes(200, "OK", content)
+                    .with_headers(BTreeMap::from([(
+                        "content-type".to_string(),
+                        "image/png".to_string(),
+                    )]))
+                    .with_final_url("https://cdn.example.com/image.png")))
+            },
+        ))
+        .expect("safe redirect succeeds");
+
+        assert_eq!(result.media_type.as_deref(), Some("image/png"));
+        assert_eq!(result.data, b"safe content");
+    }
+
+    #[test]
+    fn download_error_upstream_should_create_error_with_status_code_and_text() {
+        let error = DownloadError::with_status("https://example.com/test.png", 403, "Forbidden");
+
+        assert_eq!(error.name(), "AI_DownloadError");
+        assert_eq!(error.url(), "https://example.com/test.png");
+        assert_eq!(error.status_code(), Some(403));
+        assert_eq!(error.status_text(), Some("Forbidden"));
+        assert_eq!(
+            error.message(),
+            "Failed to download https://example.com/test.png: 403 Forbidden"
+        );
+    }
+
+    #[test]
+    fn download_error_upstream_should_create_error_with_cause() {
+        let error =
+            DownloadError::with_cause_message("https://example.com/test.png", "Connection refused");
+
+        assert_eq!(error.url(), "https://example.com/test.png");
+        assert_eq!(error.cause_message(), Some("Connection refused"));
+        assert!(
+            error.message().contains("Connection refused"),
+            "message should contain the cause message"
+        );
+    }
+
+    #[test]
+    fn download_error_upstream_should_create_error_with_custom_message() {
+        let error = DownloadError::new("https://example.com/test.png", "Custom error message");
+
+        assert_eq!(error.message(), "Custom error message");
+    }
+
+    #[test]
+    fn download_error_upstream_should_identify_download_error_instances_correctly() {
+        let download_error = DownloadError::new("https://example.com/test.png", "download failed");
+        let regular_error = std::io::Error::other("Not a download error");
+
+        let download_error_ref: &(dyn std::error::Error + 'static) = &download_error;
+        let regular_error_ref: &(dyn std::error::Error + 'static) = &regular_error;
+
+        assert!(download_error_ref.is::<DownloadError>());
+        assert!(!regular_error_ref.is::<DownloadError>());
     }
 
     #[test]
