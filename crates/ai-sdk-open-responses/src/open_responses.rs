@@ -7380,6 +7380,29 @@ mod tests {
             .expect("request body is JSON")
     }
 
+    fn open_responses_assistant_message_request_body(
+        content: Vec<LanguageModelAssistantContentPart>,
+    ) -> (JsonValue, Vec<Warning>) {
+        let (provider, captured_request) =
+            open_responses_captured_provider("openai", "gpt-4.1-mini");
+        let model = provider.language_model("gpt-4.1-mini");
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                    LanguageModelAssistantMessage::new(content),
+                )])
+                .with_provider_options(openai_provider_options(json!({
+                    "store": true
+                }))),
+            ),
+        );
+
+        (
+            captured_open_responses_request_body(&captured_request),
+            result.warnings,
+        )
+    }
+
     fn open_responses_tool_message_request_body(
         results: Vec<LanguageModelToolResultPart>,
     ) -> (JsonValue, Vec<Warning>) {
@@ -13343,6 +13366,142 @@ mod tests {
                     "call_id": "call_custom_001",
                     "name": "write_sql",
                     "arguments": "\"SELECT 1\""
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_assistant_text_and_tool_call_to_function_call() {
+        let (request_body, warnings) = open_responses_assistant_message_request_body(vec![
+            LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                "I will search for that information.",
+            )),
+            LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                "call_123",
+                "search",
+                json!({
+                    "query": "weather in San Francisco"
+                }),
+            )),
+        ]);
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "I will search for that information."
+                        }
+                    ]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "search",
+                    "arguments": "{\"query\":\"weather in San Francisco\"}"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_defaults_missing_assistant_tool_call_input_to_empty_object() {
+        let (request_body, warnings) = open_responses_assistant_message_request_body(vec![
+            LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                "call_123",
+                "search",
+                JsonValue::Null,
+            )),
+        ]);
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "search",
+                    "arguments": "{}"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_stored_assistant_tool_call_ids_to_item_references() {
+        let (request_body, warnings) = open_responses_assistant_message_request_body(vec![
+            LanguageModelAssistantContentPart::Text(
+                LanguageModelTextPart::new("I will search for that information.")
+                    .with_provider_options(openai_item_options("id_123")),
+            ),
+            LanguageModelAssistantContentPart::ToolCall(
+                LanguageModelToolCallPart::new(
+                    "call_123",
+                    "search",
+                    json!({
+                        "query": "weather in San Francisco"
+                    }),
+                )
+                .with_provider_options(openai_item_options("id_456")),
+            ),
+        ]);
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "item_reference",
+                    "id": "id_123"
+                },
+                {
+                    "type": "item_reference",
+                    "id": "id_456"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_multiple_assistant_tool_calls_in_single_message() {
+        let (request_body, warnings) = open_responses_assistant_message_request_body(vec![
+            LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                "call_123",
+                "search",
+                json!({
+                    "query": "weather in San Francisco"
+                }),
+            )),
+            LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                "call_456",
+                "calculator",
+                json!({
+                    "expression": "2 + 2"
+                }),
+            )),
+        ]);
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "search",
+                    "arguments": "{\"query\":\"weather in San Francisco\"}"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_456",
+                    "name": "calculator",
+                    "arguments": "{\"expression\":\"2 + 2\"}"
                 }
             ])
         );
