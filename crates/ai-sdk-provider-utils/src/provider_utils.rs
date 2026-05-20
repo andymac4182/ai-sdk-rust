@@ -2281,8 +2281,8 @@ impl HandledFetchError {
 ///
 /// Rust callers provide an injected transport to [`get_from_api`], so this
 /// struct only carries the request metadata that upstream prepares before
-/// calling `fetch`: URL, optional headers, and the runtime used for the
-/// provider-utils user-agent suffix.
+/// calling `fetch`: URL, optional headers, the runtime used for the
+/// provider-utils user-agent suffix, and the optional abort signal.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetFromApiOptions {
@@ -2297,6 +2297,10 @@ pub struct GetFromApiOptions {
     /// Runtime indicators used to append the provider-utils user-agent suffix.
     #[serde(default, skip_serializing_if = "RuntimeEnvironment::is_unknown")]
     pub environment: RuntimeEnvironment,
+
+    /// Caller-controlled abort signal for the HTTP transport request.
+    #[serde(default, skip)]
+    pub abort_signal: Option<LanguageModelAbortSignal>,
 }
 
 impl GetFromApiOptions {
@@ -2306,6 +2310,7 @@ impl GetFromApiOptions {
             url: url.into(),
             headers: BTreeMap::new(),
             environment: RuntimeEnvironment::unknown(),
+            abort_signal: None,
         }
     }
 
@@ -2335,15 +2340,36 @@ impl GetFromApiOptions {
         self
     }
 
+    /// Sets a caller-controlled abort signal for the HTTP transport request.
+    pub fn with_abort_signal(mut self, abort_signal: LanguageModelAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
+        self
+    }
+
+    /// Sets an optional caller-controlled abort signal for the HTTP transport request.
+    pub fn with_optional_abort_signal(
+        mut self,
+        abort_signal: Option<LanguageModelAbortSignal>,
+    ) -> Self {
+        self.abort_signal = abort_signal;
+        self
+    }
+
     /// Converts these options into the prepared provider API request.
     pub fn into_request(self) -> ProviderApiRequest {
         let Self {
             url,
             headers,
             environment,
+            abort_signal,
         } = self;
 
-        prepare_get_from_api_request(url, Some(headers), &environment)
+        let request = prepare_get_from_api_request(url, Some(headers), &environment);
+
+        match abort_signal {
+            Some(abort_signal) => request.with_abort_signal(abort_signal),
+            None => request,
+        }
     }
 }
 
@@ -8848,6 +8874,20 @@ mod tests {
             name: name.to_string(),
             age,
         })
+    }
+
+    fn validate_name_value_response(value: &JsonValue) -> Result<JsonValue, &'static str> {
+        let object = value.as_object().ok_or("Invalid input")?;
+        object
+            .get("name")
+            .and_then(JsonValue::as_str)
+            .ok_or("Invalid input")?;
+        object
+            .get("value")
+            .and_then(JsonValue::as_i64)
+            .ok_or("Invalid input")?;
+
+        Ok(value.clone())
     }
 
     fn person_schema() -> Schema<Person> {
@@ -16829,6 +16869,253 @@ mod tests {
         assert_eq!(error.url(), "https://api.example.com/v1/data");
         assert_eq!(error.request_body_values(), &json!({}));
         assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn get_from_api_upstream_should_successfully_fetch_and_parse_data() {
+        let captured_request = Arc::new(Mutex::new(None));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+
+        let result = poll_ready(get_from_api(
+            GetFromApiOptions::new("https://api.test.com/data")
+                .with_header("Authorization", "Bearer test")
+                .with_environment(RuntimeEnvironment::navigator_user_agent("test-env")),
+            move |request| {
+                *captured_request_for_transport.lock().unwrap() = Some(request.clone());
+                ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    r#"{"name":"test","value":123}"#,
+                )
+                .with_headers(BTreeMap::from([(
+                    "content-type".to_string(),
+                    "application/json".to_string(),
+                )]))))
+            },
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    validate_name_value_response,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_status_code_error_response_handler(
+                    response.status_code_error_response_handler_options(request),
+                ))
+            },
+        ))
+        .expect("getFromApi success should parse JSON");
+
+        assert_eq!(result.value(), &json!({ "name": "test", "value": 123 }));
+
+        let request = captured_request
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("transport captured request");
+        assert_eq!(request.url, "https://api.test.com/data");
+        assert_eq!(request.method, ProviderApiRequestMethod::Get);
+        assert_eq!(
+            request.headers,
+            BTreeMap::from([
+                ("authorization".to_string(), "Bearer test".to_string()),
+                (
+                    "user-agent".to_string(),
+                    format!("ai-sdk/provider-utils/{} runtime/test-env", crate::VERSION)
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn get_from_api_upstream_should_handle_api_errors() {
+        let error = poll_ready(get_from_api(
+            GetFromApiOptions::new("https://api.test.com/data"),
+            |_request| {
+                ready(Ok(ProviderApiResponse::text(
+                    404,
+                    "Not Found",
+                    r#"{"error":"Not Found"}"#,
+                )))
+            },
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    validate_name_value_response,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_status_code_error_response_handler(
+                    response.status_code_error_response_handler_options(request),
+                ))
+            },
+        ))
+        .expect_err("API error should become APICallError");
+
+        let HandledFetchError::ApiCall { error } = error else {
+            panic!("failed status should return APICallError");
+        };
+
+        assert_eq!(error.message(), "Not Found");
+        assert_eq!(error.status_code(), Some(404));
+        assert_eq!(error.response_body(), Some(r#"{"error":"Not Found"}"#));
+    }
+
+    #[test]
+    fn get_from_api_upstream_should_handle_network_errors() {
+        let error = poll_ready(get_from_api(
+            GetFromApiOptions::new("https://api.test.com/data"),
+            |_request| {
+                ready(Err(FetchErrorInfo::new("fetch failed")
+                    .with_name("TypeError")
+                    .with_cause_message("Failed to connect")))
+            },
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    validate_name_value_response,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_status_code_error_response_handler(
+                    response.status_code_error_response_handler_options(request),
+                ))
+            },
+        ))
+        .expect_err("network error should be normalized");
+
+        let HandledFetchError::ApiCall { error } = error else {
+            panic!("fetch TypeError with a cause should become APICallError");
+        };
+
+        assert_eq!(error.message(), "Cannot connect to API: Failed to connect");
+        assert_eq!(error.url(), "https://api.test.com/data");
+        assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn get_from_api_upstream_should_handle_abort_signals() {
+        let abort_controller = LanguageModelAbortController::new();
+        abort_controller.abort();
+        let called = Arc::new(AtomicUsize::new(0));
+        let called_by_transport = Arc::clone(&called);
+
+        let error = poll_ready(get_from_api(
+            GetFromApiOptions::new("https://api.test.com/data")
+                .with_abort_signal(abort_controller.signal()),
+            move |_request| {
+                called_by_transport.fetch_add(1, Ordering::SeqCst);
+                ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    r#"{"name":"test","value":123}"#,
+                )))
+            },
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    validate_name_value_response,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_status_code_error_response_handler(
+                    response.status_code_error_response_handler_options(request),
+                ))
+            },
+        ))
+        .expect_err("aborted request should return abort error");
+
+        assert_eq!(called.load(Ordering::SeqCst), 0);
+        let HandledFetchError::Original { error } = error else {
+            panic!("abort errors should pass through unchanged");
+        };
+        assert_eq!(error.name(), Some("AbortError"));
+        assert_eq!(error.message(), "Aborted");
+    }
+
+    #[test]
+    fn get_from_api_upstream_should_remove_undefined_header_entries() {
+        let captured_request = Arc::new(Mutex::new(None));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+
+        poll_ready(get_from_api(
+            GetFromApiOptions::new("https://api.test.com/data")
+                .with_headers([
+                    ("Authorization", Some("Bearer test")),
+                    ("X-Custom-Header", None),
+                ])
+                .with_environment(RuntimeEnvironment::navigator_user_agent("test-env")),
+            move |request| {
+                *captured_request_for_transport.lock().unwrap() = Some(request.clone());
+                ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    r#"{"name":"test","value":123}"#,
+                )))
+            },
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    validate_name_value_response,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_status_code_error_response_handler(
+                    response.status_code_error_response_handler_options(request),
+                ))
+            },
+        ))
+        .expect("getFromApi succeeds");
+
+        let request = captured_request
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("transport captured request");
+        assert_eq!(
+            request.headers,
+            BTreeMap::from([
+                ("authorization".to_string(), "Bearer test".to_string()),
+                (
+                    "user-agent".to_string(),
+                    format!("ai-sdk/provider-utils/{} runtime/test-env", crate::VERSION)
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn get_from_api_upstream_should_handle_errors_in_response_handlers() {
+        let error = poll_ready(get_from_api(
+            GetFromApiOptions::new("https://api.test.com/data"),
+            |_request| ready(Ok(ProviderApiResponse::text(200, "OK", "invalid json"))),
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    validate_name_value_response,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_status_code_error_response_handler(
+                    response.status_code_error_response_handler_options(request),
+                ))
+            },
+        ))
+        .expect_err("response handler error should become APICallError");
+
+        let HandledFetchError::ApiCall { error } = error else {
+            panic!("handler errors should return APICallError");
+        };
+
+        assert_eq!(error.message(), "Invalid JSON response");
+        assert_eq!(error.status_code(), Some(200));
+        assert_eq!(error.response_body(), Some("invalid json"));
     }
 
     #[test]
