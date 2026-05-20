@@ -11993,6 +11993,86 @@ mod tests {
     }
 
     #[test]
+    fn normalize_headers_upstream_returns_empty_object_for_undefined() {
+        assert_eq!(
+            normalize_headers::<String, String, Vec<(String, Option<String>)>>(None),
+            BTreeMap::new()
+        );
+    }
+
+    #[test]
+    fn normalize_headers_upstream_converts_headers_instance_to_record() {
+        let headers = normalize_headers(Some(vec![
+            ("Content-Type", Some("application/json")),
+            ("X-Test", Some("value")),
+        ]));
+
+        assert_eq!(
+            headers,
+            BTreeMap::from([
+                ("content-type".to_string(), "application/json".to_string()),
+                ("x-test".to_string(), "value".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn normalize_headers_upstream_converts_tuple_array() {
+        let headers = normalize_headers(Some(vec![
+            ("Content-Type", Some("application/json")),
+            ("X-Test", Some("value")),
+        ]));
+
+        assert_eq!(
+            headers,
+            BTreeMap::from([
+                ("content-type".to_string(), "application/json".to_string()),
+                ("x-test".to_string(), "value".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn normalize_headers_upstream_converts_plain_record_and_filters_nullish_values() {
+        let headers = normalize_headers(Some(BTreeMap::from([
+            ("Authorization", Some("Bearer token")),
+            ("X-Feature", None),
+            ("Content-Type", Some("application/json")),
+        ])));
+
+        assert_eq!(
+            headers,
+            BTreeMap::from([
+                ("authorization".to_string(), "Bearer token".to_string()),
+                ("content-type".to_string(), "application/json".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn normalize_headers_upstream_handles_empty_headers_instance() {
+        let headers = normalize_headers(Some(Vec::<(&str, Option<&str>)>::new()));
+
+        assert_eq!(headers, BTreeMap::new());
+    }
+
+    #[test]
+    fn normalize_headers_upstream_converts_uppercase_keys_to_lowercase() {
+        let headers = normalize_headers(Some(vec![
+            ("CONTENT-TYPE", Some("application/json")),
+            ("X-API-KEY", Some("secret")),
+        ]));
+
+        assert_eq!(
+            headers,
+            BTreeMap::from([
+                ("content-type".to_string(), "application/json".to_string()),
+                ("x-api-key".to_string(), "secret".to_string()),
+            ])
+        );
+    }
+
+    #[test]
     fn with_user_agent_suffix_creates_user_agent_header() {
         let headers = with_user_agent_suffix(
             Some(vec![
