@@ -5147,8 +5147,12 @@ fn open_responses_stream_result_from_response(
                                         && let Some(tool_call) =
                                             ongoing_tool_calls.remove(&output_index)
                                     {
+                                        let tool_input_end_id = item
+                                            .get("call_id")
+                                            .and_then(JsonValue::as_str)
+                                            .unwrap_or(&tool_call.tool_call_id);
                                         let mut input_end =
-                                            LanguageModelToolInputEnd::new(tool_call.tool_call_id);
+                                            LanguageModelToolInputEnd::new(tool_input_end_id);
                                         if let Some(metadata) =
                                             open_responses_namespace_metadata(provider_name, item)
                                         {
@@ -6198,6 +6202,13 @@ fn open_responses_push_tool_call_from_item(
     }
 
     let item_id = item.get("id").and_then(JsonValue::as_str);
+    let item_dedupe_key = item_id.map(|item_id| format!("item:{item_id}"));
+    if item_dedupe_key
+        .as_ref()
+        .is_some_and(|key| emitted_tool_calls.contains(key))
+    {
+        return true;
+    }
     let pending = item_id.and_then(|item_id| pending_tool_calls.remove(item_id));
     let tool_call_id = item
         .get("call_id")
@@ -6228,13 +6239,16 @@ fn open_responses_push_tool_call_from_item(
         .or_else(|| pending.and_then(|pending| pending.arguments))
         .unwrap_or_else(|| "{}".to_string());
     let dedupe_key = if tool_call_id.is_empty() {
-        format!("{}:{input}", tool_name)
+        format!("name-input:{tool_name}:{input}")
     } else {
-        tool_call_id.clone()
+        format!("call:{tool_call_id}")
     };
 
     if !emitted_tool_calls.insert(dedupe_key) {
         return true;
+    }
+    if let Some(item_dedupe_key) = item_dedupe_key {
+        emitted_tool_calls.insert(item_dedupe_key);
     }
 
     let mut tool_call = LanguageModelToolCall::new(tool_call_id, tool_name, input);
@@ -14351,6 +14365,1025 @@ mod tests {
         assert_eq!(finish.usage.output_tokens.total, Some(478));
         assert_eq!(finish.usage.output_tokens.text, Some(355));
         assert_eq!(finish.usage.output_tokens.reasoning, Some(123));
+    }
+
+    #[test]
+    fn open_responses_provider_streams_upstream_incomplete_response_finish_reason() {
+        const CREATED_RESPONSE_ID: &str = "resp_67c9a81b6a048190a9ee441c5755a4e8";
+        const FINAL_RESPONSE_ID: &str = "resp_67cadb40a0708190ac2763c0b6960f6f";
+        const DELTA_MESSAGE_ID: &str = "msg_67c9a81dea8c8190b79651a2b3adf91e";
+        const DONE_MESSAGE_ID: &str = "msg_67c9a8787f4c8190b49c858d4c1cf20c";
+
+        let stream = open_responses_stream_parts_from_events(
+            "gpt-4o",
+            vec![
+                json!({
+                    "type": "response.created",
+                    "response": {
+                        "id": CREATED_RESPONSE_ID,
+                        "object": "response",
+                        "created_at": 1741269019,
+                        "status": "in_progress",
+                        "error": null,
+                        "incomplete_details": null,
+                        "input": [],
+                        "instructions": null,
+                        "max_output_tokens": null,
+                        "model": "gpt-4o-2024-07-18",
+                        "output": [],
+                        "parallel_tool_calls": true,
+                        "previous_response_id": null,
+                        "reasoning": {
+                            "effort": null,
+                            "summary": null
+                        },
+                        "store": true,
+                        "temperature": 0.3,
+                        "text": {
+                            "format": {
+                                "type": "text"
+                            }
+                        },
+                        "tool_choice": "auto",
+                        "tools": [],
+                        "top_p": 1,
+                        "truncation": "disabled",
+                        "usage": null,
+                        "user": null,
+                        "metadata": {}
+                    }
+                }),
+                json!({
+                    "type": "response.in_progress",
+                    "response": {
+                        "id": CREATED_RESPONSE_ID,
+                        "object": "response",
+                        "created_at": 1741269019,
+                        "status": "in_progress",
+                        "error": null,
+                        "incomplete_details": null,
+                        "input": [],
+                        "instructions": null,
+                        "max_output_tokens": null,
+                        "model": "gpt-4o-2024-07-18",
+                        "output": [],
+                        "parallel_tool_calls": true,
+                        "previous_response_id": null,
+                        "reasoning": {
+                            "effort": null,
+                            "summary": null
+                        },
+                        "store": true,
+                        "temperature": 0.3,
+                        "text": {
+                            "format": {
+                                "type": "text"
+                            }
+                        },
+                        "tool_choice": "auto",
+                        "tools": [],
+                        "top_p": 1,
+                        "truncation": "disabled",
+                        "usage": null,
+                        "user": null,
+                        "metadata": {}
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        "id": DELTA_MESSAGE_ID,
+                        "type": "message",
+                        "status": "in_progress",
+                        "role": "assistant",
+                        "content": []
+                    }
+                }),
+                json!({
+                    "type": "response.content_part.added",
+                    "item_id": DELTA_MESSAGE_ID,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "text": "",
+                        "annotations": []
+                    }
+                }),
+                json!({
+                    "type": "response.output_text.delta",
+                    "item_id": DELTA_MESSAGE_ID,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": "Hello,"
+                }),
+                json!({
+                    "type": "response.output_text.done",
+                    "item_id": DONE_MESSAGE_ID,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "text": "Hello,!"
+                }),
+                json!({
+                    "type": "response.content_part.done",
+                    "item_id": DONE_MESSAGE_ID,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "text": "Hello,",
+                        "annotations": []
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "id": DONE_MESSAGE_ID,
+                        "type": "message",
+                        "status": "incomplete",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "Hello,",
+                                "annotations": []
+                            }
+                        ]
+                    }
+                }),
+                json!({
+                    "type": "response.incomplete",
+                    "response": {
+                        "id": FINAL_RESPONSE_ID,
+                        "object": "response",
+                        "created_at": 1741347648,
+                        "status": "incomplete",
+                        "error": null,
+                        "incomplete_details": {
+                            "reason": "max_output_tokens"
+                        },
+                        "instructions": null,
+                        "max_output_tokens": 100,
+                        "model": "gpt-4o-2024-07-18",
+                        "output": [
+                            {
+                                "type": "message",
+                                "id": "msg_67cadb410ccc81909fe1d8f427b9cf02",
+                                "status": "incomplete",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Hello,",
+                                        "annotations": []
+                                    }
+                                ]
+                            }
+                        ],
+                        "parallel_tool_calls": true,
+                        "previous_response_id": null,
+                        "reasoning": {
+                            "effort": null,
+                            "summary": null
+                        },
+                        "store": true,
+                        "temperature": 0,
+                        "text": {
+                            "format": {
+                                "type": "text"
+                            }
+                        },
+                        "tool_choice": "auto",
+                        "tools": [],
+                        "top_p": 1,
+                        "truncation": "disabled",
+                        "usage": {
+                            "input_tokens": 0,
+                            "input_tokens_details": {
+                                "cached_tokens": 0
+                            },
+                            "output_tokens": 0,
+                            "output_tokens_details": {
+                                "reasoning_tokens": 0
+                            },
+                            "total_tokens": 0
+                        },
+                        "user": null,
+                        "metadata": {}
+                    }
+                }),
+            ],
+        );
+
+        let response_metadata = stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ResponseMetadata(metadata) => Some(metadata),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(response_metadata.len(), 1);
+        assert_eq!(
+            response_metadata[0].id.as_deref(),
+            Some(CREATED_RESPONSE_ID)
+        );
+        assert_eq!(
+            response_metadata[0]
+                .timestamp
+                .map(|timestamp| timestamp.unix_timestamp()),
+            Some(1_741_269_019)
+        );
+        assert_eq!(
+            response_metadata[0].model_id.as_deref(),
+            Some("gpt-4o-2024-07-18")
+        );
+
+        let text_start = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextStart(text_start) => Some(text_start),
+                _ => None,
+            })
+            .expect("stream includes text start");
+        assert_eq!(text_start.id, DELTA_MESSAGE_ID);
+
+        let text_deltas = stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) => {
+                    Some((delta.id.as_str(), delta.delta.as_str()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(text_deltas, vec![(DELTA_MESSAGE_ID, "Hello,")]);
+
+        let text_end = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextEnd(text_end) => Some(text_end),
+                _ => None,
+            })
+            .expect("stream includes text end");
+        assert_eq!(text_end.id, DONE_MESSAGE_ID);
+        assert_eq!(
+            openai_metadata_value(&text_end.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(DONE_MESSAGE_ID)
+        );
+
+        let finish = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Length);
+        assert_eq!(
+            finish.finish_reason.raw.as_deref(),
+            Some("max_output_tokens")
+        );
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some(CREATED_RESPONSE_ID)
+        );
+        assert_eq!(finish.usage.input_tokens.total, Some(0));
+        assert_eq!(finish.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(finish.usage.input_tokens.no_cache, Some(0));
+        assert_eq!(finish.usage.output_tokens.total, Some(0));
+        assert_eq!(finish.usage.output_tokens.text, Some(0));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(0));
+    }
+
+    #[test]
+    fn open_responses_provider_streams_upstream_tool_calls() {
+        const RESPONSE_ID: &str = "resp_67cb13a755c08190acbe3839a49632fc";
+        const LOCATION_ITEM_ID: &str = "fc_67cb13a838088190be08eb3927c87501";
+        const WEATHER_ITEM_ID: &str = "fc_67cb13a858f081908a600343fa040f47";
+        const LOCATION_START_CALL_ID: &str = "call_6KxSghkb4MVnunFH2TxPErLP";
+        const LOCATION_DONE_CALL_ID: &str = "call_pgjcAI4ZegMkP6bsAV7sfrJA";
+        const LOCATION_COMPLETED_CALL_ID: &str = "call_KsVqaVAf3alAtCCkQe4itE7W";
+        const WEATHER_START_CALL_ID: &str = "call_Dg6WUmFHNeR5JxX1s53s1G4b";
+        const WEATHER_DONE_CALL_ID: &str = "call_X2PAkDJInno9VVnNkDrfhboW";
+
+        let current_location_tool = LanguageModelTool::Function(
+            LanguageModelFunctionTool::new(
+                "currentLocation",
+                json_object(json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                })),
+            )
+            .with_description("Get the current location.")
+            .with_strict(true),
+        );
+        let weather_tool = LanguageModelTool::Function(
+            LanguageModelFunctionTool::new(
+                "weather",
+                json_object(json!({
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "The location to get the weather for"
+                        }
+                    },
+                    "required": ["location"],
+                    "additionalProperties": false
+                })),
+            )
+            .with_description("Get the weather in a location")
+            .with_strict(true),
+        );
+        let options = LanguageModelCallOptions::new(open_responses_hello_prompt())
+            .with_tool(current_location_tool)
+            .with_tool(weather_tool);
+
+        let stream = open_responses_stream_parts_from_events_with_options(
+            "gpt-4o",
+            vec![
+                json!({
+                    "type": "response.created",
+                    "response": {
+                        "id": RESPONSE_ID,
+                        "object": "response",
+                        "created_at": 1741362087,
+                        "status": "in_progress",
+                        "error": null,
+                        "incomplete_details": null,
+                        "instructions": null,
+                        "max_output_tokens": null,
+                        "model": "gpt-4o-2024-07-18",
+                        "output": [],
+                        "parallel_tool_calls": true,
+                        "previous_response_id": null,
+                        "reasoning": {
+                            "effort": null,
+                            "summary": null
+                        },
+                        "store": true,
+                        "temperature": 0,
+                        "text": {
+                            "format": {
+                                "type": "text"
+                            }
+                        },
+                        "tool_choice": "auto",
+                        "tools": [
+                            {
+                                "type": "function",
+                                "description": "Get the current location.",
+                                "name": "currentLocation",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {},
+                                    "additionalProperties": false
+                                },
+                                "strict": true
+                            },
+                            {
+                                "type": "function",
+                                "description": "Get the weather in a location",
+                                "name": "weather",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "location": {
+                                            "type": "string",
+                                            "description": "The location to get the weather for"
+                                        }
+                                    },
+                                    "required": ["location"],
+                                    "additionalProperties": false
+                                },
+                                "strict": true
+                            }
+                        ],
+                        "top_p": 1,
+                        "truncation": "disabled",
+                        "usage": null,
+                        "user": null,
+                        "metadata": {}
+                    }
+                }),
+                json!({
+                    "type": "response.in_progress",
+                    "response": {
+                        "id": RESPONSE_ID,
+                        "object": "response",
+                        "created_at": 1741362087,
+                        "status": "in_progress",
+                        "error": null,
+                        "incomplete_details": null,
+                        "instructions": null,
+                        "max_output_tokens": null,
+                        "model": "gpt-4o-2024-07-18",
+                        "output": [],
+                        "parallel_tool_calls": true,
+                        "previous_response_id": null,
+                        "reasoning": {
+                            "effort": null,
+                            "summary": null
+                        },
+                        "store": true,
+                        "temperature": 0,
+                        "text": {
+                            "format": {
+                                "type": "text"
+                            }
+                        },
+                        "tool_choice": "auto",
+                        "tools": [],
+                        "top_p": 1,
+                        "truncation": "disabled",
+                        "usage": null,
+                        "user": null,
+                        "metadata": {}
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        "type": "function_call",
+                        "id": LOCATION_ITEM_ID,
+                        "call_id": LOCATION_START_CALL_ID,
+                        "name": "currentLocation",
+                        "arguments": "",
+                        "status": "completed"
+                    }
+                }),
+                json!({
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": LOCATION_ITEM_ID,
+                    "output_index": 0,
+                    "delta": "{}"
+                }),
+                json!({
+                    "type": "response.function_call_arguments.done",
+                    "item_id": LOCATION_ITEM_ID,
+                    "output_index": 0,
+                    "arguments": "{}"
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "type": "function_call",
+                        "id": LOCATION_ITEM_ID,
+                        "call_id": LOCATION_DONE_CALL_ID,
+                        "name": "currentLocation",
+                        "arguments": "{}",
+                        "status": "completed"
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": 1,
+                    "item": {
+                        "type": "function_call",
+                        "id": WEATHER_ITEM_ID,
+                        "call_id": WEATHER_START_CALL_ID,
+                        "name": "weather",
+                        "arguments": "",
+                        "status": "in_progress"
+                    }
+                }),
+                json!({
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": WEATHER_ITEM_ID,
+                    "output_index": 1,
+                    "delta": "{"
+                }),
+                json!({
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": WEATHER_ITEM_ID,
+                    "output_index": 1,
+                    "delta": "\"location"
+                }),
+                json!({
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": WEATHER_ITEM_ID,
+                    "output_index": 1,
+                    "delta": "\":"
+                }),
+                json!({
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": WEATHER_ITEM_ID,
+                    "output_index": 1,
+                    "delta": "\"Rome"
+                }),
+                json!({
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": WEATHER_ITEM_ID,
+                    "output_index": 1,
+                    "delta": "\"}"
+                }),
+                json!({
+                    "type": "response.function_call_arguments.done",
+                    "item_id": WEATHER_ITEM_ID,
+                    "output_index": 1,
+                    "arguments": "{\"location\":\"Rome\"}"
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": 1,
+                    "item": {
+                        "type": "function_call",
+                        "id": WEATHER_ITEM_ID,
+                        "call_id": WEATHER_DONE_CALL_ID,
+                        "name": "weather",
+                        "arguments": "{\"location\":\"Rome\"}",
+                        "status": "completed"
+                    }
+                }),
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": RESPONSE_ID,
+                        "object": "response",
+                        "created_at": 1741362087,
+                        "status": "completed",
+                        "error": null,
+                        "incomplete_details": null,
+                        "instructions": null,
+                        "max_output_tokens": null,
+                        "model": "gpt-4o-2024-07-18",
+                        "output": [
+                            {
+                                "type": "function_call",
+                                "id": LOCATION_ITEM_ID,
+                                "call_id": LOCATION_COMPLETED_CALL_ID,
+                                "name": "currentLocation",
+                                "arguments": "{}",
+                                "status": "completed"
+                            },
+                            {
+                                "type": "function_call",
+                                "id": WEATHER_ITEM_ID,
+                                "call_id": WEATHER_DONE_CALL_ID,
+                                "name": "weather",
+                                "arguments": "{\"location\":\"Rome\"}",
+                                "status": "completed"
+                            }
+                        ],
+                        "parallel_tool_calls": true,
+                        "previous_response_id": null,
+                        "reasoning": {
+                            "effort": null,
+                            "summary": null
+                        },
+                        "store": true,
+                        "temperature": 0,
+                        "text": {
+                            "format": {
+                                "type": "text"
+                            }
+                        },
+                        "tool_choice": "auto",
+                        "tools": [],
+                        "top_p": 1,
+                        "truncation": "disabled",
+                        "usage": {
+                            "input_tokens": 0,
+                            "input_tokens_details": {
+                                "cached_tokens": 0
+                            },
+                            "output_tokens": 0,
+                            "output_tokens_details": {
+                                "reasoning_tokens": 0
+                            },
+                            "total_tokens": 0
+                        },
+                        "user": null,
+                        "metadata": {}
+                    }
+                }),
+            ],
+            options,
+        );
+
+        let response_metadata = stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ResponseMetadata(metadata) => Some(metadata),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(response_metadata.len(), 1);
+        assert_eq!(response_metadata[0].id.as_deref(), Some(RESPONSE_ID));
+        assert_eq!(
+            response_metadata[0]
+                .timestamp
+                .map(|timestamp| timestamp.unix_timestamp()),
+            Some(1_741_362_087)
+        );
+
+        let tool_input_starts = stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolInputStart(start) => {
+                    Some((start.id.as_str(), start.tool_name.as_str()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tool_input_starts,
+            vec![
+                (LOCATION_START_CALL_ID, "currentLocation"),
+                (WEATHER_START_CALL_ID, "weather")
+            ]
+        );
+
+        let tool_input_deltas = stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolInputDelta(delta) => {
+                    Some((delta.id.as_str(), delta.delta.as_str()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tool_input_deltas,
+            vec![
+                (LOCATION_START_CALL_ID, "{}"),
+                (WEATHER_START_CALL_ID, "{"),
+                (WEATHER_START_CALL_ID, "\"location"),
+                (WEATHER_START_CALL_ID, "\":"),
+                (WEATHER_START_CALL_ID, "\"Rome"),
+                (WEATHER_START_CALL_ID, "\"}")
+            ]
+        );
+
+        let tool_input_ends = stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolInputEnd(end) => Some(end.id.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tool_input_ends,
+            vec![LOCATION_DONE_CALL_ID, WEATHER_DONE_CALL_ID]
+        );
+
+        let tool_calls = stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(tool_calls[0].tool_call_id, LOCATION_DONE_CALL_ID);
+        assert_eq!(tool_calls[0].tool_name, "currentLocation");
+        assert_eq!(tool_calls[0].input, "{}");
+        assert_eq!(
+            openai_metadata_value(&tool_calls[0].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(LOCATION_ITEM_ID)
+        );
+        assert_eq!(tool_calls[1].tool_call_id, WEATHER_DONE_CALL_ID);
+        assert_eq!(tool_calls[1].tool_name, "weather");
+        assert_eq!(tool_calls[1].input, r#"{"location":"Rome"}"#);
+        assert_eq!(
+            openai_metadata_value(&tool_calls[1].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(WEATHER_ITEM_ID)
+        );
+
+        let finish = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.finish_reason.unified, FinishReason::ToolCalls);
+        assert_eq!(finish.finish_reason.raw.as_deref(), None);
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some(RESPONSE_ID)
+        );
+        assert_eq!(finish.usage.input_tokens.total, Some(0));
+        assert_eq!(finish.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(finish.usage.input_tokens.no_cache, Some(0));
+        assert_eq!(finish.usage.output_tokens.total, Some(0));
+        assert_eq!(finish.usage.output_tokens.text, Some(0));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(0));
+    }
+
+    #[test]
+    fn open_responses_provider_preserves_namespace_on_streaming_function_call_output() {
+        let stream = open_responses_stream_parts_from_events(
+            "gpt-5.4",
+            vec![
+                json!({
+                    "type": "response.created",
+                    "response": {
+                        "id": "resp_ns",
+                        "object": "response",
+                        "created_at": 1741362087,
+                        "status": "in_progress",
+                        "error": null,
+                        "incomplete_details": null,
+                        "instructions": null,
+                        "max_output_tokens": null,
+                        "model": "gpt-5.4",
+                        "output": [],
+                        "parallel_tool_calls": true,
+                        "previous_response_id": null,
+                        "reasoning": {
+                            "effort": null,
+                            "summary": null
+                        },
+                        "store": true,
+                        "temperature": 0,
+                        "text": {
+                            "format": {
+                                "type": "text"
+                            }
+                        },
+                        "tool_choice": "auto",
+                        "tools": [],
+                        "top_p": 1,
+                        "truncation": "disabled",
+                        "usage": null,
+                        "user": null,
+                        "metadata": {}
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        "type": "function_call",
+                        "id": "fc_ns_1",
+                        "call_id": "call_ns_1",
+                        "name": "get_weather",
+                        "arguments": "",
+                        "status": "in_progress"
+                    }
+                }),
+                json!({
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": "fc_ns_1",
+                    "output_index": 0,
+                    "delta": "{\"location\":\"NYC\"}"
+                }),
+                json!({
+                    "type": "response.function_call_arguments.done",
+                    "item_id": "fc_ns_1",
+                    "output_index": 0,
+                    "arguments": "{\"location\":\"NYC\"}"
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "type": "function_call",
+                        "id": "fc_ns_1",
+                        "call_id": "call_ns_1",
+                        "name": "get_weather",
+                        "arguments": "{\"location\":\"NYC\"}",
+                        "status": "completed",
+                        "namespace": "weather_ns"
+                    }
+                }),
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_ns",
+                        "object": "response",
+                        "created_at": 1741362087,
+                        "status": "completed",
+                        "error": null,
+                        "incomplete_details": null,
+                        "instructions": null,
+                        "max_output_tokens": null,
+                        "model": "gpt-5.4",
+                        "output": [],
+                        "parallel_tool_calls": true,
+                        "previous_response_id": null,
+                        "reasoning": {
+                            "effort": null,
+                            "summary": null
+                        },
+                        "store": true,
+                        "temperature": 0,
+                        "text": {
+                            "format": {
+                                "type": "text"
+                            }
+                        },
+                        "tool_choice": "auto",
+                        "tools": [],
+                        "top_p": 1,
+                        "truncation": "disabled",
+                        "usage": {
+                            "input_tokens": 0,
+                            "input_tokens_details": {
+                                "cached_tokens": 0
+                            },
+                            "output_tokens": 0,
+                            "output_tokens_details": {
+                                "reasoning_tokens": 0
+                            },
+                            "total_tokens": 0
+                        },
+                        "user": null,
+                        "metadata": {}
+                    }
+                }),
+            ],
+        );
+
+        let tool_call = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .expect("stream includes tool call");
+        assert_eq!(
+            openai_metadata_value(&tool_call.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some("fc_ns_1")
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_call.provider_metadata, "namespace")
+                .and_then(JsonValue::as_str),
+            Some("weather_ns")
+        );
+
+        let tool_input_end = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolInputEnd(end) => Some(end),
+                _ => None,
+            })
+            .expect("stream includes tool input end");
+        assert_eq!(
+            openai_metadata_value(&tool_input_end.provider_metadata, "namespace")
+                .and_then(JsonValue::as_str),
+            Some("weather_ns")
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_omits_namespace_on_streaming_function_call_when_absent() {
+        let stream = open_responses_stream_parts_from_events(
+            "gpt-4o",
+            vec![
+                json!({
+                    "type": "response.created",
+                    "response": {
+                        "id": "resp_plain",
+                        "object": "response",
+                        "created_at": 1741362087,
+                        "status": "in_progress",
+                        "error": null,
+                        "incomplete_details": null,
+                        "instructions": null,
+                        "max_output_tokens": null,
+                        "model": "gpt-4o",
+                        "output": [],
+                        "parallel_tool_calls": true,
+                        "previous_response_id": null,
+                        "reasoning": {
+                            "effort": null,
+                            "summary": null
+                        },
+                        "store": true,
+                        "temperature": 0,
+                        "text": {
+                            "format": {
+                                "type": "text"
+                            }
+                        },
+                        "tool_choice": "auto",
+                        "tools": [],
+                        "top_p": 1,
+                        "truncation": "disabled",
+                        "usage": null,
+                        "user": null,
+                        "metadata": {}
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        "type": "function_call",
+                        "id": "fc_plain",
+                        "call_id": "call_plain",
+                        "name": "get_weather",
+                        "arguments": "",
+                        "status": "in_progress"
+                    }
+                }),
+                json!({
+                    "type": "response.function_call_arguments.done",
+                    "item_id": "fc_plain",
+                    "output_index": 0,
+                    "arguments": "{}"
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "type": "function_call",
+                        "id": "fc_plain",
+                        "call_id": "call_plain",
+                        "name": "get_weather",
+                        "arguments": "{}",
+                        "status": "completed"
+                    }
+                }),
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_plain",
+                        "object": "response",
+                        "created_at": 1741362087,
+                        "status": "completed",
+                        "error": null,
+                        "incomplete_details": null,
+                        "instructions": null,
+                        "max_output_tokens": null,
+                        "model": "gpt-4o",
+                        "output": [],
+                        "parallel_tool_calls": true,
+                        "previous_response_id": null,
+                        "reasoning": {
+                            "effort": null,
+                            "summary": null
+                        },
+                        "store": true,
+                        "temperature": 0,
+                        "text": {
+                            "format": {
+                                "type": "text"
+                            }
+                        },
+                        "tool_choice": "auto",
+                        "tools": [],
+                        "top_p": 1,
+                        "truncation": "disabled",
+                        "usage": {
+                            "input_tokens": 0,
+                            "input_tokens_details": {
+                                "cached_tokens": 0
+                            },
+                            "output_tokens": 0,
+                            "output_tokens_details": {
+                                "reasoning_tokens": 0
+                            },
+                            "total_tokens": 0
+                        },
+                        "user": null,
+                        "metadata": {}
+                    }
+                }),
+            ],
+        );
+
+        let tool_call = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .expect("stream includes tool call");
+        assert_eq!(
+            openai_metadata_value(&tool_call.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some("fc_plain")
+        );
+        assert!(
+            openai_metadata_value(&tool_call.provider_metadata, "namespace").is_none(),
+            "namespace metadata must be absent when upstream omits namespace"
+        );
+
+        let tool_input_end = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolInputEnd(end) => Some(end),
+                _ => None,
+            })
+            .expect("stream includes tool input end");
+        assert!(
+            openai_metadata_value(&tool_input_end.provider_metadata, "namespace").is_none(),
+            "tool input end namespace metadata must be absent"
+        );
     }
 
     #[test]
