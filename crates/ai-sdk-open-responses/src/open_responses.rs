@@ -17300,6 +17300,184 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_streams_client_tool_search_fixture_as_non_provider_executed_parts() {
+        let transport: OpenResponsesTransport = Arc::new(
+            move |_request| -> OpenResponsesTransportFuture {
+                let sse = [
+                    r#"data: {"type":"response.created","response":{"id":"resp_05147bbe356953b60069ab67352c908196a63357757792b203","object":"response","created_at":1772840757,"status":"in_progress","model":"gpt-5.4-2026-03-05","output":[],"parallel_tool_calls":true,"reasoning":{"effort":"none","summary":null},"store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"function","defer_loading":true,"description":"Get the current weather at a specific location","name":"get_weather","parameters":{"type":"object","properties":{"location":{"type":"string","description":"The city and state, e.g. San Francisco, CA"},"unit":{"type":"string","enum":["celsius","fahrenheit"],"description":"Temperature unit"}},"required":["location","unit"],"additionalProperties":false},"strict":true},{"type":"function","defer_loading":true,"description":"Search through files in the workspace","name":"search_files","parameters":{"type":"object","properties":{"query":{"type":"string","description":"The search query"},"file_types":{"type":"array","items":{"type":"string"},"description":"Filter by file types"}},"required":["query","file_types"],"additionalProperties":false},"strict":true},{"type":"tool_search","description":"Search for available tools based on what the user needs.","execution":"client","parameters":{"type":"object","properties":{"goal":{"type":"string","description":"What the user is trying to accomplish"}},"required":["goal"],"additionalProperties":false}}],"top_p":0.98,"truncation":"disabled","usage":null,"metadata":{}}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","item":{"id":"tsc_05147bbe356953b60069ab673598f88196b499a756b524b64c","type":"tool_search_call","status":"in_progress","arguments":{},"call_id":"call_NHis2zQiYcIaO6pf9nb5q1wY","execution":"client"},"output_index":0,"sequence_number":2}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","item":{"id":"tsc_05147bbe356953b60069ab673598f88196b499a756b524b64c","type":"tool_search_call","status":"completed","arguments":{"goal":"Find a tool that can provide current weather information for San Francisco."},"call_id":"call_RWTIIVfxsJW9fecsg6fy23Dy","execution":"client"},"output_index":0,"sequence_number":3}"#,
+                    "",
+                    r#"data: {"type":"response.completed","response":{"id":"resp_05147bbe356953b60069ab67352c908196a63357757792b203","object":"response","created_at":1772840757,"status":"completed","model":"gpt-5.4-2026-03-05","output":[{"id":"tsc_05147bbe356953b60069ab673598f88196b499a756b524b64c","type":"tool_search_call","status":"completed","arguments":{"goal":"Find a tool that can provide current weather information for San Francisco."},"call_id":"call_RWTIIVfxsJW9fecsg6fy23Dy","execution":"client"}],"parallel_tool_calls":true,"reasoning":{"effort":"none","summary":null},"store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"function","defer_loading":true,"description":"Get the current weather at a specific location","name":"get_weather","parameters":{"type":"object","properties":{"location":{"type":"string","description":"The city and state, e.g. San Francisco, CA"},"unit":{"type":"string","enum":["celsius","fahrenheit"],"description":"Temperature unit"}},"required":["location","unit"],"additionalProperties":false},"strict":true},{"type":"function","defer_loading":true,"description":"Search through files in the workspace","name":"search_files","parameters":{"type":"object","properties":{"query":{"type":"string","description":"The search query"},"file_types":{"type":"array","items":{"type":"string"},"description":"Filter by file types"}},"required":["query","file_types"],"additionalProperties":false},"strict":true},{"type":"tool_search","description":"Search for available tools based on what the user needs.","execution":"client","parameters":{"type":"object","properties":{"goal":{"type":"string","description":"What the user is trying to accomplish"}},"required":["goal"],"additionalProperties":false}}],"top_p":0.98,"truncation":"disabled","usage":{"input_tokens":65,"input_tokens_details":{"cached_tokens":0},"output_tokens":31,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":96},"metadata":{}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-5.4");
+
+        let result = poll_ready(model.do_stream(open_responses_client_tool_search_call_options()));
+
+        let tool_input_starts = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolInputStart(start)
+                    if start.tool_name == "toolSearch" =>
+                {
+                    Some(start)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let tool_input_ends = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolInputEnd(end) => Some(end),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let tool_calls = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call)
+                    if tool_call.tool_name == "toolSearch" =>
+                {
+                    Some(tool_call)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(tool_input_starts.len(), 1);
+        assert_eq!(tool_input_starts[0].id, "call_RWTIIVfxsJW9fecsg6fy23Dy");
+        assert_eq!(tool_input_starts[0].provider_executed, None);
+
+        assert_eq!(tool_input_ends.len(), 1);
+        assert_eq!(tool_input_ends[0].id, "call_RWTIIVfxsJW9fecsg6fy23Dy");
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].tool_call_id, "call_RWTIIVfxsJW9fecsg6fy23Dy");
+        assert_eq!(tool_calls[0].provider_executed, None);
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&tool_calls[0].input)
+                .expect("tool search input is JSON"),
+            json!({
+                "arguments": {
+                    "goal": "Find a tool that can provide current weather information for San Francisco."
+                },
+                "call_id": "call_RWTIIVfxsJW9fecsg6fy23Dy"
+            })
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_calls[0].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some("tsc_05147bbe356953b60069ab673598f88196b499a756b524b64c")
+        );
+        assert!(
+            !result
+                .stream
+                .iter()
+                .any(|part| format!("{part:?}").contains("call_NHis2zQiYcIaO6pf9nb5q1wY"))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_streams_function_call_after_client_tool_search_output() {
+        let transport: OpenResponsesTransport = Arc::new(
+            move |_request| -> OpenResponsesTransportFuture {
+                let sse = [
+                    r#"data: {"type":"response.created","response":{"id":"resp_05147bbe356953b60069ab6736cddc8196933842ce635db83f","object":"response","created_at":1772840758,"status":"in_progress","model":"gpt-5.4-2026-03-05","output":[],"parallel_tool_calls":true,"reasoning":{"effort":"none","summary":null},"store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"function","defer_loading":true,"description":"Search through files in the workspace","name":"search_files","parameters":{"type":"object","properties":{"query":{"type":"string","description":"The search query"},"file_types":{"type":"array","items":{"type":"string"},"description":"Filter by file types"}},"required":["query","file_types"],"additionalProperties":false},"strict":true},{"type":"function","description":"Get the current weather at a specific location","name":"get_weather","parameters":{"type":"object","properties":{"location":{"type":"string","description":"The city and state, e.g. San Francisco, CA"},"unit":{"type":"string","enum":["celsius","fahrenheit"],"description":"Temperature unit"}},"required":["location","unit"],"additionalProperties":false},"strict":true},{"type":"tool_search","description":"Search for available tools based on what the user needs.","execution":"client","parameters":{"type":"object","properties":{"goal":{"type":"string","description":"What the user is trying to accomplish"}},"required":["goal"],"additionalProperties":false}},{"type":"namespace","description":"Get the current weather at a specific location","name":"get_weather","tools":[{"type":"function","description":"Get the current weather at a specific location","name":"get_weather","parameters":{"type":"object","properties":{"location":{"type":"string","description":"The city and state, e.g. San Francisco, CA"},"unit":{"type":"string","enum":["celsius","fahrenheit"],"description":"Temperature unit"}},"required":["location","unit"],"additionalProperties":false},"strict":true}]}],"top_p":0.98,"truncation":"disabled","usage":null,"metadata":{}}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","item":{"id":"fc_05147bbe356953b60069ab673745c081969b5c16c333b4f179","type":"function_call","status":"in_progress","arguments":"","call_id":"call_Q7pq6EfVGRnauPLWSSYBGJ1l","name":"get_weather"},"output_index":0,"sequence_number":2}"#,
+                    "",
+                    r#"data: {"type":"response.function_call_arguments.delta","delta":"{\"","item_id":"fc_05147bbe356953b60069ab673745c081969b5c16c333b4f179","output_index":0,"sequence_number":3}"#,
+                    "",
+                    r#"data: {"type":"response.function_call_arguments.delta","delta":"location","item_id":"fc_05147bbe356953b60069ab673745c081969b5c16c333b4f179","output_index":0,"sequence_number":4}"#,
+                    "",
+                    r#"data: {"type":"response.function_call_arguments.delta","delta":"\":\"","item_id":"fc_05147bbe356953b60069ab673745c081969b5c16c333b4f179","output_index":0,"sequence_number":5}"#,
+                    "",
+                    r#"data: {"type":"response.function_call_arguments.delta","delta":"San Francisco, CA","item_id":"fc_05147bbe356953b60069ab673745c081969b5c16c333b4f179","output_index":0,"sequence_number":6}"#,
+                    "",
+                    r#"data: {"type":"response.function_call_arguments.delta","delta":"\",\"unit\":\"fahrenheit\"}","item_id":"fc_05147bbe356953b60069ab673745c081969b5c16c333b4f179","output_index":0,"sequence_number":7}"#,
+                    "",
+                    r#"data: {"type":"response.function_call_arguments.done","arguments":"{\"location\":\"San Francisco, CA\",\"unit\":\"fahrenheit\"}","item_id":"fc_05147bbe356953b60069ab673745c081969b5c16c333b4f179","output_index":0,"sequence_number":8}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","item":{"id":"fc_05147bbe356953b60069ab673745c081969b5c16c333b4f179","type":"function_call","status":"completed","arguments":"{\"location\":\"San Francisco, CA\",\"unit\":\"fahrenheit\"}","call_id":"call_Q7pq6EfVGRnauPLWSSYBGJ1l","name":"get_weather"},"output_index":0,"sequence_number":9}"#,
+                    "",
+                    r#"data: {"type":"response.completed","response":{"id":"resp_05147bbe356953b60069ab6736cddc8196933842ce635db83f","object":"response","created_at":1772840758,"status":"completed","model":"gpt-5.4-2026-03-05","output":[{"id":"fc_05147bbe356953b60069ab673745c081969b5c16c333b4f179","type":"function_call","status":"completed","arguments":"{\"location\":\"San Francisco, CA\",\"unit\":\"fahrenheit\"}","call_id":"call_Q7pq6EfVGRnauPLWSSYBGJ1l","name":"get_weather"}],"parallel_tool_calls":true,"reasoning":{"effort":"none","summary":null},"store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","top_p":0.98,"truncation":"disabled","usage":{"input_tokens":467,"input_tokens_details":{"cached_tokens":0},"output_tokens":26,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":493},"metadata":{}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-5.4");
+
+        let result = poll_ready(model.do_stream(open_responses_client_tool_search_call_options()));
+
+        let input_deltas = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolInputDelta(delta) => Some(delta.delta.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(
+            input_deltas,
+            r#"{"location":"San Francisco, CA","unit":"fahrenheit"}"#
+        );
+
+        let tool_call = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call)
+                    if tool_call.tool_name == "get_weather" =>
+                {
+                    Some(tool_call)
+                }
+                _ => None,
+            })
+            .expect("stream includes get_weather tool call");
+        assert_eq!(tool_call.tool_call_id, "call_Q7pq6EfVGRnauPLWSSYBGJ1l");
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&tool_call.input).expect("tool input is JSON"),
+            json!({
+                "location": "San Francisco, CA",
+                "unit": "fahrenheit"
+            })
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_call.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some("fc_05147bbe356953b60069ab673745c081969b5c16c333b4f179")
+        );
+    }
+
+    #[test]
     fn open_responses_streams_function_call_argument_deltas() {
         let transport: OpenResponsesTransport = Arc::new(
             move |_request| -> OpenResponsesTransportFuture {
@@ -17385,6 +17563,88 @@ mod tests {
 
     fn json_object(value: JsonValue) -> JsonObject {
         serde_json::from_value(value).expect("value is a JSON object")
+    }
+
+    fn openai_defer_loading_options() -> ProviderOptions {
+        serde_json::from_value(json!({
+            "openai": {
+                "deferLoading": true
+            }
+        }))
+        .expect("provider options deserialize")
+    }
+
+    fn open_responses_client_tool_search_call_options() -> LanguageModelCallOptions {
+        LanguageModelCallOptions::new(open_responses_hello_prompt())
+            .with_tool(LanguageModelTool::Function(
+                LanguageModelFunctionTool::new(
+                    "get_weather",
+                    json_object(json!({
+                        "type": "object",
+                        "properties": {
+                            "location": {
+                                "type": "string",
+                                "description": "The city and state, e.g. San Francisco, CA"
+                            },
+                            "unit": {
+                                "type": "string",
+                                "enum": ["celsius", "fahrenheit"],
+                                "description": "Temperature unit"
+                            }
+                        },
+                        "required": ["location", "unit"],
+                        "additionalProperties": false
+                    })),
+                )
+                .with_description("Get the current weather at a specific location")
+                .with_strict(true)
+                .with_provider_options(openai_defer_loading_options()),
+            ))
+            .with_tool(LanguageModelTool::Function(
+                LanguageModelFunctionTool::new(
+                    "search_files",
+                    json_object(json!({
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The search query"
+                            },
+                            "file_types": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string"
+                                },
+                                "description": "Filter by file types"
+                            }
+                        },
+                        "required": ["query", "file_types"],
+                        "additionalProperties": false
+                    })),
+                )
+                .with_description("Search through files in the workspace")
+                .with_strict(true)
+                .with_provider_options(openai_defer_loading_options()),
+            ))
+            .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                "openai.tool_search",
+                "toolSearch",
+                json_object(json!({
+                    "execution": "client",
+                    "description": "Search for available tools based on what the user needs.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "goal": {
+                                "type": "string",
+                                "description": "What the user is trying to accomplish"
+                            }
+                        },
+                        "required": ["goal"],
+                        "additionalProperties": false
+                    }
+                })),
+            )))
     }
 
     fn weather_function_tool() -> LanguageModelTool {
