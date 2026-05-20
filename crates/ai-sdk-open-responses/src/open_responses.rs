@@ -7380,6 +7380,45 @@ mod tests {
             .expect("request body is JSON")
     }
 
+    fn open_responses_tool_message_request_body(
+        results: Vec<LanguageModelToolResultPart>,
+    ) -> (JsonValue, Vec<Warning>) {
+        let (provider, captured_request) =
+            open_responses_captured_provider("openai", "gpt-4.1-mini");
+        let model = provider.language_model("gpt-4.1-mini");
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(
+                results
+                    .into_iter()
+                    .map(LanguageModelToolContentPart::ToolResult)
+                    .collect(),
+            )),
+        ])));
+
+        (
+            captured_open_responses_request_body(&captured_request),
+            result.warnings,
+        )
+    }
+
+    fn open_responses_single_tool_result_request_body(
+        output: LanguageModelToolResultOutput,
+    ) -> (JsonValue, Vec<Warning>) {
+        open_responses_tool_message_request_body(vec![LanguageModelToolResultPart::new(
+            "call_123", "search", output,
+        )])
+    }
+
+    fn assert_open_responses_single_tool_result_input(
+        output: LanguageModelToolResultOutput,
+        expected_input: JsonValue,
+    ) {
+        let (request_body, warnings) = open_responses_single_tool_result_request_body(output);
+
+        assert!(warnings.is_empty());
+        assert_eq!(request_body["input"], json!([expected_input]));
+    }
+
     fn open_responses_custom_tool_prompt_request_body(
         prompt: Vec<LanguageModelMessage>,
         include_custom_provider_tool: bool,
@@ -8821,6 +8860,82 @@ mod tests {
                     }
                 ]
             }))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_single_json_tool_result_to_function_call_output() {
+        assert_open_responses_single_tool_result_input(
+            LanguageModelToolResultOutput::json(json!({
+                "temperature": "72\u{00b0}F",
+                "condition": "Sunny"
+            })),
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_123",
+                "output": "{\"condition\":\"Sunny\",\"temperature\":\"72\u{00b0}F\"}"
+            }),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_single_text_tool_result_to_function_call_output() {
+        assert_open_responses_single_tool_result_input(
+            LanguageModelToolResultOutput::text("The weather in San Francisco is 72\u{00b0}F"),
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_123",
+                "output": "The weather in San Francisco is 72\u{00b0}F"
+            }),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_execution_denied_tool_result_to_function_call_output() {
+        assert_open_responses_single_tool_result_input(
+            LanguageModelToolResultOutput::execution_denied()
+                .with_reason("User denied the tool execution"),
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_123",
+                "output": "User denied the tool execution"
+            }),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_multiple_tool_results_in_single_message() {
+        let (request_body, warnings) = open_responses_tool_message_request_body(vec![
+            LanguageModelToolResultPart::new(
+                "call_123",
+                "search",
+                LanguageModelToolResultOutput::json(json!({
+                    "temperature": "72\u{00b0}F",
+                    "condition": "Sunny"
+                })),
+            ),
+            LanguageModelToolResultPart::new(
+                "call_456",
+                "calculator",
+                LanguageModelToolResultOutput::json(json!(4)),
+            ),
+        ]);
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": "{\"condition\":\"Sunny\",\"temperature\":\"72\u{00b0}F\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_456",
+                    "output": "4"
+                }
+            ])
         );
     }
 
@@ -19188,6 +19303,262 @@ mod tests {
                 .as_ref()
                 .and_then(|request| request.body.as_ref()),
             Some(&json!({ "model": "gpt-4.1-mini" }))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_tool_result_content_text_to_output_array() {
+        assert_open_responses_single_tool_result_input(
+            LanguageModelToolResultOutput::content(vec![LanguageModelToolResultContentPart::Text(
+                LanguageModelTextPart::new("The weather in San Francisco is 72\u{00b0}F"),
+            )]),
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_123",
+                "output": [
+                    {
+                        "type": "input_text",
+                        "text": "The weather in San Francisco is 72\u{00b0}F"
+                    }
+                ]
+            }),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_tool_result_content_image_data_to_input_image() {
+        assert_open_responses_single_tool_result_input(
+            LanguageModelToolResultOutput::content(vec![LanguageModelToolResultContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Base64("AQIDBAU=".to_string()),
+                    },
+                    "image/png",
+                ),
+            )]),
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_123",
+                "output": [
+                    {
+                        "type": "input_image",
+                        "image_url": "data:image/png;base64,AQIDBAU="
+                    }
+                ]
+            }),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_forwards_image_detail_on_tool_result_image_data() {
+        let image_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "imageDetail": "original"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        assert_open_responses_single_tool_result_input(
+            LanguageModelToolResultOutput::content(vec![LanguageModelToolResultContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Base64("AQIDBAU=".to_string()),
+                    },
+                    "image/png",
+                )
+                .with_provider_options(image_options),
+            )]),
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_123",
+                "output": [
+                    {
+                        "type": "input_image",
+                        "image_url": "data:image/png;base64,AQIDBAU=",
+                        "detail": "original"
+                    }
+                ]
+            }),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_forwards_image_detail_on_tool_result_image_url() {
+        let image_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "imageDetail": "high"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        assert_open_responses_single_tool_result_input(
+            LanguageModelToolResultOutput::content(vec![LanguageModelToolResultContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Url {
+                        url: Url::parse("https://example.com/x.png").expect("url parses"),
+                    },
+                    "image/png",
+                )
+                .with_provider_options(image_options),
+            )]),
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_123",
+                "output": [
+                    {
+                        "type": "input_image",
+                        "image_url": "https://example.com/x.png",
+                        "detail": "high"
+                    }
+                ]
+            }),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_tool_result_content_image_url_to_input_image() {
+        assert_open_responses_single_tool_result_input(
+            LanguageModelToolResultOutput::content(vec![LanguageModelToolResultContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Url {
+                        url: Url::parse("https://example.com/screenshot.png").expect("url parses"),
+                    },
+                    "image/png",
+                ),
+            )]),
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_123",
+                "output": [
+                    {
+                        "type": "input_image",
+                        "image_url": "https://example.com/screenshot.png"
+                    }
+                ]
+            }),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_tool_result_content_pdf_data_to_input_file() {
+        assert_open_responses_single_tool_result_input(
+            LanguageModelToolResultOutput::content(vec![LanguageModelToolResultContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Base64("AQIDBAU=".to_string()),
+                    },
+                    "application/pdf",
+                )
+                .with_filename("document.pdf"),
+            )]),
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_123",
+                "output": [
+                    {
+                        "type": "input_file",
+                        "filename": "document.pdf",
+                        "file_data": "data:application/pdf;base64,AQIDBAU="
+                    }
+                ]
+            }),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_tool_result_content_file_url_to_input_file() {
+        assert_open_responses_single_tool_result_input(
+            LanguageModelToolResultOutput::content(vec![LanguageModelToolResultContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Url {
+                        url: Url::parse("https://example.com/document.pdf").expect("url parses"),
+                    },
+                    "application/pdf",
+                ),
+            )]),
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_123",
+                "output": [
+                    {
+                        "type": "input_file",
+                        "file_url": "https://example.com/document.pdf"
+                    }
+                ]
+            }),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_tool_result_mixed_content_with_file_url() {
+        assert_open_responses_single_tool_result_input(
+            LanguageModelToolResultOutput::content(vec![
+                LanguageModelToolResultContentPart::Text(LanguageModelTextPart::new(
+                    "Here is the file you asked for:",
+                )),
+                LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                    FileData::Url {
+                        url: Url::parse("https://example.com/test.pdf").expect("url parses"),
+                    },
+                    "application/pdf",
+                )),
+            ]),
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_123",
+                "output": [
+                    {
+                        "type": "input_text",
+                        "text": "Here is the file you asked for:"
+                    },
+                    {
+                        "type": "input_file",
+                        "file_url": "https://example.com/test.pdf"
+                    }
+                ]
+            }),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_tool_result_mixed_text_image_pdf_content() {
+        assert_open_responses_single_tool_result_input(
+            LanguageModelToolResultOutput::content(vec![
+                LanguageModelToolResultContentPart::Text(LanguageModelTextPart::new(
+                    "The weather in San Francisco is 72\u{00b0}F",
+                )),
+                LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Base64("AQIDBAU=".to_string()),
+                    },
+                    "image/png",
+                )),
+                LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Base64("AQIDBAU=".to_string()),
+                    },
+                    "application/pdf",
+                )),
+            ]),
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_123",
+                "output": [
+                    {
+                        "type": "input_text",
+                        "text": "The weather in San Francisco is 72\u{00b0}F"
+                    },
+                    {
+                        "type": "input_image",
+                        "image_url": "data:image/png;base64,AQIDBAU="
+                    },
+                    {
+                        "type": "input_file",
+                        "filename": "data",
+                        "file_data": "data:application/pdf;base64,AQIDBAU="
+                    }
+                ]
+            }),
         );
     }
 
