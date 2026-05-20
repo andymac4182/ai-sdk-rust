@@ -5270,14 +5270,26 @@ fn open_responses_stream_result_from_response(
                                         item.get("execution").and_then(JsonValue::as_str),
                                         Some("server")
                                     );
+                                    let tool_name =
+                                        tool_name_mapping.to_custom_tool_name("tool_search");
 
                                     if hosted {
                                         hosted_tool_search_call_ids.push_back(tool_call_id.clone());
+                                    } else {
+                                        stream.push(LanguageModelStreamPart::ToolInputStart(
+                                            LanguageModelToolInputStart::new(
+                                                &tool_call_id,
+                                                &tool_name,
+                                            ),
+                                        ));
+                                        stream.push(LanguageModelStreamPart::ToolInputEnd(
+                                            LanguageModelToolInputEnd::new(&tool_call_id),
+                                        ));
                                     }
 
                                     let mut tool_call = LanguageModelToolCall::new(
                                         tool_call_id,
-                                        tool_name_mapping.to_custom_tool_name("tool_search"),
+                                        tool_name,
                                         open_responses_tool_search_input(item),
                                     );
 
@@ -17102,6 +17114,188 @@ mod tests {
                 _ => None,
             }),
             Some(FinishReason::ToolCalls)
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_streams_client_tool_search_uses_final_call_id() {
+        let transport: OpenResponsesTransport = Arc::new(
+            move |_request| -> OpenResponsesTransportFuture {
+                let sse = [
+                    r#"data: {"type":"response.created","response":{"id":"resp_tool_search_client","object":"response","created_at":1741362087,"status":"in_progress","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-5.4","output":[],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"store":false,"temperature":0,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[{"type":"tool_search","execution":"client","description":"Search for tools","parameters":{"type":"object","properties":{"goal":{"type":"string"}},"required":["goal"],"additionalProperties":false}},{"type":"function","name":"get_weather","description":"Get the current weather at a specific location","parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"],"additionalProperties":false},"strict":true,"defer_loading":true}],"top_p":1,"truncation":"disabled","usage":null,"user":null,"metadata":{}}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":0,"item":{"type":"tool_search_call","id":"tsc_client_1","execution":"client","call_id":"call_provisional","status":"completed","arguments":{"goal":"Find the weather tool"}}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":0,"item":{"type":"tool_search_call","id":"tsc_client_1","execution":"client","call_id":"call_final","status":"completed","arguments":{"goal":"Find the weather tool"}}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":1,"item":{"type":"tool_search_output","id":"tso_client_1","execution":"client","call_id":"call_final","status":"completed","tools":[{"type":"function","name":"get_weather","description":"Get the current weather at a specific location","parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"],"additionalProperties":false},"strict":true,"defer_loading":true}]}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":1,"item":{"type":"tool_search_output","id":"tso_client_1","execution":"client","call_id":"call_final","status":"completed","tools":[{"type":"function","name":"get_weather","description":"Get the current weather at a specific location","parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"],"additionalProperties":false},"strict":true,"defer_loading":true}]}}"#,
+                    "",
+                    r#"data: {"type":"response.completed","response":{"id":"resp_tool_search_client","object":"response","created_at":1741362087,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-5.4","output":[{"type":"tool_search_call","id":"tsc_client_1","execution":"client","call_id":"call_final","status":"completed","arguments":{"goal":"Find the weather tool"}},{"type":"tool_search_output","id":"tso_client_1","execution":"client","call_id":"call_final","status":"completed","tools":[{"type":"function","name":"get_weather","description":"Get the current weather at a specific location","parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"],"additionalProperties":false},"strict":true,"defer_loading":true}]}],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"store":false,"temperature":0,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[{"type":"tool_search","execution":"client","description":"Search for tools","parameters":{"type":"object","properties":{"goal":{"type":"string"}},"required":["goal"],"additionalProperties":false}},{"type":"function","name":"get_weather","description":"Get the current weather at a specific location","parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"],"additionalProperties":false},"strict":true,"defer_loading":true}],"top_p":1,"truncation":"disabled","usage":{"input_tokens":0,"input_tokens_details":{"cached_tokens":0},"output_tokens":0,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":0},"user":null,"metadata":{}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-5.4");
+        let defer_loading_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "deferLoading": true
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(open_responses_hello_prompt())
+                    .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                        "openai.tool_search",
+                        "toolSearch",
+                        json_object(json!({
+                            "execution": "client",
+                            "description": "Search for tools",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "goal": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["goal"],
+                                "additionalProperties": false
+                            }
+                        })),
+                    )))
+                    .with_tool(LanguageModelTool::Function(
+                        LanguageModelFunctionTool::new(
+                            "get_weather",
+                            json_object(json!({
+                                "type": "object",
+                                "properties": {
+                                    "location": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["location"],
+                                "additionalProperties": false
+                            })),
+                        )
+                        .with_description("Get the current weather at a specific location")
+                        .with_strict(true)
+                        .with_provider_options(defer_loading_options),
+                    )),
+            ),
+        );
+
+        let tool_input_starts = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolInputStart(start) => Some(start),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let tool_input_ends = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolInputEnd(end) => Some(end),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let tool_calls = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let tool_results = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(tool_input_starts.len(), 1);
+        assert_eq!(tool_input_starts[0].id, "call_final");
+        assert_eq!(tool_input_starts[0].tool_name, "toolSearch");
+        assert_eq!(tool_input_starts[0].provider_executed, None);
+
+        assert_eq!(tool_input_ends.len(), 1);
+        assert_eq!(tool_input_ends[0].id, "call_final");
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].tool_call_id, "call_final");
+        assert_eq!(tool_calls[0].tool_name, "toolSearch");
+        assert_eq!(tool_calls[0].provider_executed, None);
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&tool_calls[0].input)
+                .expect("tool search input is JSON"),
+            json!({
+                "arguments": {
+                    "goal": "Find the weather tool"
+                },
+                "call_id": "call_final"
+            })
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_calls[0].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some("tsc_client_1")
+        );
+
+        assert_eq!(tool_results.len(), 1);
+        assert_eq!(tool_results[0].tool_call_id, "call_final");
+        assert_eq!(tool_results[0].tool_name, "toolSearch");
+        assert_eq!(
+            openai_metadata_value(&tool_results[0].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some("tso_client_1")
+        );
+        assert_eq!(
+            tool_results[0].result.as_value(),
+            &json!({
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "get_weather",
+                        "description": "Get the current weather at a specific location",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": ["location"],
+                            "additionalProperties": false
+                        },
+                        "strict": true,
+                        "defer_loading": true
+                    }
+                ]
+            })
+        );
+
+        assert!(
+            !result
+                .stream
+                .iter()
+                .any(|part| format!("{part:?}").contains("call_provisional"))
         );
     }
 
