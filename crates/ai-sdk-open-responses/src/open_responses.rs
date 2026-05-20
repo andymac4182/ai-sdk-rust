@@ -14727,24 +14727,36 @@ mod tests {
         );
     }
 
-    #[test]
-    fn open_responses_provider_sends_text_verbosity_provider_option_values() {
-        for verbosity in ["low", "medium", "high"] {
-            let (warnings, request_body) = openai_provider_option_request_body(
-                "gpt-5",
-                json!({
-                    "textVerbosity": verbosity
-                }),
-            );
+    fn assert_open_responses_text_verbosity_provider_option(verbosity: &str) {
+        let (warnings, request_body) = openai_provider_option_request_body(
+            "gpt-5",
+            json!({
+                "textVerbosity": verbosity
+            }),
+        );
 
-            assert!(warnings.is_empty());
-            let mut expected = openai_text_request_body("gpt-5");
-            expected
-                .as_object_mut()
-                .expect("request body is an object")
-                .insert("text".to_string(), json!({ "verbosity": verbosity }));
-            assert_eq!(request_body, expected);
-        }
+        assert!(warnings.is_empty());
+        let mut expected = openai_text_request_body("gpt-5");
+        expected
+            .as_object_mut()
+            .expect("request body is an object")
+            .insert("text".to_string(), json!({ "verbosity": verbosity }));
+        assert_eq!(request_body, expected);
+    }
+
+    #[test]
+    fn open_responses_provider_sends_text_verbosity_low_provider_option() {
+        assert_open_responses_text_verbosity_provider_option("low");
+    }
+
+    #[test]
+    fn open_responses_provider_sends_text_verbosity_medium_provider_option() {
+        assert_open_responses_text_verbosity_provider_option("medium");
+    }
+
+    #[test]
+    fn open_responses_provider_sends_text_verbosity_high_provider_option() {
+        assert_open_responses_text_verbosity_provider_option("high");
     }
 
     #[test]
@@ -14804,24 +14816,31 @@ mod tests {
         assert_eq!(request_body, expected);
     }
 
-    #[test]
-    fn open_responses_provider_sends_truncation_provider_option_values() {
-        for truncation in ["auto", "disabled"] {
-            let (warnings, request_body) = openai_provider_option_request_body(
-                "gpt-5",
-                json!({
-                    "truncation": truncation
-                }),
-            );
+    fn assert_open_responses_truncation_provider_option(truncation: &str) {
+        let (warnings, request_body) = openai_provider_option_request_body(
+            "gpt-5",
+            json!({
+                "truncation": truncation
+            }),
+        );
 
-            assert!(warnings.is_empty());
-            let mut expected = openai_text_request_body("gpt-5");
-            expected
-                .as_object_mut()
-                .expect("request body is an object")
-                .insert("truncation".to_string(), json!(truncation));
-            assert_eq!(request_body, expected);
-        }
+        assert!(warnings.is_empty());
+        let mut expected = openai_text_request_body("gpt-5");
+        expected
+            .as_object_mut()
+            .expect("request body is an object")
+            .insert("truncation".to_string(), json!(truncation));
+        assert_eq!(request_body, expected);
+    }
+
+    #[test]
+    fn open_responses_provider_sends_truncation_auto_provider_option() {
+        assert_open_responses_truncation_provider_option("auto");
+    }
+
+    #[test]
+    fn open_responses_provider_sends_truncation_disabled_provider_option() {
+        assert_open_responses_truncation_provider_option("disabled");
     }
 
     #[test]
