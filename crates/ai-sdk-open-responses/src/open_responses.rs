@@ -7513,6 +7513,32 @@ mod tests {
         }))
     }
 
+    fn openai_store_options(store: bool) -> ProviderOptions {
+        openai_provider_options(json!({
+            "store": store
+        }))
+    }
+
+    fn openai_reasoning_options(
+        item_id: Option<&str>,
+        encrypted_content: Option<&str>,
+    ) -> ProviderOptions {
+        let mut openai = JsonObject::new();
+        if let Some(item_id) = item_id {
+            openai.insert("itemId".to_string(), JsonValue::String(item_id.to_string()));
+        }
+        if let Some(encrypted_content) = encrypted_content {
+            openai.insert(
+                "reasoningEncryptedContent".to_string(),
+                JsonValue::String(encrypted_content.to_string()),
+            );
+        }
+
+        let mut options = ProviderOptions::new();
+        options.insert("openai".to_string(), openai);
+        options
+    }
+
     fn openai_compaction_options(item_id: &str, encrypted_content: &str) -> ProviderOptions {
         openai_provider_options(json!({
             "type": "compaction",
@@ -7540,6 +7566,52 @@ mod tests {
             result.warnings,
             captured_open_responses_request_body(&captured_request),
         )
+    }
+
+    fn open_responses_reasoning_part(
+        text: &str,
+        item_id: Option<&str>,
+        encrypted_content: Option<&str>,
+    ) -> LanguageModelAssistantContentPart {
+        LanguageModelAssistantContentPart::Reasoning(
+            LanguageModelReasoningPart::new(text)
+                .with_provider_options(openai_reasoning_options(item_id, encrypted_content)),
+        )
+    }
+
+    fn open_responses_assistant_reasoning_request_body(
+        content: Vec<LanguageModelAssistantContentPart>,
+        store: bool,
+    ) -> (Vec<Warning>, JsonValue) {
+        openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(content),
+            )])
+            .with_provider_options(openai_store_options(store)),
+        )
+    }
+
+    fn assert_open_responses_assistant_reasoning_input(
+        content: Vec<LanguageModelAssistantContentPart>,
+        store: bool,
+        expected_input: JsonValue,
+    ) {
+        let (warnings, request_body) =
+            open_responses_assistant_reasoning_request_body(content, store);
+
+        assert!(warnings.is_empty());
+        assert_eq!(request_body["input"], expected_input);
+    }
+
+    fn warning_messages(warnings: &[Warning]) -> Vec<&str> {
+        warnings
+            .iter()
+            .filter_map(|warning| match warning {
+                Warning::Other { message } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn assert_openai_responses_reasoning_model_removes_unsupported_settings(model_id: &str) {
@@ -9411,6 +9483,686 @@ mod tests {
                 ]
             }))
         );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_single_reasoning_text_part_with_store_false() {
+        assert_open_responses_assistant_reasoning_input(
+            vec![open_responses_reasoning_part(
+                "Analyzing the problem step by step",
+                Some("reasoning_001"),
+                Some("encrypted_content_001"),
+            )],
+            false,
+            json!([
+                {
+                    "type": "reasoning",
+                    "id": "reasoning_001",
+                    "encrypted_content": "encrypted_content_001",
+                    "summary": [
+                        {
+                            "type": "summary_text",
+                            "text": "Analyzing the problem step by step"
+                        }
+                    ]
+                }
+            ]),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_single_reasoning_part_with_encrypted_content() {
+        assert_open_responses_assistant_reasoning_input(
+            vec![open_responses_reasoning_part(
+                "Analyzing the problem step by step",
+                Some("reasoning_001"),
+                Some("encrypted_content_001"),
+            )],
+            false,
+            json!([
+                {
+                    "type": "reasoning",
+                    "id": "reasoning_001",
+                    "encrypted_content": "encrypted_content_001",
+                    "summary": [
+                        {
+                            "type": "summary_text",
+                            "text": "Analyzing the problem step by step"
+                        }
+                    ]
+                }
+            ]),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_matches_null_encrypted_content_reasoning_upstream_case() {
+        assert_open_responses_assistant_reasoning_input(
+            vec![open_responses_reasoning_part(
+                "Analyzing the problem step by step",
+                Some("reasoning_001"),
+                Some("encrypted_content_001"),
+            )],
+            false,
+            json!([
+                {
+                    "type": "reasoning",
+                    "id": "reasoning_001",
+                    "encrypted_content": "encrypted_content_001",
+                    "summary": [
+                        {
+                            "type": "summary_text",
+                            "text": "Analyzing the problem step by step"
+                        }
+                    ]
+                }
+            ]),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_creates_empty_reasoning_summary_for_initial_empty_text() {
+        assert_open_responses_assistant_reasoning_input(
+            vec![open_responses_reasoning_part(
+                "",
+                Some("reasoning_001"),
+                Some("encrypted_content_001"),
+            )],
+            false,
+            json!([
+                {
+                    "type": "reasoning",
+                    "id": "reasoning_001",
+                    "encrypted_content": "encrypted_content_001",
+                    "summary": []
+                }
+            ]),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_creates_empty_reasoning_summary_for_initial_empty_text_with_encryption()
+     {
+        assert_open_responses_assistant_reasoning_input(
+            vec![open_responses_reasoning_part(
+                "",
+                Some("reasoning_001"),
+                Some("encrypted_content_001"),
+            )],
+            false,
+            json!([
+                {
+                    "type": "reasoning",
+                    "id": "reasoning_001",
+                    "encrypted_content": "encrypted_content_001",
+                    "summary": []
+                }
+            ]),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_warns_when_appending_empty_reasoning_text() {
+        let (warnings, request_body) = open_responses_assistant_reasoning_request_body(
+            vec![
+                open_responses_reasoning_part("First reasoning step", Some("reasoning_001"), None),
+                open_responses_reasoning_part(
+                    "",
+                    Some("reasoning_001"),
+                    Some("encrypted_content_001"),
+                ),
+            ],
+            false,
+        );
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "reasoning",
+                    "id": "reasoning_001",
+                    "encrypted_content": "encrypted_content_001",
+                    "summary": [
+                        {
+                            "type": "summary_text",
+                            "text": "First reasoning step"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(warnings.len(), 1);
+        let messages = warning_messages(&warnings);
+        assert!(
+            messages.iter().any(|message| message
+                .starts_with("Cannot append empty reasoning part to existing reasoning sequence."))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_merges_consecutive_reasoning_parts_with_same_id() {
+        assert_open_responses_assistant_reasoning_input(
+            vec![
+                open_responses_reasoning_part("First reasoning step", Some("reasoning_001"), None),
+                open_responses_reasoning_part(
+                    "Second reasoning step",
+                    Some("reasoning_001"),
+                    Some("encrypted_content_001"),
+                ),
+            ],
+            false,
+            json!([
+                {
+                    "type": "reasoning",
+                    "id": "reasoning_001",
+                    "encrypted_content": "encrypted_content_001",
+                    "summary": [
+                        {
+                            "type": "summary_text",
+                            "text": "First reasoning step"
+                        },
+                        {
+                            "type": "summary_text",
+                            "text": "Second reasoning step"
+                        }
+                    ]
+                }
+            ]),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_drops_unencrypted_reasoning_parts_with_store_false() {
+        let (warnings, request_body) = open_responses_assistant_reasoning_request_body(
+            vec![
+                open_responses_reasoning_part("First reasoning step", Some("reasoning_001"), None),
+                open_responses_reasoning_part("Second reasoning step", Some("reasoning_001"), None),
+            ],
+            false,
+        );
+
+        assert_eq!(request_body["input"], json!([]));
+        assert_eq!(
+            warning_messages(&warnings),
+            vec![
+                "Reasoning parts without encrypted content are not supported when store is false. Skipping reasoning parts."
+            ]
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_creates_separate_reasoning_messages_for_different_ids() {
+        assert_open_responses_assistant_reasoning_input(
+            vec![
+                open_responses_reasoning_part(
+                    "First reasoning block",
+                    Some("reasoning_001"),
+                    Some("encrypted_content_001"),
+                ),
+                open_responses_reasoning_part(
+                    "Second reasoning block",
+                    Some("reasoning_002"),
+                    Some("encrypted_content_002"),
+                ),
+            ],
+            false,
+            json!([
+                {
+                    "type": "reasoning",
+                    "id": "reasoning_001",
+                    "encrypted_content": "encrypted_content_001",
+                    "summary": [
+                        {
+                            "type": "summary_text",
+                            "text": "First reasoning block"
+                        }
+                    ]
+                },
+                {
+                    "type": "reasoning",
+                    "id": "reasoning_002",
+                    "encrypted_content": "encrypted_content_002",
+                    "summary": [
+                        {
+                            "type": "summary_text",
+                            "text": "Second reasoning block"
+                        }
+                    ]
+                }
+            ]),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_handles_reasoning_across_multiple_assistant_messages_when_stored() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![
+                open_responses_user_text_message("First user question"),
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    open_responses_reasoning_part(
+                        "First reasoning step (message 1)",
+                        Some("reasoning_001"),
+                        None,
+                    ),
+                    open_responses_reasoning_part(
+                        "Second reasoning step (message 1)",
+                        Some("reasoning_001"),
+                        None,
+                    ),
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "First response",
+                    )),
+                ])),
+                open_responses_user_text_message("Second user question"),
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    open_responses_reasoning_part(
+                        "First reasoning step (message 2)",
+                        Some("reasoning_002"),
+                        None,
+                    ),
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "Second response",
+                    )),
+                ])),
+            ])
+            .with_provider_options(openai_store_options(true)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "First user question"
+                        }
+                    ]
+                },
+                {
+                    "type": "item_reference",
+                    "id": "reasoning_001"
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "First response"
+                        }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Second user question"
+                        }
+                    ]
+                },
+                {
+                    "type": "item_reference",
+                    "id": "reasoning_002"
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Second response"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_handles_reasoning_across_multiple_assistant_messages_when_unstored()
+    {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![
+                open_responses_user_text_message("First user question"),
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    open_responses_reasoning_part(
+                        "First reasoning step (message 1)",
+                        Some("reasoning_001"),
+                        None,
+                    ),
+                    open_responses_reasoning_part(
+                        "Second reasoning step (message 1)",
+                        Some("reasoning_001"),
+                        Some("encrypted_content_001"),
+                    ),
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "First response",
+                    )),
+                ])),
+                open_responses_user_text_message("Second user question"),
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    open_responses_reasoning_part(
+                        "First reasoning step (message 2)",
+                        Some("reasoning_002"),
+                        Some("encrypted_content_002"),
+                    ),
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "Second response",
+                    )),
+                ])),
+            ])
+            .with_provider_options(openai_store_options(false)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "First user question"
+                        }
+                    ]
+                },
+                {
+                    "type": "reasoning",
+                    "id": "reasoning_001",
+                    "encrypted_content": "encrypted_content_001",
+                    "summary": [
+                        {
+                            "type": "summary_text",
+                            "text": "First reasoning step (message 1)"
+                        },
+                        {
+                            "type": "summary_text",
+                            "text": "Second reasoning step (message 1)"
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "First response"
+                        }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Second user question"
+                        }
+                    ]
+                },
+                {
+                    "type": "reasoning",
+                    "id": "reasoning_002",
+                    "encrypted_content": "encrypted_content_002",
+                    "summary": [
+                        {
+                            "type": "summary_text",
+                            "text": "First reasoning step (message 2)"
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Second response"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_handles_complex_reasoning_sequences_with_tool_interactions() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    open_responses_reasoning_part(
+                        "Initial analysis step 1",
+                        Some("reasoning_001"),
+                        Some("encrypted_content_001"),
+                    ),
+                    open_responses_reasoning_part(
+                        "Initial analysis step 2",
+                        Some("reasoning_001"),
+                        Some("encrypted_content_001"),
+                    ),
+                    LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                        "call_001",
+                        "search",
+                        json!({
+                            "query": "initial search"
+                        }),
+                    )),
+                ])),
+                LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                        "call_001",
+                        "search",
+                        LanguageModelToolResultOutput::json(json!({
+                            "results": ["result1", "result2"]
+                        })),
+                    )),
+                ])),
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    open_responses_reasoning_part(
+                        "Processing results step 1",
+                        Some("reasoning_002"),
+                        Some("encrypted_content_002"),
+                    ),
+                    open_responses_reasoning_part(
+                        "Processing results step 2",
+                        Some("reasoning_002"),
+                        Some("encrypted_content_002"),
+                    ),
+                    open_responses_reasoning_part(
+                        "Processing results step 3",
+                        Some("reasoning_002"),
+                        Some("encrypted_content_002"),
+                    ),
+                    LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                        "call_002",
+                        "calculator",
+                        json!({
+                            "expression": "2 + 2"
+                        }),
+                    )),
+                ])),
+                LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                        "call_002",
+                        "calculator",
+                        LanguageModelToolResultOutput::json(json!({
+                            "result": 4
+                        })),
+                    )),
+                ])),
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "Based on my analysis and calculations, here is the final answer.",
+                    )),
+                ])),
+            ])
+            .with_provider_options(openai_store_options(false)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "reasoning",
+                    "id": "reasoning_001",
+                    "encrypted_content": "encrypted_content_001",
+                    "summary": [
+                        {
+                            "type": "summary_text",
+                            "text": "Initial analysis step 1"
+                        },
+                        {
+                            "type": "summary_text",
+                            "text": "Initial analysis step 2"
+                        }
+                    ]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_001",
+                    "name": "search",
+                    "arguments": "{\"query\":\"initial search\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_001",
+                    "output": "{\"results\":[\"result1\",\"result2\"]}"
+                },
+                {
+                    "type": "reasoning",
+                    "id": "reasoning_002",
+                    "encrypted_content": "encrypted_content_002",
+                    "summary": [
+                        {
+                            "type": "summary_text",
+                            "text": "Processing results step 1"
+                        },
+                        {
+                            "type": "summary_text",
+                            "text": "Processing results step 2"
+                        },
+                        {
+                            "type": "summary_text",
+                            "text": "Processing results step 3"
+                        }
+                    ]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_002",
+                    "name": "calculator",
+                    "arguments": "{\"expression\":\"2 + 2\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_002",
+                    "output": "{\"result\":4}"
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Based on my analysis and calculations, here is the final answer."
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_warns_when_reasoning_part_has_no_provider_options() {
+        let (warnings, request_body) = open_responses_assistant_reasoning_request_body(
+            vec![LanguageModelAssistantContentPart::Reasoning(
+                LanguageModelReasoningPart::new(
+                    "This is a reasoning part without any provider options",
+                ),
+            )],
+            false,
+        );
+
+        assert_eq!(request_body["input"], json!([]));
+        assert_eq!(warnings.len(), 1);
+        let messages = warning_messages(&warnings);
+        assert!(messages.iter().any(|message| {
+            message.starts_with("Non-OpenAI reasoning parts are not supported.")
+                && message.contains("without any provider options")
+        }));
+    }
+
+    #[test]
+    fn open_responses_provider_warns_when_reasoning_lacks_openai_item_id_options() {
+        let (warnings, request_body) = open_responses_assistant_reasoning_request_body(
+            vec![LanguageModelAssistantContentPart::Reasoning(
+                LanguageModelReasoningPart::new(
+                    "This is a reasoning part without OpenAI-specific reasoning id provider options",
+                )
+                .with_provider_options(openai_provider_options(json!({
+                    "reasoning": {
+                        "encryptedContent": "encrypted_content_001"
+                    }
+                }))),
+            )],
+            false,
+        );
+
+        assert_eq!(request_body["input"], json!([]));
+        assert_eq!(warnings.len(), 1);
+        let messages = warning_messages(&warnings);
+        assert!(messages.iter().any(|message| {
+            message.starts_with("Non-OpenAI reasoning parts are not supported.")
+                && message.contains("encryptedContent")
+        }));
+    }
+
+    #[test]
+    fn open_responses_provider_includes_unstored_reasoning_without_item_id_when_encrypted() {
+        assert_open_responses_assistant_reasoning_input(
+            vec![open_responses_reasoning_part(
+                "Thinking through the problem",
+                None,
+                Some("encrypted_reasoning_blob"),
+            )],
+            false,
+            json!([
+                {
+                    "type": "reasoning",
+                    "encrypted_content": "encrypted_reasoning_blob",
+                    "summary": [
+                        {
+                            "type": "summary_text",
+                            "text": "Thinking through the problem"
+                        }
+                    ]
+                }
+            ]),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_warns_when_reasoning_lacks_item_id_and_encrypted_content() {
+        let (warnings, request_body) = open_responses_assistant_reasoning_request_body(
+            vec![open_responses_reasoning_part(
+                "Some reasoning text",
+                None,
+                None,
+            )],
+            false,
+        );
+
+        assert_eq!(request_body["input"], json!([]));
+        assert_eq!(warnings.len(), 1);
+        let messages = warning_messages(&warnings);
+        assert!(messages.iter().any(|message| {
+            message.starts_with("Non-OpenAI reasoning parts are not supported.")
+                && message.contains("Some reasoning text")
+        }));
     }
 
     #[test]
