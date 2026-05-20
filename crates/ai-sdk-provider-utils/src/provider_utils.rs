@@ -12276,6 +12276,336 @@ mod tests {
         assert_eq!(error.message(), "invalid openai provider options");
     }
 
+    fn upstream_foo_string_schema() -> Schema<JsonValue> {
+        Schema::new(schema_object(json!({
+            "type": "object",
+            "properties": {
+                "foo": { "type": "string" }
+            },
+            "required": ["foo"]
+        })))
+        .with_validator(|value| match value.get("foo").and_then(JsonValue::as_str) {
+            Some(_) => ValidationResult::success(value.clone()),
+            None => ValidationResult::failure("Invalid input"),
+        })
+    }
+
+    fn upstream_age_number_schema() -> Schema<JsonValue> {
+        Schema::new(schema_object(json!({
+            "type": "object",
+            "properties": {
+                "age": { "type": "number" }
+            },
+            "required": ["age"]
+        })))
+        .with_validator(|value| match value.get("age").and_then(JsonValue::as_f64) {
+            Some(_) => ValidationResult::success(value.clone()),
+            None => ValidationResult::failure("Invalid input"),
+        })
+    }
+
+    #[test]
+    fn parse_json_upstream_should_parse_basic_json_without_schema() {
+        let result = parse_json(r#"{"foo": "bar"}"#).expect("JSON parses");
+
+        assert_eq!(result, json!({ "foo": "bar" }));
+    }
+
+    #[test]
+    fn parse_json_upstream_should_parse_json_with_schema_validation() {
+        let result = parse_json_with_schema(r#"{"foo": "bar"}"#, upstream_foo_string_schema())
+            .expect("JSON parses and validates");
+
+        assert_eq!(result, json!({ "foo": "bar" }));
+    }
+
+    #[test]
+    fn parse_json_upstream_should_throw_json_parse_error_for_invalid_json() {
+        let error = parse_json("invalid json").expect_err("invalid JSON fails");
+
+        assert_eq!(error.text(), "invalid json");
+    }
+
+    #[test]
+    fn parse_json_upstream_should_throw_type_validation_error_for_schema_validation_failures() {
+        let error = parse_json_with_schema(r#"{"foo": "bar"}"#, upstream_age_number_schema())
+            .expect_err("schema validation fails");
+
+        let validation_error = error
+            .as_type_validation_error()
+            .expect("schema failure is returned");
+        assert_eq!(validation_error.value(), &json!({ "foo": "bar" }));
+    }
+
+    #[test]
+    fn safe_parse_json_upstream_should_safely_parse_basic_json_without_schema_and_include_raw_value()
+     {
+        let result = safe_parse_json(r#"{"foo": "bar"}"#);
+
+        assert_eq!(
+            result,
+            ParseJsonResult::success(json!({ "foo": "bar" }), json!({ "foo": "bar" }))
+        );
+    }
+
+    #[test]
+    fn safe_parse_json_upstream_should_preserve_raw_value_even_after_schema_transformation() {
+        let schema = Schema::new(schema_object(json!({
+            "type": "object",
+            "properties": {
+                "count": { "type": "string" }
+            },
+            "required": ["count"]
+        })))
+        .with_validator(|value| {
+            let count = value
+                .get("count")
+                .and_then(JsonValue::as_str)
+                .and_then(|count| count.parse::<u64>().ok())
+                .expect("test input has a numeric count string");
+
+            ValidationResult::success(json!({ "count": count }))
+        });
+
+        let result = safe_parse_json_with_schema(r#"{"count": "42"}"#, schema);
+
+        assert_eq!(
+            result,
+            ParseJsonResult::success(json!({ "count": 42 }), json!({ "count": "42" }))
+        );
+    }
+
+    #[test]
+    fn safe_parse_json_upstream_should_handle_failed_parsing_with_error_details() {
+        let result = safe_parse_json("invalid json");
+
+        assert!(result.is_failure());
+        assert!(result.raw_value().is_none());
+        assert!(
+            result
+                .error()
+                .and_then(ParseJsonError::as_json_parse_error)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn safe_parse_json_upstream_should_handle_schema_validation_failures() {
+        let result =
+            safe_parse_json_with_schema(r#"{"age": "twenty"}"#, upstream_age_number_schema());
+
+        assert!(result.is_failure());
+        assert_eq!(result.raw_value(), Some(&json!({ "age": "twenty" })));
+        assert!(
+            result
+                .error()
+                .and_then(ParseJsonError::as_type_validation_error)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn safe_parse_json_upstream_should_handle_nested_objects_and_preserve_raw_values() {
+        let schema = Schema::new(schema_object(json!({
+            "type": "object",
+            "properties": {
+                "user": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" },
+                        "name": { "type": "string" }
+                    },
+                    "required": ["id", "name"]
+                }
+            },
+            "required": ["user"]
+        })))
+        .with_validator(|value| {
+            let user = value
+                .get("user")
+                .and_then(JsonValue::as_object)
+                .expect("test input has user object");
+            let id = user
+                .get("id")
+                .and_then(JsonValue::as_str)
+                .and_then(|id| id.parse::<u64>().ok())
+                .expect("test input has numeric string id");
+            let name = user
+                .get("name")
+                .and_then(JsonValue::as_str)
+                .expect("test input has name");
+
+            ValidationResult::success(json!({ "user": { "id": id, "name": name } }))
+        });
+
+        let result =
+            safe_parse_json_with_schema(r#"{"user": {"id": "123", "name": "John"}}"#, schema);
+
+        assert_eq!(
+            result,
+            ParseJsonResult::success(
+                json!({ "user": { "id": 123, "name": "John" } }),
+                json!({ "user": { "id": "123", "name": "John" } })
+            )
+        );
+    }
+
+    #[test]
+    fn safe_parse_json_upstream_should_handle_arrays_and_preserve_raw_values() {
+        let schema = Schema::new(schema_object(json!({
+            "type": "array",
+            "items": { "type": "string" }
+        })))
+        .with_validator(|value| {
+            let values = value.as_array().expect("test input is an array");
+            let uppercased = values
+                .iter()
+                .map(|value| {
+                    JsonValue::String(
+                        value
+                            .as_str()
+                            .expect("test input has string array item")
+                            .to_uppercase(),
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            ValidationResult::success(JsonValue::Array(uppercased))
+        });
+
+        let result = safe_parse_json_with_schema(r#"["hello", "world"]"#, schema);
+
+        assert_eq!(
+            result,
+            ParseJsonResult::success(json!(["HELLO", "WORLD"]), json!(["hello", "world"]))
+        );
+    }
+
+    #[test]
+    fn safe_parse_json_upstream_should_handle_discriminated_unions_in_schema() {
+        let schema = Schema::new(schema_object(json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "type": { "const": "text" },
+                        "content": { "type": "string" }
+                    },
+                    "required": ["type", "content"]
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "type": { "const": "number" },
+                        "value": { "type": "number" }
+                    },
+                    "required": ["type", "value"]
+                }
+            ]
+        })))
+        .with_validator(
+            |value| match value.get("type").and_then(JsonValue::as_str) {
+                Some("text") if value.get("content").and_then(JsonValue::as_str).is_some() => {
+                    ValidationResult::success(value.clone())
+                }
+                Some("number") if value.get("value").and_then(JsonValue::as_f64).is_some() => {
+                    ValidationResult::success(value.clone())
+                }
+                _ => ValidationResult::failure("Invalid input"),
+            },
+        );
+
+        let result = safe_parse_json_with_schema(r#"{"type": "text", "content": "hello"}"#, schema);
+
+        assert_eq!(
+            result,
+            ParseJsonResult::success(
+                json!({ "type": "text", "content": "hello" }),
+                json!({ "type": "text", "content": "hello" })
+            )
+        );
+    }
+
+    #[test]
+    fn safe_parse_json_upstream_should_handle_nullable_fields_in_schema() {
+        let schema = Schema::new(schema_object(json!({
+            "type": "object",
+            "properties": {
+                "id": {
+                    "anyOf": [{ "type": "string" }, { "type": "null" }]
+                },
+                "data": { "type": "string" }
+            },
+            "required": ["data"]
+        })))
+        .with_validator(
+            |value| match value.get("data").and_then(JsonValue::as_str) {
+                Some(_) => ValidationResult::success(value.clone()),
+                None => ValidationResult::failure("Invalid input"),
+            },
+        );
+
+        let result = safe_parse_json_with_schema(r#"{"id": null, "data": "test"}"#, schema);
+
+        assert_eq!(
+            result,
+            ParseJsonResult::success(
+                json!({ "id": null, "data": "test" }),
+                json!({ "id": null, "data": "test" })
+            )
+        );
+    }
+
+    #[test]
+    fn safe_parse_json_upstream_should_handle_union_types_in_schema() {
+        let schema = Schema::new(schema_object(json!({
+            "type": "object",
+            "properties": {
+                "value": {
+                    "anyOf": [{ "type": "string" }, { "type": "number" }]
+                }
+            },
+            "required": ["value"]
+        })))
+        .with_validator(|value| {
+            let Some(value_property) = value.get("value") else {
+                return ValidationResult::failure("Invalid input");
+            };
+
+            if value_property.is_string() || value_property.is_number() {
+                ValidationResult::success(value.clone())
+            } else {
+                ValidationResult::failure("Invalid input")
+            }
+        });
+
+        let string_result = safe_parse_json_with_schema(r#"{"value": "test"}"#, schema.clone());
+        let number_result = safe_parse_json_with_schema(r#"{"value": 123}"#, schema);
+
+        assert_eq!(
+            string_result,
+            ParseJsonResult::success(json!({ "value": "test" }), json!({ "value": "test" }))
+        );
+        assert_eq!(
+            number_result,
+            ParseJsonResult::success(json!({ "value": 123 }), json!({ "value": 123 }))
+        );
+    }
+
+    #[test]
+    fn is_parsable_json_upstream_should_return_true_for_valid_json() {
+        assert!(is_parsable_json(r#"{"foo": "bar"}"#));
+        assert!(is_parsable_json("[1, 2, 3]"));
+        assert!(is_parsable_json(r#""hello""#));
+    }
+
+    #[test]
+    fn is_parsable_json_upstream_should_return_false_for_invalid_json() {
+        assert!(!is_parsable_json("invalid"));
+        assert!(!is_parsable_json(r#"{foo: "bar"}"#));
+        assert!(!is_parsable_json(r#"{"foo": }"#));
+    }
+
     #[test]
     fn parse_json_parses_json_values_without_schema() {
         assert_eq!(
