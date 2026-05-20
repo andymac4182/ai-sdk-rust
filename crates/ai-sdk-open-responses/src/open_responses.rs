@@ -581,6 +581,20 @@ fn open_responses_request_body(
         body.insert("top_p".to_string(), json!(top_p));
     }
 
+    if options.top_k.is_some() {
+        warnings.push(Warning::Unsupported {
+            feature: "topK".to_string(),
+            details: None,
+        });
+    }
+
+    if options.seed.is_some() {
+        warnings.push(Warning::Unsupported {
+            feature: "seed".to_string(),
+            details: None,
+        });
+    }
+
     if let Some(presence_penalty) = options.presence_penalty {
         if open_responses_uses_openai_model_capability_rules(provider_options_name) {
             warnings.push(Warning::Unsupported {
@@ -606,20 +620,6 @@ fn open_responses_request_body(
     if options.stop_sequences.is_some() {
         warnings.push(Warning::Unsupported {
             feature: "stopSequences".to_string(),
-            details: None,
-        });
-    }
-
-    if options.top_k.is_some() {
-        warnings.push(Warning::Unsupported {
-            feature: "topK".to_string(),
-            details: None,
-        });
-    }
-
-    if options.seed.is_some() {
-        warnings.push(Warning::Unsupported {
-            feature: "seed".to_string(),
             details: None,
         });
     }
@@ -12362,7 +12362,7 @@ mod tests {
                     json!({
                         "id": "resp_unsupported_call_options",
                         "created_at": 1711115037,
-                        "model": "gpt-4.1-mini",
+                        "model": "gpt-4o",
                         "output": [
                             {
                                 "type": "message",
@@ -12388,7 +12388,7 @@ mod tests {
                 .with_api_key("test-api-key"),
         )
         .with_transport(transport);
-        let model = provider.language_model("gpt-4.1-mini");
+        let model = provider.language_model("gpt-4o");
 
         let result = poll_ready(
             model.do_generate(
@@ -12397,9 +12397,9 @@ mod tests {
                         LanguageModelTextPart::new("Hello"),
                     )]),
                 )])
-                .with_stop_sequence("</done>")
+                .with_stop_sequence("\n\n")
                 .with_top_k(40)
-                .with_seed(1234)
+                .with_seed(42)
                 .with_presence_penalty(0.0)
                 .with_frequency_penalty(0.0)
                 .with_abort_signal(abort_controller.signal()),
@@ -12409,11 +12409,11 @@ mod tests {
         assert_eq!(
             unsupported_warning_details(&result.warnings),
             vec![
+                ("topK", None),
+                ("seed", None),
                 ("presencePenalty", None),
                 ("frequencyPenalty", None),
-                ("stopSequences", None),
-                ("topK", None),
-                ("seed", None)
+                ("stopSequences", None)
             ]
         );
 
@@ -12437,7 +12437,7 @@ mod tests {
         assert_eq!(
             request_body,
             json!({
-                "model": "gpt-4.1-mini",
+                "model": "gpt-4o",
                 "input": [
                     {
                         "type": "message",
