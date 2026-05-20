@@ -1395,7 +1395,6 @@ fn open_responses_input(
                 }
 
                 input.push(json!({
-                    "type": "message",
                     "role": "user",
                     "content": content
                 }));
@@ -1844,7 +1843,6 @@ fn open_responses_flush_assistant_content(
     }
 
     input.push(json!({
-        "type": "message",
         "role": "assistant",
         "content": std::mem::take(content)
     }));
@@ -1865,7 +1863,6 @@ fn open_responses_assistant_text_message(
     phase: Option<&str>,
 ) -> JsonValue {
     let mut message = JsonObject::new();
-    message.insert("type".to_string(), JsonValue::String("message".to_string()));
     message.insert(
         "role".to_string(),
         JsonValue::String("assistant".to_string()),
@@ -7394,6 +7391,90 @@ mod tests {
         ))]
     }
 
+    fn open_responses_system_hello_prompt() -> Vec<LanguageModelMessage> {
+        vec![
+            LanguageModelMessage::System(LanguageModelSystemMessage::new(
+                "You are a helpful assistant.",
+            )),
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
+            ])),
+        ]
+    }
+
+    fn openai_provider_options(value: JsonValue) -> ProviderOptions {
+        serde_json::from_value(json!({
+            "openai": value
+        }))
+        .expect("provider options deserialize")
+    }
+
+    fn openai_request_body_for(
+        model_id: &str,
+        options: LanguageModelCallOptions,
+    ) -> (Vec<Warning>, JsonValue) {
+        let (provider, captured_request) = open_responses_captured_provider("openai", model_id);
+        let model = provider.language_model(model_id);
+        let result = poll_ready(model.do_generate(options));
+
+        (
+            result.warnings,
+            captured_open_responses_request_body(&captured_request),
+        )
+    }
+
+    fn assert_openai_responses_reasoning_model_removes_unsupported_settings(model_id: &str) {
+        let (warnings, request_body) = openai_request_body_for(
+            model_id,
+            LanguageModelCallOptions::new(open_responses_system_hello_prompt())
+                .with_temperature(0.5)
+                .with_top_p(0.3),
+        );
+
+        assert_eq!(
+            request_body,
+            json!({
+                "model": model_id,
+                "input": [
+                    {
+                        "role": "developer",
+                        "content": "You are a helpful assistant."
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ]
+            }),
+            "unexpected request body for {model_id}"
+        );
+        assert_eq!(
+            unsupported_warning_details(&warnings),
+            vec![
+                (
+                    "temperature",
+                    Some("temperature is not supported for reasoning models")
+                ),
+                ("topP", Some("topP is not supported for reasoning models"))
+            ],
+            "unexpected warnings for {model_id}"
+        );
+    }
+
+    macro_rules! openai_responses_reasoning_model_settings_case {
+        ($name:ident, $model_id:literal) => {
+            #[test]
+            fn $name() {
+                assert_openai_responses_reasoning_model_removes_unsupported_settings($model_id);
+            }
+        };
+    }
+
     fn open_responses_stream_parts_from_events(
         model_id: &str,
         events: Vec<JsonValue>,
@@ -7619,7 +7700,6 @@ mod tests {
             "model": model_id,
             "input": [
                 {
-                    "type": "message",
                     "role": "user",
                     "content": [
                         {
@@ -7842,6 +7922,240 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_sends_model_id_settings_and_input() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4o",
+            LanguageModelCallOptions::new(open_responses_system_hello_prompt())
+                .with_temperature(0.5)
+                .with_top_p(0.3)
+                .with_provider_options(openai_provider_options(json!({
+                    "maxToolCalls": 10
+                }))),
+        );
+
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-4o",
+                "input": [
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant."
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "temperature": 0.5,
+                "top_p": 0.3,
+                "max_tool_calls": 10
+            })
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn open_responses_provider_keeps_temperature_and_top_p_for_gpt_5_1_reasoning_none() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-5.1",
+            LanguageModelCallOptions::new(open_responses_hello_prompt())
+                .with_temperature(0.5)
+                .with_top_p(0.3)
+                .with_provider_options(openai_provider_options(json!({
+                    "reasoningEffort": "none"
+                }))),
+        );
+
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-5.1",
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "reasoning": {
+                    "effort": "none"
+                },
+                "temperature": 0.5,
+                "top_p": 0.3
+            })
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn open_responses_provider_removes_unsupported_settings_for_o1() {
+        assert_openai_responses_reasoning_model_removes_unsupported_settings("o1");
+    }
+
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_o1,
+        "o1"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_o1_2024_12_17,
+        "o1-2024-12-17"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_o3,
+        "o3"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_o3_2025_04_16,
+        "o3-2025-04-16"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_o3_mini,
+        "o3-mini"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_o3_mini_2025_01_31,
+        "o3-mini-2025-01-31"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_o4_mini,
+        "o4-mini"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_o4_mini_2025_04_16,
+        "o4-mini-2025-04-16"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5,
+        "gpt-5"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_2025_08_07,
+        "gpt-5-2025-08-07"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_codex,
+        "gpt-5-codex"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_mini,
+        "gpt-5-mini"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_mini_2025_08_07,
+        "gpt-5-mini-2025-08-07"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_nano,
+        "gpt-5-nano"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_nano_2025_08_07,
+        "gpt-5-nano-2025-08-07"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_pro,
+        "gpt-5-pro"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_pro_2025_10_06,
+        "gpt-5-pro-2025-10-06"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_1,
+        "gpt-5.1"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_1_chat_latest,
+        "gpt-5.1-chat-latest"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_1_codex_mini,
+        "gpt-5.1-codex-mini"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_1_codex,
+        "gpt-5.1-codex"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_1_codex_max,
+        "gpt-5.1-codex-max"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_2,
+        "gpt-5.2"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_2_chat_latest,
+        "gpt-5.2-chat-latest"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_2_pro,
+        "gpt-5.2-pro"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_2_codex,
+        "gpt-5.2-codex"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_3_chat_latest,
+        "gpt-5.3-chat-latest"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_3_codex,
+        "gpt-5.3-codex"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_4,
+        "gpt-5.4"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_4_2026_03_05,
+        "gpt-5.4-2026-03-05"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_4_mini,
+        "gpt-5.4-mini"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_4_mini_2026_03_17,
+        "gpt-5.4-mini-2026-03-17"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_4_nano,
+        "gpt-5.4-nano"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_4_nano_2026_03_17,
+        "gpt-5.4-nano-2026-03-17"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_4_pro,
+        "gpt-5.4-pro"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_4_pro_2026_03_05,
+        "gpt-5.4-pro-2026-03-05"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_5,
+        "gpt-5.5"
+    );
+    openai_responses_reasoning_model_settings_case!(
+        open_responses_provider_removes_unsupported_settings_for_reasoning_model_gpt_5_5_2026_04_23,
+        "gpt-5.5-2026-04-23"
+    );
+
+    #[test]
     fn open_responses_provider_converts_openai_message_chain_with_system_input_items() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -7944,7 +8258,6 @@ mod tests {
                         "content": "Use metric units."
                     },
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -7954,7 +8267,6 @@ mod tests {
                         ]
                     },
                     {
-                        "type": "message",
                         "role": "assistant",
                         "content": [
                             {
@@ -7975,7 +8287,6 @@ mod tests {
                         "output": "25 C and cloudy"
                     },
                     {
-                        "type": "message",
                         "role": "assistant",
                         "content": [
                             {
@@ -8011,7 +8322,6 @@ mod tests {
                 "model": "qwen/qwen3",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -8090,7 +8400,6 @@ mod tests {
             remove_request_body["input"],
             json!([
                 {
-                    "type": "message",
                     "role": "user",
                     "content": [
                         {
@@ -8199,7 +8508,6 @@ mod tests {
                 "model": "gpt-4.1-mini",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -8209,7 +8517,6 @@ mod tests {
                         ]
                     },
                     {
-                        "type": "message",
                         "role": "assistant",
                         "content": [
                             {
@@ -8342,7 +8649,6 @@ mod tests {
                 "model": "gemma-7b-it",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -8954,7 +9260,6 @@ mod tests {
                 "model": "gpt-4.1-mini",
                 "input": [
                     {
-                        "type": "message",
                         "role": "assistant",
                         "content": [
                             {
@@ -8989,7 +9294,6 @@ mod tests {
                         ]
                     },
                     {
-                        "type": "message",
                         "role": "assistant",
                         "content": [
                             {
@@ -9097,7 +9401,6 @@ mod tests {
                 "model": "gpt-4.1-mini",
                 "input": [
                     {
-                        "type": "message",
                         "role": "assistant",
                         "content": [
                             {
@@ -9112,7 +9415,6 @@ mod tests {
                         "encrypted_content": "encrypted_compaction"
                     },
                     {
-                        "type": "message",
                         "role": "assistant",
                         "content": [
                             {
@@ -9229,7 +9531,6 @@ mod tests {
                 "model": "gpt-4.1-mini",
                 "input": [
                     {
-                        "type": "message",
                         "role": "assistant",
                         "content": [
                             {
@@ -9241,7 +9542,6 @@ mod tests {
                         "phase": "commentary"
                     },
                     {
-                        "type": "message",
                         "role": "assistant",
                         "content": [
                             {
@@ -9253,7 +9553,6 @@ mod tests {
                         "phase": "final_answer"
                     },
                     {
-                        "type": "message",
                         "role": "assistant",
                         "content": [
                             {
@@ -10595,7 +10894,6 @@ mod tests {
             request_body["input"],
             json!([
                 {
-                    "type": "message",
                     "role": "user",
                     "content": [
                         {
@@ -10605,7 +10903,6 @@ mod tests {
                     ]
                 },
                 {
-                    "type": "message",
                     "role": "assistant",
                     "content": [
                         {
@@ -10662,7 +10959,6 @@ mod tests {
                 "model": "gpt-4o",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -11097,7 +11393,6 @@ mod tests {
             request_body["input"],
             json!([
                 {
-                    "type": "message",
                     "role": "assistant",
                     "content": [
                         {
@@ -11107,7 +11402,6 @@ mod tests {
                     ]
                 },
                 {
-                    "type": "message",
                     "role": "assistant",
                     "content": [
                         {
@@ -11224,7 +11518,6 @@ mod tests {
             request_body["input"],
             json!([
                 {
-                    "type": "message",
                     "role": "assistant",
                     "content": [
                         {
@@ -11234,7 +11527,6 @@ mod tests {
                     ]
                 },
                 {
-                    "type": "message",
                     "role": "assistant",
                     "content": [
                         {
@@ -11244,7 +11536,6 @@ mod tests {
                     ]
                 },
                 {
-                    "type": "message",
                     "role": "assistant",
                     "content": [
                         {
@@ -12234,7 +12525,6 @@ mod tests {
                 "model": "gpt-4.1-mini",
                 "input": [
                     {
-                        "type": "message",
                         "role": "assistant",
                         "content": [
                             {
@@ -12355,7 +12645,6 @@ mod tests {
                 "model": "gpt-4.1-mini",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -12586,7 +12875,6 @@ mod tests {
                 "model": "gpt-4o",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -13045,7 +13333,6 @@ mod tests {
                 "model": "gpt-5-mini",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -13093,7 +13380,6 @@ mod tests {
                 "model": "gpt-4o",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -13138,7 +13424,6 @@ mod tests {
                 "model": "gpt-4o",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -13186,7 +13471,6 @@ mod tests {
                 "model": "stealth-reasoning-model",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -13235,7 +13519,6 @@ mod tests {
                 "model": "gpt-5.1-codex-max",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -13315,7 +13598,6 @@ mod tests {
                     "model": model_id,
                     "input": [
                         {
-                            "type": "message",
                             "role": "user",
                             "content": [
                                 {
@@ -14618,7 +14900,6 @@ mod tests {
                 "model": "gpt-4o",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -14694,7 +14975,6 @@ mod tests {
                 "model": "gpt-4o",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -14749,7 +15029,6 @@ mod tests {
                 "model": "gpt-4o",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -16913,7 +17192,6 @@ mod tests {
             request_body["input"],
             json!([
                 {
-                    "type": "message",
                     "role": "user",
                     "content": [
                         {
@@ -17042,7 +17320,6 @@ mod tests {
                 "model": "gpt-4.1-nano",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -17173,7 +17450,6 @@ mod tests {
                 "model": "gpt-4.1-nano",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -17321,7 +17597,6 @@ mod tests {
                 "model": "mistralai/ministral-3-14b-reasoning",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -17751,7 +18026,6 @@ mod tests {
             request_body["input"],
             json!([
                 {
-                    "type": "message",
                     "role": "user",
                     "content": [
                         {
@@ -17860,7 +18134,6 @@ mod tests {
             request_body["input"],
             json!([
                 {
-                    "type": "message",
                     "role": "user",
                     "content": [
                         {
@@ -18161,7 +18434,6 @@ mod tests {
                 "model": "gpt-4.1-mini",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -19677,7 +19949,6 @@ mod tests {
             json!({
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -20386,7 +20657,6 @@ mod tests {
             json!({
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -24356,7 +24626,6 @@ mod tests {
                 "model": "gpt-5-nano",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -24784,7 +25053,6 @@ mod tests {
             request_body["input"],
             json!([
                 {
-                    "type": "message",
                     "role": "user",
                     "content": [
                         {
@@ -24892,7 +25160,6 @@ mod tests {
             request_body["input"],
             json!([
                 {
-                    "type": "message",
                     "role": "user",
                     "content": [
                         {
@@ -25174,7 +25441,6 @@ mod tests {
                 "model": "gpt-5-nano",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -25340,7 +25606,6 @@ mod tests {
                 "model": "gpt-5-nano",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -25778,7 +26043,6 @@ mod tests {
                 "model": "gpt-5-codex",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -25892,7 +26156,6 @@ mod tests {
             request_body["input"],
             json!([
                 {
-                    "type": "message",
                     "role": "user",
                     "content": [
                         {
@@ -25985,7 +26248,6 @@ mod tests {
             request_body["input"],
             json!([
                 {
-                    "type": "message",
                     "role": "user",
                     "content": [
                         {
@@ -26131,7 +26393,6 @@ mod tests {
             request_body["input"],
             json!([
                 {
-                    "type": "message",
                     "role": "user",
                     "content": [
                         {
@@ -26163,7 +26424,6 @@ mod tests {
                     "id": "msg_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e52"
                 },
                 {
-                    "type": "message",
                     "role": "user",
                     "content": [
                         {
@@ -26246,7 +26506,6 @@ mod tests {
             request_body["input"],
             json!([
                 {
-                    "type": "message",
                     "role": "user",
                     "content": [
                         {
@@ -26278,7 +26537,6 @@ mod tests {
                     "id": "msg_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e52"
                 },
                 {
-                    "type": "message",
                     "role": "user",
                     "content": [
                         {
@@ -27101,7 +27359,6 @@ mod tests {
             request_body["input"],
             json!([
                 {
-                    "type": "message",
                     "role": "user",
                     "content": [
                         {
@@ -27133,7 +27390,6 @@ mod tests {
                     "id": PRIOR_MESSAGE_ID
                 },
                 {
-                    "type": "message",
                     "role": "user",
                     "content": [
                         {
@@ -27264,7 +27520,6 @@ mod tests {
             request_body["input"],
             json!([
                 {
-                    "type": "message",
                     "role": "user",
                     "content": [
                         {
@@ -27296,7 +27551,6 @@ mod tests {
                     "id": PRIOR_MESSAGE_ID
                 },
                 {
-                    "type": "message",
                     "role": "user",
                     "content": [
                         {
@@ -27343,7 +27597,6 @@ mod tests {
                 "model": "gpt-5.2",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -28134,7 +28387,6 @@ mod tests {
             request_body["input"],
             json!([
                 {
-                    "type": "message",
                     "role": "user",
                     "content": [
                         {

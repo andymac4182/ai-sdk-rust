@@ -1799,7 +1799,6 @@ mod tests {
                 "model": "openai/gpt-4.1-mini",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -1885,7 +1884,6 @@ mod tests {
                 "model": "openai/gpt-4.1-mini",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -2065,7 +2063,6 @@ mod tests {
                 "model": "openai/gpt-4.1-mini",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -2497,7 +2494,6 @@ mod tests {
                 "model": "openai/gpt-4.1-mini",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -2725,7 +2721,6 @@ mod tests {
                 "model": "openai/gpt-4.1-mini",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {

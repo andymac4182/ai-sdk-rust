@@ -160,7 +160,6 @@ mod tests {
                 "model": "gpt-4.1-mini",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -310,7 +309,6 @@ mod tests {
                 "model": "gpt-4.1-mini",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
@@ -1029,7 +1027,6 @@ mod tests {
                 "model": "gpt-4.1-mini",
                 "input": [
                     {
-                        "type": "message",
                         "role": "user",
                         "content": [
                             {
