@@ -20506,6 +20506,806 @@ mod tests {
         (provider, captured_requests)
     }
 
+    fn open_responses_prompt_request_body_for_settings(
+        settings: OpenResponsesProviderSettings,
+        options: LanguageModelCallOptions,
+    ) -> (LanguageModelGenerateResult, Option<JsonValue>) {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_prompt_conversion",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Prompt accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 3,
+                            "output_tokens": 2
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(settings).with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let result = poll_ready(model.do_generate(options));
+        let captured = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone();
+        let request_body = captured
+            .as_ref()
+            .and_then(|request| request.body.as_ref())
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok());
+
+        (result, request_body)
+    }
+
+    fn open_responses_openai_prompt_request_body(options: LanguageModelCallOptions) -> JsonValue {
+        let (result, request_body) = open_responses_prompt_request_body_for_settings(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+            options,
+        );
+
+        assert!(result.warnings.is_empty());
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        request_body.expect("request body is captured")
+    }
+
+    fn open_responses_openai_user_content_request_body(
+        content: Vec<LanguageModelUserContentPart>,
+    ) -> JsonValue {
+        open_responses_openai_prompt_request_body(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(content)),
+        ]))
+    }
+
+    fn open_responses_provider_reference(entries: &[(&str, &str)]) -> ProviderReference {
+        ProviderReference::try_from(
+            entries
+                .iter()
+                .map(|(provider, file_id)| (provider.to_string(), file_id.to_string()))
+                .collect::<BTreeMap<_, _>>(),
+        )
+        .expect("provider reference is valid")
+    }
+
+    #[test]
+    fn open_responses_provider_converts_user_text_part_to_input_text() {
+        let request_body = open_responses_openai_user_content_request_body(vec![
+            LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
+        ]);
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Hello"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_user_image_url_part() {
+        let request_body = open_responses_openai_user_content_request_body(vec![
+            LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
+            LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                FileData::Url {
+                    url: Url::parse("https://example.com/image.jpg").expect("URL parses"),
+                },
+                "image/*",
+            )),
+        ]);
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Hello"
+                        },
+                        {
+                            "type": "input_image",
+                            "image_url": "https://example.com/image.jpg"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_user_image_base64_data() {
+        let request_body = open_responses_openai_user_content_request_body(vec![
+            LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                FileData::Data {
+                    data: FileDataContent::Base64("AAECAw==".to_string()),
+                },
+                "image/png",
+            )),
+        ]);
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,AAECAw=="
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_user_image_bytes_data() {
+        let request_body = open_responses_openai_user_content_request_body(vec![
+            LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                FileData::Data {
+                    data: FileDataContent::Bytes(vec![0, 1, 2, 3]),
+                },
+                "image/png",
+            )),
+        ]);
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,AAECAw=="
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_user_image_file_id_with_prefix() {
+        let (result, request_body) = open_responses_prompt_request_body_for_settings(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key")
+                .with_file_id_prefix("file-"),
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("file-12345".to_string()),
+                        },
+                        "image/png",
+                    ),
+                )]),
+            )]),
+        );
+
+        assert!(result.warnings.is_empty());
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(
+            request_body.expect("request body is captured")["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "file_id": "file-12345"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_user_image_provider_reference() {
+        let request_body = open_responses_openai_user_content_request_body(vec![
+            LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                FileData::Reference {
+                    reference: open_responses_provider_reference(&[("openai", "file-12345")]),
+                },
+                "image/png",
+            )),
+        ]);
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "file_id": "file-12345"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_detects_wildcard_image_type_from_bytes() {
+        let png_base64 = "iVBORw0KGgo=";
+        let request_body = open_responses_openai_user_content_request_body(vec![
+            LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                FileData::Data {
+                    data: FileDataContent::Base64(png_base64.to_string()),
+                },
+                "image/*",
+            )),
+        ]);
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,iVBORw0KGgo="
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_rejects_undetected_wildcard_image_type() {
+        let (result, request_body) = open_responses_prompt_request_body_for_settings(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("AAECAw==".to_string()),
+                        },
+                        "image/*",
+                    ),
+                )]),
+            )]),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Error);
+        assert!(request_body.is_none());
+        let error_message = openai_metadata_value(&result.provider_metadata, "errorMessage")
+            .and_then(JsonValue::as_str)
+            .expect("error message is present");
+        assert!(
+            error_message.contains("file of media type \"image/*\""),
+            "unexpected error message: {error_message}"
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_passes_through_top_level_image_url() {
+        let request_body = open_responses_openai_user_content_request_body(vec![
+            LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                FileData::Url {
+                    url: Url::parse("https://example.com/x.png").expect("URL parses"),
+                },
+                "image",
+            )),
+        ]);
+
+        assert_eq!(
+            request_body["input"][0]["content"][0],
+            json!({
+                "type": "input_image",
+                "image_url": "https://example.com/x.png"
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_adds_openai_image_detail_on_prompt_image() {
+        let image_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "imageDetail": "low"
+            }
+        }))
+        .expect("provider options deserialize");
+        let request_body = open_responses_openai_user_content_request_body(vec![
+            LanguageModelUserContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Base64("AAECAw==".to_string()),
+                    },
+                    "image/png",
+                )
+                .with_provider_options(image_options),
+            ),
+        ]);
+
+        assert_eq!(
+            request_body["input"][0]["content"][0],
+            json!({
+                "type": "input_image",
+                "image_url": "data:image/png;base64,AAECAw==",
+                "detail": "low"
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_adds_azure_image_detail_on_prompt_image() {
+        let image_options: ProviderOptions = serde_json::from_value(json!({
+            "azure": {
+                "imageDetail": "low"
+            }
+        }))
+        .expect("provider options deserialize");
+        let (result, request_body) = open_responses_prompt_request_body_for_settings(
+            OpenResponsesProviderSettings::new("azure", "https://api.azure.test/v1/responses")
+                .with_api_key("test-api-key"),
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("AAECAw==".to_string()),
+                        },
+                        "image/png",
+                    )
+                    .with_provider_options(image_options),
+                )]),
+            )]),
+        );
+
+        assert!(result.warnings.is_empty());
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(
+            request_body.expect("request body is captured")["input"][0]["content"][0],
+            json!({
+                "type": "input_image",
+                "image_url": "data:image/png;base64,AAECAw==",
+                "detail": "low"
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_user_pdf_data_part() {
+        let request_body = open_responses_openai_user_content_request_body(vec![
+            LanguageModelUserContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Base64("AQIDBAU=".to_string()),
+                    },
+                    "application/pdf",
+                )
+                .with_filename("document.pdf"),
+            ),
+        ]);
+
+        assert_eq!(
+            request_body["input"][0]["content"][0],
+            json!({
+                "type": "input_file",
+                "filename": "document.pdf",
+                "file_data": "data:application/pdf;base64,AQIDBAU="
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_user_pdf_file_id_with_prefix() {
+        let (result, request_body) = open_responses_prompt_request_body_for_settings(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key")
+                .with_file_id_prefix("file-"),
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("file-pdf-12345".to_string()),
+                        },
+                        "application/pdf",
+                    ),
+                )]),
+            )]),
+        );
+
+        assert!(result.warnings.is_empty());
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(
+            request_body.expect("request body is captured")["input"][0]["content"][0],
+            json!({
+                "type": "input_file",
+                "file_id": "file-pdf-12345"
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_user_pdf_provider_reference() {
+        let request_body = open_responses_openai_user_content_request_body(vec![
+            LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                FileData::Reference {
+                    reference: open_responses_provider_reference(&[("openai", "file-pdf-12345")]),
+                },
+                "application/pdf",
+            )),
+        ]);
+
+        assert_eq!(
+            request_body["input"][0]["content"][0],
+            json!({
+                "type": "input_file",
+                "file_id": "file-pdf-12345"
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_user_pdf_url_part() {
+        let request_body = open_responses_openai_user_content_request_body(vec![
+            LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                FileData::Url {
+                    url: Url::parse("https://example.com/document.pdf").expect("URL parses"),
+                },
+                "application/pdf",
+            )),
+        ]);
+
+        assert_eq!(
+            request_body["input"][0]["content"][0],
+            json!({
+                "type": "input_file",
+                "file_url": "https://example.com/document.pdf"
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_resolves_reference_for_different_provider_options_name() {
+        let (result, request_body) = open_responses_prompt_request_body_for_settings(
+            OpenResponsesProviderSettings::new("azure", "https://api.azure.test/v1/responses")
+                .with_api_key("test-api-key"),
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Reference {
+                            reference: open_responses_provider_reference(&[(
+                                "azure",
+                                "assistant-img-abc123",
+                            )]),
+                        },
+                        "image/png",
+                    ),
+                )]),
+            )]),
+        );
+
+        assert!(result.warnings.is_empty());
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(
+            request_body.expect("request body is captured")["input"][0]["content"][0],
+            json!({
+                "type": "input_image",
+                "file_id": "assistant-img-abc123"
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_resolves_reference_for_pdf_parts() {
+        let request_body = open_responses_openai_user_content_request_body(vec![
+            LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                FileData::Reference {
+                    reference: open_responses_provider_reference(&[("openai", "file-pdf-abc123")]),
+                },
+                "application/pdf",
+            )),
+        ]);
+
+        assert_eq!(
+            request_body["input"][0]["content"][0],
+            json!({
+                "type": "input_file",
+                "file_id": "file-pdf-abc123"
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_resolves_multiple_references_in_one_message() {
+        let request_body = open_responses_openai_user_content_request_body(vec![
+            LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                FileData::Reference {
+                    reference: open_responses_provider_reference(&[
+                        ("openai", "file-img-abc123"),
+                        ("anthropic", "img-xyz"),
+                    ]),
+                },
+                "image/png",
+            )),
+            LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                FileData::Reference {
+                    reference: open_responses_provider_reference(&[
+                        ("openai", "file-pdf-xyz789"),
+                        ("google", "doc-123"),
+                    ]),
+                },
+                "application/pdf",
+            )),
+        ]);
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "file_id": "file-img-abc123"
+                        },
+                        {
+                            "type": "input_file",
+                            "file_id": "file-pdf-xyz789"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_treats_plain_strings_as_base64_data() {
+        let request_body = open_responses_openai_user_content_request_body(vec![
+            LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                FileData::Data {
+                    data: FileDataContent::Base64("file-12345".to_string()),
+                },
+                "image/png",
+            )),
+            LanguageModelUserContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Base64("assistant-abc123".to_string()),
+                    },
+                    "application/pdf",
+                )
+                .with_filename("test.pdf"),
+            ),
+        ]);
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,file-12345"
+                        },
+                        {
+                            "type": "input_file",
+                            "filename": "test.pdf",
+                            "file_data": "data:application/pdf;base64,assistant-abc123"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_image_part_with_custom_file_id_prefix() {
+        let (result, request_body) = open_responses_prompt_request_body_for_settings(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key")
+                .with_file_id_prefix("assistant-"),
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("assistant-img-abc123".to_string()),
+                        },
+                        "image/png",
+                    ),
+                )]),
+            )]),
+        );
+
+        assert!(result.warnings.is_empty());
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(
+            request_body.expect("request body is captured")["input"][0]["content"][0],
+            json!({
+                "type": "input_image",
+                "file_id": "assistant-img-abc123"
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_pdf_part_with_custom_file_id_prefix() {
+        let (result, request_body) = open_responses_prompt_request_body_for_settings(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key")
+                .with_file_id_prefix("assistant-"),
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("assistant-pdf-abc123".to_string()),
+                        },
+                        "application/pdf",
+                    ),
+                )]),
+            )]),
+        );
+
+        assert!(result.warnings.is_empty());
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(
+            request_body.expect("request body is captured")["input"][0]["content"][0],
+            json!({
+                "type": "input_file",
+                "file_id": "assistant-pdf-abc123"
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_supports_multiple_file_id_prefixes() {
+        let (result, request_body) = open_responses_prompt_request_body_for_settings(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key")
+                .with_file_id_prefix("assistant-")
+                .with_file_id_prefix("file-"),
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![
+                    LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("assistant-img-abc123".to_string()),
+                        },
+                        "image/png",
+                    )),
+                    LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("file-pdf-xyz789".to_string()),
+                        },
+                        "application/pdf",
+                    )),
+                ]),
+            )]),
+        );
+
+        assert!(result.warnings.is_empty());
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(
+            request_body.expect("request body is captured")["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "file_id": "assistant-img-abc123"
+                        },
+                        {
+                            "type": "input_file",
+                            "file_id": "file-pdf-xyz789"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_treats_file_data_as_base64_without_prefixes() {
+        let request_body = open_responses_openai_user_content_request_body(vec![
+            LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                FileData::Data {
+                    data: FileDataContent::Base64("file-12345".to_string()),
+                },
+                "image/png",
+            )),
+            LanguageModelUserContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Base64("assistant-abc123".to_string()),
+                    },
+                    "application/pdf",
+                )
+                .with_filename("test.pdf"),
+            ),
+        ]);
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,file-12345"
+                        },
+                        {
+                            "type": "input_file",
+                            "filename": "test.pdf",
+                            "file_data": "data:application/pdf;base64,assistant-abc123"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_handles_empty_file_id_prefixes_array() {
+        let (result, request_body) = open_responses_prompt_request_body_for_settings(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("file-12345".to_string()),
+                        },
+                        "image/png",
+                    ),
+                )]),
+            )]),
+        );
+
+        assert!(result.warnings.is_empty());
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(
+            request_body.expect("request body is captured")["input"][0]["content"][0],
+            json!({
+                "type": "input_image",
+                "image_url": "data:image/png;base64,file-12345"
+            })
+        );
+    }
+
     #[test]
     fn open_responses_provider_uses_default_filename_for_pdf_file_parts_when_not_provided() {
         let (provider, captured_requests) = open_responses_prompt_file_provider();
