@@ -6935,10 +6935,11 @@ mod tests {
         LanguageModelFilePart, LanguageModelFunctionTool, LanguageModelGenerateResult,
         LanguageModelMessage, LanguageModelProviderTool, LanguageModelReasoningEffort,
         LanguageModelReasoningFilePart, LanguageModelReasoningPart, LanguageModelResponseFormat,
-        LanguageModelSource, LanguageModelStreamPart, LanguageModelSystemMessage,
-        LanguageModelTextPart, LanguageModelTool, LanguageModelToolApprovalRequestPart,
-        LanguageModelToolApprovalResponsePart, LanguageModelToolCallPart, LanguageModelToolChoice,
-        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultContentPart,
+        LanguageModelSource, LanguageModelStreamPart, LanguageModelStreamResult,
+        LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelTool,
+        LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
+        LanguageModelToolCallPart, LanguageModelToolChoice, LanguageModelToolContentPart,
+        LanguageModelToolMessage, LanguageModelToolResultContentPart,
         LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUserContentPart,
         LanguageModelUserMessage,
     };
@@ -29896,8 +29897,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn open_responses_provider_streams_client_tool_search_fixture_as_non_provider_executed_parts() {
+    fn open_responses_client_tool_search_fixture_stream_result()
+    -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
         let transport: OpenResponsesTransport = Arc::new(
             move |_request| -> OpenResponsesTransportFuture {
                 let sse = [
@@ -29924,7 +29925,12 @@ mod tests {
         .with_transport(transport);
         let model = provider.language_model("gpt-5.4");
 
-        let result = poll_ready(model.do_stream(open_responses_client_tool_search_call_options()));
+        poll_ready(model.do_stream(open_responses_client_tool_search_call_options()))
+    }
+
+    #[test]
+    fn open_responses_provider_streams_client_tool_search_fixture_as_non_provider_executed_parts() {
+        let result = open_responses_client_tool_search_fixture_stream_result();
 
         let tool_input_starts = result
             .stream
@@ -29990,6 +29996,39 @@ mod tests {
                 .iter()
                 .any(|part| format!("{part:?}").contains("call_NHis2zQiYcIaO6pf9nb5q1wY"))
         );
+    }
+
+    #[test]
+    fn open_responses_provider_streams_client_tool_search_omits_provider_executed_flag() {
+        let result = open_responses_client_tool_search_fixture_stream_result();
+
+        let tool_input_start = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolInputStart(start)
+                    if start.tool_name == "toolSearch" =>
+                {
+                    Some(start)
+                }
+                _ => None,
+            })
+            .expect("stream includes toolSearch input start");
+        let tool_call = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call)
+                    if tool_call.tool_name == "toolSearch" =>
+                {
+                    Some(tool_call)
+                }
+                _ => None,
+            })
+            .expect("stream includes toolSearch call");
+
+        assert_eq!(tool_input_start.provider_executed, None);
+        assert_eq!(tool_call.provider_executed, None);
     }
 
     #[test]
