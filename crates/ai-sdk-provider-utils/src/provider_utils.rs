@@ -11591,6 +11591,35 @@ mod tests {
         assert_eq!(body, b"ok");
     }
 
+    fn media_bytes(bytes: &[u8]) -> FileDataContent {
+        FileDataContent::Bytes(bytes.to_vec())
+    }
+
+    fn media_base64(base64: &str) -> FileDataContent {
+        FileDataContent::Base64(base64.to_string())
+    }
+
+    fn upstream_webp_bytes() -> Vec<u8> {
+        vec![
+            0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50,
+            0x38, 0x20,
+        ]
+    }
+
+    fn upstream_wav_bytes() -> Vec<u8> {
+        vec![
+            0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00, 0x57, 0x41, 0x56, 0x45, 0x66, 0x6d,
+            0x74, 0x20,
+        ]
+    }
+
+    fn upstream_mp3_with_id3_bytes() -> Vec<u8> {
+        vec![
+            0x49, 0x44, 0x33, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xfb, 0x00, 0x00,
+        ]
+    }
+
     #[test]
     fn detect_media_type_matches_top_level_signature_tables() {
         assert_eq!(
@@ -11677,6 +11706,580 @@ mod tests {
         assert_eq!(
             detect_media_type(&FileDataContent::Bytes(vec![0x1a, 0x45, 0xdf, 0xa3]), None,),
             Some("audio/webm")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_gif_from_bytes() {
+        assert_eq!(
+            detect_media_type(&media_bytes(&[0x47, 0x49, 0x46, 0xff, 0xff]), Some("image")),
+            Some("image/gif")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_gif_from_base64() {
+        assert_eq!(
+            detect_media_type(&media_base64("R0lGabc123"), Some("image")),
+            Some("image/gif")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_png_from_bytes() {
+        assert_eq!(
+            detect_media_type(
+                &media_bytes(&[0x89, 0x50, 0x4e, 0x47, 0xff, 0xff]),
+                Some("image"),
+            ),
+            Some("image/png")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_png_from_base64() {
+        assert_eq!(
+            detect_media_type(&media_base64("iVBORwabc123"), Some("image")),
+            Some("image/png")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_jpeg_from_bytes() {
+        assert_eq!(
+            detect_media_type(&media_bytes(&[0xff, 0xd8, 0xff, 0xff]), Some("image")),
+            Some("image/jpeg")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_jpeg_from_base64() {
+        assert_eq!(
+            detect_media_type(&media_base64("/9j/abc123"), Some("image")),
+            Some("image/jpeg")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_webp_from_bytes() {
+        assert_eq!(
+            detect_media_type(
+                &FileDataContent::Bytes(upstream_webp_bytes()),
+                Some("image")
+            ),
+            Some("image/webp")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_webp_from_base64() {
+        let webp_base64 = convert_bytes_to_base64(&upstream_webp_bytes());
+
+        assert_eq!(
+            detect_media_type(&media_base64(&webp_base64), Some("image")),
+            Some("image/webp")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_does_not_detect_riff_audio_as_webp_from_bytes() {
+        assert_eq!(
+            detect_media_type(&FileDataContent::Bytes(upstream_wav_bytes()), Some("image")),
+            None
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_does_not_detect_riff_audio_as_webp_from_base64() {
+        let wav_base64 = convert_bytes_to_base64(&upstream_wav_bytes());
+
+        assert_eq!(
+            detect_media_type(&media_base64(&wav_base64), Some("image")),
+            None
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_bmp_from_bytes() {
+        assert_eq!(
+            detect_media_type(&media_bytes(&[0x42, 0x4d, 0xff, 0xff]), Some("image")),
+            Some("image/bmp")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_bmp_from_base64() {
+        let bmp_base64 = convert_bytes_to_base64(&[0x42, 0x4d, 0xff, 0xff]);
+
+        assert_eq!(
+            detect_media_type(&media_base64(&bmp_base64), Some("image")),
+            Some("image/bmp")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_tiff_little_endian_from_bytes() {
+        assert_eq!(
+            detect_media_type(&media_bytes(&[0x49, 0x49, 0x2a, 0x00, 0xff]), Some("image"),),
+            Some("image/tiff")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_tiff_little_endian_from_base64() {
+        assert_eq!(
+            detect_media_type(&media_base64("SUkqAAabc123"), Some("image")),
+            Some("image/tiff")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_tiff_big_endian_from_bytes() {
+        assert_eq!(
+            detect_media_type(&media_bytes(&[0x4d, 0x4d, 0x00, 0x2a, 0xff]), Some("image"),),
+            Some("image/tiff")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_tiff_big_endian_from_base64() {
+        assert_eq!(
+            detect_media_type(&media_base64("TU0AKgabc123"), Some("image")),
+            Some("image/tiff")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_avif_from_bytes() {
+        assert_eq!(
+            detect_media_type(
+                &media_bytes(&[
+                    0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66, 0xff,
+                ]),
+                Some("image"),
+            ),
+            Some("image/avif")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_avif_from_base64() {
+        assert_eq!(
+            detect_media_type(&media_base64("AAAAIGZ0eXBhdmlmabc123"), Some("image")),
+            Some("image/avif")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_heic_from_bytes() {
+        assert_eq!(
+            detect_media_type(
+                &media_bytes(&[
+                    0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63, 0xff,
+                ]),
+                Some("image"),
+            ),
+            Some("image/heic")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_heic_from_base64() {
+        assert_eq!(
+            detect_media_type(&media_base64("AAAAIGZ0eXBoZWljabc123"), Some("image")),
+            Some("image/heic")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_mp3_from_bytes() {
+        assert_eq!(
+            detect_media_type(&media_bytes(&[0xff, 0xfb]), Some("audio")),
+            Some("audio/mpeg")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_mp3_from_base64() {
+        assert_eq!(
+            detect_media_type(&media_base64("//s="), Some("audio")),
+            Some("audio/mpeg")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_mp3_with_id3_tags_from_bytes() {
+        assert_eq!(
+            detect_media_type(
+                &FileDataContent::Bytes(upstream_mp3_with_id3_bytes()),
+                Some("audio"),
+            ),
+            Some("audio/mpeg")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_mp3_with_id3_tags_from_base64() {
+        let mp3_base64 = convert_bytes_to_base64(&upstream_mp3_with_id3_bytes());
+
+        assert_eq!(
+            detect_media_type(&media_base64(&mp3_base64), Some("audio")),
+            Some("audio/mpeg")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_wav_from_bytes() {
+        assert_eq!(
+            detect_media_type(&FileDataContent::Bytes(upstream_wav_bytes()), Some("audio")),
+            Some("audio/wav")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_wav_from_base64() {
+        let wav_base64 = convert_bytes_to_base64(&upstream_wav_bytes());
+
+        assert_eq!(
+            detect_media_type(&media_base64(&wav_base64), Some("audio")),
+            Some("audio/wav")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_does_not_detect_webp_as_wav_from_bytes() {
+        assert_eq!(
+            detect_media_type(
+                &FileDataContent::Bytes(upstream_webp_bytes()),
+                Some("audio")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_does_not_detect_webp_as_wav_from_base64() {
+        let webp_base64 = convert_bytes_to_base64(&upstream_webp_bytes());
+
+        assert_eq!(
+            detect_media_type(&media_base64(&webp_base64), Some("audio")),
+            None
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_ogg_from_bytes() {
+        assert_eq!(
+            detect_media_type(&media_bytes(&[0x4f, 0x67, 0x67, 0x53]), Some("audio")),
+            Some("audio/ogg")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_ogg_from_base64() {
+        assert_eq!(
+            detect_media_type(&media_base64("T2dnUw"), Some("audio")),
+            Some("audio/ogg")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_flac_from_bytes() {
+        assert_eq!(
+            detect_media_type(&media_bytes(&[0x66, 0x4c, 0x61, 0x43]), Some("audio")),
+            Some("audio/flac")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_flac_from_base64() {
+        assert_eq!(
+            detect_media_type(&media_base64("ZkxhQw"), Some("audio")),
+            Some("audio/flac")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_aac_from_bytes() {
+        assert_eq!(
+            detect_media_type(&media_bytes(&[0x40, 0x15, 0x00, 0x00]), Some("audio")),
+            Some("audio/aac")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_aac_from_base64() {
+        let aac_base64 = convert_bytes_to_base64(&[0x40, 0x15, 0x00, 0x00]);
+
+        assert_eq!(
+            detect_media_type(&media_base64(&aac_base64), Some("audio")),
+            Some("audio/aac")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_mp4_from_bytes() {
+        assert_eq!(
+            detect_media_type(&media_bytes(&[0x66, 0x74, 0x79, 0x70]), Some("audio")),
+            Some("audio/mp4")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_mp4_from_base64() {
+        assert_eq!(
+            detect_media_type(&media_base64("ZnR5cA"), Some("audio")),
+            Some("audio/mp4")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_webm_from_bytes() {
+        assert_eq!(
+            detect_media_type(&media_bytes(&[0x1a, 0x45, 0xdf, 0xa3]), Some("audio")),
+            Some("audio/webm")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_webm_from_base64() {
+        assert_eq!(
+            detect_media_type(&media_base64("GkXfow=="), Some("audio")),
+            Some("audio/webm")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_returns_undefined_for_unknown_image_formats() {
+        assert_eq!(
+            detect_media_type(&media_bytes(&[0x00, 0x01, 0x02, 0x03]), Some("image")),
+            None
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_returns_undefined_for_unknown_audio_formats() {
+        assert_eq!(
+            detect_media_type(&media_bytes(&[0x00, 0x01, 0x02, 0x03]), Some("audio")),
+            None
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_returns_undefined_for_empty_arrays_for_image() {
+        assert_eq!(detect_media_type(&media_bytes(&[]), Some("image")), None);
+    }
+
+    #[test]
+    fn detect_media_type_upstream_returns_undefined_for_empty_arrays_for_audio() {
+        assert_eq!(detect_media_type(&media_bytes(&[]), Some("audio")), None);
+    }
+
+    #[test]
+    fn detect_media_type_upstream_returns_undefined_for_short_arrays_for_image() {
+        assert_eq!(
+            detect_media_type(&media_bytes(&[0x89, 0x50]), Some("image")),
+            None
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_returns_undefined_for_short_arrays_for_audio() {
+        assert_eq!(
+            detect_media_type(&media_bytes(&[0x4f, 0x67]), Some("audio")),
+            None
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_returns_undefined_for_invalid_base64_strings_for_image() {
+        assert_eq!(
+            detect_media_type(&media_base64("invalid123"), Some("image")),
+            None
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_returns_undefined_for_invalid_base64_strings_for_audio() {
+        assert_eq!(
+            detect_media_type(&media_base64("invalid123"), Some("audio")),
+            None
+        );
+    }
+
+    #[test]
+    fn get_top_level_media_type_upstream_returns_top_level_segment_for_full_media_type() {
+        assert_eq!(get_top_level_media_type("image/png"), "image");
+        assert_eq!(get_top_level_media_type("audio/mpeg"), "audio");
+        assert_eq!(get_top_level_media_type("video/mp4"), "video");
+        assert_eq!(get_top_level_media_type("application/pdf"), "application");
+        assert_eq!(get_top_level_media_type("text/plain"), "text");
+    }
+
+    #[test]
+    fn get_top_level_media_type_upstream_returns_input_for_top_level_segment() {
+        assert_eq!(get_top_level_media_type("image"), "image");
+        assert_eq!(get_top_level_media_type("audio"), "audio");
+        assert_eq!(get_top_level_media_type("video"), "video");
+        assert_eq!(get_top_level_media_type("application"), "application");
+        assert_eq!(get_top_level_media_type("text"), "text");
+    }
+
+    #[test]
+    fn get_top_level_media_type_upstream_normalizes_wildcards_to_top_level_segment() {
+        assert_eq!(get_top_level_media_type("image/*"), "image");
+        assert_eq!(get_top_level_media_type("audio/*"), "audio");
+        assert_eq!(get_top_level_media_type("video/*"), "video");
+        assert_eq!(get_top_level_media_type("application/*"), "application");
+        assert_eq!(get_top_level_media_type("text/*"), "text");
+    }
+
+    #[test]
+    fn get_top_level_media_type_upstream_handles_edge_cases() {
+        assert_eq!(get_top_level_media_type(""), "");
+        assert_eq!(get_top_level_media_type("/"), "");
+        assert_eq!(get_top_level_media_type("image/"), "image");
+    }
+
+    #[test]
+    fn is_full_media_type_upstream_returns_true_for_concrete_subtype() {
+        assert!(is_full_media_type("image/png"));
+        assert!(is_full_media_type("audio/mpeg"));
+        assert!(is_full_media_type("video/mp4"));
+        assert!(is_full_media_type("application/pdf"));
+        assert!(is_full_media_type("text/plain"));
+    }
+
+    #[test]
+    fn is_full_media_type_upstream_returns_false_for_top_level_only_media_types() {
+        assert!(!is_full_media_type("image"));
+        assert!(!is_full_media_type("audio"));
+        assert!(!is_full_media_type("video"));
+        assert!(!is_full_media_type("application"));
+        assert!(!is_full_media_type("text"));
+    }
+
+    #[test]
+    fn is_full_media_type_upstream_returns_false_for_wildcards() {
+        assert!(!is_full_media_type("image/*"));
+        assert!(!is_full_media_type("audio/*"));
+        assert!(!is_full_media_type("video/*"));
+        assert!(!is_full_media_type("application/*"));
+        assert!(!is_full_media_type("text/*"));
+    }
+
+    #[test]
+    fn is_full_media_type_upstream_returns_false_for_edge_cases() {
+        assert!(!is_full_media_type(""));
+        assert!(!is_full_media_type("/"));
+        assert!(!is_full_media_type("image/"));
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_image_types_when_top_level_type_is_image() {
+        assert_eq!(
+            detect_media_type(
+                &media_bytes(&[0x89, 0x50, 0x4e, 0x47, 0xff, 0xff]),
+                Some("image"),
+            ),
+            Some("image/png")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_audio_types_when_top_level_type_is_audio() {
+        assert_eq!(
+            detect_media_type(&media_bytes(&[0xff, 0xfb]), Some("audio")),
+            Some("audio/mpeg")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_video_types_when_top_level_type_is_video() {
+        assert_eq!(
+            detect_media_type(&media_bytes(&[0x1a, 0x45, 0xdf, 0xa3]), Some("video")),
+            Some("video/webm")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_detects_document_types_when_top_level_type_is_application() {
+        assert_eq!(
+            detect_media_type(
+                &media_bytes(&[0x25, 0x50, 0x44, 0x46, 0x00]),
+                Some("application"),
+            ),
+            Some("application/pdf")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_returns_undefined_for_text_top_level_segment() {
+        assert_eq!(
+            detect_media_type(&media_bytes(&[0x48, 0x65, 0x6c, 0x6c, 0x6f]), Some("text"),),
+            None
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_returns_undefined_for_unknown_top_level_segments() {
+        assert_eq!(
+            detect_media_type(
+                &media_bytes(&[0x89, 0x50, 0x4e, 0x47, 0xff, 0xff]),
+                Some("not-a-real-segment"),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_returns_undefined_when_segment_table_does_not_match() {
+        assert_eq!(
+            detect_media_type(&media_bytes(&[0x00, 0x01, 0x02, 0x03]), Some("image")),
+            None
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_without_top_level_type_detects_image_types() {
+        assert_eq!(
+            detect_media_type(&media_bytes(&[0x89, 0x50, 0x4e, 0x47, 0xff, 0xff]), None,),
+            Some("image/png")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_without_top_level_type_detects_audio_types() {
+        assert_eq!(
+            detect_media_type(&media_bytes(&[0xff, 0xfb]), None),
+            Some("audio/mpeg")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_without_top_level_type_detects_video_types() {
+        assert_eq!(
+            detect_media_type(
+                &media_bytes(&[0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70]),
+                None,
+            ),
+            Some("video/mp4")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_without_top_level_type_detects_document_types() {
+        assert_eq!(
+            detect_media_type(&media_bytes(&[0x25, 0x50, 0x44, 0x46, 0x00]), None),
+            Some("application/pdf")
+        );
+    }
+
+    #[test]
+    fn detect_media_type_upstream_without_top_level_type_returns_undefined_for_no_signature() {
+        assert_eq!(
+            detect_media_type(&media_bytes(&[0x00, 0x01, 0x02, 0x03]), None),
+            None
         );
     }
 
@@ -11773,6 +12376,40 @@ mod tests {
         assert_eq!(
             error.functionality(),
             "file of media type \"image\" must specify subtype since it could not be auto-detected"
+        );
+    }
+
+    #[test]
+    fn resolve_full_media_type_rejects_unsupported_top_level_segment() {
+        let part = LanguageModelFilePart::new(
+            FileData::Data {
+                data: FileDataContent::Base64("hello".to_string()),
+            },
+            "text",
+        );
+
+        let error = resolve_full_media_type(&part)
+            .expect_err("unsupported top-level segment requires a subtype");
+
+        assert_eq!(
+            error.functionality(),
+            "file of media type \"text\" must specify subtype since it could not be auto-detected"
+        );
+    }
+
+    #[test]
+    fn resolve_full_media_type_accepts_base64_string_data() {
+        let png_base64 = convert_bytes_to_base64(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
+        let part = LanguageModelFilePart::new(
+            FileData::Data {
+                data: FileDataContent::Base64(png_base64),
+            },
+            "image",
+        );
+
+        assert_eq!(
+            resolve_full_media_type(&part).expect("base64 data resolves"),
+            "image/png"
         );
     }
 
