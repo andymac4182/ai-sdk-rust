@@ -6817,11 +6817,11 @@ mod tests {
         FinishReason, LanguageModel, LanguageModelAbortController,
         LanguageModelAssistantContentPart, LanguageModelAssistantMessage, LanguageModelCallOptions,
         LanguageModelContent, LanguageModelCustomPart, LanguageModelFileData,
-        LanguageModelFilePart, LanguageModelFunctionTool, LanguageModelMessage,
-        LanguageModelProviderTool, LanguageModelReasoningEffort, LanguageModelReasoningFilePart,
-        LanguageModelReasoningPart, LanguageModelResponseFormat, LanguageModelSource,
-        LanguageModelStreamPart, LanguageModelSystemMessage, LanguageModelTextPart,
-        LanguageModelTool, LanguageModelToolApprovalRequestPart,
+        LanguageModelFilePart, LanguageModelFunctionTool, LanguageModelGenerateResult,
+        LanguageModelMessage, LanguageModelProviderTool, LanguageModelReasoningEffort,
+        LanguageModelReasoningFilePart, LanguageModelReasoningPart, LanguageModelResponseFormat,
+        LanguageModelSource, LanguageModelStreamPart, LanguageModelSystemMessage,
+        LanguageModelTextPart, LanguageModelTool, LanguageModelToolApprovalRequestPart,
         LanguageModelToolApprovalResponsePart, LanguageModelToolCallPart, LanguageModelToolChoice,
         LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultContentPart,
         LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUserContentPart,
@@ -19205,6 +19205,229 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_generates_mcp_approval_request_fixture_turn_1() {
+        const RESPONSE_ID: &str = "resp_04f6b17429cf2b02006949a66d56088196a2d1b86e820556ce";
+        const LIST_TOOLS_ID: &str = "mcpl_04f6b17429cf2b02006949a66d64188196993ab2bed8e07268";
+        const REASONING_ID: &str = "rs_04f6b17429cf2b02006949a66f4df88196a44362d8a21f9cea";
+        const APPROVAL_ID: &str = "mcpr_04f6b17429cf2b02006949a6712b1081968b3c7a72dec695d8";
+
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let provider = open_responses_mcp_approval_fixture_provider(
+            Arc::clone(&captured_request),
+            open_responses_mcp_approval_generate_request_body(
+                RESPONSE_ID,
+                1_766_434_413,
+                LIST_TOOLS_ID,
+                REASONING_ID,
+                APPROVAL_ID,
+                (422, 104, 64),
+            ),
+        );
+        let result = poll_ready(
+            provider.language_model("gpt-5-mini").do_generate(
+                LanguageModelCallOptions::new(open_responses_hello_prompt())
+                    .with_tool(open_responses_mcp_approval_tool()),
+            ),
+        );
+
+        open_responses_assert_mcp_approval_generate_request_content(
+            &result.content,
+            REASONING_ID,
+            APPROVAL_ID,
+        );
+        open_responses_assert_mcp_approval_generate_finish(
+            &result,
+            RESPONSE_ID,
+            1_766_434_413,
+            422,
+            104,
+            64,
+        );
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        open_responses_assert_mcp_approval_tool_request(&request_body);
+    }
+
+    #[test]
+    fn open_responses_provider_generates_mcp_approval_denial_fixture_turn_2() {
+        const RESPONSE_ID: &str = "resp_04f6b17429cf2b02006949a673effc8196bc0d00ce027d3bdc";
+        const LIST_TOOLS_ID: &str = "mcpl_04f6b17429cf2b02006949a673fd08819695f8f57cdb9bed6f";
+        const REASONING_ID: &str = "rs_04f6b17429cf2b02006949a67543c88196ad1f56cb7c8fe476";
+        const MESSAGE_ID: &str = "msg_04f6b17429cf2b02006949a679f35c81968e9b234489fa32b8";
+        const APPROVAL_ID: &str = "mcpr_04f6b17429cf2b02006949a6712b1081968b3c7a72dec695d8";
+        const FINAL_TEXT: &str = concat!(
+            "I couldn't create the short link because the shortening tool call was not approved. Do you want me to proceed and create a short URL on zip1.io with max clicks = 100? If yes, please confirm and optionally provide:\n",
+            "- a custom alias (alphanumeric and hyphens only), and/or\n",
+            "- a password, and/or\n",
+            "- a short description.\n\n",
+            "If you don't want me to use the tool, I can give instructions so you can shorten it yourself."
+        );
+
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let provider = open_responses_mcp_approval_fixture_provider(
+            Arc::clone(&captured_request),
+            open_responses_mcp_approval_generate_text_body(
+                RESPONSE_ID,
+                1_766_434_419,
+                LIST_TOOLS_ID,
+                REASONING_ID,
+                MESSAGE_ID,
+                FINAL_TEXT,
+                (592, 421, 320),
+            ),
+        );
+        let result = poll_ready(
+            provider.language_model("gpt-5-mini").do_generate(
+                LanguageModelCallOptions::new(open_responses_mcp_approval_history_prompt(
+                    APPROVAL_ID,
+                    false,
+                    None,
+                ))
+                .with_tool(open_responses_mcp_approval_tool()),
+            ),
+        );
+
+        open_responses_assert_mcp_approval_generate_text_content(
+            &result.content,
+            REASONING_ID,
+            MESSAGE_ID,
+            FINAL_TEXT,
+        );
+        open_responses_assert_mcp_approval_generate_finish(
+            &result,
+            RESPONSE_ID,
+            1_766_434_419,
+            592,
+            421,
+            320,
+        );
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        open_responses_assert_mcp_approval_tool_request(&request_body);
+        open_responses_assert_mcp_approval_response_input(&request_body, APPROVAL_ID, false);
+    }
+
+    #[test]
+    fn open_responses_provider_generates_mcp_approval_retry_fixture_turn_3() {
+        const RESPONSE_ID: &str = "resp_04f6b17429cf2b02006949a688b32881968e0f3ec6a9efe2da";
+        const LIST_TOOLS_ID: &str = "mcpl_04f6b17429cf2b02006949a688cc6481969f74af86ec648d15";
+        const REASONING_ID: &str = "rs_04f6b17429cf2b02006949a68a9c7c8196b850018869363b06";
+        const FIRST_APPROVAL_ID: &str = "mcpr_04f6b17429cf2b02006949a6712b1081968b3c7a72dec695d8";
+        const SECOND_APPROVAL_ID: &str = "mcpr_04f6b17429cf2b02006949a68bf5808196b6f2008a315c9aa4";
+
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let provider = open_responses_mcp_approval_fixture_provider(
+            Arc::clone(&captured_request),
+            open_responses_mcp_approval_generate_request_body(
+                RESPONSE_ID,
+                1_766_434_440,
+                LIST_TOOLS_ID,
+                REASONING_ID,
+                SECOND_APPROVAL_ID,
+                (587, 104, 64),
+            ),
+        );
+        let result = poll_ready(
+            provider.language_model("gpt-5-mini").do_generate(
+                LanguageModelCallOptions::new(open_responses_mcp_approval_history_prompt(
+                    FIRST_APPROVAL_ID,
+                    false,
+                    Some("try again"),
+                ))
+                .with_tool(open_responses_mcp_approval_tool()),
+            ),
+        );
+
+        open_responses_assert_mcp_approval_generate_request_content(
+            &result.content,
+            REASONING_ID,
+            SECOND_APPROVAL_ID,
+        );
+        open_responses_assert_mcp_approval_generate_finish(
+            &result,
+            RESPONSE_ID,
+            1_766_434_440,
+            587,
+            104,
+            64,
+        );
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        open_responses_assert_mcp_approval_tool_request(&request_body);
+        open_responses_assert_mcp_approval_response_input(&request_body, FIRST_APPROVAL_ID, false);
+    }
+
+    #[test]
+    fn open_responses_provider_generates_mcp_approval_result_fixture_turn_4() {
+        const RESPONSE_ID: &str = "resp_04f6b17429cf2b02006949a68dcefc81969600243221f290a7";
+        const LIST_TOOLS_ID: &str = "mcpl_04f6b17429cf2b02006949a68ebc288196ad7b23d6c452775a";
+        const MCP_CALL_ID: &str = "mcp_04f6b17429cf2b02006949a6908fc4819686c02f71f7faecc6";
+        const MESSAGE_ID: &str = "msg_04f6b17429cf2b02006949a6930b308196a3ad4f35aa6e0b1b";
+        const APPROVAL_ID: &str = "mcpr_04f6b17429cf2b02006949a68bf5808196b6f2008a315c9aa4";
+        const TOOL_OUTPUT: &str = concat!(
+            "\u{2705} Short URL created: https://zip1.io/oMAchr\n",
+            "\u{1f524} Generated code: oMAchr\n",
+            "\u{1f522} Max clicks: 100\n",
+            "\u{1f517} Original URL: https://ai-sdk.dev/\n\n",
+            "\u{1f4ca} View stats: https://zip1.io/stats/oMAchr"
+        );
+        const FINAL_TEXT: &str = concat!(
+            "Done \u{2014} I created a short link for you.\n\n",
+            "Short URL: https://zip1.io/oMAchr\n",
+            "Original URL: https://ai-sdk.dev/\n",
+            "Max clicks: 100\n",
+            "Stats page: https://zip1.io/stats/oMAchr\n\n",
+            "Would you like a custom alias, password protection, or a description added to this short link?"
+        );
+
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let provider = open_responses_mcp_approval_fixture_provider(
+            Arc::clone(&captured_request),
+            open_responses_mcp_approval_generate_result_body(
+                RESPONSE_ID,
+                1_766_434_446,
+                LIST_TOOLS_ID,
+                MCP_CALL_ID,
+                APPROVAL_ID,
+                MESSAGE_ID,
+                TOOL_OUTPUT,
+                FINAL_TEXT,
+                (765, 74, 0),
+            ),
+        );
+        let result = poll_ready(
+            provider.language_model("gpt-5-mini").do_generate(
+                LanguageModelCallOptions::new(open_responses_mcp_approval_history_prompt(
+                    APPROVAL_ID,
+                    true,
+                    None,
+                ))
+                .with_tool(open_responses_mcp_approval_tool()),
+            ),
+        );
+
+        open_responses_assert_mcp_approval_generate_result_content(
+            &result.content,
+            MCP_CALL_ID,
+            MESSAGE_ID,
+            TOOL_OUTPUT,
+            FINAL_TEXT,
+        );
+        open_responses_assert_mcp_approval_generate_finish(
+            &result,
+            RESPONSE_ID,
+            1_766_434_446,
+            765,
+            74,
+            0,
+        );
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        open_responses_assert_mcp_approval_tool_request(&request_body);
+        open_responses_assert_mcp_approval_response_input(&request_body, APPROVAL_ID, true);
+    }
+
+    #[test]
     fn open_responses_provider_streams_mcp_approval_request_fixture_turn_1() {
         const RESPONSE_ID: &str = "resp_04a97b4fce127879006949a837a3a48195b37f26ae73f550c0";
         const LIST_TOOLS_ID: &str = "mcpl_04a97b4fce127879006949a837ada08195abf62939840a3d5c";
@@ -20584,6 +20807,10 @@ mod tests {
         r#"{"alias":"","description":"Shortened link for ai-sdk.dev","max_clicks":100,"password":"","url":"https://ai-sdk.dev/"}"#
     }
 
+    fn open_responses_mcp_approval_generate_arguments() -> &'static str {
+        r#"{"alias":"","description":"","max_clicks":100,"password":"","url":"https://ai-sdk.dev/"}"#
+    }
+
     fn open_responses_mcp_approval_history_prompt(
         approval_id: &str,
         approved: bool,
@@ -20671,11 +20898,142 @@ mod tests {
         })
     }
 
+    fn open_responses_mcp_approval_generate_request_item(approval_id: &str) -> JsonValue {
+        json!({
+            "id": approval_id,
+            "type": "mcp_approval_request",
+            "server_label": "zip1",
+            "name": "create_short_url",
+            "arguments": open_responses_mcp_approval_generate_arguments()
+        })
+    }
+
     fn open_responses_mcp_reasoning_item(reasoning_id: &str) -> JsonValue {
         json!({
             "id": reasoning_id,
             "type": "reasoning",
             "summary": []
+        })
+    }
+
+    fn open_responses_mcp_approval_generate_body(
+        response_id: &str,
+        created_at: i64,
+        output: Vec<JsonValue>,
+        usage: (u64, u64, u64),
+    ) -> String {
+        json!({
+            "id": response_id,
+            "object": "response",
+            "created_at": created_at,
+            "status": "completed",
+            "model": "gpt-5-mini-2025-08-07",
+            "output": output,
+            "service_tier": "default",
+            "usage": {
+                "input_tokens": usage.0,
+                "input_tokens_details": {
+                    "cached_tokens": 0
+                },
+                "output_tokens": usage.1,
+                "output_tokens_details": {
+                    "reasoning_tokens": usage.2
+                },
+                "total_tokens": usage.0 + usage.1
+            }
+        })
+        .to_string()
+    }
+
+    fn open_responses_mcp_approval_generate_request_body(
+        response_id: &str,
+        created_at: i64,
+        list_tools_id: &str,
+        reasoning_id: &str,
+        approval_id: &str,
+        usage: (u64, u64, u64),
+    ) -> String {
+        open_responses_mcp_approval_generate_body(
+            response_id,
+            created_at,
+            vec![
+                open_responses_mcp_list_tools_item(list_tools_id),
+                open_responses_mcp_reasoning_item(reasoning_id),
+                open_responses_mcp_approval_generate_request_item(approval_id),
+            ],
+            usage,
+        )
+    }
+
+    fn open_responses_mcp_approval_generate_text_body(
+        response_id: &str,
+        created_at: i64,
+        list_tools_id: &str,
+        reasoning_id: &str,
+        message_id: &str,
+        final_text: &str,
+        usage: (u64, u64, u64),
+    ) -> String {
+        open_responses_mcp_approval_generate_body(
+            response_id,
+            created_at,
+            vec![
+                open_responses_mcp_list_tools_item(list_tools_id),
+                open_responses_mcp_reasoning_item(reasoning_id),
+                open_responses_mcp_message_item(message_id, final_text),
+            ],
+            usage,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_responses_mcp_approval_generate_result_body(
+        response_id: &str,
+        created_at: i64,
+        list_tools_id: &str,
+        mcp_call_id: &str,
+        approval_id: &str,
+        message_id: &str,
+        tool_output: &str,
+        final_text: &str,
+        usage: (u64, u64, u64),
+    ) -> String {
+        open_responses_mcp_approval_generate_body(
+            response_id,
+            created_at,
+            vec![
+                open_responses_mcp_list_tools_item(list_tools_id),
+                json!({
+                    "id": mcp_call_id,
+                    "type": "mcp_call",
+                    "status": "completed",
+                    "approval_request_id": approval_id,
+                    "arguments": open_responses_mcp_approval_generate_arguments(),
+                    "error": null,
+                    "name": "create_short_url",
+                    "output": tool_output,
+                    "server_label": "zip1"
+                }),
+                open_responses_mcp_message_item(message_id, final_text),
+            ],
+            usage,
+        )
+    }
+
+    fn open_responses_mcp_message_item(message_id: &str, final_text: &str) -> JsonValue {
+        json!({
+            "id": message_id,
+            "type": "message",
+            "status": "completed",
+            "content": [
+                {
+                    "type": "output_text",
+                    "annotations": [],
+                    "logprobs": [],
+                    "text": final_text
+                }
+            ],
+            "role": "assistant"
         })
     }
 
@@ -21052,6 +21410,197 @@ mod tests {
                 }
             }),
         ])
+    }
+
+    fn open_responses_assert_mcp_approval_generate_request_content(
+        content: &[LanguageModelContent],
+        reasoning_id: &str,
+        approval_id: &str,
+    ) {
+        let reasoning = content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::Reasoning(reasoning) => Some(reasoning),
+                _ => None,
+            })
+            .expect("content includes reasoning");
+        assert_eq!(reasoning.text, "");
+        assert_eq!(
+            openai_metadata_value(&reasoning.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(reasoning_id)
+        );
+
+        let tool_calls = content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].tool_name, "mcp.create_short_url");
+        assert_eq!(tool_calls[0].provider_executed, Some(true));
+        assert_eq!(tool_calls[0].dynamic, Some(true));
+        assert_eq!(
+            tool_calls[0].input,
+            open_responses_mcp_approval_generate_arguments()
+        );
+        assert_ne!(tool_calls[0].tool_call_id, approval_id);
+        assert_eq!(
+            openai_metadata_value(&tool_calls[0].provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(approval_id)
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_calls[0].provider_metadata, "approvalRequestId")
+                .and_then(JsonValue::as_str),
+            Some(approval_id)
+        );
+
+        let approvals = content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::ToolApprovalRequest(approval) => Some(approval),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(approvals.len(), 1);
+        assert_eq!(approvals[0].approval_id, approval_id);
+        assert_eq!(approvals[0].tool_call_id, tool_calls[0].tool_call_id);
+    }
+
+    fn open_responses_assert_mcp_approval_generate_text_content(
+        content: &[LanguageModelContent],
+        reasoning_id: &str,
+        message_id: &str,
+        final_text: &str,
+    ) {
+        let reasoning = content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::Reasoning(reasoning) => Some(reasoning),
+                _ => None,
+            })
+            .expect("content includes reasoning");
+        assert_eq!(
+            openai_metadata_value(&reasoning.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(reasoning_id)
+        );
+
+        let text = content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::Text(text) => Some(text),
+                _ => None,
+            })
+            .expect("content includes denial text");
+        assert_eq!(text.text, final_text);
+        assert_eq!(
+            openai_metadata_value(&text.provider_metadata, "itemId").and_then(JsonValue::as_str),
+            Some(message_id)
+        );
+        assert!(!content.iter().any(|part| matches!(
+            part,
+            LanguageModelContent::ToolCall(_)
+                | LanguageModelContent::ToolApprovalRequest(_)
+                | LanguageModelContent::ToolResult(_)
+        )));
+    }
+
+    fn open_responses_assert_mcp_approval_generate_result_content(
+        content: &[LanguageModelContent],
+        mcp_call_id: &str,
+        message_id: &str,
+        tool_output: &str,
+        final_text: &str,
+    ) {
+        let tool_call = content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .expect("content includes approved MCP tool call");
+        assert_eq!(tool_call.tool_call_id, mcp_call_id);
+        assert_eq!(tool_call.tool_name, "mcp.create_short_url");
+        assert_eq!(tool_call.provider_executed, Some(true));
+        assert_eq!(tool_call.dynamic, Some(true));
+        assert_eq!(
+            tool_call.input,
+            open_responses_mcp_approval_generate_arguments()
+        );
+
+        let tool_result = content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .expect("content includes approved MCP tool result");
+        assert_eq!(tool_result.tool_call_id, mcp_call_id);
+        assert_eq!(tool_result.tool_name, "mcp.create_short_url");
+        assert_eq!(tool_result.dynamic, Some(true));
+        assert_eq!(
+            tool_result.result.as_value(),
+            &json!({
+                "type": "call",
+                "serverLabel": "zip1",
+                "name": "create_short_url",
+                "arguments": open_responses_mcp_approval_generate_arguments(),
+                "output": tool_output
+            })
+        );
+
+        let text = content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::Text(text) => Some(text),
+                _ => None,
+            })
+            .expect("content includes final text");
+        assert_eq!(text.text, final_text);
+        assert_eq!(
+            openai_metadata_value(&text.provider_metadata, "itemId").and_then(JsonValue::as_str),
+            Some(message_id)
+        );
+    }
+
+    fn open_responses_assert_mcp_approval_generate_finish(
+        result: &LanguageModelGenerateResult,
+        response_id: &str,
+        created_at: i64,
+        input_tokens: u64,
+        output_tokens: u64,
+        reasoning_tokens: u64,
+    ) {
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(result.finish_reason.raw, None);
+        assert_eq!(result.usage.input_tokens.total, Some(input_tokens));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(result.usage.output_tokens.total, Some(output_tokens));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(reasoning_tokens));
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some(response_id)
+        );
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "serviceTier")
+                .and_then(JsonValue::as_str),
+            Some("default")
+        );
+
+        let response = result.response.as_ref().expect("result includes response");
+        assert_eq!(response.id.as_deref(), Some(response_id));
+        assert_eq!(response.model_id.as_deref(), Some("gpt-5-mini-2025-08-07"));
+        assert_eq!(
+            response
+                .timestamp
+                .map(|timestamp| timestamp.unix_timestamp()),
+            Some(created_at)
+        );
     }
 
     fn open_responses_assert_mcp_approval_request_stream(
