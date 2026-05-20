@@ -3433,6 +3433,10 @@ fn open_responses_content(
                     tool_call = tool_call.with_provider_executed(true);
                 }
 
+                if let Some(metadata) = open_responses_item_metadata(provider_options_name, part) {
+                    tool_call = tool_call.with_provider_metadata(metadata);
+                }
+
                 content.push(LanguageModelContent::ToolCall(tool_call));
             }
             Some("tool_search_output") => {
@@ -3447,14 +3451,21 @@ fn open_responses_content(
                             .map(ToString::to_string)
                     })
                     .unwrap_or_default();
-                open_responses_push_tool_result(
-                    &mut content,
-                    &tool_call_id,
-                    &tool_name_mapping.to_custom_tool_name("tool_search"),
-                    json!({
-                        "tools": part.get("tools").cloned().unwrap_or_else(|| JsonValue::Array(Vec::new()))
-                    }),
-                );
+                if let Ok(result) = NonNullJsonValue::new(json!({
+                    "tools": part.get("tools").cloned().unwrap_or_else(|| JsonValue::Array(Vec::new()))
+                })) {
+                    let mut tool_result = LanguageModelToolResult::new(
+                        &tool_call_id,
+                        tool_name_mapping.to_custom_tool_name("tool_search"),
+                        result,
+                    );
+                    if let Some(metadata) =
+                        open_responses_item_metadata(provider_options_name, part)
+                    {
+                        tool_result = tool_result.with_provider_metadata(metadata);
+                    }
+                    content.push(LanguageModelContent::ToolResult(tool_result));
+                }
             }
             Some("local_shell_call") => {
                 let tool_call_id = part
@@ -6958,6 +6969,113 @@ mod tests {
                 })),
             )),
         )
+    }
+
+    fn open_responses_hosted_tool_search_fixture_call_options() -> LanguageModelCallOptions {
+        LanguageModelCallOptions::new(open_responses_hello_prompt())
+            .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                "openai.tool_search",
+                "toolSearch",
+                JsonObject::new(),
+            )))
+            .with_tool(LanguageModelTool::Function(
+                LanguageModelFunctionTool::new(
+                    "get_weather",
+                    json_object(json!({
+                        "type": "object",
+                        "properties": {
+                            "location": {
+                                "type": "string"
+                            },
+                            "unit": {
+                                "type": "string",
+                                "enum": ["celsius", "fahrenheit"]
+                            }
+                        },
+                        "required": ["location", "unit"],
+                        "additionalProperties": false
+                    })),
+                )
+                .with_description("Get the current weather at a specific location")
+                .with_strict(true)
+                .with_provider_options(openai_defer_loading_options()),
+            ))
+            .with_tool(LanguageModelTool::Function(
+                LanguageModelFunctionTool::new(
+                    "search_files",
+                    json_object(json!({
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string"
+                            },
+                            "file_types": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string"
+                                }
+                            }
+                        },
+                        "required": ["query", "file_types"],
+                        "additionalProperties": false
+                    })),
+                )
+                .with_description("Search through files in the workspace")
+                .with_strict(true)
+                .with_provider_options(openai_defer_loading_options()),
+            ))
+            .with_tool(LanguageModelTool::Function(
+                LanguageModelFunctionTool::new(
+                    "send_email",
+                    json_object(json!({
+                        "type": "object",
+                        "properties": {
+                            "to": {
+                                "type": "string"
+                            },
+                            "subject": {
+                                "type": "string"
+                            },
+                            "body": {
+                                "type": "string"
+                            }
+                        },
+                        "required": ["to", "subject", "body"],
+                        "additionalProperties": false
+                    })),
+                )
+                .with_description("Send an email to a recipient")
+                .with_strict(true)
+                .with_provider_options(openai_defer_loading_options()),
+            ))
+    }
+
+    fn open_responses_tool_search_fixture_tools() -> JsonValue {
+        json!([
+            {
+                "type": "function",
+                "defer_loading": true,
+                "description": "Get the current weather at a specific location",
+                "name": "get_weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "The city and state, e.g. San Francisco, CA"
+                        },
+                        "unit": {
+                            "type": "string",
+                            "enum": ["celsius", "fahrenheit"],
+                            "description": "Temperature unit"
+                        }
+                    },
+                    "required": ["location", "unit"],
+                    "additionalProperties": false
+                },
+                "strict": true
+            }
+        ])
     }
 
     fn open_responses_captured_provider(
@@ -14902,6 +15020,146 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_generates_hosted_tool_search_fixture() {
+        const RESPONSE_ID: &str = "resp_04bd69550b37ba260069aa689530d0819094482b7c14059a0f";
+        const TOOL_SEARCH_CALL_ID: &str = "tsc_04bd69550b37ba260069aa689605cc8190bd2d9bf1199fa630";
+        const TOOL_SEARCH_OUTPUT_ID: &str =
+            "tso_04bd69550b37ba260069aa68965b508190949d19c05f1b6df9";
+
+        let transport: OpenResponsesTransport = Arc::new(
+            move |_request| -> OpenResponsesTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": RESPONSE_ID,
+                        "object": "response",
+                        "created_at": 1772775573,
+                        "status": "completed",
+                        "model": "gpt-5.4-2026-03-05",
+                        "output": [
+                            {
+                                "id": TOOL_SEARCH_CALL_ID,
+                                "type": "tool_search_call",
+                                "status": "completed",
+                                "arguments": {
+                                    "paths": ["get_weather"]
+                                },
+                                "call_id": null,
+                                "execution": "server"
+                            },
+                            {
+                                "id": TOOL_SEARCH_OUTPUT_ID,
+                                "type": "tool_search_output",
+                                "status": "completed",
+                                "call_id": null,
+                                "execution": "server",
+                                "tools": open_responses_tool_search_fixture_tools()
+                            },
+                            {
+                                "id": "fc_04bd69550b37ba260069aa68969e088190a5ebe91c1448f693",
+                                "type": "function_call",
+                                "status": "completed",
+                                "arguments": "{\"location\":\"San Francisco, CA\",\"unit\":\"fahrenheit\"}",
+                                "call_id": "call_ytqozXvUXG8NN1b0IODxzUaE",
+                                "name": "get_weather",
+                                "namespace": "get_weather"
+                            }
+                        ],
+                        "service_tier": "default",
+                        "usage": {
+                            "input_tokens": 640,
+                            "input_tokens_details": {
+                                "cached_tokens": 0
+                            },
+                            "output_tokens": 46,
+                            "output_tokens_details": {
+                                "reasoning_tokens": 20
+                            },
+                            "total_tokens": 686
+                        }
+                    })
+                    .to_string(),
+                ))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-5-nano");
+
+        let result =
+            poll_ready(model.do_generate(open_responses_hosted_tool_search_fixture_call_options()));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::ToolCalls);
+        assert_eq!(result.usage.input_tokens.total, Some(640));
+        assert_eq!(result.usage.output_tokens.total, Some(46));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(20));
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some(RESPONSE_ID)
+        );
+
+        let tool_calls = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let tool_results = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let tool_search_call = tool_calls
+            .iter()
+            .find(|tool_call| tool_call.tool_name == "toolSearch")
+            .expect("content includes hosted tool-search call");
+        assert_eq!(tool_search_call.tool_call_id, TOOL_SEARCH_CALL_ID);
+        assert_eq!(tool_search_call.provider_executed, Some(true));
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&tool_search_call.input)
+                .expect("tool-search input parses"),
+            json!({
+                "arguments": {
+                    "paths": ["get_weather"]
+                },
+                "call_id": null
+            })
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_search_call.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(TOOL_SEARCH_CALL_ID)
+        );
+
+        let tool_search_result = tool_results
+            .iter()
+            .find(|tool_result| tool_result.tool_name == "toolSearch")
+            .expect("content includes hosted tool-search result");
+        assert_eq!(tool_search_result.tool_call_id, TOOL_SEARCH_CALL_ID);
+        assert_eq!(
+            tool_search_result.result.as_value(),
+            &json!({
+                "tools": open_responses_tool_search_fixture_tools()
+            })
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_search_result.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(TOOL_SEARCH_OUTPUT_ID)
+        );
+    }
+
+    #[test]
     fn open_responses_provider_generates_apply_patch_create_file_fixture() {
         const RESPONSE_ID: &str = "resp_0b04c5f8dfc43af500692749bc5b288197b45e830995fd32d3";
         const APPLY_PATCH_ID: &str = "apc_0b04c5f8dfc43af500692749bd60908197b0e453c38f30191a";
@@ -21506,6 +21764,217 @@ mod tests {
         assert_eq!(finish.usage.input_tokens.cache_read, Some(0));
         assert_eq!(finish.usage.output_tokens.total, Some(20));
         assert_eq!(finish.usage.output_tokens.reasoning, Some(0));
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some(RESPONSE_ID)
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_streams_hosted_tool_search_fixture() {
+        const RESPONSE_ID: &str = "resp_08a14073c7135dc10069aa68621de481908b2fc660fb4fc0af";
+        const TOOL_SEARCH_CALL_ID: &str = "tsc_08a14073c7135dc10069aa686296c88190bff77ad137e79d59";
+        const TOOL_SEARCH_OUTPUT_ID: &str =
+            "tso_08a14073c7135dc10069aa6862b1248190ba40cbba918ecfa2";
+
+        let tool_search_call = json!({
+            "id": TOOL_SEARCH_CALL_ID,
+            "type": "tool_search_call",
+            "status": "completed",
+            "arguments": {
+                "paths": ["get_weather"]
+            },
+            "call_id": null,
+            "execution": "server"
+        });
+        let tool_search_output = json!({
+            "id": TOOL_SEARCH_OUTPUT_ID,
+            "type": "tool_search_output",
+            "status": "completed",
+            "call_id": null,
+            "execution": "server",
+            "tools": open_responses_tool_search_fixture_tools()
+        });
+        let function_call = json!({
+            "id": "fc_08a14073c7135dc10069aa68630840819098f7c17c4e577327",
+            "type": "function_call",
+            "status": "completed",
+            "arguments": "{\"location\":\"San Francisco, CA\",\"unit\":\"fahrenheit\"}",
+            "call_id": "call_pddfxhfOx4gY56zn4vIIEbFp",
+            "name": "get_weather",
+            "namespace": "get_weather"
+        });
+        let sse = open_responses_sse_from_events(vec![
+            json!({
+                "type": "response.created",
+                "sequence_number": 0,
+                "response": {
+                    "id": RESPONSE_ID,
+                    "object": "response",
+                    "created_at": 1772775522,
+                    "status": "in_progress",
+                    "model": "gpt-5.4-2026-03-05",
+                    "output": [],
+                    "service_tier": "auto",
+                    "usage": null
+                }
+            }),
+            json!({
+                "type": "response.output_item.added",
+                "item": {
+                    "id": TOOL_SEARCH_CALL_ID,
+                    "type": "tool_search_call",
+                    "status": "in_progress",
+                    "arguments": {},
+                    "call_id": null,
+                    "execution": "server"
+                },
+                "output_index": 0,
+                "sequence_number": 2
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "item": tool_search_call.clone(),
+                "output_index": 0,
+                "sequence_number": 3
+            }),
+            json!({
+                "type": "response.output_item.added",
+                "item": {
+                    "id": TOOL_SEARCH_OUTPUT_ID,
+                    "type": "tool_search_output",
+                    "status": "in_progress",
+                    "call_id": null,
+                    "execution": "server",
+                    "tools": open_responses_tool_search_fixture_tools()
+                },
+                "output_index": 1,
+                "sequence_number": 4
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "item": tool_search_output.clone(),
+                "output_index": 1,
+                "sequence_number": 5
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "item": function_call.clone(),
+                "output_index": 2,
+                "sequence_number": 21
+            }),
+            json!({
+                "type": "response.completed",
+                "sequence_number": 22,
+                "response": {
+                    "id": RESPONSE_ID,
+                    "object": "response",
+                    "created_at": 1772775522,
+                    "status": "completed",
+                    "completed_at": 1772775523,
+                    "model": "gpt-5.4-2026-03-05",
+                    "output": [
+                        tool_search_call,
+                        tool_search_output,
+                        function_call
+                    ],
+                    "service_tier": "default",
+                    "usage": {
+                        "input_tokens": 640,
+                        "input_tokens_details": {
+                            "cached_tokens": 0
+                        },
+                        "output_tokens": 46,
+                        "output_tokens_details": {
+                            "reasoning_tokens": 20
+                        },
+                        "total_tokens": 686
+                    }
+                }
+            }),
+        ]);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse.clone()))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-5-nano");
+
+        let result =
+            poll_ready(model.do_stream(open_responses_hosted_tool_search_fixture_call_options()));
+
+        let tool_calls = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let tool_results = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let tool_search_call = tool_calls
+            .iter()
+            .find(|tool_call| tool_call.tool_name == "toolSearch")
+            .expect("stream includes hosted tool-search call");
+        assert_eq!(tool_search_call.tool_call_id, TOOL_SEARCH_CALL_ID);
+        assert_eq!(tool_search_call.provider_executed, Some(true));
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&tool_search_call.input)
+                .expect("tool-search input parses"),
+            json!({
+                "arguments": {
+                    "paths": ["get_weather"]
+                },
+                "call_id": null
+            })
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_search_call.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(TOOL_SEARCH_CALL_ID)
+        );
+
+        let tool_search_result = tool_results
+            .iter()
+            .find(|tool_result| tool_result.tool_name == "toolSearch")
+            .expect("stream includes hosted tool-search result");
+        assert_eq!(tool_search_result.tool_call_id, TOOL_SEARCH_CALL_ID);
+        assert_eq!(
+            tool_search_result.result.as_value(),
+            &json!({
+                "tools": open_responses_tool_search_fixture_tools()
+            })
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_search_result.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(TOOL_SEARCH_OUTPUT_ID)
+        );
+
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.finish_reason.unified, FinishReason::ToolCalls);
+        assert_eq!(finish.usage.input_tokens.total, Some(640));
+        assert_eq!(finish.usage.output_tokens.total, Some(46));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(20));
         assert_eq!(
             openai_metadata_value(&finish.provider_metadata, "responseId")
                 .and_then(JsonValue::as_str),
