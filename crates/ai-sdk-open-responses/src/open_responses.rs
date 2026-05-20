@@ -7133,6 +7133,72 @@ mod tests {
         )
     }
 
+    fn open_responses_custom_tool_fixture_response_body() -> JsonValue {
+        json!({
+            "id": "resp_custom_tool_test_001",
+            "object": "response",
+            "created_at": 1741257730,
+            "status": "completed",
+            "error": null,
+            "incomplete_details": null,
+            "input": [],
+            "instructions": null,
+            "max_output_tokens": null,
+            "model": "gpt-5.2-codex",
+            "output": [
+                {
+                    "type": "custom_tool_call",
+                    "id": "ct_abc123def456",
+                    "call_id": "call_custom_sql_001",
+                    "name": "write_sql",
+                    "input": "SELECT * FROM users WHERE age > 25",
+                    "status": "completed"
+                }
+            ],
+            "parallel_tool_calls": true,
+            "previous_response_id": null,
+            "reasoning": {
+                "effort": "low",
+                "summary": null
+            },
+            "store": true,
+            "temperature": 1,
+            "text": {
+                "format": {
+                    "type": "text"
+                }
+            },
+            "tool_choice": "required",
+            "tools": [
+                {
+                    "type": "custom",
+                    "name": "write_sql",
+                    "description": "Write a SQL SELECT query to answer the user question.",
+                    "format": {
+                        "type": "grammar",
+                        "syntax": "regex",
+                        "definition": "SELECT .+"
+                    }
+                }
+            ],
+            "top_p": 1,
+            "truncation": "disabled",
+            "usage": {
+                "input_tokens": 50,
+                "input_tokens_details": {
+                    "cached_tokens": 0
+                },
+                "output_tokens": 20,
+                "output_tokens_details": {
+                    "reasoning_tokens": 0
+                },
+                "total_tokens": 70
+            },
+            "user": null,
+            "metadata": {}
+        })
+    }
+
     fn open_responses_hosted_tool_search_fixture_call_options() -> LanguageModelCallOptions {
         LanguageModelCallOptions::new(open_responses_hello_prompt())
             .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
@@ -18690,102 +18756,15 @@ mod tests {
     }
 
     #[test]
-    fn open_responses_provider_generates_custom_tool_fixture() {
-        const RESPONSE_ID: &str = "resp_custom_tool_test_001";
-        const CUSTOM_TOOL_ITEM_ID: &str = "ct_abc123def456";
-        const CALL_ID: &str = "call_custom_sql_001";
-        const CUSTOM_TOOL_INPUT: &str = "SELECT * FROM users WHERE age > 25";
-
-        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
-        let captured_request_for_transport = Arc::clone(&captured_request);
-        let transport: OpenResponsesTransport = Arc::new(
-            move |request| -> OpenResponsesTransportFuture {
-                *captured_request_for_transport
-                    .lock()
-                    .expect("captured request mutex is not poisoned") = Some(request.clone());
-
-                Box::pin(ready(Ok(ProviderApiResponse::text(
-                    200,
-                    "OK",
-                    json!({
-                        "id": RESPONSE_ID,
-                        "object": "response",
-                        "created_at": 1741257730,
-                        "status": "completed",
-                        "error": null,
-                        "incomplete_details": null,
-                        "input": [],
-                        "instructions": null,
-                        "max_output_tokens": null,
-                        "model": "gpt-5.2-codex",
-                        "output": [
-                            {
-                                "type": "custom_tool_call",
-                                "id": CUSTOM_TOOL_ITEM_ID,
-                                "call_id": CALL_ID,
-                                "name": "write_sql",
-                                "input": CUSTOM_TOOL_INPUT,
-                                "status": "completed"
-                            }
-                        ],
-                        "parallel_tool_calls": true,
-                        "previous_response_id": null,
-                        "reasoning": {
-                            "effort": "low",
-                            "summary": null
-                        },
-                        "store": true,
-                        "temperature": 1,
-                        "text": {
-                            "format": {
-                                "type": "text"
-                            }
-                        },
-                        "tool_choice": "required",
-                        "tools": [
-                            {
-                                "type": "custom",
-                                "name": "write_sql",
-                                "description": "Write a SQL SELECT query to answer the user question.",
-                                "format": {
-                                    "type": "grammar",
-                                    "syntax": "regex",
-                                    "definition": "SELECT .+"
-                                }
-                            }
-                        ],
-                        "top_p": 1,
-                        "truncation": "disabled",
-                        "usage": {
-                            "input_tokens": 50,
-                            "input_tokens_details": {
-                                "cached_tokens": 0
-                            },
-                            "output_tokens": 20,
-                            "output_tokens_details": {
-                                "reasoning_tokens": 0
-                            },
-                            "total_tokens": 70
-                        },
-                        "user": null,
-                        "metadata": {}
-                    })
-                    .to_string(),
-                ))))
-            },
+    fn open_responses_provider_generates_custom_tool_fixture_request_body() {
+        let (_, request_body) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5.2-codex",
+            &open_responses_custom_tool_fixture_response_body().to_string(),
+            open_responses_custom_tool_fixture_call_options(),
         );
-        let provider = create_open_responses(
-            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
-                .with_api_key("test-api-key"),
-        )
-        .with_transport(transport);
-        let model = provider.language_model("gpt-5.2-codex");
-
-        let result =
-            poll_ready(model.do_generate(open_responses_custom_tool_fixture_call_options()));
 
         assert_eq!(
-            captured_open_responses_request_body(&captured_request),
+            request_body,
             json!({
                 "input": [
                     {
@@ -18814,9 +18793,21 @@ mod tests {
                 ]
             })
         );
+    }
 
-        assert_eq!(result.finish_reason.unified, FinishReason::ToolCalls);
-        assert_eq!(result.finish_reason.raw, None);
+    #[test]
+    fn open_responses_provider_generates_custom_tool_fixture_content() {
+        const RESPONSE_ID: &str = "resp_custom_tool_test_001";
+        const CUSTOM_TOOL_ITEM_ID: &str = "ct_abc123def456";
+        const CALL_ID: &str = "call_custom_sql_001";
+        const CUSTOM_TOOL_INPUT: &str = "SELECT * FROM users WHERE age > 25";
+
+        let result = open_responses_generate_result_from_body_with_options(
+            "gpt-5.2-codex",
+            open_responses_custom_tool_fixture_response_body(),
+            open_responses_custom_tool_fixture_call_options(),
+        );
+
         assert_eq!(result.usage.input_tokens.total, Some(50));
         assert_eq!(result.usage.input_tokens.cache_read, Some(0));
         assert_eq!(result.usage.output_tokens.total, Some(20));
@@ -18848,6 +18839,18 @@ mod tests {
                 .and_then(JsonValue::as_str),
             Some(CUSTOM_TOOL_ITEM_ID)
         );
+    }
+
+    #[test]
+    fn open_responses_provider_generates_custom_tool_fixture_tool_calls_finish_reason() {
+        let result = open_responses_generate_result_from_body_with_options(
+            "gpt-5.2-codex",
+            open_responses_custom_tool_fixture_response_body(),
+            open_responses_custom_tool_fixture_call_options(),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::ToolCalls);
+        assert_eq!(result.finish_reason.raw, None);
     }
 
     #[test]
