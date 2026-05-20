@@ -25692,7 +25692,57 @@ mod tests {
     }
 
     #[test]
-    fn open_responses_provider_generates_shell_environment_fixture() {
+    fn open_responses_provider_generates_shell_environment_fixture_request_body() {
+        let body = json!({
+            "id": "resp_shell_environment_request_body",
+            "object": "response",
+            "created_at": 1771008375,
+            "status": "completed",
+            "model": "gpt-5.2-2025-12-11",
+            "output": [],
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "total_tokens": 2
+            }
+        })
+        .to_string();
+        let (_, request_body) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5.2",
+            &body,
+            open_responses_shell_container_call_options(),
+        );
+
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-5.2",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "shell",
+                        "environment": {
+                            "type": "container_auto"
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_generates_shell_environment_fixture_content() {
         const RESPONSE_ID: &str = "resp_01b6b3812d7541bd00698f7197d5bc81969c3d2a134af0cb66";
         const CONTAINER_ID: &str = "cntr_698f719e4ad48193bb6ee0647bebe41608d08c4949add75d";
         const FIRST_SHELL_ITEM_ID: &str = "sh_01b6b3812d7541bd00698f71a351a08196acffc9543b76a179";
@@ -25719,14 +25769,8 @@ mod tests {
             "Ration water STOP; collect rain STOP with leaves, shells, or cloth. Build a STOP simple shelter STOP near resources but above storm tide. Keep yourself healthy so you can signal quickly."
         );
 
-        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
-        let captured_request_for_transport = Arc::clone(&captured_request);
         let transport: OpenResponsesTransport =
-            Arc::new(move |request| -> OpenResponsesTransportFuture {
-                *captured_request_for_transport
-                    .lock()
-                    .expect("captured request mutex is not poisoned") = Some(request.clone());
-
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
                 Box::pin(ready(Ok(ProviderApiResponse::text(
                     200,
                     "OK",
@@ -25953,17 +25997,6 @@ mod tests {
                 })
                 .collect::<Vec<_>>(),
             vec![FINAL_TEXT]
-        );
-
-        let request_body = captured_open_responses_request_body(&captured_request);
-        assert_eq!(
-            request_body["tools"][0],
-            json!({
-                "type": "shell",
-                "environment": {
-                    "type": "container_auto"
-                }
-            })
         );
     }
 
