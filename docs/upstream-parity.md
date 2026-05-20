@@ -85,6 +85,8 @@ Rust-only coverage can offset a missing upstream test.
 In short: potentially more Rust tests, never fewer, and every portable original
 TypeScript test/case must remain individually visible in the ledger until it has
 a Rust counterpart or an explicit non-portable justification.
+Do not treat a larger Rust-only test suite as parity if even one original
+portable TypeScript test/case is missing from the matching crate.
 
 ## Required Work Order
 

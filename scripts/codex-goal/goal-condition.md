@@ -43,6 +43,8 @@ ported or explicitly documented as JavaScript-only/non-portable in the ledger.
 The minimum acceptable Rust test inventory is the full portable original
 TypeScript test inventory for that package; Rust-specific tests are only extra
 coverage and never reduce or replace that floor.
+A crate may have more Rust tests overall, but it is still incomplete if even
+one original portable TypeScript test/case is not represented in Rust.
 
 Required order: finish ALL common/core SDK packages together with Vercel AI
 Gateway provider coverage before taking more unrelated standalone provider
