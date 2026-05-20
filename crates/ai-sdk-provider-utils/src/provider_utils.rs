@@ -7654,6 +7654,18 @@ mod tests {
             .collect()
     }
 
+    fn supported_urls(entries: Vec<(&str, Vec<&str>)>) -> BTreeMap<String, Vec<String>> {
+        entries
+            .into_iter()
+            .map(|(media_type, patterns)| {
+                (
+                    media_type.to_string(),
+                    patterns.into_iter().map(str::to_string).collect(),
+                )
+            })
+            .collect()
+    }
+
     fn poll_until_ready<T>(future: impl Future<Output = T>) -> T {
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);
@@ -11993,6 +12005,302 @@ mod tests {
             "text/plain",
             "https://another.example.com",
             &supported_urls
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_returns_false_when_model_does_not_support_any_urls() {
+        assert!(!is_url_supported(
+            "text/plain",
+            "https://example.com",
+            &BTreeMap::new()
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_returns_true_for_exact_media_type_and_exact_url_match() {
+        assert!(is_url_supported(
+            "text/plain",
+            "https://example.com",
+            &supported_urls(vec![("text/plain", vec![r"https://example\.com"])])
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_returns_true_for_exact_media_type_and_regex_url_match() {
+        assert!(is_url_supported(
+            "image/png",
+            "https://images.example.com/cat.png",
+            &supported_urls(vec![(
+                "image/png",
+                vec![r"https://images\.example\.com/.+"]
+            )])
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_returns_true_for_one_of_multiple_regex_url_matches() {
+        assert!(is_url_supported(
+            "image/png",
+            "https://another.com/img.png",
+            &supported_urls(vec![(
+                "image/png",
+                vec![
+                    r"https://images\.example\.com/.+",
+                    r"https://another\.com/img\.png"
+                ]
+            )])
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_returns_false_for_exact_media_type_but_url_mismatch() {
+        assert!(!is_url_supported(
+            "text/plain",
+            "https://another.com",
+            &supported_urls(vec![("text/plain", vec![r"https://example\.com"])])
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_returns_false_for_url_match_but_media_type_mismatch() {
+        assert!(!is_url_supported(
+            "image/png",
+            "https://example.com",
+            &supported_urls(vec![("text/plain", vec![r"https://example\.com"])])
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_returns_true_for_wildcard_media_type_and_exact_url_match() {
+        assert!(is_url_supported(
+            "text/plain",
+            "https://example.com",
+            &supported_urls(vec![("*", vec![r"https://example\.com"])])
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_returns_true_for_wildcard_media_type_and_regex_url_match() {
+        assert!(is_url_supported(
+            "image/jpeg",
+            "https://images.example.com/dog.jpg",
+            &supported_urls(vec![("*", vec![r"https://images\.example\.com/.+"])])
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_returns_false_for_wildcard_media_type_but_url_mismatch() {
+        assert!(!is_url_supported(
+            "video/mp4",
+            "https://another.com",
+            &supported_urls(vec![("*", vec![r"https://example\.com"])])
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_returns_true_if_url_matches_under_specific_media_type() {
+        let supported_urls = supported_urls(vec![
+            ("text/plain", vec![r"https://text\.com"]),
+            ("*", vec![r"https://any\.com"]),
+        ]);
+
+        assert!(is_url_supported(
+            "text/plain",
+            "https://text.com",
+            &supported_urls
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_returns_true_if_wildcard_matches_even_if_specific_exists() {
+        let supported_urls = supported_urls(vec![
+            ("text/plain", vec![r"https://text\.com"]),
+            ("*", vec![r"https://any\.com"]),
+        ]);
+
+        assert!(is_url_supported(
+            "text/plain",
+            "https://any.com",
+            &supported_urls
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_returns_true_if_wildcard_matches_non_specified_media_type() {
+        let supported_urls = supported_urls(vec![
+            ("text/plain", vec![r"https://text\.com"]),
+            ("*", vec![r"https://any\.com"]),
+        ]);
+
+        assert!(is_url_supported(
+            "image/png",
+            "https://any.com",
+            &supported_urls
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_returns_false_if_url_matches_neither_specific_nor_wildcard() {
+        let supported_urls = supported_urls(vec![
+            ("text/plain", vec![r"https://text\.com"]),
+            ("*", vec![r"https://any\.com"]),
+        ]);
+
+        assert!(!is_url_supported(
+            "text/plain",
+            "https://other.com",
+            &supported_urls
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_returns_false_if_non_specified_media_type_misses_wildcard() {
+        let supported_urls = supported_urls(vec![
+            ("text/plain", vec![r"https://text\.com"]),
+            ("*", vec![r"https://any\.com"]),
+        ]);
+
+        assert!(!is_url_supported(
+            "image/png",
+            "https://other.com",
+            &supported_urls
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_returns_true_if_empty_url_matches_pattern() {
+        assert!(is_url_supported(
+            "text/plain",
+            "",
+            &supported_urls(vec![("text/plain", vec![r".*"])])
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_returns_false_if_empty_url_does_not_match_pattern() {
+        assert!(!is_url_supported(
+            "text/plain",
+            "",
+            &supported_urls(vec![("text/plain", vec![r"https://.+"])])
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_is_case_insensitive_for_media_types() {
+        assert!(is_url_supported(
+            "TEXT/PLAIN",
+            "https://example.com",
+            &supported_urls(vec![("text/plain", vec![r"https://example\.com"])])
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_handles_case_insensitive_regex_for_urls_if_specified() {
+        assert!(is_url_supported(
+            "text/plain",
+            "https://EXAMPLE.com/path",
+            &supported_urls(vec![("text/plain", vec![r"https://example\.com/path"])])
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_is_case_insensitive_for_url_paths_by_default_regex() {
+        assert!(is_url_supported(
+            "text/plain",
+            "https://example.com/PATH",
+            &supported_urls(vec![("text/plain", vec![r"https://example\.com/path"])])
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_returns_true_for_wildcard_subtype_match() {
+        assert!(is_url_supported(
+            "image/png",
+            "https://example.com",
+            &supported_urls(vec![("image/*", vec![r"https://example\.com"])])
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_uses_full_wildcard_if_subtype_wildcard_is_not_matched() {
+        assert!(is_url_supported(
+            "image/png",
+            "https://any.com",
+            &supported_urls(vec![
+                ("image/*", vec![r"https://images\.com"]),
+                ("*", vec![r"https://any\.com"]),
+            ])
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_matches_type_wildcard_key_for_top_level_only_media_type() {
+        assert!(is_url_supported(
+            "image",
+            "https://example.com/cat.png",
+            &supported_urls(vec![("image/*", vec![r"https://example\.com/.+"])])
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_matches_wildcard_key_for_top_level_only_media_type() {
+        assert!(is_url_supported(
+            "image",
+            "https://example.com",
+            &supported_urls(vec![("*", vec![r"https://example\.com"])])
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_does_not_match_specific_subtype_key_for_top_level_only_media_type()
+    {
+        assert!(!is_url_supported(
+            "image",
+            "https://example.com/cat.png",
+            &supported_urls(vec![("image/png", vec![r"https://example\.com/.+"])])
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_does_not_match_different_top_level_wildcard_key() {
+        assert!(!is_url_supported(
+            "image",
+            "https://example.com/audio.mp3",
+            &supported_urls(vec![("audio/*", vec![r"https://example\.com/.+"])])
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_returns_false_if_specific_media_type_has_empty_url_array() {
+        assert!(!is_url_supported(
+            "text/plain",
+            "https://example.com",
+            &supported_urls(vec![("text/plain", vec![])])
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_falls_back_to_wildcard_if_specific_media_type_empty_array() {
+        assert!(is_url_supported(
+            "text/plain",
+            "https://any.com",
+            &supported_urls(vec![
+                ("text/plain", vec![]),
+                ("*", vec![r"https://any\.com"]),
+            ])
+        ));
+    }
+
+    #[test]
+    fn is_url_supported_upstream_returns_false_if_empty_specific_array_and_wildcard_mismatch() {
+        assert!(!is_url_supported(
+            "text/plain",
+            "https://another.com",
+            &supported_urls(vec![
+                ("text/plain", vec![]),
+                ("*", vec![r"https://any\.com"]),
+            ])
         ));
     }
 
