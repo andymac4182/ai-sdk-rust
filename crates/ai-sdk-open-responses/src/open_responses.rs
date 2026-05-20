@@ -2003,10 +2003,7 @@ fn open_responses_function_call_arguments(input: &JsonValue) -> String {
         return "{}".to_string();
     }
 
-    input
-        .as_str()
-        .map(str::to_string)
-        .unwrap_or_else(|| input.to_string())
+    open_responses_stringified_json(input.clone())
 }
 
 fn open_responses_tool_search_call_item(
@@ -7381,6 +7378,39 @@ mod tests {
             .and_then(ProviderApiRequestBody::as_text)
             .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
             .expect("request body is JSON")
+    }
+
+    fn open_responses_custom_tool_prompt_request_body(
+        prompt: Vec<LanguageModelMessage>,
+        include_custom_provider_tool: bool,
+    ) -> (JsonValue, Vec<Warning>) {
+        let (provider, captured_request) =
+            open_responses_captured_provider("openai", "gpt-4.1-mini");
+        let model = provider.language_model("gpt-4.1-mini");
+        let mut options = LanguageModelCallOptions::new(prompt);
+        if include_custom_provider_tool {
+            options = options.with_tool(open_responses_test_custom_tool());
+        }
+
+        let result = poll_ready(model.do_generate(options));
+        let request_body = captured_open_responses_request_body(&captured_request);
+        (request_body, result.warnings)
+    }
+
+    fn open_responses_assistant_tool_call_message(
+        tool_call: LanguageModelToolCallPart,
+    ) -> LanguageModelMessage {
+        LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+            LanguageModelAssistantContentPart::ToolCall(tool_call),
+        ]))
+    }
+
+    fn open_responses_tool_result_message(
+        tool_result: LanguageModelToolResultPart,
+    ) -> LanguageModelMessage {
+        LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+            LanguageModelToolContentPart::ToolResult(tool_result),
+        ]))
     }
 
     fn open_responses_hello_prompt() -> Vec<LanguageModelMessage> {
@@ -12853,6 +12883,279 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_converts_custom_tool_call_to_custom_tool_call_input_item() {
+        let (request_body, warnings) = open_responses_custom_tool_prompt_request_body(
+            vec![open_responses_assistant_tool_call_message(
+                LanguageModelToolCallPart::new(
+                    "call_custom_001",
+                    "write_sql",
+                    JsonValue::String("SELECT * FROM users WHERE age > 25".to_string()),
+                ),
+            )],
+            true,
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_custom_001",
+                    "name": "write_sql",
+                    "input": "SELECT * FROM users WHERE age > 25"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_json_stringifies_non_string_custom_tool_call_input() {
+        let (request_body, warnings) = open_responses_custom_tool_prompt_request_body(
+            vec![open_responses_assistant_tool_call_message(
+                LanguageModelToolCallPart::new(
+                    "call_custom_002",
+                    "write_sql",
+                    json!({
+                        "query": "test"
+                    }),
+                ),
+            )],
+            true,
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_custom_002",
+                    "name": "write_sql",
+                    "input": "{\"query\":\"test\"}"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_stored_custom_tool_call_to_item_reference() {
+        let (request_body, warnings) = open_responses_custom_tool_prompt_request_body(
+            vec![open_responses_assistant_tool_call_message(
+                LanguageModelToolCallPart::new(
+                    "call_custom_003",
+                    "write_sql",
+                    JsonValue::String("SELECT 1".to_string()),
+                )
+                .with_provider_options(openai_item_options("ct_ref_123")),
+            )],
+            true,
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "item_reference",
+                    "id": "ct_ref_123"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_custom_tool_text_result_to_output() {
+        let (request_body, warnings) = open_responses_custom_tool_prompt_request_body(
+            vec![open_responses_tool_result_message(
+                LanguageModelToolResultPart::new(
+                    "call_custom_001",
+                    "write_sql",
+                    LanguageModelToolResultOutput::text(
+                        "Query executed successfully. 42 rows returned.",
+                    ),
+                ),
+            )],
+            true,
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_custom_001",
+                    "output": "Query executed successfully. 42 rows returned."
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_custom_tool_json_result_to_output() {
+        let (request_body, warnings) = open_responses_custom_tool_prompt_request_body(
+            vec![open_responses_tool_result_message(
+                LanguageModelToolResultPart::new(
+                    "call_custom_002",
+                    "write_sql",
+                    LanguageModelToolResultOutput::json(json!({
+                        "rows": 42,
+                        "status": "ok"
+                    })),
+                ),
+            )],
+            true,
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_custom_002",
+                    "output": "{\"rows\":42,\"status\":\"ok\"}"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_execution_denied_custom_tool_result_to_output() {
+        let (request_body, warnings) = open_responses_custom_tool_prompt_request_body(
+            vec![open_responses_tool_result_message(
+                LanguageModelToolResultPart::new(
+                    "call_custom_denied_001",
+                    "write_sql",
+                    LanguageModelToolResultOutput::execution_denied()
+                        .with_reason("User denied the tool execution"),
+                ),
+            )],
+            true,
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_custom_denied_001",
+                    "output": "User denied the tool execution"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_custom_tool_content_result_to_output() {
+        let (request_body, warnings) = open_responses_custom_tool_prompt_request_body(
+            vec![open_responses_tool_result_message(
+                LanguageModelToolResultPart::new(
+                    "call_custom_005",
+                    "write_sql",
+                    LanguageModelToolResultOutput::content(vec![
+                        LanguageModelToolResultContentPart::Text(LanguageModelTextPart::new(
+                            "hello",
+                        )),
+                    ]),
+                ),
+            )],
+            true,
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_custom_005",
+                    "output": [
+                        {
+                            "type": "input_text",
+                            "text": "hello"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_custom_tool_file_url_content_result_to_output() {
+        let (request_body, warnings) = open_responses_custom_tool_prompt_request_body(
+            vec![open_responses_tool_result_message(
+                LanguageModelToolResultPart::new(
+                    "call_custom_006",
+                    "write_sql",
+                    LanguageModelToolResultOutput::content(vec![
+                        LanguageModelToolResultContentPart::Text(LanguageModelTextPart::new(
+                            "Here is the file:",
+                        )),
+                        LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                            FileData::Url {
+                                url: Url::parse("https://example.com/test.pdf").expect("valid URL"),
+                            },
+                            "application/pdf",
+                        )),
+                    ]),
+                ),
+            )],
+            true,
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_custom_006",
+                    "output": [
+                        {
+                            "type": "input_text",
+                            "text": "Here is the file:"
+                        },
+                        {
+                            "type": "input_file",
+                            "file_url": "https://example.com/test.pdf"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_falls_back_to_function_call_without_custom_provider_tool_names() {
+        let (request_body, warnings) = open_responses_custom_tool_prompt_request_body(
+            vec![open_responses_assistant_tool_call_message(
+                LanguageModelToolCallPart::new(
+                    "call_custom_001",
+                    "write_sql",
+                    JsonValue::String("SELECT 1".to_string()),
+                ),
+            )],
+            false,
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "function_call",
+                    "call_id": "call_custom_001",
+                    "name": "write_sql",
+                    "arguments": "\"SELECT 1\""
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn open_responses_provider_stringifies_assistant_function_call_arguments() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -12955,7 +13258,7 @@ mod tests {
                         "type": "function_call",
                         "call_id": "call_string",
                         "name": "get_weather",
-                        "arguments": "{\"location\":\"Berlin\"}"
+                        "arguments": "\"{\\\"location\\\":\\\"Berlin\\\"}\""
                     },
                     {
                         "type": "function_call",
