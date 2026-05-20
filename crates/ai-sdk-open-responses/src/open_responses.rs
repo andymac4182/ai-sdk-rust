@@ -23200,7 +23200,50 @@ mod tests {
     }
 
     #[test]
-    fn open_responses_provider_generates_file_search_without_results_include_fixture() {
+    fn open_responses_provider_generates_file_search_without_results_include_fixture_request_body()
+    {
+        let body = json!({
+            "id": "resp_file_search_request_body_without_results",
+            "object": "response",
+            "created_at": 1_758_113_338,
+            "status": "completed",
+            "model": "gpt-5-nano-2025-08-07",
+            "output": [],
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "total_tokens": 2
+            }
+        })
+        .to_string();
+        let (_, request_body) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5-nano",
+            &body,
+            open_responses_file_search_fixture_call_options(None),
+        );
+
+        assert_eq!(request_body["model"], "gpt-5-nano");
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Hello"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert!(request_body.get("include").is_none());
+        open_responses_assert_file_search_fixture_tool_request(&request_body);
+    }
+
+    #[test]
+    fn open_responses_provider_generates_file_search_without_results_include_fixture_content() {
         const RESPONSE_ID: &str = "resp_0a098396a8feca410068caae39e7648196b346e99fa8ec494c";
         const FIRST_REASONING_ID: &str = "rs_0a098396a8feca410068caae3b47208196957fe59419daad70";
         const FILE_SEARCH_ID: &str = "fs_0a098396a8feca410068caae3cab5c8196a54fd00498464e62";
@@ -23208,14 +23251,8 @@ mod tests {
         const MESSAGE_ID: &str = "msg_0a098396a8feca410068caae457c508196b2fcd079d1d3ec74";
         const FINAL_TEXT: &str = "According to the document, an embedding model is used to convert complex data (like words or images) into a dense vector (a list of numbers) representation called an embedding, which captures semantic and syntactic relationships.";
 
-        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
-        let captured_request_for_transport = Arc::clone(&captured_request);
         let transport: OpenResponsesTransport =
-            Arc::new(move |request| -> OpenResponsesTransportFuture {
-                *captured_request_for_transport
-                    .lock()
-                    .expect("captured request mutex is not poisoned") = Some(request.clone());
-
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
                 Box::pin(ready(Ok(ProviderApiResponse::text(
                     200,
                     "OK",
@@ -23267,14 +23304,54 @@ mod tests {
         assert_eq!(result.usage.input_tokens.cache_read, Some(2560));
         assert_eq!(result.usage.output_tokens.total, Some(741));
         assert_eq!(result.usage.output_tokens.reasoning, Some(640));
+    }
 
-        let request_body = captured_open_responses_request_body(&captured_request);
-        assert!(request_body.get("include").is_none());
+    #[test]
+    fn open_responses_provider_generates_file_search_with_results_include_fixture_request_body() {
+        let body = json!({
+            "id": "resp_file_search_request_body_with_results",
+            "object": "response",
+            "created_at": 1_758_116_611,
+            "status": "completed",
+            "model": "gpt-5-nano-2025-08-07",
+            "output": [],
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "total_tokens": 2
+            }
+        })
+        .to_string();
+        let (_, request_body) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5-nano",
+            &body,
+            open_responses_file_search_fixture_call_options(Some(
+                openai_file_search_results_include_options(),
+            )),
+        );
+
+        assert_eq!(request_body["model"], "gpt-5-nano");
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Hello"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(request_body["include"], json!(["file_search_call.results"]));
         open_responses_assert_file_search_fixture_tool_request(&request_body);
     }
 
     #[test]
-    fn open_responses_provider_generates_file_search_with_results_include_fixture() {
+    fn open_responses_provider_generates_file_search_with_results_include_fixture_content() {
         const RESPONSE_ID: &str = "resp_0365d26c32c64c650068cabb02fea4819495862c2bc58440ad";
         const FIRST_REASONING_ID: &str = "rs_0365d26c32c64c650068cabb03bcc48194bfbd973152bca8f6";
         const FILE_SEARCH_ID: &str = "fs_0365d26c32c64c650068cabb04aa388194b53c59de50a3951e";
@@ -23286,14 +23363,8 @@ mod tests {
             "\u{2014} called an embedding."
         );
 
-        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
-        let captured_request_for_transport = Arc::clone(&captured_request);
         let transport: OpenResponsesTransport =
-            Arc::new(move |request| -> OpenResponsesTransportFuture {
-                *captured_request_for_transport
-                    .lock()
-                    .expect("captured request mutex is not poisoned") = Some(request.clone());
-
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
                 Box::pin(ready(Ok(ProviderApiResponse::text(
                     200,
                     "OK",
@@ -23361,10 +23432,6 @@ mod tests {
         assert_eq!(result.usage.input_tokens.cache_read, Some(2304));
         assert_eq!(result.usage.output_tokens.total, Some(536));
         assert_eq!(result.usage.output_tokens.reasoning, Some(448));
-
-        let request_body = captured_open_responses_request_body(&captured_request);
-        assert_eq!(request_body["include"], json!(["file_search_call.results"]));
-        open_responses_assert_file_search_fixture_tool_request(&request_body);
     }
 
     #[test]
