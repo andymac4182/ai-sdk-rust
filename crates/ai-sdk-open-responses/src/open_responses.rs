@@ -18663,6 +18663,245 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_prepares_local_shell_tool() {
+        let request_body = open_responses_provider_tool_request_body(
+            "openai.local_shell",
+            "local_shell",
+            JsonObject::new(),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "local_shell"
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_web_search_without_options() {
+        let request_body = open_responses_provider_tool_request_body(
+            "openai.web_search",
+            "web_search",
+            JsonObject::new(),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "web_search"
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_web_search_external_web_access_true() {
+        let request_body = open_responses_provider_tool_request_body(
+            "openai.web_search",
+            "web_search",
+            json_object(json!({
+                "externalWebAccess": true
+            })),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "web_search",
+                    "external_web_access": true
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_web_search_external_web_access_false() {
+        let request_body = open_responses_provider_tool_request_body(
+            "openai.web_search",
+            "web_search",
+            json_object(json!({
+                "externalWebAccess": false
+            })),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "web_search",
+                    "external_web_access": false
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_web_search_with_all_options() {
+        let request_body = open_responses_provider_tool_request_body(
+            "openai.web_search",
+            "web_search",
+            json_object(json!({
+                "externalWebAccess": true,
+                "filters": {
+                    "allowedDomains": ["example.com", "test.org"]
+                },
+                "searchContextSize": "high",
+                "userLocation": {
+                    "type": "approximate",
+                    "country": "US",
+                    "city": "San Francisco",
+                    "region": "California",
+                    "timezone": "America/Los_Angeles"
+                }
+            })),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "web_search",
+                    "external_web_access": true,
+                    "filters": {
+                        "allowed_domains": ["example.com", "test.org"]
+                    },
+                    "search_context_size": "high",
+                    "user_location": {
+                        "type": "approximate",
+                        "country": "US",
+                        "city": "San Francisco",
+                        "region": "California",
+                        "timezone": "America/Los_Angeles"
+                    }
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_web_search_filters_without_external_web_access() {
+        let request_body = open_responses_provider_tool_request_body(
+            "openai.web_search",
+            "web_search",
+            json_object(json!({
+                "filters": {
+                    "allowedDomains": ["example.com"]
+                }
+            })),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "web_search",
+                    "filters": {
+                        "allowed_domains": ["example.com"]
+                    }
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_resolves_web_search_tool_choice() {
+        let request_body = open_responses_request_body_for_options(
+            LanguageModelCallOptions::new(open_responses_hello_prompt())
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.web_search",
+                    "web_search",
+                    json_object(json!({
+                        "externalWebAccess": true
+                    })),
+                )))
+                .with_tool_choice(LanguageModelToolChoice::Tool {
+                    tool_name: "web_search".to_string(),
+                }),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "web_search",
+                    "external_web_access": true
+                }
+            ])
+        );
+        assert_eq!(
+            request_body["tool_choice"],
+            json!({
+                "type": "web_search"
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_multiple_tools_including_web_search() {
+        let request_body = open_responses_request_body_for_options(
+            LanguageModelCallOptions::new(open_responses_hello_prompt())
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "testFunction",
+                        json_object(json!({
+                            "type": "object",
+                            "properties": {
+                                "input": {
+                                    "type": "string"
+                                }
+                            }
+                        })),
+                    )
+                    .with_description("A test function"),
+                ))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.web_search",
+                    "web_search",
+                    json_object(json!({
+                        "externalWebAccess": false,
+                        "searchContextSize": "medium"
+                    })),
+                ))),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "function",
+                    "name": "testFunction",
+                    "description": "A test function",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "input": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                },
+                {
+                    "type": "web_search",
+                    "external_web_access": false,
+                    "search_context_size": "medium"
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
     fn open_responses_provider_prepares_code_interpreter_and_image_generation_options() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
