@@ -16846,6 +16846,138 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_streams_image_generation_fixture_results() {
+        const IMAGE_CALL_ID: &str = "ig_0df93c0bb83a72f20068c979f589c0819e9f0fc2d1a27aa1b8";
+        const IMAGE_DATA: &str = "UklGRuIWGQBXRUJQVlA4TKAwGAAv/8X/ABlJbiNJkgRDwkID67D/P9gjl9nuEf2fgPyZzj1Jyu97SlIDX5iPbDv2F3U/+UU+JIlr+wVtEwKO7xiJr";
+        const MESSAGE_ID: &str = "msg_0df93c0bb83a72f20068c97a0b36f4819ea5906451007f95e2";
+
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport = Arc::new(
+            move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                let sse = [
+                    r#"data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_0df93c0bb83a72f20068c979db26ac819e8b5a444fad3f0d7f","object":"response","created_at":1758034395,"status":"in_progress","model":"gpt-5-2025-08-07","output":[],"parallel_tool_calls":true,"reasoning":{"effort":"medium","summary":null},"store":true,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"image_generation","background":"auto","moderation":"auto","n":1,"output_compression":100,"output_format":"webp","quality":"low","size":"auto"}],"usage":null,"metadata":{}}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","sequence_number":4,"output_index":1,"item":{"id":"ig_0df93c0bb83a72f20068c979f589c0819e9f0fc2d1a27aa1b8","type":"image_generation_call","status":"in_progress"}}"#,
+                    "",
+                    r#"data: {"type":"response.image_generation_call.in_progress","sequence_number":5,"output_index":1,"item_id":"ig_0df93c0bb83a72f20068c979f589c0819e9f0fc2d1a27aa1b8"}"#,
+                    "",
+                    r#"data: {"type":"response.image_generation_call.generating","sequence_number":6,"output_index":1,"item_id":"ig_0df93c0bb83a72f20068c979f589c0819e9f0fc2d1a27aa1b8"}"#,
+                    "",
+                    r#"data: {"type":"response.image_generation_call.partial_image","sequence_number":7,"output_index":1,"item_id":"ig_0df93c0bb83a72f20068c979f589c0819e9f0fc2d1a27aa1b8","partial_image_index":0,"partial_image_b64":"UklGRuIWGQBXRUJQVlA4TKAwGAAv/8X/ABlJbiNJkgRDwkID67D/P9gjl9nuEf2fgPyZzj1Jyu97SlIDX5iPbDv2F3U/+UU+JIlr+wVtEwKO7xiJr","size":"1536x1024","quality":"low","background":"opaque","output_format":"webp"}"#,
+                    "",
+                    r#"data: {"type":"response.image_generation_call.completed","sequence_number":8,"output_index":1,"item_id":"ig_0df93c0bb83a72f20068c979f589c0819e9f0fc2d1a27aa1b8"}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","sequence_number":9,"output_index":1,"item":{"id":"ig_0df93c0bb83a72f20068c979f589c0819e9f0fc2d1a27aa1b8","type":"image_generation_call","status":"completed","background":"opaque","output_format":"webp","quality":"low","result":"UklGRuIWGQBXRUJQVlA4TKAwGAAv/8X/ABlJbiNJkgRDwkID67D/P9gjl9nuEf2fgPyZzj1Jyu97SlIDX5iPbDv2F3U/+UU+JIlr+wVtEwKO7xiJr","revised_prompt":"Create a high-resolution image.","size":"1536x1024"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","sequence_number":10,"output_index":2,"item":{"id":"msg_0df93c0bb83a72f20068c97a0b36f4819ea5906451007f95e2","type":"message","status":"in_progress","content":[],"role":"assistant"}}"#,
+                    "",
+                    r#"data: {"type":"response.content_part.added","sequence_number":11,"item_id":"msg_0df93c0bb83a72f20068c97a0b36f4819ea5906451007f95e2","output_index":2,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.done","sequence_number":12,"item_id":"msg_0df93c0bb83a72f20068c97a0b36f4819ea5906451007f95e2","output_index":2,"content_index":0,"text":"","logprobs":[]}"#,
+                    "",
+                    r#"data: {"type":"response.content_part.done","sequence_number":13,"item_id":"msg_0df93c0bb83a72f20068c97a0b36f4819ea5906451007f95e2","output_index":2,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","sequence_number":14,"output_index":2,"item":{"id":"msg_0df93c0bb83a72f20068c97a0b36f4819ea5906451007f95e2","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}}"#,
+                    "",
+                    r#"data: {"type":"response.completed","sequence_number":15,"response":{"id":"resp_0df93c0bb83a72f20068c979db26ac819e8b5a444fad3f0d7f","object":"response","created_at":1758034395,"status":"completed","model":"gpt-5-2025-08-07","output":[],"parallel_tool_calls":true,"reasoning":{"effort":"medium","summary":null},"store":true,"text":{"format":{"type":"text"},"verbosity":"medium"},"usage":{"input_tokens":2941,"input_tokens_details":{"cached_tokens":1920},"output_tokens":1249,"output_tokens_details":{"reasoning_tokens":1024},"total_tokens":4190}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-5-nano");
+
+        let result = poll_ready(model.do_stream(open_responses_image_generation_call_options()));
+
+        let tool_call = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call)
+                    if tool_call.tool_call_id == IMAGE_CALL_ID =>
+                {
+                    Some(tool_call)
+                }
+                _ => None,
+            })
+            .expect("stream includes image generation tool call");
+        assert_eq!(tool_call.tool_name, "generateImage");
+        assert_eq!(tool_call.input, "{}");
+        assert_eq!(tool_call.provider_executed, Some(true));
+
+        let tool_results = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolResult(tool_result)
+                    if tool_result.tool_call_id == IMAGE_CALL_ID =>
+                {
+                    Some(tool_result)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_results.len(), 2);
+        assert_eq!(tool_results[0].tool_name, "generateImage");
+        assert_eq!(tool_results[0].preliminary, Some(true));
+        assert_eq!(
+            tool_results[0].result.as_value(),
+            &json!({
+                "result": IMAGE_DATA
+            })
+        );
+        assert_eq!(tool_results[1].tool_name, "generateImage");
+        assert_eq!(tool_results[1].preliminary, None);
+        assert_eq!(
+            tool_results[1].result.as_value(),
+            &json!({
+                "result": IMAGE_DATA
+            })
+        );
+
+        let text_end = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextEnd(text_end) => Some(text_end),
+                _ => None,
+            })
+            .expect("stream includes empty text end");
+        assert_eq!(text_end.id, MESSAGE_ID);
+        assert_eq!(
+            text_end
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("openai"))
+                .and_then(|metadata| metadata.get("itemId"))
+                .and_then(JsonValue::as_str),
+            Some(MESSAGE_ID)
+        );
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(
+            request_body["tools"][0],
+            json!({
+                "type": "image_generation"
+            })
+        );
+    }
+
+    #[test]
     fn open_responses_provider_maps_web_search_api_sources_and_missing_action() {
         let transport: OpenResponsesTransport =
             Arc::new(move |_request| -> OpenResponsesTransportFuture {
@@ -17960,6 +18092,16 @@ mod tests {
             LanguageModelTool::Provider(LanguageModelProviderTool::new(
                 "openai.code_interpreter",
                 "codeExecution",
+                JsonObject::new(),
+            )),
+        )
+    }
+
+    fn open_responses_image_generation_call_options() -> LanguageModelCallOptions {
+        LanguageModelCallOptions::new(open_responses_hello_prompt()).with_tool(
+            LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                "openai.image_generation",
+                "generateImage",
                 JsonObject::new(),
             )),
         )
