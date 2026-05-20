@@ -36,6 +36,10 @@ only be a superset of the upstream tests, never a reduced or sampled subset.
 Do not let a broader Rust test suite replace the original upstream inventory:
 future iterations must port every original TypeScript case one-to-one first,
 then add any additional Rust-specific coverage on top.
+In practical terms, the matching Rust crate must include every portable test
+from the original TypeScript package and may include more Rust tests, but never
+fewer. Missing one original upstream test/case is a parity failure until it is
+ported or explicitly documented as JavaScript-only/non-portable in the ledger.
 
 Required order: finish ALL common/core SDK packages together with Vercel AI
 Gateway provider coverage before taking more unrelated standalone provider

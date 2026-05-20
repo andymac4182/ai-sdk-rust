@@ -145,6 +145,11 @@ still open.
    one-to-one first, then add Rust-specific tests on top where useful. Extra
    Rust tests never substitute for an unported upstream case, and a smaller
    Rust-specific suite is not acceptable parity.
+   In practical terms, the matching Rust crate must include every portable test
+   from the original TypeScript package and may include more Rust tests, but
+   never fewer. Missing one original upstream test/case is a parity failure
+   until it is ported or explicitly documented as JavaScript-only/non-portable
+   in the ledger.
 5. For provider-backed behavior, require two layers of proof before marking a
    row `verified`: deterministic fake/mock/transport tests that run in normal
    validation, plus credential-gated live provider validation when a usable
@@ -386,6 +391,8 @@ You are done only when:
    Rust may have more tests, but it must not have fewer portable tests than
    upstream. Completion requires an explicit test inventory mapping, not a
    sampled, reduced, file-level, or feature-level Rust suite.
+   More Rust tests are allowed and encouraged; fewer mapped tests than the
+   original TypeScript package is a completion blocker.
 5. The Rust workspace has a strict 1:1 crate mapping for every portable
    upstream TypeScript package: one matching Rust crate per package, no Rust
    crate owning APIs from multiple upstream packages, and the root crate limited
