@@ -6962,6 +6962,8 @@ mod tests {
         include_str!("fixtures/openai-code-interpreter-tool.1.json");
     const OPEN_RESPONSES_IMAGE_GENERATION_TOOL_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-image-generation-tool.1.json");
+    const OPEN_RESPONSES_CLIENT_TOOL_SEARCH_JSON_FIXTURE: &str =
+        include_str!("fixtures/openai-client-tool-search.1.json");
     const OPEN_RESPONSES_WEB_SEARCH_TOOL_CHUNKS_FIXTURE: &str =
         include_str!("fixtures/openai-web-search-tool.1.chunks.txt");
 
@@ -18833,6 +18835,121 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_generates_client_tool_search_fixture() {
+        let fixture: JsonValue =
+            serde_json::from_str(OPEN_RESPONSES_CLIENT_TOOL_SEARCH_JSON_FIXTURE)
+                .expect("fixture JSON parses");
+        let fixture_call = fixture["output"]
+            .as_array()
+            .and_then(|output| {
+                output
+                    .iter()
+                    .find(|item| item["type"].as_str() == Some("tool_search_call"))
+            })
+            .expect("fixture includes client tool-search call");
+
+        let (result, request_body) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5.4",
+            OPEN_RESPONSES_CLIENT_TOOL_SEARCH_JSON_FIXTURE,
+            open_responses_client_tool_search_store_false_call_options(),
+        );
+
+        assert_eq!(request_body["store"], json!(false));
+        assert_eq!(request_body["tools"][2]["type"], json!("tool_search"));
+        assert_eq!(request_body["tools"][2]["execution"], json!("client"));
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(65));
+        assert_eq!(result.usage.output_tokens.total, Some(28));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(0));
+
+        let tool_search_calls = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::ToolCall(tool_call)
+                    if tool_call.tool_name == "toolSearch" =>
+                {
+                    Some(tool_call)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_search_calls.len(), 1);
+
+        let tool_call = tool_search_calls[0];
+        assert_eq!(
+            tool_call.tool_call_id,
+            fixture_call["call_id"].as_str().unwrap()
+        );
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&tool_call.input).expect("tool-search input parses"),
+            json!({
+                "arguments": fixture_call["arguments"].clone(),
+                "call_id": fixture_call["call_id"].clone()
+            })
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_call.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            fixture_call["id"].as_str()
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_omits_provider_executed_for_client_tool_search_fixture() {
+        let (result, _) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5.4",
+            OPEN_RESPONSES_CLIENT_TOOL_SEARCH_JSON_FIXTURE,
+            open_responses_client_tool_search_store_false_call_options(),
+        );
+
+        let tool_call = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::ToolCall(tool_call)
+                    if tool_call.tool_name == "toolSearch" =>
+                {
+                    Some(tool_call)
+                }
+                _ => None,
+            })
+            .expect("content includes client tool-search call");
+
+        assert_eq!(tool_call.provider_executed, None);
+    }
+
+    #[test]
+    fn open_responses_provider_uses_call_id_for_client_tool_search_fixture() {
+        let (result, _) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5.4",
+            OPEN_RESPONSES_CLIENT_TOOL_SEARCH_JSON_FIXTURE,
+            open_responses_client_tool_search_store_false_call_options(),
+        );
+
+        let tool_call = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::ToolCall(tool_call)
+                    if tool_call.tool_name == "toolSearch" =>
+                {
+                    Some(tool_call)
+                }
+                _ => None,
+            })
+            .expect("content includes client tool-search call");
+        let parsed_input =
+            serde_json::from_str::<JsonValue>(&tool_call.input).expect("tool-search input parses");
+
+        assert_eq!(tool_call.tool_call_id, "call_AEvXZ1rvYpxHh8QZb7wGlTGH");
+        assert_eq!(
+            parsed_input["call_id"].as_str(),
+            Some("call_AEvXZ1rvYpxHh8QZb7wGlTGH")
+        );
+    }
+
+    #[test]
     fn open_responses_provider_generates_apply_patch_create_file_fixture() {
         const RESPONSE_ID: &str = "resp_0b04c5f8dfc43af500692749bc5b288197b45e830995fd32d3";
         const APPLY_PATCH_ID: &str = "apc_0b04c5f8dfc43af500692749bd60908197b0e453c38f30191a";
@@ -30535,6 +30652,17 @@ mod tests {
                     }
                 })),
             )))
+    }
+
+    fn open_responses_client_tool_search_store_false_call_options() -> LanguageModelCallOptions {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "store": false
+            }
+        }))
+        .expect("provider options deserialize");
+
+        open_responses_client_tool_search_call_options().with_provider_options(provider_options)
     }
 
     fn open_responses_upstream_function_tool_options() -> LanguageModelCallOptions {
