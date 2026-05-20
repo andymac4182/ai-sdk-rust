@@ -18640,6 +18640,164 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_prepares_custom_tool_with_regex_format() {
+        let request_body = open_responses_request_body_for_options(
+            LanguageModelCallOptions::new(open_responses_hello_prompt()).with_tool(
+                LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.custom",
+                    "write_sql",
+                    json_object(json!({
+                        "description": "Write a SQL SELECT query.",
+                        "format": {
+                            "type": "grammar",
+                            "syntax": "regex",
+                            "definition": "SELECT .+"
+                        }
+                    })),
+                )),
+            ),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "custom",
+                    "name": "write_sql",
+                    "description": "Write a SQL SELECT query.",
+                    "format": {
+                        "type": "grammar",
+                        "syntax": "regex",
+                        "definition": "SELECT .+"
+                    }
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_custom_tool_with_lark_format() {
+        let request_body = open_responses_request_body_for_options(
+            LanguageModelCallOptions::new(open_responses_hello_prompt()).with_tool(
+                LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.custom",
+                    "generate_json",
+                    json_object(json!({
+                        "format": {
+                            "type": "grammar",
+                            "syntax": "lark",
+                            "definition": "start: \"{\" \"}\""
+                        }
+                    })),
+                )),
+            ),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "custom",
+                    "name": "generate_json",
+                    "format": {
+                        "type": "grammar",
+                        "syntax": "lark",
+                        "definition": "start: \"{\" \"}\""
+                    }
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_multiple_tools_including_custom_tool() {
+        let request_body = open_responses_request_body_for_options(
+            LanguageModelCallOptions::new(open_responses_hello_prompt())
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "testFunction",
+                        json_object(json!({
+                            "type": "object",
+                            "properties": {
+                                "input": {
+                                    "type": "string"
+                                }
+                            }
+                        })),
+                    )
+                    .with_description("A test function"),
+                ))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.custom",
+                    "write_sql",
+                    json_object(json!({
+                        "description": "Write SQL.",
+                        "format": {
+                            "type": "grammar",
+                            "syntax": "regex",
+                            "definition": "SELECT .+"
+                        }
+                    })),
+                ))),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "function",
+                    "name": "testFunction",
+                    "description": "A test function",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "input": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                },
+                {
+                    "type": "custom",
+                    "name": "write_sql",
+                    "description": "Write SQL.",
+                    "format": {
+                        "type": "grammar",
+                        "syntax": "regex",
+                        "definition": "SELECT .+"
+                    }
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_resolves_custom_tool_choice_using_tool_name() {
+        let request_body = open_responses_request_body_for_options(
+            LanguageModelCallOptions::new(open_responses_hello_prompt())
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.custom",
+                    "write_sql",
+                    JsonObject::new(),
+                )))
+                .with_tool_choice(LanguageModelToolChoice::Tool {
+                    tool_name: "write_sql".to_string(),
+                }),
+        );
+
+        assert_eq!(
+            request_body["tool_choice"],
+            json!({
+                "type": "custom",
+                "name": "write_sql"
+            })
+        );
+    }
+
+    #[test]
     fn open_responses_provider_prepares_custom_tool_formats_and_choice() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -19468,11 +19626,18 @@ mod tests {
         );
     }
 
-    fn open_responses_prepared_shell_tool(args: JsonValue) -> JsonValue {
+    fn open_responses_request_body_for_options(options: LanguageModelCallOptions) -> JsonValue {
         let (provider, captured_request) =
             open_responses_captured_provider("openai", "gpt-4.1-mini");
         let model = provider.language_model("gpt-4.1-mini");
-        let result = poll_ready(model.do_generate(
+        let result = poll_ready(model.do_generate(options));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        captured_open_responses_request_body(&captured_request)
+    }
+
+    fn open_responses_prepared_shell_tool(args: JsonValue) -> JsonValue {
+        open_responses_request_body_for_options(
             LanguageModelCallOptions::new(open_responses_hello_prompt()).with_tool(
                 LanguageModelTool::Provider(LanguageModelProviderTool::new(
                     "openai.shell",
@@ -19480,10 +19645,8 @@ mod tests {
                     json_object(args),
                 )),
             ),
-        ));
-
-        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
-        captured_open_responses_request_body(&captured_request)["tools"][0].clone()
+        )["tools"][0]
+            .clone()
     }
 
     #[test]
