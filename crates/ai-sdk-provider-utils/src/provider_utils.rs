@@ -14627,6 +14627,153 @@ mod tests {
     }
 
     #[test]
+    fn create_tool_name_mapping_upstream_should_create_mappings_for_provider_defined_tools() {
+        let tools = vec![
+            LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                "anthropic.computer-use",
+                "custom-computer-tool",
+                JsonObject::new(),
+            )),
+            LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                "openai.code-interpreter",
+                "custom-code-tool",
+                JsonObject::new(),
+            )),
+        ];
+        let provider_tool_names = BTreeMap::from([
+            (
+                "anthropic.computer-use".to_string(),
+                "computer_use".to_string(),
+            ),
+            (
+                "openai.code-interpreter".to_string(),
+                "code_interpreter".to_string(),
+            ),
+        ]);
+
+        let mapping = create_tool_name_mapping(&tools, &provider_tool_names);
+
+        assert_eq!(
+            mapping.to_provider_tool_name("custom-computer-tool"),
+            "computer_use"
+        );
+        assert_eq!(
+            mapping.to_provider_tool_name("custom-code-tool"),
+            "code_interpreter"
+        );
+        assert_eq!(
+            mapping.to_custom_tool_name("computer_use"),
+            "custom-computer-tool"
+        );
+        assert_eq!(
+            mapping.to_custom_tool_name("code_interpreter"),
+            "custom-code-tool"
+        );
+    }
+
+    #[test]
+    fn create_tool_name_mapping_upstream_should_ignore_function_tools() {
+        let tools = vec![LanguageModelTool::Function(
+            LanguageModelFunctionTool::new("my-function-tool", object_schema())
+                .with_description("A function tool"),
+        )];
+
+        let mapping = create_tool_name_mapping(&tools, &BTreeMap::new());
+
+        assert_eq!(
+            mapping.to_provider_tool_name("my-function-tool"),
+            "my-function-tool"
+        );
+        assert_eq!(
+            mapping.to_custom_tool_name("my-function-tool"),
+            "my-function-tool"
+        );
+    }
+
+    #[test]
+    fn create_tool_name_mapping_upstream_should_return_input_when_tool_not_in_provider_tool_names()
+    {
+        let tools = vec![LanguageModelTool::Provider(LanguageModelProviderTool::new(
+            "unknown.tool",
+            "custom-tool",
+            JsonObject::new(),
+        ))];
+
+        let mapping = create_tool_name_mapping(&tools, &BTreeMap::new());
+
+        assert_eq!(mapping.to_provider_tool_name("custom-tool"), "custom-tool");
+        assert_eq!(mapping.to_custom_tool_name("unknown-name"), "unknown-name");
+    }
+
+    #[test]
+    fn create_tool_name_mapping_upstream_should_return_input_when_mapping_does_not_exist() {
+        let tools = vec![LanguageModelTool::Provider(LanguageModelProviderTool::new(
+            "anthropic.computer-use",
+            "custom-computer-tool",
+            JsonObject::new(),
+        ))];
+        let provider_tool_names = BTreeMap::from([(
+            "anthropic.computer-use".to_string(),
+            "computer_use".to_string(),
+        )]);
+
+        let mapping = create_tool_name_mapping(&tools, &provider_tool_names);
+
+        assert_eq!(
+            mapping.to_provider_tool_name("non-existent-tool"),
+            "non-existent-tool"
+        );
+        assert_eq!(
+            mapping.to_custom_tool_name("non-existent-provider-tool"),
+            "non-existent-provider-tool"
+        );
+    }
+
+    #[test]
+    fn create_tool_name_mapping_upstream_should_handle_empty_tools_array() {
+        let mapping =
+            create_tool_name_mapping(Vec::<LanguageModelTool>::new().iter(), &BTreeMap::new());
+
+        assert_eq!(mapping.to_provider_tool_name("any-tool"), "any-tool");
+        assert_eq!(mapping.to_custom_tool_name("any-tool"), "any-tool");
+    }
+
+    #[test]
+    fn create_tool_name_mapping_upstream_should_handle_mixed_function_and_provider_defined_tools() {
+        let tools = vec![
+            LanguageModelTool::Function(
+                LanguageModelFunctionTool::new("function-tool", object_schema())
+                    .with_description("A function tool"),
+            ),
+            LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                "anthropic.computer-use",
+                "provider-tool",
+                JsonObject::new(),
+            )),
+        ];
+        let provider_tool_names = BTreeMap::from([(
+            "anthropic.computer-use".to_string(),
+            "computer_use".to_string(),
+        )]);
+
+        let mapping = create_tool_name_mapping(&tools, &provider_tool_names);
+
+        assert_eq!(
+            mapping.to_provider_tool_name("function-tool"),
+            "function-tool"
+        );
+        assert_eq!(
+            mapping.to_custom_tool_name("function-tool"),
+            "function-tool"
+        );
+        assert_eq!(
+            mapping.to_provider_tool_name("provider-tool"),
+            "computer_use"
+        );
+        assert_eq!(mapping.to_custom_tool_name("computer_use"), "provider-tool");
+    }
+
+    #[test]
     fn tool_prepares_upstream_function_tool_shape() {
         let tool = Tool::new("weather", object_schema())
             .with_description("Look up weather.")
