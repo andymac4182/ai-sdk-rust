@@ -6855,6 +6855,10 @@ mod tests {
     use std::task::{Context, Poll, Wake, Waker};
     use url::Url;
 
+    const OPEN_RESPONSES_PHASE_JSON_FIXTURE: &str = include_str!("fixtures/openai-phase.1.json");
+    const OPEN_RESPONSES_PHASE_CHUNKS_FIXTURE: &str =
+        include_str!("fixtures/openai-phase.1.chunks.txt");
+
     fn openai_metadata_value<'a>(
         provider_metadata: &'a Option<ProviderMetadata>,
         key: &str,
@@ -6863,6 +6867,21 @@ mod tests {
             .as_ref()
             .and_then(|metadata| metadata.get("openai"))
             .and_then(|metadata| metadata.get(key))
+    }
+
+    fn assert_openai_phase_metadata(
+        provider_metadata: &Option<ProviderMetadata>,
+        item_id: &str,
+        phase: &str,
+    ) {
+        assert_eq!(
+            openai_metadata_value(provider_metadata, "itemId").and_then(JsonValue::as_str),
+            Some(item_id)
+        );
+        assert_eq!(
+            openai_metadata_value(provider_metadata, "phase").and_then(JsonValue::as_str),
+            Some(phase)
+        );
     }
 
     fn unsupported_warning_details(warnings: &[Warning]) -> Vec<(&str, Option<&str>)> {
@@ -6940,6 +6959,17 @@ mod tests {
         let mut sse = events
             .into_iter()
             .map(|event| format!("data: {event}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        sse.push_str("\n\ndata: [DONE]\n");
+        sse
+    }
+
+    fn open_responses_sse_from_fixture_lines(fixture: &str) -> String {
+        let mut sse = fixture
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| format!("data: {line}"))
             .collect::<Vec<_>>()
             .join("\n\n");
         sse.push_str("\n\ndata: [DONE]\n");
@@ -8670,6 +8700,143 @@ mod tests {
                 ],
                 "store": false
             }))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_generates_phase_fixture_metadata() {
+        const RESPONSE_ID: &str = "resp_0465b6d1ae1f97c500699f88318ee481a3b627f7fcb4875152";
+        const COMMENTARY_ID: &str = "msg_0465b6d1ae1f97c500699f883243a481a3b50b985223592984";
+        const FINAL_ID: &str = "msg_0465b6d1ae1f97c500699f8835e09c81a3b91e9d502ff18555";
+
+        let transport: OpenResponsesTransport =
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    OPEN_RESPONSES_PHASE_JSON_FIXTURE.to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-5.3-codex");
+
+        let result = poll_ready(
+            model.do_generate(LanguageModelCallOptions::new(open_responses_hello_prompt())),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(7243));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(3072));
+        assert_eq!(result.usage.output_tokens.total, Some(423));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(58));
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some(RESPONSE_ID)
+        );
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "serviceTier")
+                .and_then(JsonValue::as_str),
+            Some("default")
+        );
+
+        let text_parts = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::Text(text) => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(text_parts.len(), 2);
+        assert_openai_phase_metadata(
+            &text_parts[0].provider_metadata,
+            COMMENTARY_ID,
+            "commentary",
+        );
+        assert_openai_phase_metadata(&text_parts[1].provider_metadata, FINAL_ID, "final_answer");
+    }
+
+    #[test]
+    fn open_responses_provider_streams_phase_fixture_metadata() {
+        const RESPONSE_ID: &str = "resp_0a63f40a2632b74300699f8818e5648196a8fa657ae8091421";
+        const COMMENTARY_ID: &str = "msg_0a63f40a2632b74300699f8819a5e08196ac270722d369af5a";
+        const FINAL_ID: &str = "msg_0a63f40a2632b74300699f881bfbc88196aec38f30c3dd24b0";
+
+        let sse = open_responses_sse_from_fixture_lines(OPEN_RESPONSES_PHASE_CHUNKS_FIXTURE);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse.clone()))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-5.3-codex");
+
+        let result = poll_ready(
+            model.do_stream(LanguageModelCallOptions::new(open_responses_hello_prompt())),
+        );
+
+        let text_starts = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextStart(start) => Some(start),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(text_starts.len(), 2);
+        assert_eq!(text_starts[0].id, COMMENTARY_ID);
+        assert_openai_phase_metadata(
+            &text_starts[0].provider_metadata,
+            COMMENTARY_ID,
+            "commentary",
+        );
+        assert_eq!(text_starts[1].id, FINAL_ID);
+        assert_openai_phase_metadata(&text_starts[1].provider_metadata, FINAL_ID, "final_answer");
+
+        let text_ends = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextEnd(end) => Some(end),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(text_ends.len(), 2);
+        assert_eq!(text_ends[0].id, COMMENTARY_ID);
+        assert_openai_phase_metadata(&text_ends[0].provider_metadata, COMMENTARY_ID, "commentary");
+        assert_eq!(text_ends[1].id, FINAL_ID);
+        assert_openai_phase_metadata(&text_ends[1].provider_metadata, FINAL_ID, "final_answer");
+
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(finish.usage.input_tokens.total, Some(7112));
+        assert_eq!(finish.usage.input_tokens.cache_read, Some(3072));
+        assert_eq!(finish.usage.output_tokens.total, Some(463));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(64));
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some(RESPONSE_ID)
+        );
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "serviceTier")
+                .and_then(JsonValue::as_str),
+            Some("default")
         );
     }
 
