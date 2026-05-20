@@ -7567,6 +7567,44 @@ mod tests {
         )
     }
 
+    fn openai_provider_option_request_body(
+        model_id: &str,
+        openai_options: JsonValue,
+    ) -> (Vec<Warning>, JsonValue) {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": openai_options
+        }))
+        .expect("provider options deserialize");
+        let (provider, captured_request) = open_responses_captured_provider("openai", model_id);
+        let model = provider.language_model(model_id);
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(open_responses_hello_prompt())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        (
+            result.warnings,
+            captured_open_responses_request_body(&captured_request),
+        )
+    }
+
+    fn openai_default_request_body(model_id: &str) -> (Vec<Warning>, JsonValue) {
+        let (provider, captured_request) = open_responses_captured_provider("openai", model_id);
+        let model = provider.language_model(model_id);
+
+        let result = poll_ready(
+            model.do_generate(LanguageModelCallOptions::new(open_responses_hello_prompt())),
+        );
+
+        (
+            result.warnings,
+            captured_open_responses_request_body(&captured_request),
+        )
+    }
+
     fn assert_openai_top_level_reasoning_effort(
         reasoning: LanguageModelReasoningEffort,
         expected_effort: &str,
@@ -13425,6 +13463,136 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[test]
+    fn open_responses_provider_sends_text_verbosity_provider_option_values() {
+        for verbosity in ["low", "medium", "high"] {
+            let (warnings, request_body) = openai_provider_option_request_body(
+                "gpt-5",
+                json!({
+                    "textVerbosity": verbosity
+                }),
+            );
+
+            assert!(warnings.is_empty());
+            let mut expected = openai_text_request_body("gpt-5");
+            expected
+                .as_object_mut()
+                .expect("request body is an object")
+                .insert("text".to_string(), json!({ "verbosity": verbosity }));
+            assert_eq!(request_body, expected);
+        }
+    }
+
+    #[test]
+    fn open_responses_provider_sends_prompt_cache_key_provider_option() {
+        let (warnings, request_body) = openai_provider_option_request_body(
+            "gpt-5",
+            json!({
+                "promptCacheKey": "test-cache-key-123"
+            }),
+        );
+
+        assert!(warnings.is_empty());
+        let mut expected = openai_text_request_body("gpt-5");
+        expected
+            .as_object_mut()
+            .expect("request body is an object")
+            .insert("prompt_cache_key".to_string(), json!("test-cache-key-123"));
+        assert_eq!(request_body, expected);
+    }
+
+    #[test]
+    fn open_responses_provider_sends_prompt_cache_retention_provider_option() {
+        let (warnings, request_body) = openai_provider_option_request_body(
+            "gpt-5",
+            json!({
+                "promptCacheRetention": "24h"
+            }),
+        );
+
+        assert!(warnings.is_empty());
+        let mut expected = openai_text_request_body("gpt-5");
+        expected
+            .as_object_mut()
+            .expect("request body is an object")
+            .insert("prompt_cache_retention".to_string(), json!("24h"));
+        assert_eq!(request_body, expected);
+    }
+
+    #[test]
+    fn open_responses_provider_sends_safety_identifier_provider_option() {
+        let (warnings, request_body) = openai_provider_option_request_body(
+            "gpt-5",
+            json!({
+                "safetyIdentifier": "test-safety-identifier-123"
+            }),
+        );
+
+        assert!(warnings.is_empty());
+        let mut expected = openai_text_request_body("gpt-5");
+        expected
+            .as_object_mut()
+            .expect("request body is an object")
+            .insert(
+                "safety_identifier".to_string(),
+                json!("test-safety-identifier-123"),
+            );
+        assert_eq!(request_body, expected);
+    }
+
+    #[test]
+    fn open_responses_provider_sends_truncation_provider_option_values() {
+        for truncation in ["auto", "disabled"] {
+            let (warnings, request_body) = openai_provider_option_request_body(
+                "gpt-5",
+                json!({
+                    "truncation": truncation
+                }),
+            );
+
+            assert!(warnings.is_empty());
+            let mut expected = openai_text_request_body("gpt-5");
+            expected
+                .as_object_mut()
+                .expect("request body is an object")
+                .insert("truncation".to_string(), json!(truncation));
+            assert_eq!(request_body, expected);
+        }
+    }
+
+    #[test]
+    fn open_responses_provider_omits_unspecified_truncation_provider_option() {
+        let (warnings, request_body) = openai_default_request_body("gpt-5");
+
+        assert!(warnings.is_empty());
+        assert_eq!(request_body, openai_text_request_body("gpt-5"));
+    }
+
+    #[test]
+    fn open_responses_provider_sends_logprobs_provider_option() {
+        let (warnings, request_body) = openai_provider_option_request_body(
+            "gpt-5",
+            json!({
+                "logprobs": 5
+            }),
+        );
+
+        assert!(warnings.is_empty());
+        let mut expected = openai_text_request_body("gpt-5");
+        expected
+            .as_object_mut()
+            .expect("request body is an object")
+            .insert("top_logprobs".to_string(), json!(5));
+        expected
+            .as_object_mut()
+            .expect("request body is an object")
+            .insert(
+                "include".to_string(),
+                json!(["message.output_text.logprobs"]),
+            );
+        assert_eq!(request_body, expected);
     }
 
     #[test]
