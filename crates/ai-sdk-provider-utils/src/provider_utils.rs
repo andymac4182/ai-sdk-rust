@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::env::{self, VarError};
 use std::fmt;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::pin::Pin;
 use std::sync::{
@@ -311,6 +312,138 @@ impl<T, E> DelayedPromise<T, E> {
 impl<T, E> Default for DelayedPromise<T, E> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Error returned when an async-iterator stream read fails.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct AsyncIteratorReadableStreamError {
+    message: String,
+}
+
+impl AsyncIteratorReadableStreamError {
+    fn new(message: String) -> Self {
+        Self { message }
+    }
+
+    /// Returns the original iterator error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for AsyncIteratorReadableStreamError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for AsyncIteratorReadableStreamError {}
+
+/// Future returned when an async-iterator stream source reads the next item.
+pub type AsyncIteratorReadableStreamNextFuture<'a, T, E> =
+    Pin<Box<dyn Future<Output = Result<Option<T>, E>> + 'a>>;
+
+/// Future returned when an async-iterator stream source handles cancellation.
+pub type AsyncIteratorReadableStreamReturnFuture<'a, E> =
+    Pin<Box<dyn Future<Output = Result<(), E>> + 'a>>;
+
+/// Rust source interface for [`convert_async_iterator_to_readable_stream`].
+pub trait AsyncIteratorReadableStreamSource<T> {
+    /// Error returned by the source iterator.
+    type Error: fmt::Display + 'static;
+
+    /// Pulls the next item from the iterator.
+    fn next_item(&mut self) -> AsyncIteratorReadableStreamNextFuture<'_, T, Self::Error>;
+
+    /// Mirrors JavaScript `AsyncIterator.return(reason)`.
+    ///
+    /// Sources without a return hook can use this default implementation.
+    fn return_iterator<'a>(
+        &'a mut self,
+        _reason: Option<&'a str>,
+    ) -> AsyncIteratorReadableStreamReturnFuture<'a, Self::Error> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+}
+
+/// Rust analogue of upstream `convertAsyncIteratorToReadableStream`.
+pub struct AsyncIteratorReadableStream<T, I> {
+    iterator: I,
+    cancelled: bool,
+    closed: bool,
+    _item: PhantomData<T>,
+}
+
+impl<T, I> AsyncIteratorReadableStream<T, I>
+where
+    I: AsyncIteratorReadableStreamSource<T>,
+{
+    /// Reads one item from the underlying iterator.
+    pub async fn read(&mut self) -> Result<Option<T>, AsyncIteratorReadableStreamError> {
+        if self.cancelled || self.closed {
+            return Ok(None);
+        }
+
+        match self.iterator.next_item().await {
+            Ok(Some(value)) => Ok(Some(value)),
+            Ok(None) => {
+                self.closed = true;
+                Ok(None)
+            }
+            Err(error) => {
+                self.closed = true;
+                Err(AsyncIteratorReadableStreamError::new(error.to_string()))
+            }
+        }
+    }
+
+    /// Cancels the stream and invokes the source return hook when one exists.
+    pub async fn cancel(&mut self, reason: Option<&str>) {
+        if self.cancelled {
+            self.closed = true;
+            return;
+        }
+
+        self.cancelled = true;
+        self.closed = true;
+
+        let _ = self.iterator.return_iterator(reason).await;
+    }
+
+    /// Returns whether the stream has been cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled
+    }
+
+    /// Returns whether the stream has been closed.
+    pub fn is_closed(&self) -> bool {
+        self.closed
+    }
+
+    /// Returns the underlying iterator for post-read inspection.
+    pub fn iterator(&self) -> &I {
+        &self.iterator
+    }
+
+    /// Consumes the stream and returns the underlying iterator.
+    pub fn into_iterator(self) -> I {
+        self.iterator
+    }
+}
+
+/// Converts an async iterator-like source into a readable stream-like reader.
+pub fn convert_async_iterator_to_readable_stream<T, I>(
+    iterator: I,
+) -> AsyncIteratorReadableStream<T, I>
+where
+    I: AsyncIteratorReadableStreamSource<T>,
+{
+    AsyncIteratorReadableStream {
+        iterator,
+        cancelled: false,
+        closed: false,
+        _item: PhantomData,
     }
 }
 
@@ -7555,7 +7688,7 @@ pub fn resolve_provider_reference<'a>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, VecDeque};
     use std::env::VarError;
     use std::ffi::OsString;
     use std::future::{Future, ready};
@@ -7584,11 +7717,12 @@ mod tests {
     use url::Url;
 
     use super::{
-        Arrayable, Base64DecodeError, BinaryResponseHandlerOptions, ConvertToFormDataOptions,
-        DEFAULT_MAX_DOWNLOAD_SIZE, DelayedPromise, DownloadBlobOptions, DownloadBlobResponse,
-        DownloadError, DownloadedBlob, EventSourceResponseHandlerOptions, ExecuteToolOutput,
-        ExperimentalSandbox, FetchErrorInfo, FlexibleSchema, FormData, FormDataEntry,
-        FormDataInputValue, FormDataValue, GetFromApiOptions, HandledFetchError,
+        Arrayable, AsyncIteratorReadableStreamNextFuture, AsyncIteratorReadableStreamReturnFuture,
+        AsyncIteratorReadableStreamSource, Base64DecodeError, BinaryResponseHandlerOptions,
+        ConvertToFormDataOptions, DEFAULT_MAX_DOWNLOAD_SIZE, DelayedPromise, DownloadBlobOptions,
+        DownloadBlobResponse, DownloadError, DownloadedBlob, EventSourceResponseHandlerOptions,
+        ExecuteToolOutput, ExperimentalSandbox, FetchErrorInfo, FlexibleSchema, FormData,
+        FormDataEntry, FormDataInputValue, FormDataValue, GetFromApiOptions, HandledFetchError,
         IdGeneratorOptions, InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
         JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, LazySchema, LoadApiKeyOptions,
         LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError, ParseJsonResult,
@@ -7604,10 +7738,11 @@ mod tests {
         ToolExecutionError, ToolExecutionOptions, ToolModelOutputOptions, ToolNeedsApprovalOptions,
         ToolResult, ValidateTypesResult, ValidationResult,
         add_additional_properties_to_json_schema, as_array, as_flexible_schema, as_schema,
-        combine_headers, convert_base64_to_bytes, convert_bytes_to_base64,
-        convert_image_model_file_to_data_uri, convert_inline_file_data_to_bytes, convert_to_base64,
-        convert_to_form_data, create_binary_response_handler, create_event_source_response_handler,
-        create_id_generator, create_json_error_response_handler, create_json_response_handler,
+        combine_headers, convert_async_iterator_to_readable_stream, convert_base64_to_bytes,
+        convert_bytes_to_base64, convert_image_model_file_to_data_uri,
+        convert_inline_file_data_to_bytes, convert_to_base64, convert_to_form_data,
+        create_binary_response_handler, create_event_source_response_handler, create_id_generator,
+        create_json_error_response_handler, create_json_response_handler,
         create_provider_defined_tool_factory,
         create_provider_defined_tool_factory_with_output_schema,
         create_provider_executed_tool_factory, create_status_code_error_response_handler,
@@ -7640,6 +7775,74 @@ mod tests {
         match Pin::new(&mut future).poll(&mut context) {
             Poll::Ready(value) => value,
             Poll::Pending => unreachable!("test futures should be ready"),
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct ScriptedReadableStreamIterator {
+        values: VecDeque<i32>,
+        next_calls: usize,
+        return_calls: usize,
+        return_reasons: Vec<Option<String>>,
+        finally_called: bool,
+        return_error_message: Option<String>,
+    }
+
+    impl ScriptedReadableStreamIterator {
+        fn with_values(values: impl IntoIterator<Item = i32>) -> Self {
+            Self {
+                values: values.into_iter().collect(),
+                ..Self::default()
+            }
+        }
+
+        fn with_return_error(mut self, message: impl Into<String>) -> Self {
+            self.return_error_message = Some(message.into());
+            self
+        }
+    }
+
+    impl AsyncIteratorReadableStreamSource<i32> for ScriptedReadableStreamIterator {
+        type Error = String;
+
+        fn next_item(&mut self) -> AsyncIteratorReadableStreamNextFuture<'_, i32, Self::Error> {
+            self.next_calls += 1;
+            Box::pin(ready(Ok(self.values.pop_front())))
+        }
+
+        fn return_iterator<'a>(
+            &'a mut self,
+            reason: Option<&'a str>,
+        ) -> AsyncIteratorReadableStreamReturnFuture<'a, Self::Error> {
+            self.return_calls += 1;
+            self.return_reasons.push(reason.map(str::to_string));
+            self.finally_called = true;
+
+            Box::pin(ready(self.return_error_message.clone().map_or(Ok(()), Err)))
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct NextOnlyReadableStreamIterator {
+        value: Option<i32>,
+        next_calls: usize,
+    }
+
+    impl NextOnlyReadableStreamIterator {
+        fn new(value: i32) -> Self {
+            Self {
+                value: Some(value),
+                next_calls: 0,
+            }
+        }
+    }
+
+    impl AsyncIteratorReadableStreamSource<i32> for NextOnlyReadableStreamIterator {
+        type Error = String;
+
+        fn next_item(&mut self) -> AsyncIteratorReadableStreamNextFuture<'_, i32, Self::Error> {
+            self.next_calls += 1;
+            Box::pin(ready(Ok(self.value.take())))
         }
     }
 
@@ -7717,6 +7920,86 @@ mod tests {
         assert_eq!(
             get_error_message(Some(&json!({ "code": "bad_request" }))),
             "{\"code\":\"bad_request\"}"
+        );
+    }
+
+    #[test]
+    fn convert_async_iterator_stream_upstream_calls_return_on_cancel_and_triggers_finally() {
+        let iterator = ScriptedReadableStreamIterator::with_values([0, 1]);
+        let mut stream = convert_async_iterator_to_readable_stream(iterator);
+
+        assert_eq!(
+            poll_ready(stream.read()).expect("first read succeeds"),
+            Some(0)
+        );
+
+        poll_ready(stream.cancel(Some("stop")));
+
+        assert!(stream.is_cancelled());
+        assert!(stream.is_closed());
+        assert_eq!(stream.iterator().return_calls, 1);
+        assert_eq!(
+            stream.iterator().return_reasons,
+            vec![Some("stop".to_string())]
+        );
+        assert!(stream.iterator().finally_called);
+    }
+
+    #[test]
+    fn convert_async_iterator_stream_upstream_stops_reads_after_cancel() {
+        let iterator = ScriptedReadableStreamIterator::with_values([0, 1]);
+        let mut stream = convert_async_iterator_to_readable_stream(iterator);
+
+        assert_eq!(
+            poll_ready(stream.read()).expect("first read succeeds"),
+            Some(0)
+        );
+
+        poll_ready(stream.cancel(Some("stop")));
+
+        assert_eq!(
+            poll_ready(stream.read()).expect("cancelled stream closes"),
+            None
+        );
+        assert_eq!(stream.iterator().next_calls, 1);
+    }
+
+    #[test]
+    fn convert_async_iterator_stream_upstream_cancels_without_return_method() {
+        let iterator = NextOnlyReadableStreamIterator::new(42);
+        let mut stream = convert_async_iterator_to_readable_stream(iterator);
+
+        assert_eq!(
+            poll_ready(stream.read()).expect("first read succeeds"),
+            Some(42)
+        );
+
+        poll_ready(stream.cancel(None));
+
+        assert!(stream.is_cancelled());
+        assert!(stream.is_closed());
+        assert_eq!(stream.iterator().next_calls, 1);
+    }
+
+    #[test]
+    fn convert_async_iterator_stream_upstream_ignores_return_errors() {
+        let iterator =
+            ScriptedReadableStreamIterator::with_values([1]).with_return_error("return() failed");
+        let mut stream = convert_async_iterator_to_readable_stream(iterator);
+
+        assert_eq!(
+            poll_ready(stream.read()).expect("first read succeeds"),
+            Some(1)
+        );
+
+        poll_ready(stream.cancel(None));
+
+        assert!(stream.is_cancelled());
+        assert!(stream.is_closed());
+        assert_eq!(stream.iterator().return_calls, 1);
+        assert_eq!(
+            stream.iterator().return_error_message.as_deref(),
+            Some("return() failed")
         );
     }
 
