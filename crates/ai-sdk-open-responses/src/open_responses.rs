@@ -17876,8 +17876,8 @@ mod tests {
         assert_eq!(finish.usage.output_tokens.reasoning, Some(256));
     }
 
-    #[test]
-    fn open_responses_provider_handles_prompt_file_defaults_and_unsupported_files() {
+    fn open_responses_prompt_file_provider()
+    -> (OpenResponsesProvider, Arc<Mutex<Vec<ProviderApiRequest>>>) {
         let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
         let captured_requests_for_transport = Arc::clone(&captured_requests);
         let transport: OpenResponsesTransport =
@@ -17919,64 +17919,25 @@ mod tests {
                 .with_api_key("test-api-key"),
         )
         .with_transport(transport);
+
+        (provider, captured_requests)
+    }
+
+    #[test]
+    fn open_responses_provider_uses_default_filename_for_pdf_file_parts_when_not_provided() {
+        let (provider, captured_requests) = open_responses_prompt_file_provider();
         let model = provider.language_model("gpt-4.1-mini");
 
-        let rejected = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+        let accepted = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
             LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
                 LanguageModelUserContentPart::File(LanguageModelFilePart::new(
                     FileData::Data {
                         data: FileDataContent::Base64("AQIDBAU=".to_string()),
                     },
-                    "text/plain",
+                    "application/pdf",
                 )),
             ])),
         ])));
-
-        assert_eq!(rejected.finish_reason.unified, FinishReason::Error);
-        assert_eq!(
-            openai_metadata_value(&rejected.provider_metadata, "errorMessage")
-                .and_then(JsonValue::as_str),
-            Some("file part media type text/plain")
-        );
-        assert!(
-            captured_requests
-                .lock()
-                .expect("captured requests mutex is not poisoned")
-                .is_empty()
-        );
-
-        let provider_options: ProviderOptions = serde_json::from_value(json!({
-            "openai": {
-                "passThroughUnsupportedFiles": true
-            }
-        }))
-        .expect("provider options deserialize");
-        let accepted = poll_ready(
-            model.do_generate(
-                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
-                    LanguageModelUserMessage::new(vec![
-                        LanguageModelUserContentPart::File(LanguageModelFilePart::new(
-                            FileData::Data {
-                                data: FileDataContent::Base64("AQIDBAU=".to_string()),
-                            },
-                            "application/pdf",
-                        )),
-                        LanguageModelUserContentPart::File(
-                            LanguageModelFilePart::new(
-                                FileData::Data {
-                                    data: FileDataContent::Base64(
-                                        "bmFtZSxyb2xlCkFkYSxlbmdpbmVlcgo=".to_string(),
-                                    ),
-                                },
-                                "text/csv",
-                            )
-                            .with_filename("names.csv"),
-                        ),
-                    ]),
-                )])
-                .with_provider_options(provider_options),
-            ),
-        );
 
         assert_eq!(
             accepted
@@ -18010,7 +17971,100 @@ mod tests {
                             "type": "input_file",
                             "filename": "part-0.pdf",
                             "file_data": "data:application/pdf;base64,AQIDBAU="
-                        },
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_rejects_unsupported_file_types_by_default() {
+        let (provider, captured_requests) = open_responses_prompt_file_provider();
+        let model = provider.language_model("gpt-4.1-mini");
+
+        let rejected = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Base64("AQIDBAU=".to_string()),
+                    },
+                    "text/plain",
+                )),
+            ])),
+        ])));
+
+        assert_eq!(rejected.finish_reason.unified, FinishReason::Error);
+        assert_eq!(
+            openai_metadata_value(&rejected.provider_metadata, "errorMessage")
+                .and_then(JsonValue::as_str),
+            Some("file part media type text/plain")
+        );
+        assert!(
+            captured_requests
+                .lock()
+                .expect("captured requests mutex is not poisoned")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_passes_through_unsupported_file_types_when_enabled() {
+        let (provider, captured_requests) = open_responses_prompt_file_provider();
+        let model = provider.language_model("gpt-4.1-mini");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "passThroughUnsupportedFiles": true
+            }
+        }))
+        .expect("provider options deserialize");
+        let accepted = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::File(
+                        LanguageModelFilePart::new(
+                            FileData::Data {
+                                data: FileDataContent::Base64(
+                                    "bmFtZSxyb2xlCkFkYSxlbmdpbmVlcgo=".to_string(),
+                                ),
+                            },
+                            "text/csv",
+                        )
+                        .with_filename("names.csv"),
+                    )]),
+                )])
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(
+            accepted
+                .content
+                .iter()
+                .filter_map(|part| match part {
+                    LanguageModelContent::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["File defaults accepted"]
+        );
+        let requests = captured_requests
+            .lock()
+            .expect("captured requests mutex is not poisoned");
+        assert_eq!(requests.len(), 1);
+        let request_body = requests[0]
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
                         {
                             "type": "input_file",
                             "filename": "names.csv",
