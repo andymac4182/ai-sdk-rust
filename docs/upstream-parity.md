@@ -41,6 +41,8 @@ to exist as an equivalent Rust test in the matching Rust crate. This is a
 minimum bar, not an aspirational coverage target: Rust may add more tests for
 stronger typing, additional edge cases, live-provider proof, or Rust-specific
 failure modes, but it must never have fewer portable tests than upstream.
+The required comparison is equality-plus: every original portable TypeScript
+test must exist in Rust, and any Rust-only tests are additive coverage only.
 The upstream TypeScript test inventory is the floor and the Rust inventory must
 be a superset, not a sampled or reduced suite.
 Future iterations must start from the original TypeScript test list and port it
