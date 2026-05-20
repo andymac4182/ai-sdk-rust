@@ -9091,6 +9091,250 @@ mod tests {
         );
     }
 
+    fn upstream_reasoning_effort_map() -> BTreeMap<ReasoningLevel, String> {
+        BTreeMap::from([
+            (ReasoningLevel::Minimal, "low".to_string()),
+            (ReasoningLevel::Low, "low".to_string()),
+            (ReasoningLevel::Medium, "medium".to_string()),
+            (ReasoningLevel::High, "high".to_string()),
+            (ReasoningLevel::Xhigh, "max".to_string()),
+        ])
+    }
+
+    #[test]
+    fn map_reasoning_to_provider_effort_upstream_returns_mapped_value_with_no_warning_for_direct_match()
+     {
+        let mut warnings = Vec::new();
+
+        assert_eq!(
+            map_reasoning_to_provider_effort(
+                ReasoningLevel::Medium,
+                &upstream_reasoning_effort_map(),
+                &mut warnings,
+            ),
+            Some("medium".to_string())
+        );
+        assert_eq!(warnings, Vec::new());
+    }
+
+    #[test]
+    fn map_reasoning_to_provider_effort_upstream_returns_mapped_value_with_compatibility_warning_for_renamed_match()
+     {
+        let mut warnings = Vec::new();
+
+        assert_eq!(
+            map_reasoning_to_provider_effort(
+                ReasoningLevel::Minimal,
+                &upstream_reasoning_effort_map(),
+                &mut warnings,
+            ),
+            Some("low".to_string())
+        );
+        assert_eq!(
+            warnings,
+            vec![Warning::Compatibility {
+                feature: "reasoning".to_string(),
+                details: Some(
+                    "reasoning \"minimal\" is not directly supported by this model. mapped to effort \"low\"."
+                        .to_string()
+                ),
+            }]
+        );
+    }
+
+    #[test]
+    fn map_reasoning_to_provider_effort_upstream_returns_mapped_value_with_compatibility_warning_for_xhigh()
+     {
+        let mut warnings = Vec::new();
+
+        assert_eq!(
+            map_reasoning_to_provider_effort(
+                ReasoningLevel::Xhigh,
+                &upstream_reasoning_effort_map(),
+                &mut warnings,
+            ),
+            Some("max".to_string())
+        );
+        assert_eq!(
+            warnings,
+            vec![Warning::Compatibility {
+                feature: "reasoning".to_string(),
+                details: Some(
+                    "reasoning \"xhigh\" is not directly supported by this model. mapped to effort \"max\"."
+                        .to_string()
+                ),
+            }]
+        );
+    }
+
+    #[test]
+    fn map_reasoning_to_provider_effort_upstream_returns_undefined_with_unsupported_warning_for_key_missing_from_effort_map()
+     {
+        let effort_map = BTreeMap::from([(ReasoningLevel::Medium, "medium".to_string())]);
+        let mut warnings = Vec::new();
+
+        assert_eq!(
+            map_reasoning_to_provider_effort(ReasoningLevel::High, &effort_map, &mut warnings),
+            None
+        );
+        assert_eq!(
+            warnings,
+            vec![Warning::Unsupported {
+                feature: "reasoning".to_string(),
+                details: Some("reasoning \"high\" is not supported by this model.".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn is_custom_reasoning_upstream_returns_false_for_undefined() {
+        assert!(!is_custom_reasoning(None));
+    }
+
+    #[test]
+    fn is_custom_reasoning_upstream_returns_false_for_provider_default() {
+        assert!(!is_custom_reasoning(Some(
+            &LanguageModelReasoningEffort::ProviderDefault
+        )));
+    }
+
+    #[test]
+    fn is_custom_reasoning_upstream_returns_true_for_none() {
+        assert!(is_custom_reasoning(Some(
+            &LanguageModelReasoningEffort::None
+        )));
+    }
+
+    #[test]
+    fn is_custom_reasoning_upstream_returns_true_for_all_reasoning_levels() {
+        for reasoning in [
+            LanguageModelReasoningEffort::Minimal,
+            LanguageModelReasoningEffort::Low,
+            LanguageModelReasoningEffort::Medium,
+            LanguageModelReasoningEffort::High,
+            LanguageModelReasoningEffort::Xhigh,
+        ] {
+            assert!(is_custom_reasoning(Some(&reasoning)));
+        }
+    }
+
+    #[test]
+    fn map_reasoning_to_provider_budget_upstream_returns_correct_budget_for_known_key() {
+        let mut warnings = Vec::new();
+
+        assert_eq!(
+            map_reasoning_to_provider_budget(
+                ReasoningLevel::Medium,
+                64_000,
+                64_000,
+                None,
+                None,
+                &mut warnings,
+            ),
+            Some(19_200)
+        );
+        assert_eq!(warnings, Vec::new());
+    }
+
+    #[test]
+    fn map_reasoning_to_provider_budget_upstream_caps_result_at_max_reasoning_budget() {
+        let mut warnings = Vec::new();
+
+        assert_eq!(
+            map_reasoning_to_provider_budget(
+                ReasoningLevel::Xhigh,
+                64_000,
+                50_000,
+                None,
+                None,
+                &mut warnings,
+            ),
+            Some(50_000)
+        );
+        assert_eq!(warnings, Vec::new());
+    }
+
+    #[test]
+    fn map_reasoning_to_provider_budget_upstream_floors_result_at_default_min_reasoning_budget() {
+        let mut warnings = Vec::new();
+
+        assert_eq!(
+            map_reasoning_to_provider_budget(
+                ReasoningLevel::Minimal,
+                10_000,
+                10_000,
+                None,
+                None,
+                &mut warnings,
+            ),
+            Some(1024)
+        );
+        assert_eq!(warnings, Vec::new());
+    }
+
+    #[test]
+    fn map_reasoning_to_provider_budget_upstream_respects_custom_min_reasoning_budget() {
+        let mut warnings = Vec::new();
+
+        assert_eq!(
+            map_reasoning_to_provider_budget(
+                ReasoningLevel::Minimal,
+                10_000,
+                10_000,
+                Some(512),
+                None,
+                &mut warnings,
+            ),
+            Some(512)
+        );
+        assert_eq!(warnings, Vec::new());
+    }
+
+    #[test]
+    fn map_reasoning_to_provider_budget_upstream_respects_custom_budget_percentages() {
+        let budget_percentages = BTreeMap::from([(ReasoningLevel::Medium, 0.5)]);
+        let mut warnings = Vec::new();
+
+        assert_eq!(
+            map_reasoning_to_provider_budget(
+                ReasoningLevel::Medium,
+                10_000,
+                10_000,
+                None,
+                Some(&budget_percentages),
+                &mut warnings,
+            ),
+            Some(5000)
+        );
+        assert_eq!(warnings, Vec::new());
+    }
+
+    #[test]
+    fn map_reasoning_to_provider_budget_upstream_returns_undefined_with_unsupported_warning_for_key_missing_from_custom_budget_percentages()
+     {
+        let budget_percentages = BTreeMap::from([(ReasoningLevel::Medium, 0.5)]);
+        let mut warnings = Vec::new();
+
+        assert_eq!(
+            map_reasoning_to_provider_budget(
+                ReasoningLevel::High,
+                64_000,
+                64_000,
+                None,
+                Some(&budget_percentages),
+                &mut warnings,
+            ),
+            None
+        );
+        assert_eq!(
+            warnings,
+            vec![Warning::Unsupported {
+                feature: "reasoning".to_string(),
+                details: Some("reasoning \"high\" is not supported by this model.".to_string()),
+            }]
+        );
+    }
+
     #[test]
     fn arrayable_serializes_single_or_array_values() {
         assert_eq!(
