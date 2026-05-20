@@ -583,6 +583,9 @@ impl fmt::Debug for SmoothStreamChunking {
 pub struct SmoothStreamOptions {
     /// Controls how buffered text and reasoning deltas are split.
     pub chunking: SmoothStreamChunking,
+
+    /// Delay in milliseconds after each detected smoothed chunk.
+    pub delay_in_ms: Option<i64>,
 }
 
 impl SmoothStreamOptions {
@@ -590,12 +593,21 @@ impl SmoothStreamOptions {
     pub fn new() -> Self {
         Self {
             chunking: SmoothStreamChunking::Word,
+            delay_in_ms: Some(10),
         }
     }
 
     /// Sets the smoothing chunking strategy.
     pub fn with_chunking(mut self, chunking: SmoothStreamChunking) -> Self {
         self.chunking = chunking;
+        self
+    }
+
+    /// Sets the delay in milliseconds after each detected smoothed chunk.
+    ///
+    /// `None` mirrors upstream `delayInMs: null` and resolves immediately.
+    pub fn with_delay_in_ms(mut self, delay_in_ms: Option<i64>) -> Self {
+        self.delay_in_ms = delay_in_ms;
         self
     }
 }
@@ -2898,6 +2910,7 @@ where
             let _ = replay_stream_text_attempt_parts(
                 parts,
                 &attempt_parts,
+                None,
                 controls.on_chunk,
                 controls.on_error,
                 controls.abort_signal,
@@ -2924,25 +2937,46 @@ where
             strip_stream_text_finish_parts(transformed_parts)
         };
 
-        let attempt_parts = match controls.smooth_stream {
-            Some(smooth_stream) => match smooth_stream_parts(attempt_parts, smooth_stream) {
-                Ok(attempt_parts) => {
-                    collected_step.apply_transformed_parts(&attempt_parts);
-                    attempt_parts
+        let (attempt_parts, smooth_stream_delay_after, smooth_stream_delay_in_ms) =
+            match controls.smooth_stream {
+                Some(smooth_stream) => {
+                    match smooth_stream_scheduled_parts(attempt_parts, smooth_stream) {
+                        Ok(scheduled_parts) => {
+                            let delay_after = scheduled_parts
+                                .iter()
+                                .map(|scheduled| scheduled.delay_after)
+                                .collect::<Vec<_>>();
+                            let attempt_parts = scheduled_parts
+                                .into_iter()
+                                .map(|scheduled| scheduled.part)
+                                .collect::<Vec<_>>();
+                            collected_step.apply_transformed_parts(&attempt_parts);
+                            (attempt_parts, Some(delay_after), smooth_stream.delay_in_ms)
+                        }
+                        Err(error) => {
+                            collected_step.apply_smooth_stream_error(&error);
+                            (
+                                vec![TextStreamPart::Error(LanguageModelErrorStreamPart::new(
+                                    JsonValue::String(error.to_string()),
+                                ))],
+                                None,
+                                None,
+                            )
+                        }
+                    }
                 }
-                Err(error) => {
-                    collected_step.apply_smooth_stream_error(&error);
-                    vec![TextStreamPart::Error(LanguageModelErrorStreamPart::new(
-                        JsonValue::String(error.to_string()),
-                    ))]
-                }
-            },
-            None => attempt_parts,
-        };
+                None => (attempt_parts, None, None),
+            };
 
         if let Some(abort_reason) = replay_stream_text_attempt_parts(
             parts,
             &attempt_parts,
+            smooth_stream_delay_after
+                .as_deref()
+                .map(|delay_after| SmoothStreamReplayDelay {
+                    delay_after,
+                    delay_in_ms: smooth_stream_delay_in_ms,
+                }),
             controls.on_chunk,
             controls.on_error,
             controls.abort_signal,
@@ -3452,9 +3486,15 @@ enum SmoothStreamDeltaKind {
     Reasoning,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SmoothStreamScheduledPart {
+    part: TextStreamPart,
+    delay_after: bool,
+}
+
 struct SmoothStreamState<'a> {
     chunking: &'a SmoothStreamChunking,
-    output: Vec<TextStreamPart>,
+    output: Vec<SmoothStreamScheduledPart>,
     buffer: String,
     id: String,
     delta_kind: Option<SmoothStreamDeltaKind>,
@@ -3493,14 +3533,14 @@ impl<'a> SmoothStreamState<'a> {
             }
             part => {
                 self.flush_buffer();
-                self.output.push(part);
+                self.push_part_without_delay(part);
             }
         }
 
         Ok(())
     }
 
-    fn finish(mut self) -> Vec<TextStreamPart> {
+    fn finish(mut self) -> Vec<SmoothStreamScheduledPart> {
         self.flush_buffer();
         self.output
     }
@@ -3525,7 +3565,7 @@ impl<'a> SmoothStreamState<'a> {
         }
 
         while let Some(chunk) = detect_smooth_stream_chunk(&self.buffer, self.chunking)? {
-            self.push_delta_part(delta_kind, chunk.clone(), None);
+            self.push_delta_part(delta_kind, chunk.clone(), None, true);
             self.buffer = self.buffer[chunk.len()..].to_string();
         }
 
@@ -3543,7 +3583,7 @@ impl<'a> SmoothStreamState<'a> {
 
         let text = std::mem::take(&mut self.buffer);
         let provider_metadata = self.provider_metadata.take();
-        self.push_delta_part(delta_kind, text, provider_metadata);
+        self.push_delta_part(delta_kind, text, provider_metadata, false);
     }
 
     fn push_delta_part(
@@ -3551,23 +3591,34 @@ impl<'a> SmoothStreamState<'a> {
         delta_kind: SmoothStreamDeltaKind,
         text: String,
         provider_metadata: Option<ProviderMetadata>,
+        delay_after: bool,
     ) {
-        match delta_kind {
+        let part = match delta_kind {
             SmoothStreamDeltaKind::Text => {
                 let mut part = TextStreamTextDeltaPart::new(self.id.clone(), text);
                 if let Some(provider_metadata) = provider_metadata {
                     part = part.with_provider_metadata(provider_metadata);
                 }
-                self.output.push(TextStreamPart::TextDelta(part));
+                TextStreamPart::TextDelta(part)
             }
             SmoothStreamDeltaKind::Reasoning => {
                 let mut part = TextStreamReasoningDeltaPart::new(self.id.clone(), text);
                 if let Some(provider_metadata) = provider_metadata {
                     part = part.with_provider_metadata(provider_metadata);
                 }
-                self.output.push(TextStreamPart::ReasoningDelta(part));
+                TextStreamPart::ReasoningDelta(part)
             }
-        }
+        };
+
+        self.output
+            .push(SmoothStreamScheduledPart { part, delay_after });
+    }
+
+    fn push_part_without_delay(&mut self, part: TextStreamPart) {
+        self.output.push(SmoothStreamScheduledPart {
+            part,
+            delay_after: false,
+        });
     }
 }
 
@@ -3575,6 +3626,16 @@ fn smooth_stream_parts(
     parts: impl IntoIterator<Item = TextStreamPart>,
     options: &SmoothStreamOptions,
 ) -> Result<Vec<TextStreamPart>, SmoothStreamError> {
+    Ok(smooth_stream_scheduled_parts(parts, options)?
+        .into_iter()
+        .map(|scheduled| scheduled.part)
+        .collect())
+}
+
+fn smooth_stream_scheduled_parts(
+    parts: impl IntoIterator<Item = TextStreamPart>,
+    options: &SmoothStreamOptions,
+) -> Result<Vec<SmoothStreamScheduledPart>, SmoothStreamError> {
     let mut state = SmoothStreamState::new(&options.chunking);
 
     for part in parts {
@@ -3640,14 +3701,21 @@ fn line_chunk_regex() -> &'static Regex {
     LINE_CHUNK_REGEX.get_or_init(|| Regex::new(r"\n+").expect("line chunk regex compiles"))
 }
 
+#[derive(Clone, Copy)]
+struct SmoothStreamReplayDelay<'a> {
+    delay_after: &'a [bool],
+    delay_in_ms: Option<i64>,
+}
+
 async fn replay_stream_text_attempt_parts(
     parts: &mut Vec<TextStreamPart>,
     attempt_parts: &[TextStreamPart],
+    smooth_stream_delay: Option<SmoothStreamReplayDelay<'_>>,
     on_chunk: Option<&StreamTextOnChunk<'_>>,
     on_error: Option<&StreamTextOnError<'_>>,
     abort_signal: Option<&StreamTextAbortSignal>,
 ) -> Option<Option<JsonValue>> {
-    for part in attempt_parts {
+    for (part_index, part) in attempt_parts.iter().enumerate() {
         if let Some(on_chunk) = on_chunk
             && is_stream_text_chunk_callback_part(part)
         {
@@ -3674,6 +3742,12 @@ async fn replay_stream_text_attempt_parts(
             let abort_reason = abort_part.reason.clone();
             push_text_stream_part(parts, TextStreamPart::Abort(abort_part), on_chunk).await;
             return Some(abort_reason);
+        }
+
+        if let Some(delay) = smooth_stream_delay
+            && delay.delay_after.get(part_index).copied().unwrap_or(false)
+        {
+            ai_sdk_provider_utils::delay(delay.delay_in_ms).await;
         }
     }
 
@@ -3925,6 +3999,19 @@ mod tests {
         }
     }
 
+    fn poll_until_ready<T>(future: impl Future<Output = T>) -> T {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut future = Box::pin(future);
+
+        loop {
+            match Pin::new(&mut future).poll(&mut context) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => std::thread::sleep(std::time::Duration::from_millis(1)),
+            }
+        }
+    }
+
     fn user_message(text: &str) -> LanguageModelMessage {
         LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
             LanguageModelUserContentPart::Text(LanguageModelTextPart::new(text)),
@@ -3977,6 +4064,58 @@ mod tests {
                 TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "world!")),
                 TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
             ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_marks_detected_chunks_for_default_delay() {
+        let scheduled_parts = smooth_stream_scheduled_parts(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Hello, world!")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            &SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should schedule text chunks");
+
+        assert_eq!(SmoothStreamOptions::new().delay_in_ms, Some(10));
+        assert_eq!(
+            scheduled_parts,
+            vec![
+                SmoothStreamScheduledPart {
+                    part: TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                    delay_after: false,
+                },
+                SmoothStreamScheduledPart {
+                    part: TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Hello, ")),
+                    delay_after: true,
+                },
+                SmoothStreamScheduledPart {
+                    part: TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "world!")),
+                    delay_after: false,
+                },
+                SmoothStreamScheduledPart {
+                    part: TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                    delay_after: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_supports_custom_and_null_delay_options() {
+        assert_eq!(
+            SmoothStreamOptions::new()
+                .with_delay_in_ms(Some(20))
+                .delay_in_ms,
+            Some(20)
+        );
+        assert_eq!(
+            SmoothStreamOptions::new()
+                .with_delay_in_ms(None)
+                .delay_in_ms,
+            None
         );
     }
 
@@ -4274,7 +4413,7 @@ mod tests {
 
         let result = poll_ready(stream_text(
             StreamTextOptions::new(&model, vec![user_message("Say hello")])
-                .with_smooth_stream(SmoothStreamOptions::new())
+                .with_smooth_stream(SmoothStreamOptions::new().with_delay_in_ms(None))
                 .with_on_chunk(move |event| {
                     let chunks = Arc::clone(&chunks_for_callback);
                     async move {
@@ -4303,6 +4442,39 @@ mod tests {
                 TextStreamPart::TextDelta(part) if part.text == "Hello, "
             )
         }));
+    }
+
+    #[test]
+    fn stream_text_smooth_stream_waits_after_detected_chunks() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "Hello, world!",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let started_at = Instant::now();
+        let result = poll_until_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_smooth_stream(SmoothStreamOptions::new().with_delay_in_ms(Some(5))),
+        ));
+
+        assert_eq!(
+            result.text_stream,
+            vec!["Hello, ".to_string(), "world!".to_string()]
+        );
+        assert!(
+            started_at.elapsed() >= std::time::Duration::from_millis(5),
+            "smooth stream should await the configured delay after the detected chunk"
+        );
     }
 
     #[test]
