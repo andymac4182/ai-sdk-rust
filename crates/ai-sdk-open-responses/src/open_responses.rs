@@ -11427,6 +11427,86 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_streams_context_management_options() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport = Arc::new(
+            move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                let sse = [
+                    r#"data: {"type":"response.created","response":{"id":"resp_stream_context_management","created_at":1711115037,"model":"gpt-5.2"}}"#,
+                    "",
+                    r#"data: {"type":"response.completed","response":{"id":"resp_stream_context_management","created_at":1711115037,"model":"gpt-5.2","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse)
+                    .with_headers(Headers::from([(
+                        "content-type".to_string(),
+                        "text/event-stream".to_string(),
+                    )])))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "store": false,
+                "contextManagement": [
+                    {
+                        "type": "compaction",
+                        "compactThreshold": 50000
+                    }
+                ]
+            }
+        }))
+        .expect("provider options deserialize");
+        let model = provider.language_model("gpt-5.2");
+
+        let result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Compact context"),
+                    )]),
+                )])
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(
+            result
+                .stream
+                .iter()
+                .any(|part| matches!(part, LanguageModelStreamPart::Finish(_)))
+        );
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(request_body["model"], "gpt-5.2");
+        assert_eq!(request_body["store"], false);
+        assert_eq!(request_body["stream"], true);
+        assert_eq!(
+            request_body["context_management"],
+            json!([
+                {
+                    "type": "compaction",
+                    "compact_threshold": 50000
+                }
+            ])
+        );
+        assert!(request_body.get("contextManagement").is_none());
+    }
+
+    #[test]
     fn open_responses_provider_maps_openai_passthrough_option_edges() {
         let (provider, captured_request) = open_responses_captured_provider("openai", "gpt-4o");
         let provider_options: ProviderOptions = serde_json::from_value(json!({
