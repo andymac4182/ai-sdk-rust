@@ -132,8 +132,11 @@ still open.
    `*.spec.tsx` case must have an equivalent Rust test in the matching 1:1
    crate, including table-driven cases, fixture/snapshot-equivalent cases,
    streaming edge cases, error paths, provider option serialization, and
-   type-level assertions where Rust can express them. Missing upstream tests are
-   missing parity, even if broader Rust tests happen to cover similar behavior.
+   type-level assertions where Rust can express them. Count the individual
+   upstream test/case as the unit of parity; do not collapse the inventory to a
+   file-level, feature-level, or broad behavioral checklist. Missing upstream
+   tests are missing parity, even if broader Rust tests happen to cover similar
+   behavior.
    Treat the upstream TypeScript test inventory as the floor and the Rust test
    inventory as a required superset: every portable upstream case must be
    counted, mapped to a Rust counterpart, and kept in the ledger until ported or
@@ -373,9 +376,12 @@ You are done only when:
 3. The Rust crate/workspace has validated equivalents for all portable
    upstream surfaces.
 4. Every portable test from the original upstream TypeScript packages exists as
-   an equivalent Rust test in the matching crate. Rust may have more tests, but
-   it must not have fewer portable tests than upstream. Completion requires an
-   explicit test inventory mapping, not a sampled or reduced Rust suite.
+   an equivalent Rust test in the matching crate. The unit is each original
+   upstream test/case, including table rows, fixtures, snapshots, streaming
+   cases, error paths, provider options, and portable type-level assertions.
+   Rust may have more tests, but it must not have fewer portable tests than
+   upstream. Completion requires an explicit test inventory mapping, not a
+   sampled, reduced, file-level, or feature-level Rust suite.
 5. The Rust workspace has a strict 1:1 crate mapping for every portable
    upstream TypeScript package: one matching Rust crate per package, no Rust
    crate owning APIs from multiple upstream packages, and the root crate limited
