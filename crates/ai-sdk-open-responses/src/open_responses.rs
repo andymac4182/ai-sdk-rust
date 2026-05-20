@@ -3563,9 +3563,12 @@ fn open_responses_content(
                         .with_provider_executed(true)
                         .with_dynamic(true),
                 ));
-                content.push(LanguageModelContent::ToolResult(
-                    open_responses_mcp_tool_result(part, &tool_call_id, &tool_name),
-                ));
+                let mut tool_result =
+                    open_responses_mcp_tool_result(part, &tool_call_id, &tool_name);
+                if let Some(metadata) = open_responses_item_metadata(provider_options_name, part) {
+                    tool_result = tool_result.with_provider_metadata(metadata);
+                }
+                content.push(LanguageModelContent::ToolResult(tool_result));
             }
             Some("mcp_approval_request") => {
                 let approval_id = part
@@ -6974,6 +6977,8 @@ mod tests {
         include_str!("fixtures/openai-shell-container-multiturn.1.json");
     const OPEN_RESPONSES_SHELL_LOCAL_MULTITURN_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-shell-local-multiturn.1.json");
+    const OPEN_RESPONSES_MCP_TOOL_JSON_FIXTURE: &str =
+        include_str!("fixtures/openai-mcp-tool.1.json");
     const OPEN_RESPONSES_WEB_SEARCH_TOOL_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-web-search-tool.1.json");
     const OPEN_RESPONSES_WEB_SEARCH_TOOL_CHUNKS_FIXTURE: &str =
@@ -25762,6 +25767,170 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_generates_mcp_tool_fixture_request_body() {
+        let (_, request_body) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5-mini",
+            OPEN_RESPONSES_MCP_TOOL_JSON_FIXTURE,
+            open_responses_mcp_call_options(),
+        );
+
+        assert_eq!(request_body["model"], "gpt-5-mini");
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Hello"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "mcp",
+                    "server_label": "dmcp",
+                    "server_url": "https://mcp.exa.ai/mcp",
+                    "server_description": "A web-search API for AI agents",
+                    "require_approval": "never"
+                }
+            ])
+        );
+        assert!(request_body.get("include").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_generates_mcp_tool_fixture_content() {
+        let fixture: JsonValue = serde_json::from_str(OPEN_RESPONSES_MCP_TOOL_JSON_FIXTURE)
+            .expect("fixture JSON parses");
+        let output = fixture["output"]
+            .as_array()
+            .expect("fixture output is array");
+        let list_tools_item = output
+            .iter()
+            .find(|item| item["type"].as_str() == Some("mcp_list_tools"))
+            .expect("fixture includes mcp_list_tools item");
+        let reasoning_items = output
+            .iter()
+            .filter(|item| item["type"].as_str() == Some("reasoning"))
+            .collect::<Vec<_>>();
+        let mcp_item = output
+            .iter()
+            .find(|item| item["type"].as_str() == Some("mcp_call"))
+            .expect("fixture includes mcp call");
+        let message_item = output
+            .iter()
+            .find(|item| item["type"].as_str() == Some("message"))
+            .expect("fixture includes final message");
+        let message_content = &message_item["content"][0];
+
+        let (result, _) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5-mini",
+            OPEN_RESPONSES_MCP_TOOL_JSON_FIXTURE,
+            open_responses_mcp_call_options(),
+        );
+
+        let reasoning_parts = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::Reasoning(reasoning) => Some(reasoning),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reasoning_parts.len(), reasoning_items.len());
+        for (reasoning, item) in reasoning_parts.iter().zip(reasoning_items) {
+            assert_eq!(reasoning.text, "");
+            assert_eq!(
+                openai_metadata_value(&reasoning.provider_metadata, "itemId")
+                    .and_then(JsonValue::as_str),
+                item["id"].as_str()
+            );
+        }
+
+        let tool_call = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::ToolCall(tool_call)
+                    if tool_call.tool_name == "mcp.web_search_exa" =>
+                {
+                    Some(tool_call)
+                }
+                _ => None,
+            })
+            .expect("content includes MCP tool call");
+        assert_eq!(tool_call.tool_call_id, mcp_item["id"].as_str().unwrap());
+        assert_eq!(tool_call.input, mcp_item["arguments"].as_str().unwrap());
+        assert_eq!(tool_call.provider_executed, Some(true));
+        assert_eq!(tool_call.dynamic, Some(true));
+
+        let tool_result = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::ToolResult(tool_result)
+                    if tool_result.tool_name == "mcp.web_search_exa" =>
+                {
+                    Some(tool_result)
+                }
+                _ => None,
+            })
+            .expect("content includes MCP tool result");
+        assert_eq!(tool_result.tool_call_id, mcp_item["id"].as_str().unwrap());
+        assert_eq!(tool_result.dynamic, Some(true));
+        assert_eq!(
+            openai_metadata_value(&tool_result.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            mcp_item["id"].as_str()
+        );
+        assert_eq!(
+            tool_result.result.as_value(),
+            &json!({
+                "type": "call",
+                "serverLabel": mcp_item["server_label"],
+                "name": mcp_item["name"],
+                "arguments": mcp_item["arguments"],
+                "output": mcp_item["output"]
+            })
+        );
+
+        assert!(!result.content.iter().any(|part| {
+            matches!(
+                part,
+                LanguageModelContent::ToolCall(tool_call)
+                    if tool_call.tool_call_id == list_tools_item["id"].as_str().unwrap()
+            )
+        }));
+
+        let text = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::Text(text) => Some(text),
+                _ => None,
+            })
+            .expect("content includes final text");
+        assert_eq!(text.text, message_content["text"].as_str().unwrap());
+        assert_eq!(
+            openai_metadata_value(&text.provider_metadata, "itemId").and_then(JsonValue::as_str),
+            message_item["id"].as_str()
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(6_700));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(result.usage.output_tokens.total, Some(1_078));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(704));
+    }
+
+    #[test]
     fn open_responses_provider_streams_mcp_tool_fixture() {
         const RESPONSE_ID: &str = "resp_0c72b1033351981300690ccf79c6d88193b7d054f4f83ad50a";
         const LIST_TOOLS_ID: &str = "mcpl_0c72b1033351981300690ccf79e488819386bcc68bc55afd27";
@@ -31271,6 +31440,20 @@ mod tests {
             "shell",
             JsonObject::new(),
         )))
+    }
+
+    fn open_responses_mcp_call_options() -> LanguageModelCallOptions {
+        LanguageModelCallOptions::new(open_responses_hello_prompt()).with_tool(
+            LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                "openai.mcp",
+                "MCP",
+                json_object(json!({
+                    "serverLabel": "dmcp",
+                    "serverUrl": "https://mcp.exa.ai/mcp",
+                    "serverDescription": "A web-search API for AI agents"
+                })),
+            )),
+        )
     }
 
     fn open_responses_client_tool_search_call_options() -> LanguageModelCallOptions {
