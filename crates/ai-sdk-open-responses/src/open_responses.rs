@@ -660,7 +660,12 @@ fn open_responses_request_body(
         &mut warnings,
     );
     add_open_responses_hosted_tool_includes(&options.tools, &mut body);
-    apply_open_responses_reasoning_options(options.reasoning.as_ref(), &mut body, &mut warnings);
+    apply_open_responses_reasoning_options(
+        provider_options_name,
+        options.reasoning.as_ref(),
+        &mut body,
+        &mut warnings,
+    );
     apply_open_responses_model_capability_rules(
         model_id,
         provider_options_name,
@@ -920,12 +925,14 @@ fn validate_open_responses_service_tier(
 }
 
 fn apply_open_responses_reasoning_options(
+    provider_options_name: &str,
     reasoning: Option<&LanguageModelReasoningEffort>,
     body: &mut JsonObject,
     warnings: &mut Vec<Warning>,
 ) {
     let provider_effort = remove_open_responses_reasoning_effort(body);
-    let effort = provider_effort.or_else(|| open_responses_reasoning_effort(reasoning, warnings));
+    let effort = provider_effort
+        .or_else(|| open_responses_reasoning_effort(provider_options_name, reasoning, warnings));
     let summary = remove_open_responses_reasoning_summary(body);
 
     if effort.is_none() && summary.is_none() {
@@ -956,12 +963,18 @@ fn apply_open_responses_reasoning_options(
 }
 
 fn open_responses_reasoning_effort(
+    provider_options_name: &str,
     reasoning: Option<&LanguageModelReasoningEffort>,
     warnings: &mut Vec<Warning>,
 ) -> Option<String> {
     match reasoning? {
         LanguageModelReasoningEffort::ProviderDefault => None,
         LanguageModelReasoningEffort::None => Some("none".to_string()),
+        LanguageModelReasoningEffort::Minimal
+            if open_responses_uses_openai_model_capability_rules(provider_options_name) =>
+        {
+            Some("minimal".to_string())
+        }
         effort => {
             let reasoning_level = ReasoningLevel::try_from(effort.clone()).ok()?;
             map_reasoning_to_provider_effort(
@@ -6927,6 +6940,69 @@ mod tests {
             .expect("request body is JSON")
     }
 
+    fn open_responses_hello_prompt() -> Vec<LanguageModelMessage> {
+        vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![LanguageModelUserContentPart::Text(
+                LanguageModelTextPart::new("Hello"),
+            )],
+        ))]
+    }
+
+    fn openai_text_request_body(model_id: &str) -> JsonValue {
+        json!({
+            "model": model_id,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Hello"
+                        }
+                    ]
+                }
+            ]
+        })
+    }
+
+    fn openai_reasoning_generate_body<F>(
+        model_id: &str,
+        reasoning: LanguageModelReasoningEffort,
+        configure_options: F,
+    ) -> (Vec<Warning>, JsonValue)
+    where
+        F: FnOnce(LanguageModelCallOptions) -> LanguageModelCallOptions,
+    {
+        let (provider, captured_request) = open_responses_captured_provider("openai", model_id);
+        let model = provider.language_model(model_id);
+        let options = configure_options(
+            LanguageModelCallOptions::new(open_responses_hello_prompt()).with_reasoning(reasoning),
+        );
+
+        let result = poll_ready(model.do_generate(options));
+
+        (
+            result.warnings,
+            captured_open_responses_request_body(&captured_request),
+        )
+    }
+
+    fn assert_openai_top_level_reasoning_effort(
+        reasoning: LanguageModelReasoningEffort,
+        expected_effort: &str,
+    ) {
+        let (warnings, request_body) =
+            openai_reasoning_generate_body("o3-mini", reasoning, |options| options);
+
+        assert!(warnings.is_empty());
+        let mut expected_body = openai_text_request_body("o3-mini");
+        expected_body["reasoning"] = json!({
+            "effort": expected_effort
+        });
+        assert_eq!(request_body, expected_body);
+    }
+
     use super::map_open_responses_finish_reason;
 
     #[test]
@@ -11359,6 +11435,110 @@ mod tests {
                 "unexpected request body for {model_id}"
             );
         }
+    }
+
+    #[test]
+    fn open_responses_provider_omits_provider_default_top_level_reasoning_for_openai() {
+        let (warnings, request_body) = openai_reasoning_generate_body(
+            "o3-mini",
+            LanguageModelReasoningEffort::ProviderDefault,
+            |options| options,
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(request_body, openai_text_request_body("o3-mini"));
+    }
+
+    #[test]
+    fn open_responses_provider_maps_top_level_reasoning_none_for_openai() {
+        assert_openai_top_level_reasoning_effort(LanguageModelReasoningEffort::None, "none");
+    }
+
+    #[test]
+    fn open_responses_provider_maps_top_level_reasoning_minimal_for_openai() {
+        assert_openai_top_level_reasoning_effort(LanguageModelReasoningEffort::Minimal, "minimal");
+    }
+
+    #[test]
+    fn open_responses_provider_maps_top_level_reasoning_low_for_openai() {
+        assert_openai_top_level_reasoning_effort(LanguageModelReasoningEffort::Low, "low");
+    }
+
+    #[test]
+    fn open_responses_provider_maps_top_level_reasoning_medium_for_openai() {
+        assert_openai_top_level_reasoning_effort(LanguageModelReasoningEffort::Medium, "medium");
+    }
+
+    #[test]
+    fn open_responses_provider_maps_top_level_reasoning_high_for_openai() {
+        assert_openai_top_level_reasoning_effort(LanguageModelReasoningEffort::High, "high");
+    }
+
+    #[test]
+    fn open_responses_provider_maps_top_level_reasoning_xhigh_for_openai() {
+        assert_openai_top_level_reasoning_effort(LanguageModelReasoningEffort::Xhigh, "xhigh");
+    }
+
+    #[test]
+    fn open_responses_provider_prefers_provider_reasoning_effort_over_top_level_for_openai() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "reasoningEffort": "high"
+            }
+        }))
+        .expect("provider options deserialize");
+        let (warnings, request_body) = openai_reasoning_generate_body(
+            "o3-mini",
+            LanguageModelReasoningEffort::Low,
+            |options| options.with_provider_options(provider_options),
+        );
+
+        assert!(warnings.is_empty());
+        let mut expected_body = openai_text_request_body("o3-mini");
+        expected_body["reasoning"] = json!({
+            "effort": "high"
+        });
+        assert_eq!(request_body, expected_body);
+    }
+
+    #[test]
+    fn open_responses_provider_strips_temperature_and_top_p_for_top_level_reasoning_model() {
+        let (warnings, request_body) = openai_reasoning_generate_body(
+            "o3-mini",
+            LanguageModelReasoningEffort::Medium,
+            |options| options.with_temperature(0.5).with_top_p(0.7),
+        );
+
+        assert_eq!(
+            unsupported_warning_details(&warnings),
+            vec![
+                (
+                    "temperature",
+                    Some("temperature is not supported for reasoning models")
+                ),
+                ("topP", Some("topP is not supported for reasoning models"))
+            ]
+        );
+        let mut expected_body = openai_text_request_body("o3-mini");
+        expected_body["reasoning"] = json!({
+            "effort": "medium"
+        });
+        assert_eq!(request_body, expected_body);
+    }
+
+    #[test]
+    fn open_responses_provider_keeps_sampling_parameters_for_top_level_reasoning_none() {
+        let (warnings, request_body) = openai_reasoning_generate_body(
+            "gpt-4o",
+            LanguageModelReasoningEffort::None,
+            |options| options.with_temperature(0.5).with_top_p(0.7),
+        );
+
+        assert!(warnings.is_empty());
+        let mut expected_body = openai_text_request_body("gpt-4o");
+        expected_body["temperature"] = json!(0.5);
+        expected_body["top_p"] = json!(0.7);
+        assert_eq!(request_body, expected_body);
     }
 
     #[test]
