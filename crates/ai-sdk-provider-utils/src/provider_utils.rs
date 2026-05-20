@@ -13343,108 +13343,255 @@ mod tests {
         assert_eq!(cause_error.status_text(), None);
     }
 
-    #[test]
-    fn validate_download_url_allows_public_http_https_data_and_ip_urls() {
-        assert!(validate_download_url("https://example.com/image.png").is_ok());
-        assert!(validate_download_url("http://example.com/image.png").is_ok());
-        assert!(validate_download_url("https://203.0.113.1/file").is_ok());
-        assert!(validate_download_url("https://example.com:8080/file").is_ok());
-        assert!(validate_download_url("data:text/plain;base64,aGVsbG8=").is_ok());
+    fn expect_download_url_allowed(url: &str) {
+        assert!(
+            validate_download_url(url).is_ok(),
+            "{url} should be allowed"
+        );
+    }
+
+    fn expect_download_url_rejected(url: &str) -> DownloadError {
+        validate_download_url(url).expect_err("download URL should be rejected")
     }
 
     #[test]
-    fn validate_download_url_rejects_invalid_and_unsupported_schemes() {
+    fn validate_download_url_upstream_should_allow_https_urls() {
+        expect_download_url_allowed("https://example.com/image.png");
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_allow_http_urls() {
+        expect_download_url_allowed("http://example.com/image.png");
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_allow_public_ip_addresses() {
+        expect_download_url_allowed("https://203.0.113.1/file");
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_allow_urls_with_ports() {
+        expect_download_url_allowed("https://example.com:8080/file");
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_allow_data_urls() {
+        expect_download_url_allowed("data:text/plain;base64,aGVsbG8=");
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_block_file_urls() {
         assert_eq!(
-            validate_download_url("not-a-url")
-                .expect_err("invalid URL is rejected")
-                .message(),
-            "Invalid URL: not-a-url"
-        );
-        assert_eq!(
-            validate_download_url("file:///etc/passwd")
-                .expect_err("file scheme is rejected")
-                .message(),
+            expect_download_url_rejected("file:///etc/passwd").message(),
             "URL scheme must be http, https, or data, got file:"
         );
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_block_ftp_urls() {
         assert_eq!(
-            validate_download_url("ftp://example.com/file")
-                .expect_err("ftp scheme is rejected")
-                .message(),
+            expect_download_url_rejected("ftp://example.com/file").message(),
             "URL scheme must be http, https, or data, got ftp:"
         );
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_block_javascript_urls() {
         assert_eq!(
-            validate_download_url("javascript:alert(1)")
-                .expect_err("javascript scheme is rejected")
-                .message(),
+            expect_download_url_rejected("javascript:alert(1)").message(),
             "URL scheme must be http, https, or data, got javascript:"
         );
     }
 
     #[test]
-    fn validate_download_url_rejects_local_hostnames() {
-        for url in [
-            "http://localhost/file",
-            "http://localhost:3000/file",
-            "http://myhost.local/file",
-            "http://app.localhost/file",
-        ] {
-            assert!(
-                validate_download_url(url)
-                    .expect_err("local hostname is rejected")
-                    .message()
-                    .contains("is not allowed"),
-                "{url} should be rejected"
-            );
-        }
+    fn validate_download_url_upstream_should_block_invalid_urls() {
+        assert_eq!(
+            expect_download_url_rejected("not-a-url").message(),
+            "Invalid URL: not-a-url"
+        );
     }
 
     #[test]
-    fn validate_download_url_rejects_private_ipv4_addresses() {
-        for url in [
-            "http://127.0.0.1/file",
-            "http://127.255.0.1/file",
-            "http://10.0.0.1/file",
-            "http://172.16.0.1/file",
-            "http://172.31.255.255/file",
-            "http://192.168.1.1/file",
-            "http://169.254.169.254/latest/meta-data/",
-            "http://0.0.0.0/file",
-        ] {
-            assert!(
-                validate_download_url(url)
-                    .expect_err("private IPv4 address is rejected")
-                    .message()
-                    .contains("IP address"),
-                "{url} should be rejected"
-            );
-        }
-
-        assert!(validate_download_url("http://172.15.0.1/file").is_ok());
-        assert!(validate_download_url("http://172.32.0.1/file").is_ok());
+    fn validate_download_url_upstream_should_block_localhost() {
+        assert!(
+            expect_download_url_rejected("http://localhost/file")
+                .message()
+                .contains("is not allowed")
+        );
     }
 
     #[test]
-    fn validate_download_url_rejects_private_ipv6_addresses() {
-        for url in [
-            "http://[::1]/file",
-            "http://[::]/file",
-            "http://[fc00::1]/file",
-            "http://[fd12::1]/file",
-            "http://[fe80::1]/file",
-            "http://[::ffff:127.0.0.1]/file",
-            "http://[::ffff:10.0.0.1]/file",
-            "http://[::ffff:169.254.169.254]/file",
-        ] {
-            assert!(
-                validate_download_url(url)
-                    .expect_err("private IPv6 address is rejected")
-                    .message()
-                    .contains("IPv6 address"),
-                "{url} should be rejected"
-            );
-        }
+    fn validate_download_url_upstream_should_block_localhost_with_port() {
+        assert!(
+            expect_download_url_rejected("http://localhost:3000/file")
+                .message()
+                .contains("is not allowed")
+        );
+    }
 
-        assert!(validate_download_url("http://[::ffff:203.0.113.1]/file").is_ok());
+    #[test]
+    fn validate_download_url_upstream_should_block_local_domains() {
+        assert!(
+            expect_download_url_rejected("http://myhost.local/file")
+                .message()
+                .contains("is not allowed")
+        );
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_block_localhost_domains() {
+        assert!(
+            expect_download_url_rejected("http://app.localhost/file")
+                .message()
+                .contains("is not allowed")
+        );
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_block_127_0_0_1_loopback() {
+        assert!(
+            expect_download_url_rejected("http://127.0.0.1/file")
+                .message()
+                .contains("IP address")
+        );
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_block_127_range() {
+        assert!(
+            expect_download_url_rejected("http://127.255.0.1/file")
+                .message()
+                .contains("IP address")
+        );
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_block_10_range_private() {
+        assert!(
+            expect_download_url_rejected("http://10.0.0.1/file")
+                .message()
+                .contains("IP address")
+        );
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_block_172_16_to_172_31_private() {
+        assert!(
+            expect_download_url_rejected("http://172.16.0.1/file")
+                .message()
+                .contains("IP address")
+        );
+        assert!(
+            expect_download_url_rejected("http://172.31.255.255/file")
+                .message()
+                .contains("IP address")
+        );
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_allow_172_15_and_172_32_public() {
+        expect_download_url_allowed("http://172.15.0.1/file");
+        expect_download_url_allowed("http://172.32.0.1/file");
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_block_192_168_range_private() {
+        assert!(
+            expect_download_url_rejected("http://192.168.1.1/file")
+                .message()
+                .contains("IP address")
+        );
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_block_169_254_link_local_cloud_metadata() {
+        assert!(
+            expect_download_url_rejected("http://169.254.169.254/latest/meta-data/")
+                .message()
+                .contains("IP address")
+        );
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_block_0_0_0_0() {
+        assert!(
+            expect_download_url_rejected("http://0.0.0.0/file")
+                .message()
+                .contains("IP address")
+        );
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_block_ipv6_loopback() {
+        assert!(
+            expect_download_url_rejected("http://[::1]/file")
+                .message()
+                .contains("IPv6 address")
+        );
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_block_ipv6_unspecified() {
+        assert!(
+            expect_download_url_rejected("http://[::]/file")
+                .message()
+                .contains("IPv6 address")
+        );
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_block_fc00_7_unique_local() {
+        assert!(
+            expect_download_url_rejected("http://[fc00::1]/file")
+                .message()
+                .contains("IPv6 address")
+        );
+        assert!(
+            expect_download_url_rejected("http://[fd12::1]/file")
+                .message()
+                .contains("IPv6 address")
+        );
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_block_fe80_10_link_local() {
+        assert!(
+            expect_download_url_rejected("http://[fe80::1]/file")
+                .message()
+                .contains("IPv6 address")
+        );
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_block_ipv4_mapped_127_0_0_1() {
+        assert!(
+            expect_download_url_rejected("http://[::ffff:127.0.0.1]/file")
+                .message()
+                .contains("IPv6 address")
+        );
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_block_ipv4_mapped_10_0_0_1() {
+        assert!(
+            expect_download_url_rejected("http://[::ffff:10.0.0.1]/file")
+                .message()
+                .contains("IPv6 address")
+        );
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_block_ipv4_mapped_169_254_169_254() {
+        assert!(
+            expect_download_url_rejected("http://[::ffff:169.254.169.254]/file")
+                .message()
+                .contains("IPv6 address")
+        );
+    }
+
+    #[test]
+    fn validate_download_url_upstream_should_allow_ipv4_mapped_public_ip() {
+        expect_download_url_allowed("http://[::ffff:203.0.113.1]/file");
     }
 
     #[test]
