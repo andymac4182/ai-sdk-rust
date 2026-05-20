@@ -1124,6 +1124,8 @@ fn merge_open_responses_passthrough_provider_option_object(
             | "allowed_tools"
             | "forceReasoning"
             | "force_reasoning"
+            | "maxCompletionTokens"
+            | "max_completion_tokens"
             | "passThroughUnsupportedFiles"
             | "pass_through_unsupported_files"
             | "systemMessageMode"
@@ -4549,8 +4551,10 @@ fn open_responses_stream_result_from_response(
     let mut ongoing_annotations = Vec::<JsonValue>::new();
     let mut active_message_phase = None::<String>;
     let mut active_reasoning_items = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut active_reasoning_metadata = BTreeMap::<String, ProviderMetadata>::new();
     let mut active_message_items = BTreeSet::<String>::new();
     let mut completed_message_text = BTreeMap::<String, String>::new();
+    let mut completed_reasoning_text = BTreeMap::<String, String>::new();
     let store_response = request_body
         .get("store")
         .and_then(JsonValue::as_bool)
@@ -4593,6 +4597,7 @@ fn open_responses_stream_result_from_response(
 
                 match event_type {
                     Some("response.created") => {
+                        has_tool_calls = false;
                         response_id = open_responses_response_id(&value);
                     }
                     Some("response.output_text.delta") => {
@@ -4650,6 +4655,14 @@ fn open_responses_stream_result_from_response(
                         {
                             let item_id = open_responses_stream_item_id(&value);
                             let id = open_responses_stream_reasoning_id(&value);
+                            let provider_metadata = open_responses_stream_reasoning_metadata(
+                                provider_name,
+                                item_id.as_deref(),
+                                None,
+                            );
+                            if let Some(provider_metadata) = provider_metadata.clone() {
+                                active_reasoning_metadata.insert(id.clone(), provider_metadata);
+                            }
                             open_responses_push_reasoning_delta(
                                 &mut stream,
                                 &mut reasoning_buffers,
@@ -4657,32 +4670,16 @@ fn open_responses_stream_result_from_response(
                                 &ended_reasoning,
                                 &id,
                                 delta,
-                                open_responses_stream_reasoning_metadata(
-                                    provider_name,
-                                    item_id.as_deref(),
-                                    None,
-                                ),
+                                provider_metadata,
                             );
                         }
                     }
                     Some("response.reasoning_summary_text.done")
                     | Some("response.reasoning_text.done") => {
-                        let item_id = open_responses_stream_item_id(&value);
                         let id = open_responses_stream_reasoning_id(&value);
-                        let text = value.get("text").and_then(JsonValue::as_str);
-                        open_responses_finish_reasoning_block(
-                            &mut stream,
-                            &mut reasoning_buffers,
-                            &mut active_reasoning,
-                            &mut ended_reasoning,
-                            &id,
-                            text,
-                            open_responses_stream_reasoning_metadata(
-                                provider_name,
-                                item_id.as_deref(),
-                                None,
-                            ),
-                        );
+                        if let Some(text) = value.get("text").and_then(JsonValue::as_str) {
+                            completed_reasoning_text.insert(id, text.to_string());
+                        }
                     }
                     Some("response.content_part.done") => {
                         let part = value.get("part");
@@ -4721,21 +4718,10 @@ fn open_responses_stream_result_from_response(
                                 );
                             }
                         } else if open_responses_is_reasoning_text_part(part_type) {
-                            let item_id = open_responses_stream_item_id(&value);
                             let id = open_responses_stream_reasoning_id(&value);
-                            open_responses_finish_reasoning_block(
-                                &mut stream,
-                                &mut reasoning_buffers,
-                                &mut active_reasoning,
-                                &mut ended_reasoning,
-                                &id,
-                                text,
-                                open_responses_stream_reasoning_metadata(
-                                    provider_name,
-                                    item_id.as_deref(),
-                                    None,
-                                ),
-                            );
+                            if let Some(text) = text {
+                                completed_reasoning_text.insert(id, text.to_string());
+                            }
                         }
                     }
                     Some("response.reasoning_summary_part.added") => {
@@ -4746,16 +4732,20 @@ fn open_responses_stream_result_from_response(
                                 .or_default()
                                 .insert(summary_index.clone());
                             let id = format!("{item_id}:{summary_index}");
+                            let provider_metadata = open_responses_stream_reasoning_metadata(
+                                provider_name,
+                                Some(item_id),
+                                None,
+                            );
+                            if let Some(provider_metadata) = provider_metadata.clone() {
+                                active_reasoning_metadata.insert(id.clone(), provider_metadata);
+                            }
                             open_responses_start_reasoning_block(
                                 &mut stream,
                                 &mut active_reasoning,
                                 &ended_reasoning,
                                 &id,
-                                open_responses_stream_reasoning_metadata(
-                                    provider_name,
-                                    Some(item_id),
-                                    None,
-                                ),
+                                provider_metadata,
                             );
                         }
                     }
@@ -4957,15 +4947,16 @@ fn open_responses_stream_result_from_response(
                                             .or_default()
                                             .insert("0".to_string());
                                         let id = format!("{item_id}:0");
+                                        let provider_metadata =
+                                            open_responses_reasoning_metadata(provider_name, item);
+                                        active_reasoning_metadata
+                                            .insert(id.clone(), provider_metadata.clone());
                                         open_responses_start_reasoning_block(
                                             &mut stream,
                                             &mut active_reasoning,
                                             &ended_reasoning,
                                             &id,
-                                            Some(open_responses_reasoning_metadata(
-                                                provider_name,
-                                                item,
-                                            )),
+                                            Some(provider_metadata),
                                         );
                                     }
                                 }
@@ -5590,15 +5581,19 @@ fn open_responses_stream_result_from_response(
                                             .unwrap_or_else(|| BTreeSet::from(["0".to_string()]));
                                         for summary_index in summary_indices {
                                             let id = format!("{item_id}:{summary_index}");
+                                            let final_text = completed_reasoning_text.remove(&id);
+                                            let provider_metadata =
+                                                open_responses_reasoning_metadata(
+                                                    provider_name,
+                                                    item,
+                                                );
+                                            active_reasoning_metadata.remove(&id);
                                             open_responses_start_reasoning_block(
                                                 &mut stream,
                                                 &mut active_reasoning,
                                                 &ended_reasoning,
                                                 &id,
-                                                Some(open_responses_reasoning_metadata(
-                                                    provider_name,
-                                                    item,
-                                                )),
+                                                Some(provider_metadata.clone()),
                                             );
                                             open_responses_finish_reasoning_block(
                                                 &mut stream,
@@ -5606,11 +5601,8 @@ fn open_responses_stream_result_from_response(
                                                 &mut active_reasoning,
                                                 &mut ended_reasoning,
                                                 &id,
-                                                None,
-                                                Some(open_responses_reasoning_metadata(
-                                                    provider_name,
-                                                    item,
-                                                )),
+                                                final_text.as_deref(),
+                                                Some(provider_metadata),
                                             );
                                         }
                                     }
@@ -5643,34 +5635,38 @@ fn open_responses_stream_result_from_response(
                     Some("response.completed") => {
                         if let Some(response) = open_responses_event_response(&value) {
                             usage = open_responses_usage(response.get("usage"));
-                            has_tool_calls |= open_responses_push_tool_calls_from_response(
-                                &mut stream,
-                                &mut emitted_tool_calls,
-                                &mut pending_tool_calls,
-                                provider_name,
-                                response,
-                            );
+                            let response_has_tool_calls =
+                                open_responses_push_tool_calls_from_response(
+                                    &mut stream,
+                                    &mut emitted_tool_calls,
+                                    &mut pending_tool_calls,
+                                    provider_name,
+                                    response,
+                                ) || has_tool_calls;
                             finish_reason = map_open_responses_finish_reason(
                                 response
                                     .get("incomplete_details")
                                     .and_then(|details| details.get("reason"))
                                     .and_then(JsonValue::as_str),
-                                has_tool_calls,
+                                response_has_tool_calls,
                             );
+                            has_tool_calls = false;
                             service_tier = open_responses_service_tier(response);
                         }
                     }
                     Some("response.incomplete") => {
                         if let Some(response) = open_responses_event_response(&value) {
                             usage = open_responses_usage(response.get("usage"));
-                            has_tool_calls |= open_responses_response_has_tool_calls(response);
+                            let response_has_tool_calls =
+                                open_responses_response_has_tool_calls(response) || has_tool_calls;
                             finish_reason = map_open_responses_finish_reason(
                                 response
                                     .get("incomplete_details")
                                     .and_then(|details| details.get("reason"))
                                     .and_then(JsonValue::as_str),
-                                has_tool_calls,
+                                response_has_tool_calls,
                             );
+                            has_tool_calls = false;
                             service_tier = open_responses_service_tier(response);
                         }
                     }
@@ -5701,9 +5697,17 @@ fn open_responses_stream_result_from_response(
     }
 
     for id in active_reasoning.clone() {
-        stream.push(LanguageModelStreamPart::ReasoningEnd(
-            LanguageModelReasoningEnd::new(id),
-        ));
+        let final_text = completed_reasoning_text.remove(&id);
+        let provider_metadata = active_reasoning_metadata.remove(&id);
+        open_responses_finish_reasoning_block(
+            &mut stream,
+            &mut reasoning_buffers,
+            &mut active_reasoning,
+            &mut ended_reasoning,
+            &id,
+            final_text.as_deref(),
+            provider_metadata,
+        );
     }
 
     for id in active_text.clone() {
@@ -6858,6 +6862,10 @@ mod tests {
     const OPEN_RESPONSES_PHASE_JSON_FIXTURE: &str = include_str!("fixtures/openai-phase.1.json");
     const OPEN_RESPONSES_PHASE_CHUNKS_FIXTURE: &str =
         include_str!("fixtures/openai-phase.1.chunks.txt");
+    const OPEN_RESPONSES_REASONING_ENCRYPTED_CONTENT_JSON_FIXTURE: &str =
+        include_str!("fixtures/openai-reasoning-encrypted-content.1.json");
+    const OPEN_RESPONSES_REASONING_ENCRYPTED_CONTENT_CHUNKS_FIXTURE: &str =
+        include_str!("fixtures/openai-reasoning-encrypted-content.1.chunks.txt");
 
     fn openai_metadata_value<'a>(
         provider_metadata: &'a Option<ProviderMetadata>,
@@ -8837,6 +8845,269 @@ mod tests {
             openai_metadata_value(&finish.provider_metadata, "serviceTier")
                 .and_then(JsonValue::as_str),
             Some("default")
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_generates_reasoning_encrypted_content_fixture() {
+        let fixture: JsonValue =
+            serde_json::from_str(OPEN_RESPONSES_REASONING_ENCRYPTED_CONTENT_JSON_FIXTURE)
+                .expect("fixture JSON parses");
+        let reasoning_item = &fixture["output"][0];
+        let text_item = &fixture["output"][1];
+        let expected_reasoning_text = reasoning_item["summary"][0]["text"]
+            .as_str()
+            .expect("fixture reasoning text");
+        let expected_encrypted_content = reasoning_item["encrypted_content"]
+            .as_str()
+            .expect("fixture encrypted content");
+        let expected_text = text_item["content"][0]["text"]
+            .as_str()
+            .expect("fixture text");
+
+        let transport: OpenResponsesTransport =
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    OPEN_RESPONSES_REASONING_ENCRYPTED_CONTENT_JSON_FIXTURE.to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-5-mini");
+
+        let result = poll_ready(model.do_generate(open_responses_code_interpreter_call_options()));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(865));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(result.usage.output_tokens.total, Some(163));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(128));
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            fixture["id"].as_str()
+        );
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "serviceTier")
+                .and_then(JsonValue::as_str),
+            Some("default")
+        );
+
+        assert_eq!(result.content.len(), 2);
+        let reasoning = match &result.content[0] {
+            LanguageModelContent::Reasoning(reasoning) => reasoning,
+            other => panic!("expected reasoning content, got {other:?}"),
+        };
+        assert_eq!(reasoning.text, expected_reasoning_text);
+        assert_eq!(
+            openai_metadata_value(&reasoning.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            reasoning_item["id"].as_str()
+        );
+        assert_eq!(
+            openai_metadata_value(&reasoning.provider_metadata, "reasoningEncryptedContent")
+                .and_then(JsonValue::as_str),
+            Some(expected_encrypted_content)
+        );
+
+        let text = match &result.content[1] {
+            LanguageModelContent::Text(text) => text,
+            other => panic!("expected text content, got {other:?}"),
+        };
+        assert_eq!(text.text, expected_text);
+        assert_eq!(
+            openai_metadata_value(&text.provider_metadata, "itemId").and_then(JsonValue::as_str),
+            text_item["id"].as_str()
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_streams_reasoning_encrypted_content_fixture() {
+        let fixture_events = OPEN_RESPONSES_REASONING_ENCRYPTED_CONTENT_CHUNKS_FIXTURE
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<JsonValue>(line).expect("fixture event parses"))
+            .collect::<Vec<_>>();
+        let first_reasoning_added = fixture_events
+            .iter()
+            .find(|event| {
+                event["type"].as_str() == Some("response.output_item.added")
+                    && event["item"]["type"].as_str() == Some("reasoning")
+            })
+            .expect("fixture includes reasoning item start");
+        let first_reasoning_done = fixture_events
+            .iter()
+            .find(|event| {
+                event["type"].as_str() == Some("response.output_item.done")
+                    && event["item"]["type"].as_str() == Some("reasoning")
+            })
+            .expect("fixture includes reasoning item end");
+        let first_reasoning_item_id = first_reasoning_added["item"]["id"]
+            .as_str()
+            .expect("fixture reasoning item id");
+        let first_reasoning_start_encrypted_content =
+            first_reasoning_added["item"]["encrypted_content"]
+                .as_str()
+                .expect("fixture reasoning start encrypted content");
+        let first_reasoning_end_encrypted_content =
+            first_reasoning_done["item"]["encrypted_content"]
+                .as_str()
+                .expect("fixture reasoning end encrypted content");
+        let expected_reasoning_summary = fixture_events
+            .iter()
+            .find(|event| event["type"].as_str() == Some("response.reasoning_summary_text.done"))
+            .and_then(|event| event["text"].as_str())
+            .expect("fixture includes reasoning summary");
+        let expected_final_text = fixture_events
+            .iter()
+            .find(|event| event["type"].as_str() == Some("response.output_text.done"))
+            .and_then(|event| event["text"].as_str())
+            .expect("fixture includes final text");
+
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let sse = open_responses_sse_from_fixture_lines(
+            OPEN_RESPONSES_REASONING_ENCRYPTED_CONTENT_CHUNKS_FIXTURE,
+        );
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse.clone()))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-5.1-codex-max");
+
+        let result =
+            poll_ready(model.do_stream(open_responses_encrypted_reasoning_stream_options()));
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(request_body["model"], "gpt-5.1-codex-max");
+        assert_eq!(request_body["stream"], true);
+        assert_eq!(request_body["store"], false);
+        assert_eq!(
+            request_body["include"],
+            json!(["reasoning.encrypted_content"])
+        );
+        assert_eq!(
+            request_body["reasoning"],
+            json!({
+                "effort": "high",
+                "summary": "auto"
+            })
+        );
+        assert_eq!(request_body["tools"][0]["type"], "function");
+        assert_eq!(request_body["tools"][0]["name"], "calculator");
+        assert!(request_body.get("maxCompletionTokens").is_none());
+        assert!(request_body.get("max_output_tokens").is_none());
+
+        let reasoning_id = format!("{first_reasoning_item_id}:0");
+        let reasoning_start = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ReasoningStart(start) => Some(start),
+                _ => None,
+            })
+            .expect("stream includes reasoning start");
+        assert_eq!(reasoning_start.id, reasoning_id);
+        assert_eq!(
+            openai_metadata_value(&reasoning_start.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(first_reasoning_item_id)
+        );
+        assert_eq!(
+            openai_metadata_value(
+                &reasoning_start.provider_metadata,
+                "reasoningEncryptedContent",
+            )
+            .and_then(JsonValue::as_str),
+            Some(first_reasoning_start_encrypted_content)
+        );
+
+        let reasoning_text = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ReasoningDelta(delta) => Some(delta.delta.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(reasoning_text, expected_reasoning_summary);
+
+        let reasoning_end = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ReasoningEnd(end) => Some(end),
+                _ => None,
+            })
+            .expect("stream includes reasoning end");
+        assert_eq!(reasoning_end.id, reasoning_id);
+        assert_eq!(
+            openai_metadata_value(
+                &reasoning_end.provider_metadata,
+                "reasoningEncryptedContent"
+            )
+            .and_then(JsonValue::as_str),
+            Some(first_reasoning_end_encrypted_content)
+        );
+
+        let tool_calls = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_calls.len(), 3);
+        assert_eq!(tool_calls[0].tool_call_id, "call_AB6AaRZ1FYZB2RwS6A5vbdqn");
+        assert_eq!(tool_calls[0].tool_name, "calculator");
+        assert_eq!(tool_calls[0].input, r#"{"a":12,"b":7,"op":"add"}"#);
+        assert_eq!(tool_calls[1].tool_call_id, "call_Q6pW65MUgW9vF59BmItYGos3");
+        assert_eq!(tool_calls[1].input, r#"{"a":19,"b":3,"op":"multiply"}"#);
+        assert_eq!(tool_calls[2].tool_call_id, "call_Zl5vIMnD7dVAjgU6FkhmiCZh");
+        assert_eq!(tool_calls[2].input, r#"{"a":57,"b":10,"op":"multiply"}"#);
+
+        let text = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) => Some(delta.delta.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(text, expected_final_text);
+
+        let finish = result
+            .stream
+            .iter()
+            .rev()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(finish.usage.input_tokens.total, Some(299));
+        assert_eq!(finish.usage.output_tokens.total, Some(12));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(0));
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some("resp_01830d662ab3856501693c3217ba4c8190a3ddf6c839d4f12a")
         );
     }
 
@@ -12212,6 +12483,7 @@ mod tests {
                 "strictJsonSchema": false,
                 "reasoningEffort": "high",
                 "reasoningSummary": "detailed",
+                "maxCompletionTokens": 32000,
                 "contextManagement": [
                     {
                         "type": "compaction",
@@ -12325,6 +12597,10 @@ mod tests {
                 "summary": "detailed"
             })
         );
+        assert!(
+            request_body.get("max_output_tokens").is_none(),
+            "maxCompletionTokens is a chat provider option and should not affect Responses requests"
+        );
         assert_eq!(request_body["caching"], "auto");
 
         for leaked_key in [
@@ -12339,6 +12615,7 @@ mod tests {
             "strictJsonSchema",
             "reasoningEffort",
             "reasoningSummary",
+            "maxCompletionTokens",
             "contextManagement",
             "logprobs",
             "passThroughUnsupportedFiles",
@@ -24110,6 +24387,55 @@ mod tests {
                 JsonObject::new(),
             )),
         )
+    }
+
+    fn open_responses_calculator_function_tool() -> LanguageModelTool {
+        LanguageModelTool::Function(
+            LanguageModelFunctionTool::new(
+                "calculator",
+                json_object(json!({
+                    "type": "object",
+                    "properties": {
+                        "a": {
+                            "type": "number",
+                            "description": "First operand."
+                        },
+                        "b": {
+                            "type": "number",
+                            "description": "Second operand."
+                        },
+                        "op": {
+                            "type": "string",
+                            "enum": ["add", "subtract", "multiply", "divide"],
+                            "default": "add",
+                            "description": "Arithmetic operation to perform."
+                        }
+                    },
+                    "required": ["a", "b", "op"],
+                    "additionalProperties": false
+                })),
+            )
+            .with_description("A minimal calculator for basic arithmetic. Call it once per step.")
+            .with_strict(true),
+        )
+    }
+
+    fn open_responses_encrypted_reasoning_stream_options() -> LanguageModelCallOptions {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "reasoningEffort": "high",
+                "maxCompletionTokens": 32000,
+                "store": false,
+                "include": ["reasoning.encrypted_content"],
+                "reasoningSummary": "auto",
+                "forceReasoning": true
+            }
+        }))
+        .expect("provider options deserialize");
+
+        LanguageModelCallOptions::new(open_responses_hello_prompt())
+            .with_tool(open_responses_calculator_function_tool())
+            .with_provider_options(provider_options)
     }
 
     fn open_responses_image_generation_call_options() -> LanguageModelCallOptions {

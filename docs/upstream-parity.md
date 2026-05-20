@@ -243,6 +243,7 @@ inventory.
 | Open Responses custom provider-tool prompt history reconstruction | verified | `src/open_responses.rs` | `open_responses_provider_reconstructs_custom_tool_calls`; `open_responses_provider_reconstructs_custom_tool_outputs` | Open Responses prompt conversion now recognizes `openai.custom` provider tool names during history serialization, maps assistant custom tool calls to `custom_tool_call` with string-preserving or JSON-stringified input, preserves stored item references, and maps text, JSON, execution-denied, and multipart content tool-role outputs to `custom_tool_call_output`. |
 | Open Responses assistant text prompt metadata | verified | `src/open_responses.rs` | `open_responses_provider_reconstructs_text_item_id_and_phase_with_store_false`; `open_responses_provider_uses_item_references_for_stored_assistant_history` | Assistant text prompt history now preserves OpenAI item IDs and `phase` metadata when `store` is disabled, including `commentary` and `final_answer`, and still collapses stored text items to `item_reference` entries when `store` is enabled. |
 | Open Responses phase metadata fixtures | verified | `crates/ai-sdk-open-responses/src/open_responses.rs`, `crates/ai-sdk-open-responses/src/fixtures/openai-phase.1.json`, `crates/ai-sdk-open-responses/src/fixtures/openai-phase.1.chunks.txt` | `open_responses_provider_generates_phase_fixture_metadata`; `open_responses_provider_streams_phase_fixture_metadata` | Mirrors upstream OpenAI Responses `openai-phase.1` JSON and streaming fixtures byte-for-byte: generated text content and streamed `text-start`/`text-end` parts preserve OpenAI `itemId` metadata plus `phase: "commentary"` and `phase: "final_answer"` for the two assistant message items, while response/service-tier metadata and cached/reasoning usage remain aligned. |
+| Open Responses encrypted reasoning fixtures | verified | `crates/ai-sdk-open-responses/src/open_responses.rs`, `crates/ai-sdk-open-responses/src/fixtures/openai-reasoning-encrypted-content.1.json`, `crates/ai-sdk-open-responses/src/fixtures/openai-reasoning-encrypted-content.1.chunks.txt` | `open_responses_provider_generates_reasoning_encrypted_content_fixture`; `open_responses_provider_streams_reasoning_encrypted_content_fixture` | Mirrors upstream OpenAI Responses `openai-reasoning-encrypted-content.1` JSON and streaming fixtures byte-for-byte: generated reasoning preserves `reasoningEncryptedContent`, streamed reasoning emits start/delta/end parts with encrypted-content metadata, tool calls stream through the calculator flow, final text and response metadata/usage stay aligned, and the chat-only `maxCompletionTokens` provider option is asserted not to leak into Responses request bodies. |
 | Open Responses reasoning prompt history reconstruction | verified | `src/open_responses.rs` | `open_responses_provider_reconstructs_reasoning_history_with_store_false`; `open_responses_provider_warns_for_unstored_reasoning_without_encrypted_content` | Open Responses prompt conversion now reconstructs assistant reasoning history when `store` is disabled, merges repeated reasoning item IDs into one `reasoning` item with summary parts, updates encrypted content from later parts, supports encrypted reasoning without an item id, deduplicates stored reasoning item references, and warns/skips reasoning parts that cannot be sent without encrypted content. |
 | Open Responses compaction prompt history reconstruction | verified | `src/open_responses.rs` | `open_responses_provider_reconstructs_compaction_history_with_store_false`; `open_responses_provider_uses_item_references_for_stored_assistant_history` | Open Responses prompt conversion now maps assistant `openai.compaction` custom prompt history to `compaction` items with encrypted content when `store` is disabled and to stored `item_reference` entries when the compaction item is persisted. |
 | Open Responses multipart tool-result file outputs | verified | `src/open_responses.rs` | `open_responses_provider_converts_tool_result_file_content_outputs` | Multipart tool-result `content` outputs now convert text plus image/file URL and data parts into Responses `function_call_output` arrays using `input_text`, `input_image`, and `input_file`, forwards OpenAI `imageDetail` provider options on image outputs, and keeps unsupported file data forms and custom parts warning-backed. |
@@ -895,6 +896,15 @@ focused tests for each portable behavior before changing rows to `verified`.
   text content and streamed `text-start`/`text-end` parts preserve OpenAI
   `itemId` plus `phase` metadata for both `commentary` and `final_answer`
   assistant messages, along with response metadata and usage.
+- 2026-05-20: OpenAI Responses encrypted reasoning fixture parity added
+  `open_responses_provider_generates_reasoning_encrypted_content_fixture` and
+  `open_responses_provider_streams_reasoning_encrypted_content_fixture` now use
+  byte-matched copies of upstream `openai-reasoning-encrypted-content.1`
+  JSON/JSONL fixtures to prove non-streaming encrypted reasoning metadata,
+  streamed reasoning start/delta/end metadata, multi-response calculator tool
+  calls, final text, usage, and response metadata. The request-body check also
+  keeps upstream Responses behavior by ensuring chat-only `maxCompletionTokens`
+  does not leak into `/responses` bodies.
 
 ## Next Unported Work Queue
 
@@ -927,9 +937,9 @@ focused tests for each portable behavior before changing rows to `verified`.
    now cover the previously named request-tool, prompt-file, unsupported-option,
    no-schema JSON, allowed-tools, hosted-tool include options,
    system-message modes, provider option edge mapping, shell/apply-patch,
-   assistant filtering, custom provider-tool, phase metadata fixture, and
-   OpenAI model-capability slices; the next Open Responses work should compare
-   the remaining
+   assistant filtering, custom provider-tool, phase metadata fixture, encrypted
+   reasoning fixture, and OpenAI model-capability slices; the next Open
+   Responses work should compare the remaining
    `packages/openai/src/responses` tests against the package-owned Rust crate,
    then add exact missing test names to this ledger.
 4. Keep the next slices Gateway-first within the first-phase queue: close
