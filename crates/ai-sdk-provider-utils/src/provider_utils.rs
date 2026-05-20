@@ -14259,6 +14259,17 @@ mod tests {
     }
 
     #[test]
+    fn response_handler_upstream_binary_handler_handles_binary_response_successfully() {
+        let binary_data = vec![1, 2, 3, 4];
+        let options =
+            BinaryResponseHandlerOptions::new("test-url", json!({}), 200, binary_data.clone());
+
+        let result = create_binary_response_handler(options).expect("binary response is handled");
+
+        assert_eq!(result.value(), &binary_data);
+    }
+
+    #[test]
     fn create_binary_response_handler_preserves_empty_byte_body() {
         let options = BinaryResponseHandlerOptions::new(
             "https://api.example.com/files",
@@ -14271,6 +14282,15 @@ mod tests {
             create_binary_response_handler(options).expect("empty binary body is still readable");
 
         assert_eq!(result.value(), &Vec::<u8>::new());
+    }
+
+    #[test]
+    fn response_handler_upstream_binary_handler_throws_api_call_error_for_null_body() {
+        let options = BinaryResponseHandlerOptions::empty("test-url", json!({}), 200);
+
+        let error = create_binary_response_handler(options).expect_err("missing body is rejected");
+
+        assert_eq!(error.message(), "Response body is empty");
     }
 
     #[test]
@@ -14497,6 +14517,31 @@ mod tests {
     }
 
     #[test]
+    fn response_handler_upstream_json_handler_returns_parsed_value_and_raw_value() {
+        let options = JsonResponseHandlerOptions::new(
+            "test-url",
+            json!({}),
+            200,
+            r#"{"name":"John","age":30,"extraField":"ignored"}"#,
+        );
+
+        let result = create_json_response_handler(options, validate_person)
+            .expect("valid JSON response is handled");
+
+        assert_eq!(
+            result.value(),
+            &Person {
+                name: "John".to_string(),
+                age: 30,
+            }
+        );
+        assert_eq!(
+            result.raw_value(),
+            Some(&json!({ "name": "John", "age": 30, "extraField": "ignored" }))
+        );
+    }
+
+    #[test]
     fn create_json_response_handler_returns_api_call_error_for_invalid_json() {
         let response_headers =
             BTreeMap::from([("content-type".to_string(), "application/json".to_string())]);
@@ -14574,6 +14619,26 @@ mod tests {
             serde_json::from_value(serialized).expect("options deserialize");
 
         assert_eq!(deserialized, options);
+    }
+
+    #[test]
+    fn response_handler_upstream_status_code_handler_creates_error_with_status_text_and_body() {
+        let options = StatusCodeErrorResponseHandlerOptions::new(
+            "test-url",
+            json!({ "some": "data" }),
+            404,
+            "Not Found",
+            "Error message",
+        );
+
+        let result = create_status_code_error_response_handler(options);
+        let error = result.value();
+
+        assert_eq!(error.message(), "Not Found");
+        assert_eq!(error.status_code(), Some(404));
+        assert_eq!(error.response_body(), Some("Error message"));
+        assert_eq!(error.url(), "test-url");
+        assert_eq!(error.request_body_values(), &json!({ "some": "data" }));
     }
 
     #[test]
