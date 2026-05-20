@@ -7391,6 +7391,12 @@ mod tests {
         ))]
     }
 
+    fn open_responses_user_text_message(text: &str) -> LanguageModelMessage {
+        LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+            LanguageModelUserContentPart::Text(LanguageModelTextPart::new(text)),
+        ]))
+    }
+
     fn open_responses_system_hello_prompt() -> Vec<LanguageModelMessage> {
         vec![
             LanguageModelMessage::System(LanguageModelSystemMessage::new(
@@ -7407,6 +7413,19 @@ mod tests {
             "openai": value
         }))
         .expect("provider options deserialize")
+    }
+
+    fn openai_item_options(item_id: &str) -> ProviderOptions {
+        openai_provider_options(json!({
+            "itemId": item_id
+        }))
+    }
+
+    fn openai_conversation_options() -> ProviderOptions {
+        openai_provider_options(json!({
+            "conversation": "conv_123",
+            "store": true
+        }))
     }
 
     fn openai_request_body_for(
@@ -10918,6 +10937,215 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[test]
+    fn open_responses_provider_skips_assistant_text_item_ids_when_conversation_is_set() {
+        let (_, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![
+                open_responses_user_text_message("Hello"),
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(
+                        LanguageModelTextPart::new("Hi there!")
+                            .with_provider_options(openai_item_options("msg_existing_123")),
+                    ),
+                ])),
+                open_responses_user_text_message("What is the weather?"),
+            ])
+            .with_provider_options(openai_conversation_options()),
+        );
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Hello"
+                        }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "What is the weather?"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(request_body["conversation"], "conv_123");
+    }
+
+    #[test]
+    fn open_responses_provider_skips_assistant_tool_call_item_ids_when_conversation_is_set() {
+        let (_, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![
+                open_responses_user_text_message("What is the weather?"),
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "call_123",
+                            "getWeather",
+                            json!({
+                                "location": "San Francisco"
+                            }),
+                        )
+                        .with_provider_options(openai_item_options("fc_existing_456")),
+                    ),
+                ])),
+                LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                        "call_123",
+                        "getWeather",
+                        LanguageModelToolResultOutput::json(json!({
+                            "temp": 72
+                        })),
+                    )),
+                ])),
+            ])
+            .with_provider_options(openai_conversation_options()),
+        );
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "What is the weather?"
+                        }
+                    ]
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": "{\"temp\":72}"
+                }
+            ])
+        );
+        assert_eq!(request_body["conversation"], "conv_123");
+    }
+
+    #[test]
+    fn open_responses_provider_includes_fresh_assistant_text_when_conversation_is_set() {
+        let (_, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![
+                open_responses_user_text_message("Hello"),
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "Hi there!",
+                    )),
+                ])),
+            ])
+            .with_provider_options(openai_conversation_options()),
+        );
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Hello"
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Hi there!"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(request_body["conversation"], "conv_123");
+    }
+
+    #[test]
+    fn open_responses_provider_uses_item_references_when_conversation_is_not_set() {
+        let (_, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![
+                open_responses_user_text_message("Hello"),
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(
+                        LanguageModelTextPart::new("Hi there!")
+                            .with_provider_options(openai_item_options("msg_existing_123")),
+                    ),
+                ])),
+            ])
+            .with_provider_options(openai_provider_options(json!({
+                "store": true
+            }))),
+        );
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Hello"
+                        }
+                    ]
+                },
+                {
+                    "type": "item_reference",
+                    "id": "msg_existing_123"
+                }
+            ])
+        );
+        assert!(request_body.get("conversation").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_skips_reasoning_item_ids_when_conversation_is_set() {
+        let (_, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![
+                open_responses_user_text_message("Hello"),
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Reasoning(
+                        LanguageModelReasoningPart::new("Let me think...")
+                            .with_provider_options(openai_item_options("reasoning_existing_789")),
+                    ),
+                ])),
+            ])
+            .with_provider_options(openai_conversation_options()),
+        );
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Hello"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(request_body["conversation"], "conv_123");
     }
 
     #[test]
