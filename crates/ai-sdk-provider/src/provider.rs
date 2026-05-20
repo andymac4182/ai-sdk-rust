@@ -1518,27 +1518,100 @@ mod tests {
             .expect("provider reference has one entry")
     }
 
-    #[test]
-    fn get_error_message_matches_upstream_unknown_string_error_and_json_cases() {
-        #[derive(Debug)]
-        struct ProviderFailure;
+    struct DisplayError(&'static str);
 
-        impl fmt::Display for ProviderFailure {
-            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("ProviderFailure: request timed out")
-            }
+    impl fmt::Display for DisplayError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str(self.0)
         }
+    }
 
+    #[test]
+    fn get_error_message_returns_unknown_error_for_null() {
         assert_eq!(get_error_message(None), "unknown error");
+    }
+
+    #[test]
+    fn get_error_message_returns_unknown_error_for_undefined() {
+        assert_eq!(get_error_message(None), "unknown error");
+    }
+
+    #[test]
+    fn get_error_message_returns_string_as_is() {
         assert_eq!(
             get_error_message(Some(&"something went wrong")),
             "something went wrong"
         );
+    }
+
+    #[test]
+    fn get_error_message_returns_empty_string_as_is() {
         assert_eq!(get_error_message(Some(&"")), "");
+    }
+
+    #[test]
+    fn get_error_message_includes_error_type_prefix_for_basic_error() {
         assert_eq!(
-            get_error_message(Some(&ProviderFailure)),
-            "ProviderFailure: request timed out"
+            get_error_message(Some(&DisplayError("Error: API crashed"))),
+            "Error: API crashed"
         );
+    }
+
+    #[test]
+    fn get_error_message_includes_type_error_prefix() {
+        assert_eq!(
+            get_error_message(Some(&DisplayError("TypeError: invalid argument"))),
+            "TypeError: invalid argument"
+        );
+    }
+
+    #[test]
+    fn get_error_message_includes_range_error_prefix() {
+        assert_eq!(
+            get_error_message(Some(&DisplayError("RangeError: out of bounds"))),
+            "RangeError: out of bounds"
+        );
+    }
+
+    #[test]
+    fn get_error_message_returns_error_name_for_empty_message() {
+        assert_eq!(get_error_message(Some(&DisplayError("Error"))), "Error");
+    }
+
+    #[test]
+    fn get_error_message_returns_type_error_name_for_empty_message() {
+        assert_eq!(
+            get_error_message(Some(&DisplayError("TypeError"))),
+            "TypeError"
+        );
+    }
+
+    #[test]
+    fn get_error_message_handles_custom_error_subclasses() {
+        assert_eq!(
+            get_error_message(Some(&DisplayError("CustomError: custom failure"))),
+            "CustomError: custom failure"
+        );
+    }
+
+    #[test]
+    fn get_error_message_respects_custom_to_string_overrides() {
+        assert_eq!(
+            get_error_message(Some(&DisplayError("API Error 429: rate limited"))),
+            "API Error 429: rate limited"
+        );
+    }
+
+    #[test]
+    fn get_error_message_handles_custom_error_subclass_with_empty_message() {
+        assert_eq!(
+            get_error_message(Some(&DisplayError("CustomError"))),
+            "CustomError"
+        );
+    }
+
+    #[test]
+    fn get_error_message_json_stringifies_plain_objects() {
         assert_eq!(
             get_error_message(Some(&json!({
                 "code": "FAIL",
@@ -1546,8 +1619,20 @@ mod tests {
             }))),
             "{\"code\":\"FAIL\",\"detail\":\"oops\"}"
         );
+    }
+
+    #[test]
+    fn get_error_message_json_stringifies_numbers() {
         assert_eq!(get_error_message(Some(&json!(42))), "42");
+    }
+
+    #[test]
+    fn get_error_message_json_stringifies_booleans() {
         assert_eq!(get_error_message(Some(&json!(false))), "false");
+    }
+
+    #[test]
+    fn get_error_message_json_stringifies_arrays() {
         assert_eq!(get_error_message(Some(&json!(["a", "b"]))), "[\"a\",\"b\"]");
     }
 
