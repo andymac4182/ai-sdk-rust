@@ -10500,6 +10500,58 @@ mod tests {
     }
 
     #[test]
+    fn is_provider_reference_upstream_returns_true_for_plain_record_of_provider_ids() {
+        assert!(is_provider_reference(&json!({
+            "openai": "file-abc123"
+        })));
+    }
+
+    #[test]
+    fn is_provider_reference_upstream_returns_true_for_record_with_single_file_id_like_key() {
+        assert!(is_provider_reference(&json!({
+            "fileId": "abc"
+        })));
+    }
+
+    #[test]
+    fn is_provider_reference_upstream_returns_false_for_object_carrying_type_property() {
+        assert!(!is_provider_reference(&json!({
+            "type": "reference",
+            "reference": {
+                "fileId": "abc"
+            }
+        })));
+    }
+
+    #[test]
+    fn is_provider_reference_upstream_returns_false_for_tagged_data_object() {
+        assert!(!is_provider_reference(&json!({
+            "type": "data",
+            "data": "x"
+        })));
+    }
+
+    #[test]
+    fn is_provider_reference_upstream_returns_false_for_uint8_array_json_boundary() {
+        assert!(!is_provider_reference(&json!([1, 2, 3])));
+    }
+
+    #[test]
+    fn is_provider_reference_upstream_returns_false_for_null() {
+        assert!(!is_provider_reference(&JsonValue::Null));
+    }
+
+    #[test]
+    fn is_provider_reference_upstream_returns_false_for_string_primitive() {
+        assert!(!is_provider_reference(&json!("some-string")));
+    }
+
+    #[test]
+    fn is_provider_reference_upstream_returns_false_for_number_primitive() {
+        assert!(!is_provider_reference(&json!(42)));
+    }
+
+    #[test]
     fn validate_types_returns_validated_values() {
         let value = json!({ "name": "John", "age": 30 });
 
