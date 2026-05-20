@@ -20,16 +20,19 @@ APIs, examples, tests, and feature status. Do not mark the goal complete while
 any ledger row is unported, unverified, or undocumented. Re-scan upstream often.
 
 Test parity is a hard completion gate. EVERY portable test from the original
-upstream TypeScript package must exist as an equivalent Rust test in the
-matching 1:1 crate before that package can be marked verified. Rust may and
-should add extra tests for Rust-specific typing, safety, live-provider proof,
-and edge cases, but it must never have fewer portable tests than upstream. A
-broader Rust test that only generally covers the same area is not enough unless
-the ledger maps it to the exact upstream cases it covers. The original
-TypeScript test inventory is the floor: every portable upstream test case must
-be counted, mapped to Rust, and kept visible until ported or explicitly
-documented as JavaScript-only. Future Rust coverage may only be a superset of
-the upstream tests, never a reduced or sampled subset.
+upstream TypeScript packages must exist as an equivalent Rust test in the
+matching 1:1 crate before that package can be marked verified. The inventory is
+the individual upstream test/case, not just the file, feature, or broad behavior
+area. No original portable TypeScript test, table row, fixture/snapshot case,
+streaming/error/provider-option case, or type-level assertion may be missing a
+Rust counterpart. Rust may and should add extra tests for Rust-specific typing,
+safety, live-provider proof, and edge cases, but it must never have fewer
+portable tests than upstream. A broader Rust test that only generally covers the
+same area is not enough unless the ledger maps it to the exact upstream cases it
+covers. The original TypeScript test inventory is the floor: every portable
+upstream test case must be counted, mapped to Rust, and kept visible until
+ported or explicitly documented as JavaScript-only. Future Rust coverage may
+only be a superset of the upstream tests, never a reduced or sampled subset.
 
 Required order: finish ALL common/core SDK packages together with Vercel AI
 Gateway provider coverage before taking more unrelated standalone provider

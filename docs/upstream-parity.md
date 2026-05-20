@@ -48,7 +48,9 @@ Every original portable TypeScript test case must be accounted for, including
 table-driven cases, helper-backed scenarios, fixtures, snapshot-equivalent
 assertions, streaming edge cases, error paths, and type-level tests. A Rust test
 may combine several upstream assertions only when the ledger records the exact
-upstream cases it covers; otherwise, each upstream case needs a named Rust
+upstream tests/cases it covers. The inventory must be tracked at the individual
+test/case level, not only at the test-file, package-feature, or broad behavior
+level; otherwise, each upstream case needs a named Rust
 counterpart in the owning crate.
 
 Missing upstream tests are missing parity. A package row cannot be marked
