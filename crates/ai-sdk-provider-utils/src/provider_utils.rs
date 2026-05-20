@@ -10242,6 +10242,310 @@ mod tests {
     }
 
     #[test]
+    fn convert_to_form_data_upstream_adds_string_values_to_form_data() {
+        let form_data = convert_to_form_data(
+            vec![
+                (
+                    "model".to_string(),
+                    Some(FormDataInputValue::text("gpt-image-1")),
+                ),
+                (
+                    "prompt".to_string(),
+                    Some(FormDataInputValue::text("A cute cat")),
+                ),
+            ],
+            ConvertToFormDataOptions::new(),
+        );
+
+        assert_eq!(
+            form_data.get("model").cloned(),
+            Some(FormDataValue::text("gpt-image-1"))
+        );
+        assert_eq!(
+            form_data.get("prompt").cloned(),
+            Some(FormDataValue::text("A cute cat"))
+        );
+    }
+
+    #[test]
+    fn convert_to_form_data_upstream_adds_number_values_as_strings() {
+        let form_data = convert_to_form_data(
+            vec![
+                ("n".to_string(), Some(FormDataInputValue::text("2"))),
+                ("seed".to_string(), Some(FormDataInputValue::text("42"))),
+            ],
+            ConvertToFormDataOptions::new(),
+        );
+
+        assert_eq!(form_data.get("n").cloned(), Some(FormDataValue::text("2")));
+        assert_eq!(
+            form_data.get("seed").cloned(),
+            Some(FormDataValue::text("42"))
+        );
+    }
+
+    #[test]
+    fn convert_to_form_data_upstream_adds_blob_values_to_form_data() {
+        let form_data = convert_to_form_data(
+            vec![(
+                "image".to_string(),
+                Some(FormDataInputValue::bytes(b"test".to_vec())),
+            )],
+            ConvertToFormDataOptions::new(),
+        );
+
+        assert_eq!(
+            form_data.get("image").cloned(),
+            Some(FormDataValue::bytes(b"test".to_vec()))
+        );
+    }
+
+    #[test]
+    fn convert_to_form_data_upstream_skips_null_values() {
+        let form_data = convert_to_form_data(
+            vec![
+                (
+                    "model".to_string(),
+                    Some(FormDataInputValue::text("gpt-image-1")),
+                ),
+                ("mask".to_string(), None),
+            ],
+            ConvertToFormDataOptions::new(),
+        );
+
+        assert_eq!(
+            form_data.get("model").cloned(),
+            Some(FormDataValue::text("gpt-image-1"))
+        );
+        assert!(!form_data.has("mask"));
+    }
+
+    #[test]
+    fn convert_to_form_data_upstream_skips_undefined_values() {
+        let form_data = convert_to_form_data(
+            vec![
+                (
+                    "model".to_string(),
+                    Some(FormDataInputValue::text("gpt-image-1")),
+                ),
+                ("size".to_string(), None),
+            ],
+            ConvertToFormDataOptions::new(),
+        );
+
+        assert_eq!(
+            form_data.get("model").cloned(),
+            Some(FormDataValue::text("gpt-image-1"))
+        );
+        assert!(!form_data.has("size"));
+    }
+
+    #[test]
+    fn convert_to_form_data_upstream_adds_single_element_arrays_without_suffix() {
+        let form_data = convert_to_form_data(
+            vec![(
+                "image".to_string(),
+                Some(FormDataInputValue::array(vec![FormDataValue::bytes(
+                    b"test".to_vec(),
+                )])),
+            )],
+            ConvertToFormDataOptions::new(),
+        );
+
+        assert_eq!(
+            form_data.get("image").cloned(),
+            Some(FormDataValue::bytes(b"test".to_vec()))
+        );
+        assert!(!form_data.has("image[]"));
+    }
+
+    #[test]
+    fn convert_to_form_data_upstream_adds_multi_element_arrays_with_suffix() {
+        let form_data = convert_to_form_data(
+            vec![(
+                "image".to_string(),
+                Some(FormDataInputValue::array(vec![
+                    FormDataValue::bytes(b"test1".to_vec()),
+                    FormDataValue::bytes(b"test2".to_vec()),
+                ])),
+            )],
+            ConvertToFormDataOptions::new(),
+        );
+
+        assert!(!form_data.has("image"));
+        let images: Vec<_> = form_data.get_all("image[]").into_iter().cloned().collect();
+        assert_eq!(
+            images,
+            vec![
+                FormDataValue::bytes(b"test1".to_vec()),
+                FormDataValue::bytes(b"test2".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn convert_to_form_data_upstream_adds_multi_element_arrays_without_suffix_when_disabled() {
+        let form_data = convert_to_form_data(
+            vec![(
+                "image".to_string(),
+                Some(FormDataInputValue::array(vec![
+                    FormDataValue::bytes(b"test1".to_vec()),
+                    FormDataValue::bytes(b"test2".to_vec()),
+                ])),
+            )],
+            ConvertToFormDataOptions::new().with_use_array_brackets(false),
+        );
+
+        assert!(!form_data.has("image[]"));
+        let images: Vec<_> = form_data.get_all("image").into_iter().cloned().collect();
+        assert_eq!(
+            images,
+            vec![
+                FormDataValue::bytes(b"test1".to_vec()),
+                FormDataValue::bytes(b"test2".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn convert_to_form_data_upstream_handles_empty_arrays_by_not_adding_values() {
+        let form_data = convert_to_form_data(
+            vec![
+                ("model".to_string(), Some(FormDataInputValue::text("test"))),
+                (
+                    "images".to_string(),
+                    Some(FormDataInputValue::array(Vec::new())),
+                ),
+            ],
+            ConvertToFormDataOptions::new(),
+        );
+
+        assert_eq!(
+            form_data.get("model").cloned(),
+            Some(FormDataValue::text("test"))
+        );
+        assert!(!form_data.has("images"));
+        assert!(!form_data.has("images[]"));
+    }
+
+    #[test]
+    fn convert_to_form_data_upstream_adds_string_arrays_with_suffix() {
+        let form_data = convert_to_form_data(
+            vec![(
+                "tags".to_string(),
+                Some(FormDataInputValue::array(vec![
+                    FormDataValue::text("cat"),
+                    FormDataValue::text("cute"),
+                    FormDataValue::text("animal"),
+                ])),
+            )],
+            ConvertToFormDataOptions::new(),
+        );
+
+        let tags: Vec<_> = form_data.get_all("tags[]").into_iter().cloned().collect();
+        assert_eq!(
+            tags,
+            vec![
+                FormDataValue::text("cat"),
+                FormDataValue::text("cute"),
+                FormDataValue::text("animal"),
+            ]
+        );
+    }
+
+    #[test]
+    fn convert_to_form_data_upstream_accepts_typed_input_objects() {
+        let form_data = convert_to_form_data(
+            vec![
+                (
+                    "model".to_string(),
+                    Some(FormDataInputValue::text("dall-e-3")),
+                ),
+                (
+                    "prompt".to_string(),
+                    Some(FormDataInputValue::text("A sunset")),
+                ),
+                ("n".to_string(), Some(FormDataInputValue::text("1"))),
+                (
+                    "size".to_string(),
+                    Some(FormDataInputValue::text("1024x1024")),
+                ),
+            ],
+            ConvertToFormDataOptions::new(),
+        );
+
+        assert_eq!(
+            form_data.get("model").cloned(),
+            Some(FormDataValue::text("dall-e-3"))
+        );
+        assert_eq!(
+            form_data.get("prompt").cloned(),
+            Some(FormDataValue::text("A sunset"))
+        );
+        assert_eq!(form_data.get("n").cloned(), Some(FormDataValue::text("1")));
+        assert_eq!(
+            form_data.get("size").cloned(),
+            Some(FormDataValue::text("1024x1024"))
+        );
+    }
+
+    #[test]
+    fn convert_to_form_data_upstream_handles_complex_input_with_various_types() {
+        let form_data = convert_to_form_data(
+            vec![
+                (
+                    "model".to_string(),
+                    Some(FormDataInputValue::text("gpt-image-1")),
+                ),
+                (
+                    "prompt".to_string(),
+                    Some(FormDataInputValue::text("Edit this image")),
+                ),
+                (
+                    "image".to_string(),
+                    Some(FormDataInputValue::array(vec![FormDataValue::bytes(
+                        b"image data".to_vec(),
+                    )])),
+                ),
+                ("mask".to_string(), None),
+                ("n".to_string(), Some(FormDataInputValue::text("1"))),
+                (
+                    "size".to_string(),
+                    Some(FormDataInputValue::text("1024x1024")),
+                ),
+                (
+                    "quality".to_string(),
+                    Some(FormDataInputValue::text("high")),
+                ),
+            ],
+            ConvertToFormDataOptions::new(),
+        );
+
+        assert_eq!(
+            form_data.get("model").cloned(),
+            Some(FormDataValue::text("gpt-image-1"))
+        );
+        assert_eq!(
+            form_data.get("prompt").cloned(),
+            Some(FormDataValue::text("Edit this image"))
+        );
+        assert_eq!(
+            form_data.get("image").cloned(),
+            Some(FormDataValue::bytes(b"image data".to_vec()))
+        );
+        assert!(!form_data.has("mask"));
+        assert_eq!(form_data.get("n").cloned(), Some(FormDataValue::text("1")));
+        assert_eq!(
+            form_data.get("size").cloned(),
+            Some(FormDataValue::text("1024x1024"))
+        );
+        assert_eq!(
+            form_data.get("quality").cloned(),
+            Some(FormDataValue::text("high"))
+        );
+    }
+
+    #[test]
     fn download_blob_contracts_serialize_with_upstream_camel_case_fields() {
         let options = DownloadBlobOptions::new("https://example.com/image.png").with_max_bytes(4);
         assert_eq!(
@@ -12426,6 +12730,29 @@ mod tests {
     }
 
     #[test]
+    fn convert_image_model_file_to_data_uri_upstream_returns_url_as_is_for_url_files() {
+        let file =
+            ImageModelFile::url(Url::parse("https://example.com/image.png").expect("valid URL"));
+
+        assert_eq!(
+            convert_image_model_file_to_data_uri(&file),
+            "https://example.com/image.png"
+        );
+    }
+
+    #[test]
+    fn convert_image_model_file_to_data_uri_upstream_handles_urls_with_query_parameters() {
+        let file = ImageModelFile::url(
+            Url::parse("https://example.com/image.png?width=100&height=200").expect("valid URL"),
+        );
+
+        assert_eq!(
+            convert_image_model_file_to_data_uri(&file),
+            "https://example.com/image.png?width=100&height=200"
+        );
+    }
+
+    #[test]
     fn convert_image_model_file_to_data_uri_embeds_base64_data() {
         let file = ImageModelFile::file(
             "image/png",
@@ -12435,6 +12762,30 @@ mod tests {
         assert_eq!(
             convert_image_model_file_to_data_uri(&file),
             "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+        );
+    }
+
+    #[test]
+    fn convert_image_model_file_to_data_uri_upstream_returns_data_uri_for_base64_string_data() {
+        let data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+        let file = ImageModelFile::file("image/png", FileDataContent::Base64(data.to_string()));
+
+        assert_eq!(
+            convert_image_model_file_to_data_uri(&file),
+            format!("data:image/png;base64,{data}")
+        );
+    }
+
+    #[test]
+    fn convert_image_model_file_to_data_uri_upstream_handles_different_media_types() {
+        let file = ImageModelFile::file(
+            "image/jpeg",
+            FileDataContent::Base64("base64data".to_string()),
+        );
+
+        assert_eq!(
+            convert_image_model_file_to_data_uri(&file),
+            "data:image/jpeg;base64,base64data"
         );
     }
 
@@ -12449,12 +12800,43 @@ mod tests {
     }
 
     #[test]
+    fn convert_image_model_file_to_data_uri_upstream_converts_uint8_array_to_base64_data_uri() {
+        let file = ImageModelFile::file("image/png", FileDataContent::Bytes(b"Hello".to_vec()));
+
+        assert_eq!(
+            convert_image_model_file_to_data_uri(&file),
+            "data:image/png;base64,SGVsbG8="
+        );
+    }
+
+    #[test]
     fn convert_image_model_file_to_data_uri_handles_empty_raw_bytes() {
         let file = ImageModelFile::file("image/png", FileDataContent::Bytes(Vec::new()));
 
         assert_eq!(
             convert_image_model_file_to_data_uri(&file),
             "data:image/png;base64,"
+        );
+    }
+
+    #[test]
+    fn convert_image_model_file_to_data_uri_upstream_handles_empty_uint8_array() {
+        let file = ImageModelFile::file("image/png", FileDataContent::Bytes(Vec::new()));
+
+        assert_eq!(
+            convert_image_model_file_to_data_uri(&file),
+            "data:image/png;base64,"
+        );
+    }
+
+    #[test]
+    fn convert_image_model_file_to_data_uri_upstream_handles_different_media_types_with_uint8_array()
+     {
+        let file = ImageModelFile::file("image/webp", FileDataContent::Bytes(b"Hello".to_vec()));
+
+        assert_eq!(
+            convert_image_model_file_to_data_uri(&file),
+            "data:image/webp;base64,SGVsbG8="
         );
     }
 
