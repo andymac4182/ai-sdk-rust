@@ -11184,6 +11184,105 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_allows_force_reasoning_for_unrecognized_model_ids() {
+        let (provider, captured_request) =
+            open_responses_captured_provider("openai", "stealth-reasoning-model");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "forceReasoning": true,
+                "reasoningEffort": "low",
+                "reasoningSummary": "auto"
+            }
+        }))
+        .expect("provider options deserialize");
+        let model = provider.language_model("stealth-reasoning-model");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Hello"),
+                    )]),
+                )])
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "stealth-reasoning-model",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "reasoning": {
+                    "effort": "low",
+                    "summary": "auto"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_sends_xhigh_reasoning_effort_for_codex_max_model() {
+        let (provider, captured_request) =
+            open_responses_captured_provider("openai", "gpt-5.1-codex-max");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "reasoningEffort": "xhigh"
+            }
+        }))
+        .expect("provider options deserialize");
+        let model = provider.language_model("gpt-5.1-codex-max");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Hello"),
+                    )]),
+                )])
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-5.1-codex-max",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "reasoning": {
+                    "effort": "xhigh"
+                }
+            })
+        );
+    }
+
+    #[test]
     fn open_responses_provider_validates_openai_service_tier_model_capabilities() {
         let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
         let captured_requests_for_transport = Arc::clone(&captured_requests);
