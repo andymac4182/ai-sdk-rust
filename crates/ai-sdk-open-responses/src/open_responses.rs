@@ -13453,6 +13453,117 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_converts_stored_local_shell_history_to_item_reference() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "call_XWgeTylovOiS8xLNz2TONOgO",
+                            "local_shell",
+                            json!({
+                                "action": {
+                                    "type": "exec",
+                                    "command": ["ls"]
+                                }
+                            }),
+                        )
+                        .with_provider_options(openai_item_options(
+                            "lsh_68c2e2cf522c81908f3e2c1bccd1493b0b24aae9c6c01e4f",
+                        )),
+                    ),
+                ])),
+                LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                        "call_XWgeTylovOiS8xLNz2TONOgO",
+                        "local_shell",
+                        LanguageModelToolResultOutput::json(json!({
+                            "output": "example output"
+                        })),
+                    )),
+                ])),
+            ])
+            .with_tool(open_responses_test_local_shell_tool())
+            .with_provider_options(openai_store_options(true)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "item_reference",
+                    "id": "lsh_68c2e2cf522c81908f3e2c1bccd1493b0b24aae9c6c01e4f"
+                },
+                {
+                    "type": "local_shell_call_output",
+                    "call_id": "call_XWgeTylovOiS8xLNz2TONOgO",
+                    "output": "example output"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_unstored_local_shell_history_to_call_items() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "call_XWgeTylovOiS8xLNz2TONOgO",
+                            "local_shell",
+                            json!({
+                                "action": {
+                                    "type": "exec",
+                                    "command": ["ls"]
+                                }
+                            }),
+                        )
+                        .with_provider_options(openai_item_options(
+                            "lsh_68c2e2cf522c81908f3e2c1bccd1493b0b24aae9c6c01e4f",
+                        )),
+                    ),
+                ])),
+                LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                        "call_XWgeTylovOiS8xLNz2TONOgO",
+                        "local_shell",
+                        LanguageModelToolResultOutput::json(json!({
+                            "output": "example output"
+                        })),
+                    )),
+                ])),
+            ])
+            .with_tool(open_responses_test_local_shell_tool())
+            .with_provider_options(openai_store_options(false)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "local_shell_call",
+                    "call_id": "call_XWgeTylovOiS8xLNz2TONOgO",
+                    "id": "lsh_68c2e2cf522c81908f3e2c1bccd1493b0b24aae9c6c01e4f",
+                    "action": {
+                        "type": "exec",
+                        "command": ["ls"]
+                    }
+                },
+                {
+                    "type": "local_shell_call_output",
+                    "call_id": "call_XWgeTylovOiS8xLNz2TONOgO",
+                    "output": "example output"
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn open_responses_provider_reconstructs_local_shell_history_with_store_false() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -13837,6 +13948,217 @@ mod tests {
                             }
                         }
                     ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_stored_apply_patch_history_to_item_reference() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "call_INoksNAffcdh5UmRTWMLk1Ne",
+                            "apply_patch",
+                            json!({
+                                "callId": "call_INoksNAffcdh5UmRTWMLk1Ne",
+                                "operation": {
+                                    "type": "create_file",
+                                    "path": "index.html",
+                                    "diff": "+<!doctype html>\n+<html></html>"
+                                }
+                            }),
+                        )
+                        .with_provider_options(openai_item_options(
+                            "apc_0d5dfb28a009b1ee0169713022c3f88195a70b253d2a8cf798",
+                        )),
+                    ),
+                ])),
+                LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                        "call_INoksNAffcdh5UmRTWMLk1Ne",
+                        "apply_patch",
+                        LanguageModelToolResultOutput::json(json!({
+                            "status": "completed",
+                            "output": "Created index.html"
+                        })),
+                    )),
+                ])),
+            ])
+            .with_tool(open_responses_test_apply_patch_tool())
+            .with_provider_options(openai_store_options(true)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "item_reference",
+                    "id": "apc_0d5dfb28a009b1ee0169713022c3f88195a70b253d2a8cf798"
+                },
+                {
+                    "type": "apply_patch_call_output",
+                    "call_id": "call_INoksNAffcdh5UmRTWMLk1Ne",
+                    "status": "completed",
+                    "output": "Created index.html"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_unstored_apply_patch_create_file_to_call() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "call_INoksNAffcdh5UmRTWMLk1Ne",
+                            "apply_patch",
+                            json!({
+                                "callId": "call_INoksNAffcdh5UmRTWMLk1Ne",
+                                "operation": {
+                                    "type": "create_file",
+                                    "path": "index.html",
+                                    "diff": "+<!doctype html>\n+<html></html>"
+                                }
+                            }),
+                        )
+                        .with_provider_options(openai_item_options(
+                            "apc_0d5dfb28a009b1ee0169713022c3f88195a70b253d2a8cf798",
+                        )),
+                    ),
+                ])),
+                LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                        "call_INoksNAffcdh5UmRTWMLk1Ne",
+                        "apply_patch",
+                        LanguageModelToolResultOutput::json(json!({
+                            "status": "completed",
+                            "output": "Created index.html"
+                        })),
+                    )),
+                ])),
+            ])
+            .with_tool(open_responses_test_apply_patch_tool())
+            .with_provider_options(openai_store_options(false)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "apply_patch_call",
+                    "call_id": "call_INoksNAffcdh5UmRTWMLk1Ne",
+                    "id": "apc_0d5dfb28a009b1ee0169713022c3f88195a70b253d2a8cf798",
+                    "status": "completed",
+                    "operation": {
+                        "type": "create_file",
+                        "path": "index.html",
+                        "diff": "+<!doctype html>\n+<html></html>"
+                    }
+                },
+                {
+                    "type": "apply_patch_call_output",
+                    "call_id": "call_INoksNAffcdh5UmRTWMLk1Ne",
+                    "status": "completed",
+                    "output": "Created index.html"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_unstored_apply_patch_update_file_to_call() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "call_UpdateFile123",
+                            "apply_patch",
+                            json!({
+                                "callId": "call_UpdateFile123",
+                                "operation": {
+                                    "type": "update_file",
+                                    "path": "src/app.ts",
+                                    "diff": "-old line\n+new line"
+                                }
+                            }),
+                        )
+                        .with_provider_options(openai_item_options("apc_update_file_item_id")),
+                    ),
+                ]),
+            )])
+            .with_tool(open_responses_test_apply_patch_tool())
+            .with_provider_options(openai_store_options(false)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "apply_patch_call",
+                    "call_id": "call_UpdateFile123",
+                    "id": "apc_update_file_item_id",
+                    "status": "completed",
+                    "operation": {
+                        "type": "update_file",
+                        "path": "src/app.ts",
+                        "diff": "-old line\n+new line"
+                    }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_unstored_apply_patch_delete_file_to_call() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "call_DeleteFile456",
+                            "apply_patch",
+                            json!({
+                                "callId": "call_DeleteFile456",
+                                "operation": {
+                                    "type": "delete_file",
+                                    "path": "temp.txt"
+                                }
+                            }),
+                        )
+                        .with_provider_options(openai_item_options("apc_delete_file_item_id")),
+                    ),
+                ]),
+            )])
+            .with_tool(open_responses_test_apply_patch_tool())
+            .with_provider_options(openai_store_options(false)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "apply_patch_call",
+                    "call_id": "call_DeleteFile456",
+                    "id": "apc_delete_file_item_id",
+                    "status": "completed",
+                    "operation": {
+                        "type": "delete_file",
+                        "path": "temp.txt"
+                    }
                 }
             ])
         );
