@@ -15829,4 +15829,74 @@ mod tests {
         assert_eq!(error.provider(), "openai");
         assert_eq!(error.reference(), &reference);
     }
+
+    #[test]
+    fn resolve_provider_reference_upstream_returns_identifier_when_provider_key_exists() {
+        let reference = ProviderReference::try_from(BTreeMap::from([
+            ("anthropic".to_string(), "file-xyz".to_string()),
+            ("openai".to_string(), "file-abc".to_string()),
+        ]))
+        .expect("provider reference is valid");
+
+        assert_eq!(
+            resolve_provider_reference(&reference, "openai").expect("openai reference is present"),
+            "file-abc"
+        );
+    }
+
+    #[test]
+    fn resolve_provider_reference_upstream_returns_correct_identifier_for_different_provider() {
+        let reference = ProviderReference::try_from(BTreeMap::from([
+            ("anthropic".to_string(), "file-xyz".to_string()),
+            ("openai".to_string(), "file-abc".to_string()),
+        ]))
+        .expect("provider reference is valid");
+
+        assert_eq!(
+            resolve_provider_reference(&reference, "anthropic")
+                .expect("anthropic reference is present"),
+            "file-xyz"
+        );
+    }
+
+    #[test]
+    fn resolve_provider_reference_upstream_throws_when_no_entry_exists_for_provider() {
+        let reference = ProviderReference::try_from(BTreeMap::from([
+            ("anthropic".to_string(), "file-xyz".to_string()),
+            ("google".to_string(), "file-123".to_string()),
+        ]))
+        .expect("provider reference is valid");
+
+        let error = resolve_provider_reference(&reference, "openai")
+            .expect_err("missing provider reference is rejected");
+
+        assert_eq!(error.provider(), "openai");
+        assert_eq!(error.reference(), &reference);
+    }
+
+    #[test]
+    fn resolve_provider_reference_upstream_throws_when_reference_is_empty() {
+        let reference =
+            ProviderReference::try_from(BTreeMap::new()).expect("empty reference is valid");
+
+        let error = resolve_provider_reference(&reference, "openai")
+            .expect_err("empty reference cannot satisfy provider lookup");
+
+        assert_eq!(error.provider(), "openai");
+        assert_eq!(error.reference(), &reference);
+    }
+
+    #[test]
+    fn resolve_provider_reference_upstream_works_with_single_provider_reference() {
+        let reference = ProviderReference::try_from(BTreeMap::from([(
+            "openai".to_string(),
+            "file-only".to_string(),
+        )]))
+        .expect("provider reference is valid");
+
+        assert_eq!(
+            resolve_provider_reference(&reference, "openai").expect("openai reference is present"),
+            "file-only"
+        );
+    }
 }
