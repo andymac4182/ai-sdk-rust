@@ -141,6 +141,10 @@ still open.
    inventory as a required superset: every portable upstream case must be
    counted, mapped to a Rust counterpart, and kept in the ledger until ported or
    explicitly documented as JavaScript-only.
+   Future iterations must replicate the original upstream test list
+   one-to-one first, then add Rust-specific tests on top where useful. Extra
+   Rust tests never substitute for an unported upstream case, and a smaller
+   Rust-specific suite is not acceptable parity.
 5. For provider-backed behavior, require two layers of proof before marking a
    row `verified`: deterministic fake/mock/transport tests that run in normal
    validation, plus credential-gated live provider validation when a usable

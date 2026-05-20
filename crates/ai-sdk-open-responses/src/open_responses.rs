@@ -6958,6 +6958,10 @@ mod tests {
         include_str!("fixtures/openai-reasoning-encrypted-content.1.json");
     const OPEN_RESPONSES_REASONING_ENCRYPTED_CONTENT_CHUNKS_FIXTURE: &str =
         include_str!("fixtures/openai-reasoning-encrypted-content.1.chunks.txt");
+    const OPEN_RESPONSES_CODE_INTERPRETER_TOOL_JSON_FIXTURE: &str =
+        include_str!("fixtures/openai-code-interpreter-tool.1.json");
+    const OPEN_RESPONSES_IMAGE_GENERATION_TOOL_JSON_FIXTURE: &str =
+        include_str!("fixtures/openai-image-generation-tool.1.json");
     const OPEN_RESPONSES_WEB_SEARCH_TOOL_CHUNKS_FIXTURE: &str =
         include_str!("fixtures/openai-web-search-tool.1.chunks.txt");
 
@@ -7352,6 +7356,39 @@ mod tests {
         let model = provider.language_model(model_id);
 
         poll_ready(model.do_generate(options))
+    }
+
+    fn open_responses_generate_result_from_text_with_request_body(
+        model_id: &str,
+        body: &str,
+        options: LanguageModelCallOptions,
+    ) -> (LanguageModelGenerateResult, JsonValue) {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let body = body.to_string();
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    body.clone(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model(model_id);
+
+        let result = poll_ready(model.do_generate(options));
+        let request_body = captured_open_responses_request_body(&captured_request);
+
+        (result, request_body)
     }
 
     fn open_responses_citation_response_body(
@@ -22655,6 +22692,219 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_generates_code_interpreter_fixture_results() {
+        let fixture: JsonValue =
+            serde_json::from_str(OPEN_RESPONSES_CODE_INTERPRETER_TOOL_JSON_FIXTURE)
+                .expect("fixture JSON parses");
+        let output = fixture["output"]
+            .as_array()
+            .expect("fixture output is array");
+        let code_calls = output
+            .iter()
+            .filter(|item| item["type"].as_str() == Some("code_interpreter_call"))
+            .collect::<Vec<_>>();
+        let final_message = output
+            .iter()
+            .find(|item| item["type"].as_str() == Some("message"))
+            .expect("fixture includes final message");
+
+        let (result, request_body) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5-nano",
+            OPEN_RESPONSES_CODE_INTERPRETER_TOOL_JSON_FIXTURE,
+            open_responses_code_interpreter_call_options(),
+        );
+
+        assert_eq!(
+            request_body["include"],
+            json!(["code_interpreter_call.outputs"])
+        );
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "code_interpreter",
+                    "container": {
+                        "type": "auto"
+                    }
+                }
+            ])
+        );
+
+        let tool_calls = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let tool_results = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_calls.len(), code_calls.len());
+        assert_eq!(tool_results.len(), code_calls.len());
+
+        for (index, code_call) in code_calls.iter().enumerate() {
+            let tool_call = tool_calls[index];
+            assert_eq!(tool_call.tool_call_id, code_call["id"].as_str().unwrap());
+            assert_eq!(tool_call.tool_name, "codeExecution");
+            assert_eq!(tool_call.provider_executed, Some(true));
+            assert_eq!(
+                serde_json::from_str::<JsonValue>(&tool_call.input).expect("tool input is JSON"),
+                json!({
+                    "code": code_call["code"].clone(),
+                    "containerId": code_call["container_id"].clone()
+                })
+            );
+
+            let tool_result = tool_results[index];
+            assert_eq!(tool_result.tool_call_id, code_call["id"].as_str().unwrap());
+            assert_eq!(tool_result.tool_name, "codeExecution");
+            assert_eq!(
+                tool_result.result.as_value(),
+                &json!({
+                    "outputs": code_call["outputs"].clone()
+                })
+            );
+        }
+
+        let text = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::Text(text) => Some(text),
+                _ => None,
+            })
+            .expect("content includes final text");
+        assert_eq!(
+            text.text,
+            final_message["content"][0]["text"].as_str().unwrap()
+        );
+        assert_eq!(
+            openai_metadata_value(&text.provider_metadata, "itemId").and_then(JsonValue::as_str),
+            final_message["id"].as_str()
+        );
+
+        let source = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::Source(LanguageModelSource::Document(source)) => Some(source),
+                _ => None,
+            })
+            .expect("content includes container file citation source");
+        let annotation = &final_message["content"][0]["annotations"][0];
+        assert_eq!(source.id, "source-0");
+        assert_eq!(source.filename.as_deref(), annotation["filename"].as_str());
+        assert_eq!(source.media_type, "text/plain");
+        assert_eq!(
+            openai_metadata_value(&source.provider_metadata, "fileId").and_then(JsonValue::as_str),
+            annotation["file_id"].as_str()
+        );
+        assert_eq!(
+            openai_metadata_value(&source.provider_metadata, "containerId")
+                .and_then(JsonValue::as_str),
+            annotation["container_id"].as_str()
+        );
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(2283));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(result.usage.output_tokens.total, Some(1928));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(1792));
+    }
+
+    #[test]
+    fn open_responses_provider_generates_image_generation_fixture_results() {
+        let fixture: JsonValue =
+            serde_json::from_str(OPEN_RESPONSES_IMAGE_GENERATION_TOOL_JSON_FIXTURE)
+                .expect("fixture JSON parses");
+        let output = fixture["output"]
+            .as_array()
+            .expect("fixture output is array");
+        let image_call = output
+            .iter()
+            .find(|item| item["type"].as_str() == Some("image_generation_call"))
+            .expect("fixture includes image generation call");
+        let final_message = output
+            .iter()
+            .find(|item| item["type"].as_str() == Some("message"))
+            .expect("fixture includes final message");
+
+        let (result, request_body) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5-nano",
+            OPEN_RESPONSES_IMAGE_GENERATION_TOOL_JSON_FIXTURE,
+            open_responses_image_generation_fixture_call_options(),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "image_generation",
+                    "output_format": "webp",
+                    "quality": "low",
+                    "size": "1024x1024",
+                    "partial_images": 2
+                }
+            ])
+        );
+
+        let tool_call = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .expect("content includes image generation tool call");
+        assert_eq!(tool_call.tool_call_id, image_call["id"].as_str().unwrap());
+        assert_eq!(tool_call.tool_name, "generateImage");
+        assert_eq!(tool_call.input, "{}");
+        assert_eq!(tool_call.provider_executed, Some(true));
+
+        let tool_result = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .expect("content includes image generation tool result");
+        assert_eq!(tool_result.tool_call_id, image_call["id"].as_str().unwrap());
+        assert_eq!(tool_result.tool_name, "generateImage");
+        assert_eq!(
+            tool_result.result.as_value(),
+            &json!({
+                "result": image_call["result"].clone()
+            })
+        );
+
+        let text = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::Text(text) => Some(text),
+                _ => None,
+            })
+            .expect("content includes empty assistant text");
+        assert_eq!(text.text, "");
+        assert_eq!(
+            openai_metadata_value(&text.provider_metadata, "itemId").and_then(JsonValue::as_str),
+            final_message["id"].as_str()
+        );
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(3151));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(result.usage.output_tokens.total, Some(1970));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(1920));
+    }
+
+    #[test]
     fn open_responses_provider_streams_code_interpreter_results_with_annotations() {
         const CONTAINER_ID: &str = "cntr_68c2e6f380d881908a57a82d394434ff02f484f5344062e9";
         const CODE_CALL_ID: &str = "ci_68c2e6fd57948193aa93df6bdb00a86d02d3a5742c7ddae9";
@@ -30018,6 +30268,21 @@ mod tests {
                 "openai.image_generation",
                 "generateImage",
                 JsonObject::new(),
+            )),
+        )
+    }
+
+    fn open_responses_image_generation_fixture_call_options() -> LanguageModelCallOptions {
+        LanguageModelCallOptions::new(open_responses_hello_prompt()).with_tool(
+            LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                "openai.image_generation",
+                "generateImage",
+                json_object(json!({
+                    "outputFormat": "webp",
+                    "quality": "low",
+                    "size": "1024x1024",
+                    "partialImages": 2
+                })),
             )),
         )
     }
