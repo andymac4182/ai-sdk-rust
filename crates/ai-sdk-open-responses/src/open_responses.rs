@@ -19205,6 +19205,282 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_streams_mcp_approval_request_fixture_turn_1() {
+        const RESPONSE_ID: &str = "resp_04a97b4fce127879006949a837a3a48195b37f26ae73f550c0";
+        const LIST_TOOLS_ID: &str = "mcpl_04a97b4fce127879006949a837ada08195abf62939840a3d5c";
+        const REASONING_ID: &str = "rs_04a97b4fce127879006949a83904c88195977de6cc3f06064a";
+        const APPROVAL_ID: &str = "mcpr_04a97b4fce127879006949a83ac9308195a7f7b69ea82e91fe";
+
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let provider = open_responses_mcp_approval_fixture_provider(
+            Arc::clone(&captured_request),
+            open_responses_mcp_approval_request_sse(
+                RESPONSE_ID,
+                1_766_434_871,
+                LIST_TOOLS_ID,
+                REASONING_ID,
+                APPROVAL_ID,
+                422,
+                48,
+            ),
+        );
+        let result = poll_ready(
+            provider.language_model("gpt-5-mini").do_stream(
+                LanguageModelCallOptions::new(open_responses_hello_prompt())
+                    .with_tool(open_responses_mcp_approval_tool()),
+            ),
+        );
+
+        open_responses_assert_mcp_approval_request_stream(
+            &result.stream,
+            RESPONSE_ID,
+            1_766_434_871,
+            REASONING_ID,
+            APPROVAL_ID,
+            422,
+            48,
+        );
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        open_responses_assert_mcp_approval_tool_request(&request_body);
+    }
+
+    #[test]
+    fn open_responses_provider_streams_mcp_approval_denial_fixture_turn_2() {
+        const RESPONSE_ID: &str = "resp_04a97b4fce127879006949a855fa68819598a2a379fd5b6c38";
+        const LIST_TOOLS_ID: &str = "mcpl_04a97b4fce127879006949a856328881959cdd5fda3bc888e8";
+        const REASONING_ID: &str = "rs_04a97b4fce127879006949a857b7c88195818dab6d25ff091d";
+        const MESSAGE_ID: &str = "msg_04a97b4fce127879006949a85c36b08195b7527e9fb2f8569e";
+        const APPROVAL_ID: &str = "mcpr_04a97b4fce127879006949a83ac9308195a7f7b69ea82e91fe";
+        const FINAL_TEXT: &str = concat!(
+            "I wasn\u{2019}t able to create the short link because the URL-shortening tool call was not approved. I won\u{2019}t retry it without your permission.\n\n",
+            "Options:\n",
+            "- Approve the tool call and I\u{2019}ll create the short URL with max clicks = 100 now.\n",
+            "- I can suggest a short alias (e.g., ai-sdk, ai-sdk-dev) for you to use when creating the short link yourself.\n",
+            "- I can give step-by-step instructions to create the shortened link manually on zip1.io or another shortener.\n\n",
+            "Which would you like?"
+        );
+
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let provider = open_responses_mcp_approval_fixture_provider(
+            Arc::clone(&captured_request),
+            open_responses_mcp_approval_text_sse(
+                RESPONSE_ID,
+                1_766_434_902,
+                LIST_TOOLS_ID,
+                REASONING_ID,
+                MESSAGE_ID,
+                FINAL_TEXT,
+                553,
+                371,
+                256,
+            ),
+        );
+        let result = poll_ready(
+            provider.language_model("gpt-5-mini").do_stream(
+                LanguageModelCallOptions::new(open_responses_mcp_approval_history_prompt(
+                    APPROVAL_ID,
+                    false,
+                    None,
+                ))
+                .with_tool(open_responses_mcp_approval_tool()),
+            ),
+        );
+
+        open_responses_assert_mcp_approval_text_stream(
+            &result.stream,
+            RESPONSE_ID,
+            1_766_434_902,
+            REASONING_ID,
+            MESSAGE_ID,
+            FINAL_TEXT,
+            (553, 371, 256),
+        );
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        open_responses_assert_mcp_approval_tool_request(&request_body);
+        open_responses_assert_mcp_approval_response_input(&request_body, APPROVAL_ID, false);
+    }
+
+    #[test]
+    fn open_responses_provider_streams_mcp_approval_retry_fixture_turn_3() {
+        const RESPONSE_ID: &str = "resp_04a97b4fce127879006949a864795c8195a77efd798149326b";
+        const LIST_TOOLS_ID: &str = "mcpl_04a97b4fce127879006949a8648d5c8195b329dc93c3bad534";
+        const REASONING_ID: &str = "rs_04a97b4fce127879006949a8660eec81959dfbe2481a912faf";
+        const FIRST_APPROVAL_ID: &str = "mcpr_04a97b4fce127879006949a83ac9308195a7f7b69ea82e91fe";
+        const SECOND_APPROVAL_ID: &str = "mcpr_04a97b4fce127879006949a8672ac081959f95aa8ceedb7cd9";
+
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let provider = open_responses_mcp_approval_fixture_provider(
+            Arc::clone(&captured_request),
+            open_responses_mcp_approval_request_sse(
+                RESPONSE_ID,
+                1_766_434_916,
+                LIST_TOOLS_ID,
+                REASONING_ID,
+                SECOND_APPROVAL_ID,
+                609,
+                48,
+            ),
+        );
+        let result = poll_ready(
+            provider.language_model("gpt-5-mini").do_stream(
+                LanguageModelCallOptions::new(open_responses_mcp_approval_history_prompt(
+                    FIRST_APPROVAL_ID,
+                    false,
+                    Some("try again"),
+                ))
+                .with_tool(open_responses_mcp_approval_tool()),
+            ),
+        );
+
+        open_responses_assert_mcp_approval_request_stream(
+            &result.stream,
+            RESPONSE_ID,
+            1_766_434_916,
+            REASONING_ID,
+            SECOND_APPROVAL_ID,
+            609,
+            48,
+        );
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        open_responses_assert_mcp_approval_tool_request(&request_body);
+        open_responses_assert_mcp_approval_response_input(&request_body, FIRST_APPROVAL_ID, false);
+        assert!(
+            request_body["input"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|item| item["role"] == "user" && item["content"][0]["text"] == "try again"),
+            "retry turn includes the follow-up user message"
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_streams_mcp_approval_result_fixture_turn_4() {
+        const RESPONSE_ID: &str = "resp_04a97b4fce127879006949a87ab0cc8195b3175edc260d6a88";
+        const LIST_TOOLS_ID: &str = "mcpl_04a97b4fce127879006949a87ac9388195b0d86b0d1f24176b";
+        const MCP_CALL_ID: &str = "mcp_04a97b4fce127879006949a87c14248195ac23dfe0854c03d3";
+        const MESSAGE_ID: &str = "msg_04a97b4fce127879006949a87d97e081959020140d5b07b7b5";
+        const APPROVAL_ID: &str = "mcpr_04a97b4fce127879006949a8672ac081959f95aa8ceedb7cd9";
+        const TOOL_OUTPUT: &str = "Short URL created: https://zip1.io/UDKvlw\nGenerated code: UDKvlw\nMax clicks: 100\nDescription: Shortened link for ai-sdk.dev\nOriginal URL: https://ai-sdk.dev/\n\nView stats: https://zip1.io/stats/UDKvlw";
+        const FINAL_TEXT: &str = concat!(
+            "Done \u{2014} here\u{2019}s your shortened link:\n\n",
+            "https://zip1.io/UDKvlw\n\n",
+            "Details:\n",
+            "- Original URL: https://ai-sdk.dev/\n",
+            "- Max clicks: 100\n",
+            "- Stats: https://zip1.io/stats/UDKvlw\n\n",
+            "Would you like a custom alias or password protection added?"
+        );
+
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let provider = open_responses_mcp_approval_fixture_provider(
+            Arc::clone(&captured_request),
+            open_responses_mcp_approval_result_sse(
+                RESPONSE_ID,
+                1_766_434_938,
+                LIST_TOOLS_ID,
+                MCP_CALL_ID,
+                APPROVAL_ID,
+                MESSAGE_ID,
+                TOOL_OUTPUT,
+                FINAL_TEXT,
+            ),
+        );
+        let result = poll_ready(
+            provider.language_model("gpt-5-mini").do_stream(
+                LanguageModelCallOptions::new(open_responses_mcp_approval_history_prompt(
+                    APPROVAL_ID,
+                    true,
+                    None,
+                ))
+                .with_tool(open_responses_mcp_approval_tool()),
+            ),
+        );
+
+        let metadata = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ResponseMetadata(metadata) => Some(metadata),
+                _ => None,
+            })
+            .expect("stream includes response metadata");
+        assert_eq!(metadata.id.as_deref(), Some(RESPONSE_ID));
+        assert_eq!(metadata.model_id.as_deref(), Some("gpt-5-mini-2025-08-07"));
+
+        let tool_call = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .expect("stream includes approved MCP tool call");
+        assert_eq!(tool_call.tool_call_id, MCP_CALL_ID);
+        assert_eq!(tool_call.tool_name, "mcp.create_short_url");
+        assert_eq!(tool_call.provider_executed, Some(true));
+        assert_eq!(tool_call.dynamic, Some(true));
+        assert_eq!(tool_call.input, open_responses_mcp_approval_arguments());
+
+        let tool_result = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .expect("stream includes approved MCP tool result");
+        assert_eq!(tool_result.tool_call_id, MCP_CALL_ID);
+        assert_eq!(tool_result.tool_name, "mcp.create_short_url");
+        assert_eq!(
+            tool_result.result.as_value(),
+            &json!({
+                "type": "call",
+                "serverLabel": "zip1",
+                "name": "create_short_url",
+                "arguments": open_responses_mcp_approval_arguments(),
+                "output": TOOL_OUTPUT
+            })
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_result.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(MCP_CALL_ID)
+        );
+
+        let streamed_text = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) if delta.id == MESSAGE_ID => {
+                    Some(delta.delta.as_str())
+                }
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(streamed_text, FINAL_TEXT);
+
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(finish.usage.input_tokens.total, Some(779));
+        assert_eq!(finish.usage.output_tokens.total, Some(69));
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        open_responses_assert_mcp_approval_tool_request(&request_body);
+        open_responses_assert_mcp_approval_response_input(&request_body, APPROVAL_ID, true);
+    }
+
+    #[test]
     fn open_responses_provider_maps_web_search_api_sources_and_missing_action() {
         let transport: OpenResponsesTransport =
             Arc::new(move |_request| -> OpenResponsesTransportFuture {
@@ -20269,6 +20545,716 @@ mod tests {
                 _ => None,
             }),
             Some(FinishReason::ToolCalls)
+        );
+    }
+
+    fn open_responses_mcp_approval_fixture_provider(
+        captured_request: Arc<Mutex<Option<ProviderApiRequest>>>,
+        sse: String,
+    ) -> OpenResponsesProvider {
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse.clone()))))
+            });
+
+        create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport)
+    }
+
+    fn open_responses_mcp_approval_tool() -> LanguageModelTool {
+        LanguageModelTool::Provider(LanguageModelProviderTool::new(
+            "openai.mcp",
+            "MCP",
+            json_object(json!({
+                "serverLabel": "zip1",
+                "serverUrl": "https://zip1.io/mcp",
+                "serverDescription": "Link shortener",
+                "requireApproval": "always"
+            })),
+        ))
+    }
+
+    fn open_responses_mcp_approval_arguments() -> &'static str {
+        r#"{"alias":"","description":"Shortened link for ai-sdk.dev","max_clicks":100,"password":"","url":"https://ai-sdk.dev/"}"#
+    }
+
+    fn open_responses_mcp_approval_history_prompt(
+        approval_id: &str,
+        approved: bool,
+        follow_up: Option<&str>,
+    ) -> Vec<LanguageModelMessage> {
+        let mut prompt = vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
+                    "shorten ai-sdk.dev",
+                )),
+            ])),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(
+                    LanguageModelToolCallPart::new(
+                        approval_id,
+                        "mcp.create_short_url",
+                        json!({
+                            "url": "https://ai-sdk.dev/"
+                        }),
+                    )
+                    .with_provider_executed(true),
+                ),
+                LanguageModelAssistantContentPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequestPart::new(approval_id, approval_id),
+                ),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolApprovalResponse(
+                    LanguageModelToolApprovalResponsePart::new(approval_id, approved),
+                ),
+            ])),
+        ];
+
+        if let Some(follow_up) = follow_up {
+            prompt.push(LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![LanguageModelAssistantContentPart::Text(
+                    LanguageModelTextPart::new("The tool was not approved."),
+                )]),
+            ));
+            prompt.push(LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::Text(
+                    LanguageModelTextPart::new(follow_up),
+                )],
+            )));
+        }
+
+        prompt
+    }
+
+    fn open_responses_fixture_sse(events: Vec<JsonValue>) -> String {
+        let mut sse = events
+            .into_iter()
+            .map(|event| format!("data: {event}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        sse.push_str("\n\ndata: [DONE]\n");
+        sse
+    }
+
+    fn open_responses_mcp_list_tools_item(list_tools_id: &str) -> JsonValue {
+        json!({
+            "id": list_tools_id,
+            "type": "mcp_list_tools",
+            "server_label": "zip1",
+            "tools": [
+                {
+                    "name": "create_short_url",
+                    "description": "Create a shortened link",
+                    "input_schema": {
+                        "type": "object"
+                    }
+                }
+            ]
+        })
+    }
+
+    fn open_responses_mcp_approval_request_item(approval_id: &str) -> JsonValue {
+        json!({
+            "id": approval_id,
+            "type": "mcp_approval_request",
+            "server_label": "zip1",
+            "name": "create_short_url",
+            "arguments": open_responses_mcp_approval_arguments(),
+            "approval_request_id": approval_id
+        })
+    }
+
+    fn open_responses_mcp_reasoning_item(reasoning_id: &str) -> JsonValue {
+        json!({
+            "id": reasoning_id,
+            "type": "reasoning",
+            "summary": []
+        })
+    }
+
+    fn open_responses_mcp_approval_request_sse(
+        response_id: &str,
+        created_at: i64,
+        list_tools_id: &str,
+        reasoning_id: &str,
+        approval_id: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) -> String {
+        let list_tools = open_responses_mcp_list_tools_item(list_tools_id);
+        let reasoning = open_responses_mcp_reasoning_item(reasoning_id);
+        let approval = open_responses_mcp_approval_request_item(approval_id);
+        open_responses_fixture_sse(vec![
+            json!({
+                "type": "response.created",
+                "sequence_number": 0,
+                "response": {
+                    "id": response_id,
+                    "object": "response",
+                    "created_at": created_at,
+                    "status": "in_progress",
+                    "model": "gpt-5-mini-2025-08-07",
+                    "output": []
+                }
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "sequence_number": 5,
+                "output_index": 0,
+                "item": list_tools
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "sequence_number": 7,
+                "output_index": 1,
+                "item": reasoning
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "sequence_number": 13,
+                "output_index": 2,
+                "item": approval
+            }),
+            json!({
+                "type": "response.completed",
+                "sequence_number": 14,
+                "response": {
+                    "id": response_id,
+                    "object": "response",
+                    "created_at": created_at,
+                    "status": "completed",
+                    "model": "gpt-5-mini-2025-08-07",
+                    "output": [
+                        open_responses_mcp_list_tools_item(list_tools_id),
+                        open_responses_mcp_reasoning_item(reasoning_id),
+                        open_responses_mcp_approval_request_item(approval_id)
+                    ],
+                    "service_tier": "default",
+                    "usage": {
+                        "input_tokens": input_tokens,
+                        "input_tokens_details": {
+                            "cached_tokens": 0
+                        },
+                        "output_tokens": output_tokens,
+                        "output_tokens_details": {
+                            "reasoning_tokens": 0
+                        },
+                        "total_tokens": input_tokens + output_tokens
+                    }
+                }
+            }),
+        ])
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_responses_mcp_approval_text_sse(
+        response_id: &str,
+        created_at: i64,
+        list_tools_id: &str,
+        reasoning_id: &str,
+        message_id: &str,
+        final_text: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        reasoning_tokens: u64,
+    ) -> String {
+        let list_tools = open_responses_mcp_list_tools_item(list_tools_id);
+        let reasoning = open_responses_mcp_reasoning_item(reasoning_id);
+        let message = json!({
+            "id": message_id,
+            "type": "message",
+            "status": "completed",
+            "content": [
+                {
+                    "type": "output_text",
+                    "annotations": [],
+                    "logprobs": [],
+                    "text": final_text
+                }
+            ],
+            "role": "assistant"
+        });
+        open_responses_fixture_sse(vec![
+            json!({
+                "type": "response.created",
+                "sequence_number": 0,
+                "response": {
+                    "id": response_id,
+                    "object": "response",
+                    "created_at": created_at,
+                    "status": "in_progress",
+                    "model": "gpt-5-mini-2025-08-07",
+                    "output": []
+                }
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "sequence_number": 5,
+                "output_index": 0,
+                "item": list_tools
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "sequence_number": 7,
+                "output_index": 1,
+                "item": reasoning
+            }),
+            json!({
+                "type": "response.output_item.added",
+                "sequence_number": 8,
+                "output_index": 2,
+                "item": {
+                    "id": message_id,
+                    "type": "message",
+                    "status": "in_progress",
+                    "content": [],
+                    "role": "assistant"
+                }
+            }),
+            json!({
+                "type": "response.content_part.added",
+                "sequence_number": 9,
+                "item_id": message_id,
+                "output_index": 2,
+                "content_index": 0,
+                "part": {
+                    "type": "output_text",
+                    "annotations": [],
+                    "logprobs": [],
+                    "text": ""
+                }
+            }),
+            json!({
+                "type": "response.output_text.delta",
+                "sequence_number": 10,
+                "item_id": message_id,
+                "output_index": 2,
+                "content_index": 0,
+                "delta": final_text,
+                "logprobs": []
+            }),
+            json!({
+                "type": "response.output_text.done",
+                "sequence_number": 11,
+                "item_id": message_id,
+                "output_index": 2,
+                "content_index": 0,
+                "text": final_text,
+                "logprobs": []
+            }),
+            json!({
+                "type": "response.content_part.done",
+                "sequence_number": 12,
+                "item_id": message_id,
+                "output_index": 2,
+                "content_index": 0,
+                "part": {
+                    "type": "output_text",
+                    "annotations": [],
+                    "logprobs": [],
+                    "text": final_text
+                }
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "sequence_number": 13,
+                "output_index": 2,
+                "item": message
+            }),
+            json!({
+                "type": "response.completed",
+                "sequence_number": 14,
+                "response": {
+                    "id": response_id,
+                    "object": "response",
+                    "created_at": created_at,
+                    "status": "completed",
+                    "model": "gpt-5-mini-2025-08-07",
+                    "output": [
+                        open_responses_mcp_list_tools_item(list_tools_id),
+                        open_responses_mcp_reasoning_item(reasoning_id),
+                        message
+                    ],
+                    "service_tier": "default",
+                    "usage": {
+                        "input_tokens": input_tokens,
+                        "input_tokens_details": {
+                            "cached_tokens": 0
+                        },
+                        "output_tokens": output_tokens,
+                        "output_tokens_details": {
+                            "reasoning_tokens": reasoning_tokens
+                        },
+                        "total_tokens": input_tokens + output_tokens
+                    }
+                }
+            }),
+        ])
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_responses_mcp_approval_result_sse(
+        response_id: &str,
+        created_at: i64,
+        list_tools_id: &str,
+        mcp_call_id: &str,
+        approval_id: &str,
+        message_id: &str,
+        tool_output: &str,
+        final_text: &str,
+    ) -> String {
+        let list_tools = open_responses_mcp_list_tools_item(list_tools_id);
+        let mcp_call = json!({
+            "id": mcp_call_id,
+            "type": "mcp_call",
+            "status": "completed",
+            "approval_request_id": approval_id,
+            "arguments": open_responses_mcp_approval_arguments(),
+            "name": "create_short_url",
+            "server_label": "zip1",
+            "output": tool_output
+        });
+        let message = json!({
+            "id": message_id,
+            "type": "message",
+            "status": "completed",
+            "content": [
+                {
+                    "type": "output_text",
+                    "annotations": [],
+                    "logprobs": [],
+                    "text": final_text
+                }
+            ],
+            "role": "assistant"
+        });
+
+        open_responses_fixture_sse(vec![
+            json!({
+                "type": "response.created",
+                "sequence_number": 0,
+                "response": {
+                    "id": response_id,
+                    "object": "response",
+                    "created_at": created_at,
+                    "status": "in_progress",
+                    "model": "gpt-5-mini-2025-08-07",
+                    "output": []
+                }
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "sequence_number": 5,
+                "output_index": 0,
+                "item": list_tools
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "sequence_number": 7,
+                "output_index": 1,
+                "item": mcp_call
+            }),
+            json!({
+                "type": "response.output_item.added",
+                "sequence_number": 8,
+                "output_index": 2,
+                "item": {
+                    "id": message_id,
+                    "type": "message",
+                    "status": "in_progress",
+                    "content": [],
+                    "role": "assistant"
+                }
+            }),
+            json!({
+                "type": "response.content_part.added",
+                "sequence_number": 9,
+                "item_id": message_id,
+                "output_index": 2,
+                "content_index": 0,
+                "part": {
+                    "type": "output_text",
+                    "annotations": [],
+                    "logprobs": [],
+                    "text": ""
+                }
+            }),
+            json!({
+                "type": "response.output_text.delta",
+                "sequence_number": 10,
+                "item_id": message_id,
+                "output_index": 2,
+                "content_index": 0,
+                "delta": final_text,
+                "logprobs": []
+            }),
+            json!({
+                "type": "response.output_text.done",
+                "sequence_number": 11,
+                "item_id": message_id,
+                "output_index": 2,
+                "content_index": 0,
+                "text": final_text,
+                "logprobs": []
+            }),
+            json!({
+                "type": "response.content_part.done",
+                "sequence_number": 12,
+                "item_id": message_id,
+                "output_index": 2,
+                "content_index": 0,
+                "part": {
+                    "type": "output_text",
+                    "annotations": [],
+                    "logprobs": [],
+                    "text": final_text
+                }
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "sequence_number": 13,
+                "output_index": 2,
+                "item": message
+            }),
+            json!({
+                "type": "response.completed",
+                "sequence_number": 14,
+                "response": {
+                    "id": response_id,
+                    "object": "response",
+                    "created_at": created_at,
+                    "status": "completed",
+                    "model": "gpt-5-mini-2025-08-07",
+                    "output": [
+                        open_responses_mcp_list_tools_item(list_tools_id),
+                        mcp_call,
+                        message
+                    ],
+                    "service_tier": "default",
+                    "usage": {
+                        "input_tokens": 779,
+                        "input_tokens_details": {
+                            "cached_tokens": 0
+                        },
+                        "output_tokens": 69,
+                        "output_tokens_details": {
+                            "reasoning_tokens": 0
+                        },
+                        "total_tokens": 848
+                    }
+                }
+            }),
+        ])
+    }
+
+    fn open_responses_assert_mcp_approval_request_stream(
+        stream: &[LanguageModelStreamPart],
+        response_id: &str,
+        created_at: i64,
+        reasoning_id: &str,
+        approval_id: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) {
+        let metadata = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ResponseMetadata(metadata) => Some(metadata),
+                _ => None,
+            })
+            .expect("stream includes response metadata");
+        assert_eq!(metadata.id.as_deref(), Some(response_id));
+        assert_eq!(metadata.model_id.as_deref(), Some("gpt-5-mini-2025-08-07"));
+        assert_eq!(
+            metadata
+                .timestamp
+                .map(|timestamp| timestamp.unix_timestamp()),
+            Some(created_at)
+        );
+
+        let reasoning_start = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ReasoningStart(start) => Some(start),
+                _ => None,
+            })
+            .expect("stream includes reasoning start");
+        assert_eq!(
+            openai_metadata_value(&reasoning_start.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(reasoning_id)
+        );
+
+        let tool_call = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .expect("stream includes MCP approval tool call");
+        assert_eq!(tool_call.tool_name, "mcp.create_short_url");
+        assert_eq!(tool_call.provider_executed, Some(true));
+        assert_eq!(tool_call.dynamic, Some(true));
+        assert_eq!(tool_call.input, open_responses_mcp_approval_arguments());
+        assert_ne!(tool_call.tool_call_id, approval_id);
+        assert_eq!(
+            openai_metadata_value(&tool_call.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(approval_id)
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_call.provider_metadata, "approvalRequestId")
+                .and_then(JsonValue::as_str),
+            Some(approval_id)
+        );
+
+        assert!(stream.iter().any(|part| matches!(
+            part,
+            LanguageModelStreamPart::ToolApprovalRequest(approval)
+                if approval.approval_id == approval_id
+                    && approval.tool_call_id == tool_call.tool_call_id
+        )));
+
+        let finish = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(finish.usage.input_tokens.total, Some(input_tokens));
+        assert_eq!(finish.usage.output_tokens.total, Some(output_tokens));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(0));
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some(response_id)
+        );
+    }
+
+    fn open_responses_assert_mcp_approval_text_stream(
+        stream: &[LanguageModelStreamPart],
+        response_id: &str,
+        created_at: i64,
+        reasoning_id: &str,
+        message_id: &str,
+        final_text: &str,
+        usage: (u64, u64, u64),
+    ) {
+        let metadata = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ResponseMetadata(metadata) => Some(metadata),
+                _ => None,
+            })
+            .expect("stream includes response metadata");
+        assert_eq!(metadata.id.as_deref(), Some(response_id));
+        assert_eq!(metadata.model_id.as_deref(), Some("gpt-5-mini-2025-08-07"));
+        assert_eq!(
+            metadata
+                .timestamp
+                .map(|timestamp| timestamp.unix_timestamp()),
+            Some(created_at)
+        );
+
+        let reasoning_start = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ReasoningStart(start) => Some(start),
+                _ => None,
+            })
+            .expect("stream includes reasoning start");
+        assert_eq!(
+            openai_metadata_value(&reasoning_start.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(reasoning_id)
+        );
+
+        let text_start = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextStart(start) => Some(start),
+                _ => None,
+            })
+            .expect("stream includes text start");
+        assert_eq!(text_start.id, message_id);
+        assert_eq!(
+            openai_metadata_value(&text_start.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(message_id)
+        );
+
+        let streamed_text = stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) if delta.id == message_id => {
+                    Some(delta.delta.as_str())
+                }
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(streamed_text, final_text);
+
+        let finish = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(finish.usage.input_tokens.total, Some(usage.0));
+        assert_eq!(finish.usage.output_tokens.total, Some(usage.1));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(usage.2));
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some(response_id)
+        );
+    }
+
+    fn open_responses_assert_mcp_approval_tool_request(request_body: &JsonValue) {
+        assert_eq!(
+            request_body["tools"][0],
+            json!({
+                "type": "mcp",
+                "server_label": "zip1",
+                "server_url": "https://zip1.io/mcp",
+                "server_description": "Link shortener",
+                "require_approval": "always"
+            })
+        );
+    }
+
+    fn open_responses_assert_mcp_approval_response_input(
+        request_body: &JsonValue,
+        approval_id: &str,
+        approved: bool,
+    ) {
+        let input = request_body["input"]
+            .as_array()
+            .expect("request input is an array");
+        assert!(
+            input
+                .iter()
+                .any(|item| item["type"] == "item_reference" && item["id"] == approval_id),
+            "approval response includes the approval item reference"
+        );
+        assert!(
+            input
+                .iter()
+                .any(|item| item["type"] == "mcp_approval_response"
+                    && item["approval_request_id"] == approval_id
+                    && item["approve"] == approved),
+            "approval response includes the mcp approval response item"
         );
     }
 
