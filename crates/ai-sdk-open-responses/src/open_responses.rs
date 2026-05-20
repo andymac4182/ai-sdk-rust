@@ -9439,6 +9439,203 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_generates_reasoning_with_summary_parts() {
+        let (result, request_body) = open_responses_run_inline_reasoning_generate(
+            "o3-mini",
+            json!({
+                "reasoningEffort": "low",
+                "reasoningSummary": "auto"
+            }),
+            open_responses_single_reasoning_summary_body(None, false),
+        );
+
+        assert_eq!(request_body["model"], "o3-mini");
+        assert!(request_body.get("stream").is_none());
+        assert_eq!(
+            request_body["reasoning"],
+            json!({
+                "effort": "low",
+                "summary": "auto"
+            })
+        );
+        assert_eq!(result.content.len(), 3);
+        open_responses_assert_generate_reasoning_content(
+            &result,
+            0,
+            INLINE_REASONING_ITEM_ID,
+            INLINE_REASONING_SUMMARY_0,
+            ExpectedEncryptedContent::Null,
+        );
+        open_responses_assert_generate_reasoning_content(
+            &result,
+            1,
+            INLINE_REASONING_ITEM_ID,
+            INLINE_REASONING_SUMMARY_1,
+            ExpectedEncryptedContent::Null,
+        );
+        open_responses_assert_generate_text_content(&result, 2, INLINE_MESSAGE_ID, "answer text");
+        open_responses_assert_inline_reasoning_generate_finish(&result, 34, 538, 320);
+    }
+
+    #[test]
+    fn open_responses_provider_generates_reasoning_with_empty_summary() {
+        let (result, request_body) = open_responses_run_inline_reasoning_generate(
+            "o3-mini",
+            json!({
+                "reasoningEffort": "low",
+                "reasoningSummary": null
+            }),
+            open_responses_single_reasoning_summary_body(None, true),
+        );
+
+        assert_eq!(request_body["model"], "o3-mini");
+        assert!(request_body.get("stream").is_none());
+        assert_eq!(request_body["reasoning"], json!({ "effort": "low" }));
+        assert_eq!(result.content.len(), 2);
+        open_responses_assert_generate_reasoning_content(
+            &result,
+            0,
+            INLINE_REASONING_ITEM_ID,
+            "",
+            ExpectedEncryptedContent::Null,
+        );
+        open_responses_assert_generate_text_content(&result, 1, INLINE_MESSAGE_ID, "answer text");
+        open_responses_assert_inline_reasoning_generate_finish(&result, 34, 538, 320);
+    }
+
+    #[test]
+    fn open_responses_provider_generates_encrypted_reasoning_with_summary_parts() {
+        let (result, request_body) = open_responses_run_inline_reasoning_generate(
+            "o3-mini",
+            json!({
+                "reasoningEffort": "low",
+                "reasoningSummary": "auto",
+                "include": ["reasoning.encrypted_content"]
+            }),
+            open_responses_single_reasoning_summary_body(
+                Some("encrypted_reasoning_data_abc123"),
+                false,
+            ),
+        );
+
+        assert_eq!(
+            request_body["include"],
+            json!(["reasoning.encrypted_content"])
+        );
+        assert_eq!(
+            request_body["reasoning"],
+            json!({
+                "effort": "low",
+                "summary": "auto"
+            })
+        );
+        assert_eq!(result.content.len(), 3);
+        open_responses_assert_generate_reasoning_content(
+            &result,
+            0,
+            INLINE_REASONING_ITEM_ID,
+            INLINE_REASONING_SUMMARY_0,
+            ExpectedEncryptedContent::Value("encrypted_reasoning_data_abc123"),
+        );
+        open_responses_assert_generate_reasoning_content(
+            &result,
+            1,
+            INLINE_REASONING_ITEM_ID,
+            INLINE_REASONING_SUMMARY_1,
+            ExpectedEncryptedContent::Value("encrypted_reasoning_data_abc123"),
+        );
+        open_responses_assert_generate_text_content(&result, 2, INLINE_MESSAGE_ID, "answer text");
+        open_responses_assert_inline_reasoning_generate_finish(&result, 34, 538, 320);
+    }
+
+    #[test]
+    fn open_responses_provider_generates_encrypted_reasoning_with_empty_summary() {
+        let (result, request_body) = open_responses_run_inline_reasoning_generate(
+            "o3-mini",
+            json!({
+                "reasoningEffort": "low",
+                "reasoningSummary": null,
+                "include": ["reasoning.encrypted_content"]
+            }),
+            open_responses_single_reasoning_summary_body(
+                Some("encrypted_reasoning_data_abc123"),
+                true,
+            ),
+        );
+
+        assert_eq!(
+            request_body["include"],
+            json!(["reasoning.encrypted_content"])
+        );
+        assert_eq!(request_body["reasoning"], json!({ "effort": "low" }));
+        assert_eq!(result.content.len(), 2);
+        open_responses_assert_generate_reasoning_content(
+            &result,
+            0,
+            INLINE_REASONING_ITEM_ID,
+            "",
+            ExpectedEncryptedContent::Value("encrypted_reasoning_data_abc123"),
+        );
+        open_responses_assert_generate_text_content(&result, 1, INLINE_MESSAGE_ID, "answer text");
+        open_responses_assert_inline_reasoning_generate_finish(&result, 34, 538, 320);
+    }
+
+    #[test]
+    fn open_responses_provider_generates_multiple_reasoning_blocks() {
+        let (result, request_body) = open_responses_run_inline_reasoning_generate(
+            "o3-mini",
+            json!({
+                "reasoningEffort": "medium",
+                "reasoningSummary": "auto"
+            }),
+            open_responses_multiple_reasoning_blocks_body(),
+        );
+
+        assert_eq!(
+            request_body["reasoning"],
+            json!({
+                "effort": "medium",
+                "summary": "auto"
+            })
+        );
+        assert_eq!(result.content.len(), 5);
+        open_responses_assert_generate_reasoning_content(
+            &result,
+            0,
+            "rs_first_6808709f6fcc8191ad2e2fdd784017b3",
+            "**Initial analysis**\n\nFirst reasoning block: analyzing the problem structure.",
+            ExpectedEncryptedContent::Null,
+        );
+        open_responses_assert_generate_reasoning_content(
+            &result,
+            1,
+            "rs_first_6808709f6fcc8191ad2e2fdd784017b3",
+            "**Deeper consideration**\n\nLet me think about the various approaches available.",
+            ExpectedEncryptedContent::Null,
+        );
+        open_responses_assert_generate_text_content(
+            &result,
+            2,
+            "msg_67c97c02656c81908e080dfdf4a03cd1",
+            "Let me think about this step by step.",
+        );
+        open_responses_assert_generate_reasoning_content(
+            &result,
+            3,
+            "rs_second_7908809g7gcc9291be3e3fee895028c4",
+            "Second reasoning block: considering alternative approaches.",
+            ExpectedEncryptedContent::Null,
+        );
+        open_responses_assert_generate_text_content(
+            &result,
+            4,
+            "msg_final_78d08d03767d92908f25523f5ge51e77",
+            "Based on my analysis, here is the solution.",
+        );
+        open_responses_assert_inline_reasoning_generate_finish(&result, 45, 628, 420);
+    }
+
+    #[test]
     fn open_responses_provider_streams_reasoning_encrypted_content_fixture() {
         let fixture_events = OPEN_RESPONSES_REASONING_ENCRYPTED_CONTENT_CHUNKS_FIXTURE
             .lines()
@@ -28810,6 +29007,48 @@ mod tests {
         "There's a fascinating debate about who created the Mission burrito."
     );
 
+    fn open_responses_run_inline_reasoning_generate(
+        model_id: &str,
+        openai_options: JsonValue,
+        response_body: JsonValue,
+    ) -> (LanguageModelGenerateResult, JsonValue) {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let response_text = response_body.to_string();
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    response_text.clone(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model(model_id);
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": openai_options
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(open_responses_hello_prompt())
+                    .with_provider_options(provider_options),
+            ),
+        );
+        let request_body = captured_open_responses_request_body(&captured_request);
+
+        (result, request_body)
+    }
+
     fn open_responses_run_inline_reasoning_stream(
         model_id: &str,
         openai_options: JsonValue,
@@ -28845,6 +29084,87 @@ mod tests {
         let request_body = captured_open_responses_request_body(&captured_request);
 
         (result.stream, request_body)
+    }
+
+    fn open_responses_single_reasoning_summary_body(
+        encrypted_content: Option<&str>,
+        empty_summary: bool,
+    ) -> JsonValue {
+        json!({
+            "id": INLINE_RESPONSE_ID,
+            "object": "response",
+            "created_at": 1741257730,
+            "status": "completed",
+            "error": null,
+            "incomplete_details": null,
+            "input": [],
+            "instructions": null,
+            "max_output_tokens": null,
+            "model": "o3-mini-2025-01-31",
+            "output": [
+                open_responses_inline_reasoning_item(
+                    INLINE_REASONING_ITEM_ID,
+                    encrypted_content,
+                    Some(if empty_summary {
+                        json!([])
+                    } else {
+                        json!([
+                            {
+                                "type": "summary_text",
+                                "text": INLINE_REASONING_SUMMARY_0
+                            },
+                            {
+                                "type": "summary_text",
+                                "text": INLINE_REASONING_SUMMARY_1
+                            }
+                        ])
+                    })
+                ),
+                {
+                    "id": INLINE_MESSAGE_ID,
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "answer text",
+                            "annotations": []
+                        }
+                    ]
+                }
+            ],
+            "parallel_tool_calls": true,
+            "previous_response_id": null,
+            "reasoning": {
+                "effort": "low",
+                "summary": "auto"
+            },
+            "store": true,
+            "temperature": 1,
+            "text": {
+                "format": {
+                    "type": "text"
+                }
+            },
+            "tool_choice": "auto",
+            "tools": [],
+            "top_p": 1,
+            "truncation": "disabled",
+            "usage": {
+                "input_tokens": 34,
+                "input_tokens_details": {
+                    "cached_tokens": 0
+                },
+                "output_tokens": 538,
+                "output_tokens_details": {
+                    "reasoning_tokens": 320
+                },
+                "total_tokens": 572
+            },
+            "user": null,
+            "metadata": {}
+        })
     }
 
     fn open_responses_single_reasoning_summary_sse(
@@ -29021,6 +29341,103 @@ mod tests {
         ]);
 
         open_responses_sse_from_events(events)
+    }
+
+    fn open_responses_multiple_reasoning_blocks_body() -> JsonValue {
+        json!({
+            "id": INLINE_RESPONSE_ID,
+            "object": "response",
+            "created_at": 1741257730,
+            "status": "completed",
+            "error": null,
+            "incomplete_details": null,
+            "input": [],
+            "instructions": null,
+            "max_output_tokens": null,
+            "model": "o3-mini-2025-01-31",
+            "output": [
+                open_responses_inline_reasoning_item(
+                    "rs_first_6808709f6fcc8191ad2e2fdd784017b3",
+                    None,
+                    Some(json!([
+                        {
+                            "type": "summary_text",
+                            "text": "**Initial analysis**\n\nFirst reasoning block: analyzing the problem structure."
+                        },
+                        {
+                            "type": "summary_text",
+                            "text": "**Deeper consideration**\n\nLet me think about the various approaches available."
+                        }
+                    ]))
+                ),
+                {
+                    "id": "msg_67c97c02656c81908e080dfdf4a03cd1",
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Let me think about this step by step.",
+                            "annotations": []
+                        }
+                    ]
+                },
+                open_responses_inline_reasoning_item(
+                    "rs_second_7908809g7gcc9291be3e3fee895028c4",
+                    None,
+                    Some(json!([
+                        {
+                            "type": "summary_text",
+                            "text": "Second reasoning block: considering alternative approaches."
+                        }
+                    ]))
+                ),
+                {
+                    "id": "msg_final_78d08d03767d92908f25523f5ge51e77",
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Based on my analysis, here is the solution.",
+                            "annotations": []
+                        }
+                    ]
+                }
+            ],
+            "parallel_tool_calls": true,
+            "previous_response_id": null,
+            "reasoning": {
+                "effort": "medium",
+                "summary": "auto"
+            },
+            "store": true,
+            "temperature": null,
+            "text": {
+                "format": {
+                    "type": "text"
+                }
+            },
+            "tool_choice": "auto",
+            "tools": [],
+            "top_p": null,
+            "truncation": "disabled",
+            "usage": {
+                "input_tokens": 45,
+                "input_tokens_details": {
+                    "cached_tokens": 0
+                },
+                "output_tokens": 628,
+                "output_tokens_details": {
+                    "reasoning_tokens": 420
+                },
+                "total_tokens": 673
+            },
+            "user": null,
+            "metadata": {}
+        })
     }
 
     fn open_responses_multiple_reasoning_blocks_sse() -> String {
@@ -29330,6 +29747,60 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn open_responses_assert_generate_reasoning_content(
+        result: &LanguageModelGenerateResult,
+        index: usize,
+        item_id: &str,
+        text: &str,
+        expected_encrypted_content: ExpectedEncryptedContent<'_>,
+    ) {
+        let reasoning = match &result.content[index] {
+            LanguageModelContent::Reasoning(reasoning) => reasoning,
+            other => panic!("expected reasoning content at {index}, got {other:?}"),
+        };
+        assert_eq!(reasoning.text, text);
+        open_responses_assert_reasoning_metadata(
+            &reasoning.provider_metadata,
+            item_id,
+            expected_encrypted_content,
+        );
+    }
+
+    fn open_responses_assert_generate_text_content(
+        result: &LanguageModelGenerateResult,
+        index: usize,
+        item_id: &str,
+        text: &str,
+    ) {
+        let content = match &result.content[index] {
+            LanguageModelContent::Text(content) => content,
+            other => panic!("expected text content at {index}, got {other:?}"),
+        };
+        assert_eq!(content.text, text);
+        assert_eq!(
+            openai_metadata_value(&content.provider_metadata, "itemId").and_then(JsonValue::as_str),
+            Some(item_id)
+        );
+    }
+
+    fn open_responses_assert_inline_reasoning_generate_finish(
+        result: &LanguageModelGenerateResult,
+        input_tokens: u64,
+        output_tokens: u64,
+        reasoning_tokens: u64,
+    ) {
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(input_tokens));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(result.usage.output_tokens.total, Some(output_tokens));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(reasoning_tokens));
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some(INLINE_RESPONSE_ID)
+        );
     }
 
     fn open_responses_reasoning_delta_text(stream: &[LanguageModelStreamPart], id: &str) -> String {
