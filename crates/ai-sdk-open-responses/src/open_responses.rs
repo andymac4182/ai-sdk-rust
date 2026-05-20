@@ -6926,6 +6926,8 @@ mod tests {
         include_str!("fixtures/openai-reasoning-encrypted-content.1.json");
     const OPEN_RESPONSES_REASONING_ENCRYPTED_CONTENT_CHUNKS_FIXTURE: &str =
         include_str!("fixtures/openai-reasoning-encrypted-content.1.chunks.txt");
+    const OPEN_RESPONSES_WEB_SEARCH_TOOL_CHUNKS_FIXTURE: &str =
+        include_str!("fixtures/openai-web-search-tool.1.chunks.txt");
 
     fn openai_metadata_value<'a>(
         provider_metadata: &'a Option<ProviderMetadata>,
@@ -21470,6 +21472,262 @@ mod tests {
                 _ => None,
             }),
             Some(FinishReason::Stop)
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_streams_upstream_web_search_tool_fixture() {
+        let fixture_events = OPEN_RESPONSES_WEB_SEARCH_TOOL_CHUNKS_FIXTURE
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<JsonValue>(line).expect("fixture event parses"))
+            .collect::<Vec<_>>();
+        let completed_response = fixture_events
+            .iter()
+            .find(|event| event["type"].as_str() == Some("response.completed"))
+            .map(|event| &event["response"])
+            .expect("fixture includes completed response");
+        let completed_output = completed_response["output"]
+            .as_array()
+            .expect("fixture completed output is an array");
+        let web_search_items = completed_output
+            .iter()
+            .filter(|item| item["type"].as_str() == Some("web_search_call"))
+            .collect::<Vec<_>>();
+        let message_item = completed_output
+            .iter()
+            .find(|item| item["type"].as_str() == Some("message"))
+            .expect("fixture includes final message");
+        let message_content = &message_item["content"][0];
+        let expected_text = message_content["text"]
+            .as_str()
+            .expect("fixture final message has text");
+        let expected_annotations = &message_content["annotations"];
+
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let sse =
+            open_responses_sse_from_fixture_lines(OPEN_RESPONSES_WEB_SEARCH_TOOL_CHUNKS_FIXTURE);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse.clone()))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-5-nano");
+
+        let result = poll_ready(model.do_stream(
+            LanguageModelCallOptions::new(open_responses_hello_prompt()).with_tool(
+                LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.web_search",
+                    "webSearch",
+                    JsonObject::new(),
+                )),
+            ),
+        ));
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(request_body["model"], "gpt-5-nano");
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "web_search"
+                }
+            ])
+        );
+        assert_eq!(
+            request_body["include"],
+            json!(["web_search_call.action.sources"])
+        );
+
+        let metadata = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ResponseMetadata(metadata) => Some(metadata),
+                _ => None,
+            })
+            .expect("stream includes response metadata");
+        assert_eq!(metadata.id.as_deref(), completed_response["id"].as_str());
+        assert_eq!(
+            metadata.model_id.as_deref(),
+            completed_response["model"].as_str()
+        );
+        assert_eq!(
+            metadata
+                .timestamp
+                .map(|timestamp| timestamp.unix_timestamp()),
+            completed_response["created_at"].as_i64()
+        );
+
+        let reasoning_item_count = completed_output
+            .iter()
+            .filter(|item| item["type"].as_str() == Some("reasoning"))
+            .count();
+        assert_eq!(
+            result
+                .stream
+                .iter()
+                .filter(|part| matches!(part, LanguageModelStreamPart::ReasoningStart(_)))
+                .count(),
+            reasoning_item_count
+        );
+        assert_eq!(
+            result
+                .stream
+                .iter()
+                .filter(|part| matches!(part, LanguageModelStreamPart::ReasoningEnd(_)))
+                .count(),
+            reasoning_item_count
+        );
+
+        let tool_starts = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolInputStart(start)
+                    if start.tool_name == "webSearch" =>
+                {
+                    Some(start)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let tool_calls = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call)
+                    if tool_call.tool_name == "webSearch" =>
+                {
+                    Some(tool_call)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let tool_results = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolResult(tool_result)
+                    if tool_result.tool_name == "webSearch" =>
+                {
+                    Some(tool_result)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(web_search_items.len(), 6);
+        assert_eq!(tool_starts.len(), web_search_items.len());
+        assert_eq!(tool_calls.len(), web_search_items.len());
+        assert_eq!(tool_results.len(), web_search_items.len());
+        for (index, item) in web_search_items.iter().enumerate() {
+            let item_id = item["id"].as_str().expect("web search fixture item has id");
+            assert_eq!(tool_starts[index].id, item_id);
+            assert_eq!(tool_starts[index].provider_executed, Some(true));
+            assert_eq!(tool_calls[index].tool_call_id, item_id);
+            assert_eq!(tool_calls[index].provider_executed, Some(true));
+            assert_eq!(tool_calls[index].input, "{}");
+            assert_eq!(tool_results[index].tool_call_id, item_id);
+
+            let action = item["action"]
+                .as_object()
+                .expect("web search item has action");
+            let result_value = tool_results[index].result.as_value();
+            let expected_action_type = match action.get("type").and_then(JsonValue::as_str) {
+                Some("open_page") => "openPage",
+                Some("find_in_page") => "findInPage",
+                Some(action_type) => action_type,
+                None => panic!("web search action has type"),
+            };
+            assert_eq!(
+                result_value["action"]["type"].as_str(),
+                Some(expected_action_type)
+            );
+            if let Some(query) = action.get("query") {
+                assert_eq!(result_value["action"]["query"], *query);
+            }
+            if let Some(url) = action.get("url") {
+                assert_eq!(result_value["action"]["url"], *url);
+            }
+            if let Some(pattern) = action.get("pattern") {
+                assert_eq!(result_value["action"]["pattern"], *pattern);
+            }
+            if let Some(sources) = action.get("sources") {
+                assert_eq!(result_value["sources"], *sources);
+            } else {
+                assert!(result_value.get("sources").is_none());
+            }
+        }
+
+        let actual_text = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) => Some(delta.delta.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(actual_text, expected_text);
+
+        let sources = open_responses_stream_sources(&result.stream);
+        assert_eq!(
+            sources.len(),
+            expected_annotations
+                .as_array()
+                .expect("fixture annotations are an array")
+                .len()
+        );
+        let text_end = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextEnd(text_end)
+                    if text_end.id == message_item["id"].as_str().unwrap_or_default() =>
+                {
+                    Some(text_end)
+                }
+                _ => None,
+            })
+            .expect("stream includes final text end");
+        assert_eq!(
+            openai_metadata_value(&text_end.provider_metadata, "annotations"),
+            Some(expected_annotations)
+        );
+
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(finish.finish_reason.raw, None);
+        assert_eq!(finish.usage.input_tokens.total, Some(31_073));
+        assert_eq!(finish.usage.input_tokens.cache_read, Some(3_712));
+        assert_eq!(finish.usage.input_tokens.no_cache, Some(27_361));
+        assert_eq!(finish.usage.output_tokens.total, Some(4_416));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(3_712));
+        assert_eq!(finish.usage.output_tokens.text, Some(704));
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            completed_response["id"].as_str()
+        );
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "serviceTier")
+                .and_then(JsonValue::as_str),
+            Some("default")
         );
     }
 
