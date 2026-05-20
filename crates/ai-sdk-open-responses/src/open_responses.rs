@@ -19705,7 +19705,8 @@ mod tests {
         let provider_options: ProviderOptions = serde_json::from_value(json!({
             "openai": {
                 "allowedTools": {
-                    "toolNames": ["get_weather"]
+                    "toolNames": ["weather"],
+                    "mode": "auto"
                 }
             }
         }))
@@ -19720,7 +19721,7 @@ mod tests {
                 )])
                 .with_tool(LanguageModelTool::Function(
                     LanguageModelFunctionTool::new(
-                        "get_weather",
+                        "weather",
                         json_object(json!({
                             "type": "object",
                             "properties": {}
@@ -19730,15 +19731,14 @@ mod tests {
                 ))
                 .with_tool(LanguageModelTool::Function(
                     LanguageModelFunctionTool::new(
-                        "get_time",
+                        "cityAttractions",
                         json_object(json!({
                             "type": "object",
                             "properties": {}
                         })),
                     )
-                    .with_description("Get time"),
+                    .with_description("Find city attractions"),
                 ))
-                .with_tool_choice(LanguageModelToolChoice::Required)
                 .with_provider_options(provider_options),
             ),
         );
@@ -19760,7 +19760,7 @@ mod tests {
             json!([
                 {
                     "type": "function",
-                    "name": "get_weather",
+                    "name": "weather",
                     "description": "Get weather",
                     "parameters": {
                         "type": "object",
@@ -19769,8 +19769,8 @@ mod tests {
                 },
                 {
                     "type": "function",
-                    "name": "get_time",
-                    "description": "Get time",
+                    "name": "cityAttractions",
+                    "description": "Find city attractions",
                     "parameters": {
                         "type": "object",
                         "properties": {}
@@ -19786,7 +19786,7 @@ mod tests {
                 "tools": [
                     {
                         "type": "function",
-                        "name": "get_weather"
+                        "name": "weather"
                     }
                 ]
             })
@@ -19903,6 +19903,117 @@ mod tests {
                     {
                         "type": "function",
                         "name": "cityAttractions"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_allowed_tools_overrides_request_tool_choice() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_allowed_tools_override",
+                        "created_at": 1711115037,
+                        "model": "gpt-4.1-mini",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Allowed tools override accepted"
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 6,
+                            "output_tokens": 4
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4.1-mini");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "allowedTools": {
+                    "toolNames": ["weather"]
+                }
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Use one allowed tool"),
+                    )]),
+                )])
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "weather",
+                        json_object(json!({
+                            "type": "object",
+                            "properties": {}
+                        })),
+                    )
+                    .with_description("Get weather"),
+                ))
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "cityAttractions",
+                        json_object(json!({
+                            "type": "object",
+                            "properties": {}
+                        })),
+                    )
+                    .with_description("Find city attractions"),
+                ))
+                .with_tool_choice(LanguageModelToolChoice::Required)
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON");
+
+        assert_eq!(
+            request_body["tool_choice"],
+            json!({
+                "type": "allowed_tools",
+                "mode": "auto",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "weather"
                     }
                 ]
             })
