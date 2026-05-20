@@ -7647,6 +7647,13 @@ mod tests {
         }
     }
 
+    fn header_map<const N: usize>(entries: [(&str, &str); N]) -> BTreeMap<String, String> {
+        entries
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    }
+
     fn poll_until_ready<T>(future: impl Future<Output = T>) -> T {
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);
@@ -7928,6 +7935,201 @@ mod tests {
         let failure: Resolvable<'_, Result<&str, &str>> =
             Resolvable::function(|| ready(Err("bad")));
         assert_eq!(poll_ready(resolve(failure)), Err("bad"));
+    }
+
+    #[test]
+    fn resolve_upstream_should_resolve_raw_values() {
+        let value: Resolvable<'_, i32> = Resolvable::value(42);
+
+        assert_eq!(poll_ready(resolve(value)), 42);
+    }
+
+    #[test]
+    fn resolve_upstream_should_resolve_raw_objects() {
+        let value: Resolvable<'_, JsonValue> = Resolvable::value(json!({
+            "foo": "bar"
+        }));
+
+        assert_eq!(
+            poll_ready(resolve(value)),
+            json!({
+                "foo": "bar"
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_upstream_should_resolve_promises() {
+        let value: Resolvable<'_, &str> = Resolvable::future(ready("hello"));
+
+        assert_eq!(poll_ready(resolve(value)), "hello");
+    }
+
+    #[test]
+    fn resolve_upstream_should_resolve_rejected_promises() {
+        let value: Resolvable<'_, Result<&str, &str>> =
+            Resolvable::future(ready(Err("test error")));
+
+        assert_eq!(poll_ready(resolve(value)), Err("test error"));
+    }
+
+    #[test]
+    fn resolve_upstream_should_resolve_synchronous_functions() {
+        let value: Resolvable<'_, i32> = Resolvable::lazy_value(|| 42);
+
+        assert_eq!(poll_ready(resolve(value)), 42);
+    }
+
+    #[test]
+    fn resolve_upstream_should_resolve_synchronous_functions_returning_objects() {
+        let value: Resolvable<'_, JsonValue> = Resolvable::lazy_value(|| {
+            json!({
+                "foo": "bar"
+            })
+        });
+
+        assert_eq!(
+            poll_ready(resolve(value)),
+            json!({
+                "foo": "bar"
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_upstream_should_resolve_async_functions() {
+        let value: Resolvable<'_, &str> = Resolvable::function(|| async { "hello" });
+
+        assert_eq!(poll_ready(resolve(value)), "hello");
+    }
+
+    #[test]
+    fn resolve_upstream_should_resolve_async_functions_returning_promises() {
+        let value: Resolvable<'_, i32> = Resolvable::function(|| ready(42));
+
+        assert_eq!(poll_ready(resolve(value)), 42);
+    }
+
+    #[test]
+    fn resolve_upstream_should_handle_async_function_rejections() {
+        let value: Resolvable<'_, Result<&str, &str>> =
+            Resolvable::function(|| ready(Err("async error")));
+
+        assert_eq!(poll_ready(resolve(value)), Err("async error"));
+    }
+
+    #[test]
+    fn resolve_upstream_should_handle_null() {
+        let value: Resolvable<'_, JsonValue> = Resolvable::value(JsonValue::Null);
+
+        assert_eq!(poll_ready(resolve(value)), JsonValue::Null);
+    }
+
+    #[test]
+    fn resolve_upstream_should_handle_undefined() {
+        let value: Resolvable<'_, Option<String>> = Resolvable::value(None);
+
+        assert_eq!(poll_ready(resolve(value)), None);
+    }
+
+    #[test]
+    fn resolve_upstream_should_resolve_nested_objects() {
+        let value: Resolvable<'_, JsonValue> = Resolvable::value(json!({
+            "nested": {
+                "value": 42
+            }
+        }));
+
+        assert_eq!(
+            poll_ready(resolve(value)),
+            json!({
+                "nested": {
+                    "value": 42
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_headers_upstream_should_resolve_header_objects() {
+        let headers = header_map([("Content-Type", "application/json")]);
+
+        assert_eq!(
+            poll_ready(resolve(Resolvable::value(headers.clone()))),
+            headers
+        );
+    }
+
+    #[test]
+    fn resolve_headers_upstream_should_resolve_header_functions() {
+        let value = Resolvable::lazy_value(|| header_map([("Authorization", "Bearer token")]));
+
+        assert_eq!(
+            poll_ready(resolve(value)),
+            header_map([("Authorization", "Bearer token")])
+        );
+    }
+
+    #[test]
+    fn resolve_headers_upstream_should_resolve_async_header_functions() {
+        let value = Resolvable::function(|| async { header_map([("X-Custom", "value")]) });
+
+        assert_eq!(
+            poll_ready(resolve(value)),
+            header_map([("X-Custom", "value")])
+        );
+    }
+
+    #[test]
+    fn resolve_headers_upstream_should_resolve_header_promises() {
+        let value = Resolvable::future(ready(header_map([("Accept", "application/json")])));
+
+        assert_eq!(
+            poll_ready(resolve(value)),
+            header_map([("Accept", "application/json")])
+        );
+    }
+
+    #[test]
+    fn resolve_headers_upstream_reinvokes_async_header_function_each_time() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let make_headers = |counter: Arc<AtomicUsize>| {
+            Resolvable::function(move || async move {
+                let request_number = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                header_map([("X-Request-Number", &request_number.to_string())])
+            })
+        };
+
+        assert_eq!(
+            poll_ready(resolve(make_headers(Arc::clone(&counter)))),
+            header_map([("X-Request-Number", "1")])
+        );
+        assert_eq!(
+            poll_ready(resolve(make_headers(Arc::clone(&counter)))),
+            header_map([("X-Request-Number", "2")])
+        );
+        assert_eq!(
+            poll_ready(resolve(make_headers(counter))),
+            header_map([("X-Request-Number", "3")])
+        );
+    }
+
+    #[test]
+    fn resolve_upstream_should_maintain_type_information() {
+        struct User {
+            id: u64,
+            name: String,
+        }
+
+        let user_promise: Resolvable<'_, User> = Resolvable::future(ready(User {
+            id: 1,
+            name: "Test User".to_string(),
+        }));
+
+        let result = poll_ready(resolve(user_promise));
+
+        assert_eq!(result.id, 1);
+        assert_eq!(result.name, "Test User");
     }
 
     #[test]
