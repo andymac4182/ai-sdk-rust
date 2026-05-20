@@ -16494,6 +16494,175 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_streams_file_search_without_results_include() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport = Arc::new(
+            move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                let sse = [
+                    r#"data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_0459517ad68504ad0068cabfba22b88192836339640e9a765a","object":"response","created_at":1758117818,"status":"in_progress","model":"gpt-5-mini-2025-08-07","output":[],"parallel_tool_calls":true,"reasoning":{"effort":"medium","summary":null},"store":true,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"file_search","filters":null,"max_num_results":20,"ranking_options":{"ranker":"auto","score_threshold":0},"vector_store_ids":["vs_68caad8bd5d88191ab766cf043d89a18"]}],"usage":null,"metadata":{}}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","sequence_number":4,"output_index":1,"item":{"id":"fs_0459517ad68504ad0068cabfbd76888192a5dc4475fadabf8a","type":"file_search_call","status":"in_progress","queries":[],"results":null}}"#,
+                    "",
+                    r#"data: {"type":"response.file_search_call.in_progress","sequence_number":5,"output_index":1,"item_id":"fs_0459517ad68504ad0068cabfbd76888192a5dc4475fadabf8a"}"#,
+                    "",
+                    r#"data: {"type":"response.file_search_call.searching","sequence_number":6,"output_index":1,"item_id":"fs_0459517ad68504ad0068cabfbd76888192a5dc4475fadabf8a"}"#,
+                    "",
+                    r#"data: {"type":"response.file_search_call.completed","sequence_number":7,"output_index":1,"item_id":"fs_0459517ad68504ad0068cabfbd76888192a5dc4475fadabf8a"}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","sequence_number":8,"output_index":1,"item":{"id":"fs_0459517ad68504ad0068cabfbd76888192a5dc4475fadabf8a","type":"file_search_call","status":"completed","queries":["What is an embedding model according to this document?","What is an embedding model defined as in the document?","definition of embedding model"],"results":null}}"#,
+                    "",
+                    r#"data: {"type":"response.completed","sequence_number":93,"response":{"id":"resp_0459517ad68504ad0068cabfba22b88192836339640e9a765a","object":"response","created_at":1758117818,"status":"completed","model":"gpt-5-mini-2025-08-07","output":[{"id":"fs_0459517ad68504ad0068cabfbd76888192a5dc4475fadabf8a","type":"file_search_call","status":"completed","queries":["What is an embedding model according to this document?","What is an embedding model defined as in the document?","definition of embedding model"],"results":null}],"usage":{"input_tokens":3737,"input_tokens_details":{"cached_tokens":2304},"output_tokens":621,"output_tokens_details":{"reasoning_tokens":512},"total_tokens":4358}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-5-nano");
+
+        let result = poll_ready(model.do_stream(open_responses_file_search_call_options(None)));
+
+        let tool_call = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .expect("stream includes file search tool call");
+        assert_eq!(
+            tool_call.tool_call_id,
+            "fs_0459517ad68504ad0068cabfbd76888192a5dc4475fadabf8a"
+        );
+        assert_eq!(tool_call.tool_name, "fileSearch");
+        assert_eq!(tool_call.input, "{}");
+        assert_eq!(tool_call.provider_executed, Some(true));
+
+        let tool_result = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .expect("stream includes file search tool result");
+        assert_eq!(tool_result.tool_name, "fileSearch");
+        assert_eq!(
+            tool_result.result.as_value(),
+            &json!({
+                "queries": [
+                    "What is an embedding model according to this document?",
+                    "What is an embedding model defined as in the document?",
+                    "definition of embedding model"
+                ],
+                "results": null
+            })
+        );
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert!(request_body.get("include").is_none());
+        assert_eq!(
+            request_body["tools"][0],
+            json!({
+                "type": "file_search",
+                "vector_store_ids": ["vs_68caad8bd5d88191ab766cf043d89a18"]
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_streams_file_search_with_results_include() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport = Arc::new(
+            move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                let sse = [
+                    r#"data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_06456cb9918b63780068cacd710b0881a1b00b5fca56e7100b","object":"response","created_at":1758121329,"status":"in_progress","model":"gpt-5-mini-2025-08-07","output":[],"parallel_tool_calls":true,"reasoning":{"effort":"medium","summary":null},"store":true,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"file_search","filters":null,"max_num_results":20,"ranking_options":{"ranker":"auto","score_threshold":0},"vector_store_ids":["vs_68caad8bd5d88191ab766cf043d89a18"]}],"usage":null,"metadata":{}}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","sequence_number":4,"output_index":1,"item":{"id":"fs_06456cb9918b63780068cacd74a1dc81a1bf68dd57f140b4b6","type":"file_search_call","status":"in_progress","queries":[],"results":null}}"#,
+                    "",
+                    r#"data: {"type":"response.file_search_call.in_progress","sequence_number":5,"output_index":1,"item_id":"fs_06456cb9918b63780068cacd74a1dc81a1bf68dd57f140b4b6"}"#,
+                    "",
+                    r#"data: {"type":"response.file_search_call.searching","sequence_number":6,"output_index":1,"item_id":"fs_06456cb9918b63780068cacd74a1dc81a1bf68dd57f140b4b6"}"#,
+                    "",
+                    r#"data: {"type":"response.file_search_call.completed","sequence_number":7,"output_index":1,"item_id":"fs_06456cb9918b63780068cacd74a1dc81a1bf68dd57f140b4b6"}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","sequence_number":8,"output_index":1,"item":{"id":"fs_06456cb9918b63780068cacd74a1dc81a1bf68dd57f140b4b6","type":"file_search_call","status":"completed","queries":["What is an embedding model according to this document?","What is an embedding model definition in this document?","How does the document define an embedding model?"],"results":[{"attributes":{},"file_id":"file-Ebzhf8H4DPGPr9pUhr7n7v","filename":"ai.pdf","score":0.9312,"text":"An embedding model is used to convert complex data."}]}}"#,
+                    "",
+                    r#"data: {"type":"response.completed","sequence_number":92,"response":{"id":"resp_06456cb9918b63780068cacd710b0881a1b00b5fca56e7100b","object":"response","created_at":1758121329,"status":"completed","model":"gpt-5-mini-2025-08-07","output":[{"id":"fs_06456cb9918b63780068cacd74a1dc81a1bf68dd57f140b4b6","type":"file_search_call","status":"completed","queries":["What is an embedding model according to this document?","What is an embedding model definition in this document?","How does the document define an embedding model?"],"results":[{"attributes":{},"file_id":"file-Ebzhf8H4DPGPr9pUhr7n7v","filename":"ai.pdf","score":0.9312,"text":"An embedding model is used to convert complex data."}]}],"usage":{"input_tokens":3748,"input_tokens_details":{"cached_tokens":2304},"output_tokens":543,"output_tokens_details":{"reasoning_tokens":448},"total_tokens":4291}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-5-nano");
+
+        let result = poll_ready(
+            model.do_stream(open_responses_file_search_call_options(Some(
+                openai_file_search_results_include_options(),
+            ))),
+        );
+
+        let tool_result = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .expect("stream includes file search tool result");
+        assert_eq!(tool_result.tool_name, "fileSearch");
+        assert_eq!(
+            tool_result.result.as_value(),
+            &json!({
+                "queries": [
+                    "What is an embedding model according to this document?",
+                    "What is an embedding model definition in this document?",
+                    "How does the document define an embedding model?"
+                ],
+                "results": [
+                    {
+                        "attributes": {},
+                        "fileId": "file-Ebzhf8H4DPGPr9pUhr7n7v",
+                        "filename": "ai.pdf",
+                        "score": 0.9312,
+                        "text": "An embedding model is used to convert complex data."
+                    }
+                ]
+            })
+        );
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(request_body["include"], json!(["file_search_call.results"]));
+    }
+
+    #[test]
     fn open_responses_provider_maps_web_search_api_sources_and_missing_action() {
         let transport: OpenResponsesTransport =
             Arc::new(move |_request| -> OpenResponsesTransportFuture {
@@ -17572,6 +17741,35 @@ mod tests {
             }
         }))
         .expect("provider options deserialize")
+    }
+
+    fn openai_file_search_results_include_options() -> ProviderOptions {
+        serde_json::from_value(json!({
+            "openai": {
+                "include": ["file_search_call.results"]
+            }
+        }))
+        .expect("provider options deserialize")
+    }
+
+    fn open_responses_file_search_call_options(
+        provider_options: Option<ProviderOptions>,
+    ) -> LanguageModelCallOptions {
+        let mut options = LanguageModelCallOptions::new(open_responses_hello_prompt()).with_tool(
+            LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                "openai.file_search",
+                "fileSearch",
+                json_object(json!({
+                    "vectorStoreIds": ["vs_68caad8bd5d88191ab766cf043d89a18"]
+                })),
+            )),
+        );
+
+        if let Some(provider_options) = provider_options {
+            options = options.with_provider_options(provider_options);
+        }
+
+        options
     }
 
     fn open_responses_client_tool_search_call_options() -> LanguageModelCallOptions {

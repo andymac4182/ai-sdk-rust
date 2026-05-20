@@ -124,7 +124,17 @@ still open.
    JavaScript-only concepts such as `AbortSignal`.
 3. Add focused serialization/deserialization and behavior tests for every new
    public contract.
-4. For provider-backed behavior, require two layers of proof before marking a
+4. Port EVERY portable test from the original upstream TypeScript package into
+   Rust before marking that package row `verified`. This is a hard minimum:
+   Rust may add more tests for Rust-specific safety, typing, and failure modes,
+   but it must never have fewer portable tests than upstream. Every
+   `*.test.ts`, `*.test.tsx`, `*.test-d.ts`, `*.test-d.tsx`, `*.spec.ts`, and
+   `*.spec.tsx` case must have an equivalent Rust test in the matching 1:1
+   crate, including table-driven cases, fixture/snapshot-equivalent cases,
+   streaming edge cases, error paths, provider option serialization, and
+   type-level assertions where Rust can express them. Missing upstream tests are
+   missing parity, even if broader Rust tests happen to cover similar behavior.
+5. For provider-backed behavior, require two layers of proof before marking a
    row `verified`: deterministic fake/mock/transport tests that run in normal
    validation, plus credential-gated live provider validation when a usable
    credential exists. Live validation must be opt-in (`#[ignore]` tests or
@@ -133,31 +143,31 @@ still open.
    If live credentials or the upstream API are unavailable, the ledger must say
    so explicitly; passing deterministic tests alone is not enough to claim
    real-provider verification.
-5. For OTel/telemetry behavior, require deterministic span-attribute tests plus
+6. For OTel/telemetry behavior, require deterministic span-attribute tests plus
    local OTLP/HTTP export validation before marking OTel-backed rows
    `verified`. The local validation should use the loopback OTLP receiver or a
    local OpenTelemetry Collector endpoint, assert the emitted wire payload, and
    not rely on external credentials. Once root telemetry wiring exists,
    provider live tests should run with telemetry enabled and verify the emitted
    OTLP data through that local receiver or collector.
-6. Enforce strict 1:1 crate/package ownership now. Every portable upstream
+7. Enforce strict 1:1 crate/package ownership now. Every portable upstream
    `vercel/ai` TypeScript package that gains Rust API must have exactly one
    matching Rust workspace crate before that API lands, and no Rust crate may
    own APIs from more than one upstream package. This is a merge-blocking
    acceptance gate for every iteration, not cleanup for a later pass.
-7. Treat the current root-crate consolidation as active architecture debt. We
+8. Treat the current root-crate consolidation as active architecture debt. We
    are already merging multiple TypeScript packages into one Rust crate today,
    and every additional package folded into that crate makes the future split
    harder, more coupled, and more breaking. New package-owned implementation
    must not be staged in the root crate or any other consolidated crate. If the
    matching crate does not exist yet, create it first.
-8. Treat the root crate as a facade, not an implementation home or staging
+9. Treat the root crate as a facade, not an implementation home or staging
    area. It may aggregate re-exports and compatibility shims, and if it is the
    Rust equivalent of `packages/ai`, it may own only that package's API. It
    must not also own provider contracts, provider utilities, provider
    implementations, MCP, workflow, telemetry, adapters, or other
    package-owned surfaces.
-9. Before adding or reviewing API for any upstream TypeScript package, create
+10. Before adding or reviewing API for any upstream TypeScript package, create
    or use its matching Rust crate and put the package-owned types and
    implementation there. A parity slice that ports a TypeScript package without
    creating or using its matching Rust crate is blocked, incomplete, and not
@@ -165,30 +175,30 @@ still open.
    Passing tests in the wrong crate prove behavior, not parity. A package row
    cannot be marked `verified` while its portable implementation is owned by
    the wrong crate.
-10. Do not use temporary staging exceptions for new package-owned
+11. Do not use temporary staging exceptions for new package-owned
    implementation. A temporary exception may only cover an unavoidable
    transitional shim or extraction of existing root-crate debt, and it must be
    documented in the ledger with the destination crate, the reason the matching
    crate cannot land in the same slice, and the smallest concrete extraction
    follow-up. Do not use this exception for convenience, to land a working
    implementation faster, or to keep merging unrelated packages into one crate.
-11. Build and verify high-level APIs against deterministic fake/test models
+12. Build and verify high-level APIs against deterministic fake/test models
    before adding real provider networking.
-12. `generate_text(...)` and tool loops remain an early vertical-slice priority:
+13. `generate_text(...)` and tool loops remain an early vertical-slice priority:
    prove prompts/settings, model calls, tool calls, typed Rust tools, tool
    results, continuation until final text/max steps, and `GenerateTextResult`.
-13. Add deterministic end-to-end tests for plain text generation, single tool
+14. Add deterministic end-to-end tests for plain text generation, single tool
    call, multi-step tool call, tool error, unknown tool, invalid tool args, max
    step exhaustion, streaming/event sequences, structured output, provider
    metadata, and every additional high-level API as it lands.
-14. Ban vague generic naming such as `helpers`, `utils`, `common`, `misc`,
+15. Ban vague generic naming such as `helpers`, `utils`, `common`, `misc`,
    `stuff`, `shared`, and similar buckets in source paths, module names, crate
    names, public APIs, and docs. Prefer precise responsibility names. Add or
    improve a custom check to enforce this convention. Document explicit
    exceptions only when mirroring upstream package names.
-15. Do not churn dependencies, CI, or unrelated modules unless the next SDK
+16. Do not churn dependencies, CI, or unrelated modules unless the next SDK
     slice genuinely requires it.
-16. Work in this order as a hard gate: finish ALL common/core SDK packages
+17. Work in this order as a hard gate: finish ALL common/core SDK packages
     together with Vercel AI Gateway provider coverage first, then return to the
     remaining standalone providers. The first phase includes `packages/ai`,
     `packages/provider`, `packages/provider-utils`, `packages/openai-compatible`,
@@ -201,17 +211,17 @@ still open.
     not "pick another provider after Gateway has some coverage"; it is "finish
     the whole common/core plus Vercel AI Gateway phase, then pick the remaining
     providers."
-17. Port every upstream provider package in its matching crate. Prefer
+18. Port every upstream provider package in its matching crate. Prefer
     contract-first typed provider crates with fake/deterministic tests, then add
     HTTP/gateway-backed integration tests where credentials are available. Do
     not add root modules for provider-owned API except re-export shims or
     cross-crate primitives that are not owned by the provider package.
-18. Port examples and docs once the corresponding API works. Rust examples
+19. Port examples and docs once the corresponding API works. Rust examples
     should be runnable and should map clearly to upstream examples.
-19. When enough works end to end, add a kitchen sink example app that
+20. When enough works end to end, add a kitchen sink example app that
     demonstrates working generate text, tool execution, provider contracts, and
     any available gateway-backed validation.
-20. Keep expanding until the parity ledger is complete. A single slice is never
+21. Keep expanding until the parity ledger is complete. A single slice is never
     enough unless the ledger already proves full upstream parity.
 
 ## Parallel Work
@@ -358,13 +368,16 @@ You are done only when:
 2. Every ledger item is `verified` or `js-only-documented`.
 3. The Rust crate/workspace has validated equivalents for all portable
    upstream surfaces.
-4. The Rust workspace has a strict 1:1 crate mapping for every portable
+4. Every portable test from the original upstream TypeScript packages exists as
+   an equivalent Rust test in the matching crate. Rust may have more tests, but
+   it must not have fewer portable tests than upstream.
+5. The Rust workspace has a strict 1:1 crate mapping for every portable
    upstream TypeScript package: one matching Rust crate per package, no Rust
    crate owning APIs from multiple upstream packages, and the root crate limited
    to the `packages/ai` facade plus aggregate re-exports and compatibility
    shims. Existing root-crate package debt must be extracted before completion.
    Until then it is incomplete and cannot count as verified parity.
-5. The full validation suite passes.
-6. The final complete slice is merged to `main` and pushed.
+6. The full validation suite passes.
+7. The final complete slice is merged to `main` and pushed.
 
 If any ledger item remains `not-started` or `in-progress`, keep working.
