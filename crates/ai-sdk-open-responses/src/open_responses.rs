@@ -11283,6 +11283,85 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_warns_for_reasoning_effort_on_non_reasoning_models() {
+        let non_reasoning_model_ids = [
+            "gpt-4.1",
+            "gpt-4.1-2025-04-14",
+            "gpt-4.1-mini",
+            "gpt-4.1-mini-2025-04-14",
+            "gpt-4.1-nano",
+            "gpt-4.1-nano-2025-04-14",
+            "gpt-4o",
+            "gpt-4o-2024-05-13",
+            "gpt-4o-2024-08-06",
+            "gpt-4o-2024-11-20",
+            "gpt-4o-audio-preview",
+            "gpt-4o-audio-preview-2024-12-17",
+            "gpt-4o-search-preview",
+            "gpt-4o-search-preview-2025-03-11",
+            "gpt-4o-mini-search-preview",
+            "gpt-4o-mini-search-preview-2025-03-11",
+            "gpt-4o-mini",
+            "gpt-4o-mini-2024-07-18",
+            "gpt-3.5-turbo-0125",
+            "gpt-3.5-turbo",
+            "gpt-3.5-turbo-1106",
+            "gpt-5-chat-latest",
+        ];
+
+        for model_id in non_reasoning_model_ids {
+            let (provider, captured_request) = open_responses_captured_provider("openai", model_id);
+            let provider_options: ProviderOptions = serde_json::from_value(json!({
+                "openai": {
+                    "reasoningEffort": "low"
+                }
+            }))
+            .expect("provider options deserialize");
+            let model = provider.language_model(model_id);
+
+            let result = poll_ready(
+                model.do_generate(
+                    LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                        LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                            LanguageModelTextPart::new("Hello"),
+                        )]),
+                    )])
+                    .with_provider_options(provider_options),
+                ),
+            );
+
+            assert_eq!(
+                unsupported_warning_details(&result.warnings),
+                vec![(
+                    "reasoningEffort",
+                    Some("reasoningEffort is not supported for non-reasoning models")
+                )],
+                "unexpected warnings for {model_id}"
+            );
+            let request_body = captured_open_responses_request_body(&captured_request);
+            assert_eq!(
+                request_body,
+                json!({
+                    "model": model_id,
+                    "input": [
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": "Hello"
+                                }
+                            ]
+                        }
+                    ]
+                }),
+                "unexpected request body for {model_id}"
+            );
+        }
+    }
+
+    #[test]
     fn open_responses_provider_validates_openai_service_tier_model_capabilities() {
         let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
         let captured_requests_for_transport = Arc::clone(&captured_requests);
