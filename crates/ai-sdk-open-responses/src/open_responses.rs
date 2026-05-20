@@ -5711,7 +5711,16 @@ fn open_responses_stream_result_from_response(
                     Some("response.failed") => {
                         if let Some(response) = open_responses_event_response(&value) {
                             usage = open_responses_usage(response.get("usage"));
-                            if !saw_error_event {
+                            if let Some(incomplete_reason) = response
+                                .get("incomplete_details")
+                                .and_then(|details| details.get("reason"))
+                                .and_then(JsonValue::as_str)
+                            {
+                                finish_reason = map_open_responses_finish_reason(
+                                    Some(incomplete_reason),
+                                    false,
+                                );
+                            } else if !saw_error_event {
                                 finish_reason = LanguageModelFinishReason {
                                     unified: FinishReason::Error,
                                     raw: open_responses_failed_raw_finish_reason(response),
@@ -21577,6 +21586,81 @@ mod tests {
             openai_metadata_value(&finish.provider_metadata, "responseId"),
             Some(&json!("resp_stream_openai_error"))
         );
+    }
+
+    #[test]
+    fn open_responses_provider_streams_failed_response_incomplete_details_finish_reason() {
+        let transport: OpenResponsesTransport = Arc::new(
+            move |_request| -> OpenResponsesTransportFuture {
+                let sse = [
+                    r#"data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_failed_with_reason","created_at":1741269019,"model":"gpt-4o-2024-07-18","service_tier":null}}"#,
+                    "",
+                    r#"data: {"type":"error","sequence_number":1,"error":{"type":"server_error","code":"server_error","message":"response failed","param":null}}"#,
+                    "",
+                    r#"data: {"type":"response.failed","sequence_number":2,"response":{"error":{"code":"server_error","message":"response failed"},"incomplete_details":{"reason":"max_output_tokens"},"usage":null,"service_tier":null}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse)
+                    .with_headers(Headers::from([(
+                        "content-type".to_string(),
+                        "text/event-stream".to_string(),
+                    )])))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4o-mini");
+
+        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Say hello")),
+            ])),
+        ])));
+
+        let error = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Error(error) => Some(&error.error),
+                _ => None,
+            })
+            .expect("stream includes error event");
+        assert_eq!(error.get("type").and_then(JsonValue::as_str), Some("error"));
+        assert_eq!(error.get("sequence_number"), Some(&json!(1)));
+        assert_eq!(
+            error
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(JsonValue::as_str),
+            Some("server_error")
+        );
+
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Length);
+        assert_eq!(
+            finish.finish_reason.raw.as_deref(),
+            Some("max_output_tokens")
+        );
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId"),
+            Some(&json!("resp_failed_with_reason"))
+        );
+        assert!(finish.usage.input_tokens.total.is_none());
+        assert!(finish.usage.output_tokens.total.is_none());
     }
 
     #[test]
