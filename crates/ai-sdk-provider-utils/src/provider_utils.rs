@@ -742,6 +742,96 @@ impl SerializedModelOptions {
     }
 }
 
+/// Runtime value used to check whether data can cross a JSON serialization boundary.
+///
+/// Rust's [`JsonValue`] cannot contain JavaScript functions, symbols, bigints,
+/// dates, regular expressions, class instances, or null-prototype objects. This
+/// enum models those upstream runtime values explicitly so
+/// [`is_json_serializable`] can mirror provider-utils `isJSONSerializable`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum JsonSerializableValue {
+    /// JavaScript `undefined`, accepted by the upstream helper.
+    Undefined,
+
+    /// A value already represented by JSON.
+    Json(JsonValue),
+
+    /// JavaScript array-like values, including entries that may be unsupported.
+    Array(Vec<JsonSerializableValue>),
+
+    /// Plain object values with recursively checked properties.
+    PlainObject(BTreeMap<String, JsonSerializableValue>),
+
+    /// JavaScript function value.
+    Function,
+
+    /// JavaScript symbol value.
+    Symbol,
+
+    /// JavaScript bigint value.
+    BigInt,
+
+    /// Non-plain JavaScript object, such as Date, RegExp, class instance, or
+    /// null-prototype object.
+    NonPlainObject(String),
+}
+
+impl JsonSerializableValue {
+    /// Creates a JSON-backed serializable value.
+    pub fn json(value: impl Into<JsonValue>) -> Self {
+        Self::Json(value.into())
+    }
+
+    /// Creates a JavaScript array-like value.
+    pub fn array(values: impl IntoIterator<Item = JsonSerializableValue>) -> Self {
+        Self::Array(values.into_iter().collect())
+    }
+
+    /// Creates a JavaScript plain object-like value.
+    pub fn plain_object<K, I>(entries: I) -> Self
+    where
+        I: IntoIterator<Item = (K, JsonSerializableValue)>,
+        K: Into<String>,
+    {
+        Self::PlainObject(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.into(), value))
+                .collect(),
+        )
+    }
+
+    /// Creates a named non-plain JavaScript object value.
+    pub fn non_plain_object(kind: impl Into<String>) -> Self {
+        Self::NonPlainObject(kind.into())
+    }
+}
+
+impl From<JsonValue> for JsonSerializableValue {
+    fn from(value: JsonValue) -> Self {
+        Self::Json(value)
+    }
+}
+
+impl From<Option<JsonValue>> for JsonSerializableValue {
+    fn from(value: Option<JsonValue>) -> Self {
+        value.map_or(Self::Undefined, Self::Json)
+    }
+}
+
+/// Checks whether a value can cross a JSON serialization boundary.
+pub fn is_json_serializable(value: &JsonSerializableValue) -> bool {
+    match value {
+        JsonSerializableValue::Undefined | JsonSerializableValue::Json(_) => true,
+        JsonSerializableValue::Array(values) => values.iter().all(is_json_serializable),
+        JsonSerializableValue::PlainObject(entries) => entries.values().all(is_json_serializable),
+        JsonSerializableValue::Function
+        | JsonSerializableValue::Symbol
+        | JsonSerializableValue::BigInt
+        | JsonSerializableValue::NonPlainObject(_) => false,
+    }
+}
+
 /// Result returned by a schema validator.
 ///
 /// This mirrors upstream provider-utils `ValidationResult` while retaining an
@@ -7724,19 +7814,19 @@ mod tests {
         ExecuteToolOutput, ExperimentalSandbox, FetchErrorInfo, FlexibleSchema, FormData,
         FormDataEntry, FormDataInputValue, FormDataValue, GetFromApiOptions, HandledFetchError,
         IdGeneratorOptions, InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
-        JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, LazySchema, LoadApiKeyOptions,
-        LoadOptionalSettingOptions, LoadSettingOptions, ParseJsonError, ParseJsonResult,
-        PostFormDataToApiOptions, PostJsonToApiOptions, PostToApiOptions, ProviderApiRequest,
-        ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
-        ProviderApiResponseBody, ProviderApiResponseHandlerError, ProviderDefinedToolFactory,
-        ProviderExecutedToolFactory, ReasoningLevel, Resolvable, ResponseHandlerResult,
-        RuntimeEnvironment, SandboxCommandOptions, SandboxCommandResult, SandboxRunCommandFuture,
-        Schema, SerializedModelOptions, StatusCodeErrorResponseHandlerOptions,
-        StreamingToolCallDelta, StreamingToolCallDeltaFunction, StreamingToolCallTracker,
-        StreamingToolCallTrackerOptions, StreamingToolCallTypeValidation, Tool,
-        ToolApprovalRequest, ToolApprovalResponse, ToolCall, ToolDescriptionOptions,
-        ToolExecutionError, ToolExecutionOptions, ToolModelOutputOptions, ToolNeedsApprovalOptions,
-        ToolResult, ValidateTypesResult, ValidationResult,
+        JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, JsonSerializableValue,
+        LazySchema, LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions,
+        ParseJsonError, ParseJsonResult, PostFormDataToApiOptions, PostJsonToApiOptions,
+        PostToApiOptions, ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod,
+        ProviderApiResponse, ProviderApiResponseBody, ProviderApiResponseHandlerError,
+        ProviderDefinedToolFactory, ProviderExecutedToolFactory, ReasoningLevel, Resolvable,
+        ResponseHandlerResult, RuntimeEnvironment, SandboxCommandOptions, SandboxCommandResult,
+        SandboxRunCommandFuture, Schema, SerializedModelOptions,
+        StatusCodeErrorResponseHandlerOptions, StreamingToolCallDelta,
+        StreamingToolCallDeltaFunction, StreamingToolCallTracker, StreamingToolCallTrackerOptions,
+        StreamingToolCallTypeValidation, Tool, ToolApprovalRequest, ToolApprovalResponse, ToolCall,
+        ToolDescriptionOptions, ToolExecutionError, ToolExecutionOptions, ToolModelOutputOptions,
+        ToolNeedsApprovalOptions, ToolResult, ValidateTypesResult, ValidationResult,
         add_additional_properties_to_json_schema, as_array, as_flexible_schema, as_schema,
         combine_headers, convert_async_iterator_to_readable_stream, convert_base64_to_bytes,
         convert_bytes_to_base64, convert_image_model_file_to_data_uri,
@@ -7751,20 +7841,20 @@ mod tests {
         generate_id, get_error_message, get_from_api, get_runtime_environment_user_agent,
         get_top_level_media_type, handle_fetch_error, handle_provider_api_response,
         inject_json_instruction, inject_json_instruction_into_messages, is_abort_error,
-        is_custom_reasoning, is_executable_tool, is_full_media_type, is_non_nullable,
-        is_parsable_json, is_provider_reference, is_url_supported, json_schema, lazy_json_schema,
-        lazy_schema, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
-        load_setting, load_setting_with_env, map_reasoning_to_provider_budget,
-        map_reasoning_to_provider_effort, media_type_to_extension, normalize_headers, parse_json,
-        parse_json_event_stream, parse_json_with_schema, parse_provider_options,
-        post_form_data_to_api, post_json_to_api, post_to_api, prepare_get_from_api_request,
-        prepare_post_form_data_to_api_request, prepare_post_json_to_api_request,
-        prepare_post_to_api_request, prepare_tools, prepare_tools_with_context,
-        read_response_with_size_limit, remove_undefined_entries, resolve, resolve_full_media_type,
-        resolve_provider_reference, safe_parse_json, safe_parse_json_with_schema,
-        safe_validate_types, secure_json_parse, serialize_model_options, strip_file_extension,
-        tool, validate_download_url, validate_types, with_provider_utils_user_agent,
-        with_user_agent_suffix, without_trailing_slash,
+        is_custom_reasoning, is_executable_tool, is_full_media_type, is_json_serializable,
+        is_non_nullable, is_parsable_json, is_provider_reference, is_url_supported, json_schema,
+        lazy_json_schema, lazy_schema, load_api_key, load_api_key_with_env,
+        load_optional_setting_with_env, load_setting, load_setting_with_env,
+        map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
+        media_type_to_extension, normalize_headers, parse_json, parse_json_event_stream,
+        parse_json_with_schema, parse_provider_options, post_form_data_to_api, post_json_to_api,
+        post_to_api, prepare_get_from_api_request, prepare_post_form_data_to_api_request,
+        prepare_post_json_to_api_request, prepare_post_to_api_request, prepare_tools,
+        prepare_tools_with_context, read_response_with_size_limit, remove_undefined_entries,
+        resolve, resolve_full_media_type, resolve_provider_reference, safe_parse_json,
+        safe_parse_json_with_schema, safe_validate_types, secure_json_parse,
+        serialize_model_options, strip_file_extension, tool, validate_download_url, validate_types,
+        with_provider_utils_user_agent, with_user_agent_suffix, without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -10684,6 +10774,102 @@ mod tests {
                 .clone()
             )
         );
+    }
+
+    #[test]
+    fn is_json_serializable_upstream_returns_true_for_null_and_undefined() {
+        assert!(is_json_serializable(&JsonSerializableValue::json(
+            JsonValue::Null
+        )));
+        assert!(is_json_serializable(&JsonSerializableValue::Undefined));
+    }
+
+    #[test]
+    fn is_json_serializable_upstream_returns_true_for_json_primitives() {
+        for value in [json!("test"), json!(42), json!(true), json!(false)] {
+            assert!(is_json_serializable(&JsonSerializableValue::json(value)));
+        }
+    }
+
+    #[test]
+    fn is_json_serializable_upstream_returns_false_for_unsupported_primitives() {
+        for value in [
+            JsonSerializableValue::Function,
+            JsonSerializableValue::Symbol,
+            JsonSerializableValue::BigInt,
+        ] {
+            assert!(!is_json_serializable(&value));
+        }
+    }
+
+    #[test]
+    fn is_json_serializable_upstream_returns_true_for_serializable_arrays() {
+        let value = JsonSerializableValue::array([
+            JsonSerializableValue::json(json!("test")),
+            JsonSerializableValue::json(json!(42)),
+            JsonSerializableValue::json(json!(true)),
+            JsonSerializableValue::json(JsonValue::Null),
+            JsonSerializableValue::Undefined,
+            JsonSerializableValue::plain_object([(
+                "nested",
+                JsonSerializableValue::array([JsonSerializableValue::json(json!("value"))]),
+            )]),
+        ]);
+
+        assert!(is_json_serializable(&value));
+    }
+
+    #[test]
+    fn is_json_serializable_upstream_returns_false_for_arrays_with_non_serializable_values() {
+        let value = JsonSerializableValue::array([
+            JsonSerializableValue::json(json!("test")),
+            JsonSerializableValue::Function,
+        ]);
+
+        assert!(!is_json_serializable(&value));
+    }
+
+    #[test]
+    fn is_json_serializable_upstream_returns_true_for_serializable_plain_objects() {
+        let value = JsonSerializableValue::plain_object([
+            ("string", JsonSerializableValue::json(json!("test"))),
+            ("number", JsonSerializableValue::json(json!(42))),
+            ("boolean", JsonSerializableValue::json(json!(true))),
+            ("nullValue", JsonSerializableValue::json(JsonValue::Null)),
+            ("undefinedValue", JsonSerializableValue::Undefined),
+            (
+                "nested",
+                JsonSerializableValue::plain_object([(
+                    "array",
+                    JsonSerializableValue::array([JsonSerializableValue::json(json!("value"))]),
+                )]),
+            ),
+        ]);
+
+        assert!(is_json_serializable(&value));
+    }
+
+    #[test]
+    fn is_json_serializable_upstream_returns_false_for_plain_objects_with_non_serializable_values()
+    {
+        let value = JsonSerializableValue::plain_object([(
+            "nested",
+            JsonSerializableValue::plain_object([("callback", JsonSerializableValue::Function)]),
+        )]);
+
+        assert!(!is_json_serializable(&value));
+    }
+
+    #[test]
+    fn is_json_serializable_upstream_returns_false_for_non_plain_objects() {
+        for value in [
+            JsonSerializableValue::non_plain_object("Date"),
+            JsonSerializableValue::non_plain_object("RegExp"),
+            JsonSerializableValue::non_plain_object("TestClass"),
+            JsonSerializableValue::non_plain_object("Object.create(null)"),
+        ] {
+            assert!(!is_json_serializable(&value));
+        }
     }
 
     #[test]
