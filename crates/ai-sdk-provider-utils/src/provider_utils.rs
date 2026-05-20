@@ -12574,6 +12574,138 @@ mod tests {
         ));
     }
 
+    fn upstream_response_body_chunks(body: Option<&[u8]>) -> Vec<Vec<u8>> {
+        body.map(|body| body.chunks(4).map(<[u8]>::to_vec).collect())
+            .unwrap_or_default()
+    }
+
+    fn assert_download_error_message_contains(error: &DownloadError, expected: &str) {
+        assert!(
+            error.message().contains(expected),
+            "expected {message:?} to contain {expected:?}",
+            message = error.message()
+        );
+    }
+
+    #[test]
+    fn read_response_with_size_limit_upstream_should_read_response_within_limit_successfully() {
+        let data = vec![1, 2, 3, 4, 5, 6, 7, 8];
+
+        let body = read_response_with_size_limit(
+            "http://example.com/file",
+            upstream_response_body_chunks(Some(&data)),
+            Some("8"),
+            Some(100),
+        )
+        .expect("body is within limit");
+
+        assert_eq!(body, data);
+    }
+
+    #[test]
+    fn read_response_with_size_limit_upstream_rejects_oversized_content_length_early() {
+        let body = vec![0; 10];
+
+        let error = read_response_with_size_limit(
+            "http://example.com/large",
+            upstream_response_body_chunks(Some(&body)),
+            Some("1000"),
+            Some(100),
+        )
+        .expect_err("content-length exceeds limit");
+
+        assert_eq!(error.url(), "http://example.com/large");
+        assert_download_error_message_contains(&error, "Content-Length: 1000");
+    }
+
+    #[test]
+    fn read_response_with_size_limit_upstream_should_abort_when_streamed_bytes_exceed_limit() {
+        let large_body = vec![42; 200];
+
+        let error = read_response_with_size_limit(
+            "http://example.com/streaming",
+            upstream_response_body_chunks(Some(&large_body)),
+            None,
+            Some(50),
+        )
+        .expect_err("streamed bytes exceed limit");
+
+        assert_download_error_message_contains(&error, "exceeded maximum size of 50 bytes");
+    }
+
+    #[test]
+    fn read_response_with_size_limit_upstream_should_handle_lying_content_length() {
+        let large_body = vec![42; 200];
+
+        let error = read_response_with_size_limit(
+            "http://example.com/liar",
+            upstream_response_body_chunks(Some(&large_body)),
+            Some("10"),
+            Some(50),
+        )
+        .expect_err("actual body still exceeds limit");
+
+        assert_download_error_message_contains(&error, "exceeded maximum size of 50 bytes");
+    }
+
+    #[test]
+    fn read_response_with_size_limit_upstream_should_handle_empty_body_null() {
+        let body = read_response_with_size_limit(
+            "http://example.com/empty",
+            upstream_response_body_chunks(None),
+            None,
+            Some(100),
+        )
+        .expect("null body reads as empty bytes");
+
+        assert_eq!(body, Vec::<u8>::new());
+    }
+
+    #[test]
+    fn read_response_with_size_limit_upstream_should_handle_empty_body_zero_length() {
+        let data = Vec::<u8>::new();
+
+        let body = read_response_with_size_limit(
+            "http://example.com/empty",
+            upstream_response_body_chunks(Some(&data)),
+            None,
+            Some(100),
+        )
+        .expect("zero-length body reads as empty bytes");
+
+        assert_eq!(body, data);
+    }
+
+    #[test]
+    fn read_response_with_size_limit_upstream_should_respect_custom_max_bytes() {
+        let data = vec![1; 10];
+
+        let body = read_response_with_size_limit(
+            "http://example.com/custom",
+            upstream_response_body_chunks(Some(&data)),
+            Some("10"),
+            Some(10),
+        )
+        .expect("body matches custom maxBytes");
+
+        assert_eq!(body, data);
+    }
+
+    #[test]
+    fn read_response_with_size_limit_upstream_should_reject_at_exact_boundary_max_bytes_plus_one() {
+        let data = vec![1; 11];
+
+        let error = read_response_with_size_limit(
+            "http://example.com/boundary",
+            upstream_response_body_chunks(Some(&data)),
+            None,
+            Some(10),
+        )
+        .expect_err("maxBytes plus one exceeds limit");
+
+        assert_download_error_message_contains(&error, "exceeded maximum size of 10 bytes");
+    }
+
     #[test]
     fn read_response_with_size_limit_reads_chunks_within_limit() {
         let chunks = [b"abcd".as_slice(), b"efgh".as_slice()];
