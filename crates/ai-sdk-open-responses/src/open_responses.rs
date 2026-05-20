@@ -7232,6 +7232,96 @@ mod tests {
             .stream
     }
 
+    fn open_responses_generate_result_from_body(
+        model_id: &str,
+        body: JsonValue,
+    ) -> LanguageModelGenerateResult {
+        let transport: OpenResponsesTransport =
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    body.to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model(model_id);
+
+        poll_ready(model.do_generate(LanguageModelCallOptions::new(open_responses_hello_prompt())))
+    }
+
+    fn open_responses_citation_response_body(
+        response_id: &str,
+        model_id: &str,
+        message_id: &str,
+        text: &str,
+        annotations: Vec<JsonValue>,
+        usage: (u64, u64, u64, u64),
+    ) -> JsonValue {
+        let (input_tokens, cached_tokens, output_tokens, reasoning_tokens) = usage;
+        json!({
+            "id": response_id,
+            "object": "response",
+            "created_at": 1234567890,
+            "status": "completed",
+            "error": null,
+            "incomplete_details": null,
+            "input": [],
+            "instructions": null,
+            "max_output_tokens": null,
+            "model": model_id,
+            "output": [
+                {
+                    "id": message_id,
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": text,
+                            "annotations": annotations
+                        }
+                    ]
+                }
+            ],
+            "parallel_tool_calls": true,
+            "previous_response_id": null,
+            "reasoning": {
+                "effort": null,
+                "summary": null
+            },
+            "store": true,
+            "temperature": 0,
+            "text": {
+                "format": {
+                    "type": "text"
+                }
+            },
+            "tool_choice": "auto",
+            "tools": [],
+            "top_p": 1,
+            "truncation": "disabled",
+            "usage": {
+                "input_tokens": input_tokens,
+                "input_tokens_details": {
+                    "cached_tokens": cached_tokens
+                },
+                "output_tokens": output_tokens,
+                "output_tokens_details": {
+                    "reasoning_tokens": reasoning_tokens
+                },
+                "total_tokens": input_tokens + output_tokens
+            },
+            "user": null,
+            "metadata": {}
+        })
+    }
+
     fn open_responses_stream_sources(
         stream: &[LanguageModelStreamPart],
     ) -> Vec<LanguageModelSource> {
@@ -7239,6 +7329,18 @@ mod tests {
             .iter()
             .filter_map(|part| match part {
                 LanguageModelStreamPart::Source(source) => Some(source.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn open_responses_content_sources(
+        content: &[LanguageModelContent],
+    ) -> Vec<LanguageModelSource> {
+        content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::Source(source) => Some(source.clone()),
                 _ => None,
             })
             .collect()
@@ -17025,6 +17127,359 @@ mod tests {
                 "status": "completed"
             })
         );
+    }
+
+    #[test]
+    fn open_responses_provider_generates_mixed_url_and_file_citations() {
+        const TEXT: &str = "Based on web search and file content.";
+        let annotations = json!([
+            {
+                "type": "url_citation",
+                "start_index": 0,
+                "end_index": 10,
+                "url": "https://example.com",
+                "title": "Example URL"
+            },
+            {
+                "type": "file_citation",
+                "file_id": "file-abc123",
+                "filename": "resource1.json",
+                "index": 123
+            }
+        ]);
+
+        let result = open_responses_generate_result_from_body(
+            "gpt-4o",
+            open_responses_citation_response_body(
+                "resp_123",
+                "gpt-4o",
+                "msg_123",
+                TEXT,
+                annotations.as_array().expect("annotations array").clone(),
+                (100, 0, 50, 0),
+            ),
+        );
+
+        let text = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::Text(text) => Some(text),
+                _ => None,
+            })
+            .expect("content includes text");
+        assert_eq!(text.text, TEXT);
+        assert_eq!(
+            openai_metadata_value(&text.provider_metadata, "itemId").and_then(JsonValue::as_str),
+            Some("msg_123")
+        );
+        assert_eq!(
+            openai_metadata_value(&text.provider_metadata, "annotations"),
+            Some(&annotations)
+        );
+
+        let sources = open_responses_content_sources(&result.content);
+        assert_eq!(sources.len(), 2);
+        match &sources[0] {
+            LanguageModelSource::Url(source) => {
+                assert_eq!(source.id, "source-0");
+                assert_eq!(source.url, "https://example.com");
+                assert_eq!(source.title.as_deref(), Some("Example URL"));
+            }
+            other => panic!("expected URL citation source, got {other:?}"),
+        }
+        match &sources[1] {
+            LanguageModelSource::Document(source) => {
+                assert_eq!(source.id, "source-1");
+                assert_eq!(source.media_type, "text/plain");
+                assert_eq!(source.title, "resource1.json");
+                assert_eq!(source.filename.as_deref(), Some("resource1.json"));
+                assert_eq!(
+                    openai_metadata_value(&source.provider_metadata, "fileId")
+                        .and_then(JsonValue::as_str),
+                    Some("file-abc123")
+                );
+                assert_eq!(
+                    openai_metadata_value(&source.provider_metadata, "index")
+                        .and_then(JsonValue::as_u64),
+                    Some(123)
+                );
+            }
+            other => panic!("expected file citation source, got {other:?}"),
+        }
+        assert_eq!(result.usage.input_tokens.total, Some(100));
+        assert_eq!(result.usage.output_tokens.total, Some(50));
+    }
+
+    #[test]
+    fn open_responses_provider_generates_file_citation_only() {
+        const TEXT: &str = "Based on the file content.";
+        let annotations = json!([
+            {
+                "type": "file_citation",
+                "file_id": "file-xyz789",
+                "filename": "resource1.json",
+                "index": 123
+            }
+        ]);
+
+        let result = open_responses_generate_result_from_body(
+            "gpt-4o",
+            open_responses_citation_response_body(
+                "resp_456",
+                "gpt-4o",
+                "msg_456",
+                TEXT,
+                annotations.as_array().expect("annotations array").clone(),
+                (50, 0, 25, 0),
+            ),
+        );
+
+        let text = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::Text(text) => Some(text),
+                _ => None,
+            })
+            .expect("content includes text");
+        assert_eq!(text.text, TEXT);
+        assert_eq!(
+            openai_metadata_value(&text.provider_metadata, "annotations"),
+            Some(&annotations)
+        );
+
+        let sources = open_responses_content_sources(&result.content);
+        assert_eq!(sources.len(), 1);
+        match &sources[0] {
+            LanguageModelSource::Document(source) => {
+                assert_eq!(source.id, "source-0");
+                assert_eq!(source.media_type, "text/plain");
+                assert_eq!(source.title, "resource1.json");
+                assert_eq!(source.filename.as_deref(), Some("resource1.json"));
+                assert_eq!(
+                    openai_metadata_value(&source.provider_metadata, "fileId")
+                        .and_then(JsonValue::as_str),
+                    Some("file-xyz789")
+                );
+                assert_eq!(
+                    openai_metadata_value(&source.provider_metadata, "index")
+                        .and_then(JsonValue::as_u64),
+                    Some(123)
+                );
+            }
+            other => panic!("expected file citation source, got {other:?}"),
+        }
+        assert_eq!(result.usage.input_tokens.total, Some(50));
+        assert_eq!(result.usage.output_tokens.total, Some(25));
+    }
+
+    #[test]
+    fn open_responses_provider_generates_file_citations_without_optional_fields() {
+        const TEXT: &str = "Answer for the specified years....";
+        const FILE_ID: &str = "file-YRcoCqn3Fo2K4JgraG";
+        const FILENAME: &str = "resource1.json";
+        let annotations = json!([
+            {
+                "type": "file_citation",
+                "file_id": FILE_ID,
+                "filename": FILENAME,
+                "index": 145
+            },
+            {
+                "type": "file_citation",
+                "file_id": FILE_ID,
+                "filename": FILENAME,
+                "index": 192
+            }
+        ]);
+
+        let result = open_responses_generate_result_from_body(
+            "gpt-5",
+            open_responses_citation_response_body(
+                "resp_789",
+                "gpt-5",
+                "msg_789",
+                TEXT,
+                annotations.as_array().expect("annotations array").clone(),
+                (50, 0, 25, 0),
+            ),
+        );
+
+        let text = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::Text(text) => Some(text),
+                _ => None,
+            })
+            .expect("content includes text");
+        assert_eq!(text.text, TEXT);
+        assert_eq!(
+            openai_metadata_value(&text.provider_metadata, "annotations"),
+            Some(&annotations)
+        );
+
+        let sources = open_responses_content_sources(&result.content);
+        assert_eq!(sources.len(), 2);
+        for (source, index, source_id) in [
+            (sources[0].clone(), 145, "source-0"),
+            (sources[1].clone(), 192, "source-1"),
+        ] {
+            match source {
+                LanguageModelSource::Document(source) => {
+                    assert_eq!(source.id, source_id);
+                    assert_eq!(source.media_type, "text/plain");
+                    assert_eq!(source.title, FILENAME);
+                    assert_eq!(source.filename.as_deref(), Some(FILENAME));
+                    assert_eq!(
+                        openai_metadata_value(&source.provider_metadata, "fileId")
+                            .and_then(JsonValue::as_str),
+                        Some(FILE_ID)
+                    );
+                    assert_eq!(
+                        openai_metadata_value(&source.provider_metadata, "index")
+                            .and_then(JsonValue::as_u64),
+                        Some(index)
+                    );
+                }
+                other => panic!("expected file citation source, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn open_responses_provider_generates_container_file_citation() {
+        const TEXT: &str = "Generated with container file.";
+        let annotations = json!([
+            {
+                "type": "container_file_citation",
+                "container_id": "cntr_test",
+                "file_id": "file-container",
+                "filename": "data.csv",
+                "start_index": 0,
+                "end_index": 10,
+                "index": 2
+            }
+        ]);
+
+        let result = open_responses_generate_result_from_body(
+            "gpt-5",
+            open_responses_citation_response_body(
+                "resp_container",
+                "gpt-5",
+                "msg_container",
+                TEXT,
+                annotations.as_array().expect("annotations array").clone(),
+                (10, 0, 5, 0),
+            ),
+        );
+
+        let text = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::Text(text) => Some(text),
+                _ => None,
+            })
+            .expect("content includes text");
+        assert_eq!(text.text, TEXT);
+        assert_eq!(
+            openai_metadata_value(&text.provider_metadata, "annotations"),
+            Some(&annotations)
+        );
+
+        let sources = open_responses_content_sources(&result.content);
+        assert_eq!(sources.len(), 1);
+        match &sources[0] {
+            LanguageModelSource::Document(source) => {
+                assert_eq!(source.id, "source-0");
+                assert_eq!(source.media_type, "text/plain");
+                assert_eq!(source.title, "data.csv");
+                assert_eq!(source.filename.as_deref(), Some("data.csv"));
+                assert_eq!(
+                    openai_metadata_value(&source.provider_metadata, "type")
+                        .and_then(JsonValue::as_str),
+                    Some("container_file_citation")
+                );
+                assert_eq!(
+                    openai_metadata_value(&source.provider_metadata, "fileId")
+                        .and_then(JsonValue::as_str),
+                    Some("file-container")
+                );
+                assert_eq!(
+                    openai_metadata_value(&source.provider_metadata, "containerId")
+                        .and_then(JsonValue::as_str),
+                    Some("cntr_test")
+                );
+            }
+            other => panic!("expected container file citation source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn open_responses_provider_generates_file_path_citation() {
+        const TEXT: &str = "Output written to file.";
+        let annotations = json!([
+            {
+                "type": "file_path",
+                "file_id": "file-path-123",
+                "index": 0
+            }
+        ]);
+
+        let result = open_responses_generate_result_from_body(
+            "gpt-4o",
+            open_responses_citation_response_body(
+                "resp_file_path",
+                "gpt-4o",
+                "msg_file_path",
+                TEXT,
+                annotations.as_array().expect("annotations array").clone(),
+                (10, 0, 5, 0),
+            ),
+        );
+
+        let text = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::Text(text) => Some(text),
+                _ => None,
+            })
+            .expect("content includes text");
+        assert_eq!(text.text, TEXT);
+        assert_eq!(
+            openai_metadata_value(&text.provider_metadata, "annotations"),
+            Some(&annotations)
+        );
+
+        let sources = open_responses_content_sources(&result.content);
+        assert_eq!(sources.len(), 1);
+        match &sources[0] {
+            LanguageModelSource::Document(source) => {
+                assert_eq!(source.id, "source-0");
+                assert_eq!(source.media_type, "application/octet-stream");
+                assert_eq!(source.title, "file-path-123");
+                assert_eq!(source.filename.as_deref(), Some("file-path-123"));
+                assert_eq!(
+                    openai_metadata_value(&source.provider_metadata, "type")
+                        .and_then(JsonValue::as_str),
+                    Some("file_path")
+                );
+                assert_eq!(
+                    openai_metadata_value(&source.provider_metadata, "fileId")
+                        .and_then(JsonValue::as_str),
+                    Some("file-path-123")
+                );
+                assert_eq!(
+                    openai_metadata_value(&source.provider_metadata, "index")
+                        .and_then(JsonValue::as_u64),
+                    Some(0)
+                );
+            }
+            other => panic!("expected file path source, got {other:?}"),
+        }
     }
 
     #[test]
