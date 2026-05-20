@@ -9160,6 +9160,356 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_includes_provider_tool_outputs_with_multiple_tool_results() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::Tool(
+                LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                        "call-shell",
+                        "shell",
+                        LanguageModelToolResultOutput::json(json!({
+                            "output": [
+                                {
+                                    "stdout": "hi\n",
+                                    "stderr": "",
+                                    "outcome": {
+                                        "type": "exit",
+                                        "exitCode": 0
+                                    }
+                                }
+                            ]
+                        })),
+                    )),
+                    LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                        "call-apply",
+                        "apply_patch",
+                        LanguageModelToolResultOutput::json(json!({
+                            "status": "completed",
+                            "output": "patched"
+                        })),
+                    )),
+                ]),
+            )])
+            .with_tool(open_responses_test_shell_tool())
+            .with_tool(open_responses_test_apply_patch_tool())
+            .with_provider_options(openai_store_options(true)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "shell_call_output",
+                    "call_id": "call-shell",
+                    "output": [
+                        {
+                            "stdout": "hi\n",
+                            "stderr": "",
+                            "outcome": {
+                                "type": "exit",
+                                "exit_code": 0
+                            }
+                        }
+                    ]
+                },
+                {
+                    "type": "apply_patch_call_output",
+                    "call_id": "call-apply",
+                    "status": "completed",
+                    "output": "patched"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_includes_client_side_tool_calls_in_prompt() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "call-1",
+                            "calculator",
+                            json!({
+                                "a": 1,
+                                "b": 2
+                            }),
+                        )
+                        .with_provider_executed(false),
+                    ),
+                ]),
+            )])
+            .with_provider_options(openai_store_options(true)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "calculator",
+                    "arguments": "{\"a\":1,\"b\":2}"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_approved_mcp_approval_response_when_stored() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::Tool(
+                LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolApprovalResponse(
+                        LanguageModelToolApprovalResponsePart::new("mcp-approval-123", true),
+                    ),
+                ]),
+            )])
+            .with_provider_options(openai_store_options(true)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "item_reference",
+                    "id": "mcp-approval-123"
+                },
+                {
+                    "type": "mcp_approval_response",
+                    "approval_request_id": "mcp-approval-123",
+                    "approve": true
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_denied_mcp_approval_response_when_stored() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::Tool(
+                LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolApprovalResponse(
+                        LanguageModelToolApprovalResponsePart::new("mcp-approval-456", false),
+                    ),
+                ]),
+            )])
+            .with_provider_options(openai_store_options(true)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "item_reference",
+                    "id": "mcp-approval-456"
+                },
+                {
+                    "type": "mcp_approval_response",
+                    "approval_request_id": "mcp-approval-456",
+                    "approve": false
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_mcp_approval_response_when_unstored() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::Tool(
+                LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolApprovalResponse(
+                        LanguageModelToolApprovalResponsePart::new("mcp-approval-789", true),
+                    ),
+                ]),
+            )])
+            .with_provider_options(openai_store_options(false)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "mcp_approval_response",
+                    "approval_request_id": "mcp-approval-789",
+                    "approve": true
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_skips_duplicate_mcp_approval_response() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::Tool(
+                LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolApprovalResponse(
+                        LanguageModelToolApprovalResponsePart::new("duplicate-approval", true),
+                    ),
+                    LanguageModelToolContentPart::ToolApprovalResponse(
+                        LanguageModelToolApprovalResponsePart::new("duplicate-approval", true),
+                    ),
+                ]),
+            )])
+            .with_provider_options(openai_store_options(true)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "item_reference",
+                    "id": "duplicate-approval"
+                },
+                {
+                    "type": "mcp_approval_response",
+                    "approval_request_id": "duplicate-approval",
+                    "approve": true
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_multiple_mcp_approval_responses() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::Tool(
+                LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolApprovalResponse(
+                        LanguageModelToolApprovalResponsePart::new("approval-1", true),
+                    ),
+                    LanguageModelToolContentPart::ToolApprovalResponse(
+                        LanguageModelToolApprovalResponsePart::new("approval-2", false),
+                    ),
+                ]),
+            )])
+            .with_provider_options(openai_store_options(true)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "item_reference",
+                    "id": "approval-1"
+                },
+                {
+                    "type": "mcp_approval_response",
+                    "approval_request_id": "approval-1",
+                    "approve": true
+                },
+                {
+                    "type": "item_reference",
+                    "id": "approval-2"
+                },
+                {
+                    "type": "mcp_approval_response",
+                    "approval_request_id": "approval-2",
+                    "approve": false
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_skips_denied_mcp_tool_output_with_approval_id() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::Tool(
+                LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolApprovalResponse(
+                        LanguageModelToolApprovalResponsePart::new("denied-approval", false),
+                    ),
+                    LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                        "call-123",
+                        "mcp_tool",
+                        LanguageModelToolResultOutput::execution_denied()
+                            .with_reason("User denied the tool execution")
+                            .with_provider_options(openai_provider_options(json!({
+                                "approvalId": "denied-approval"
+                            }))),
+                    )),
+                ]),
+            )])
+            .with_provider_options(openai_store_options(true)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "item_reference",
+                    "id": "denied-approval"
+                },
+                {
+                    "type": "mcp_approval_response",
+                    "approval_request_id": "denied-approval",
+                    "approve": false
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_mixes_mcp_approval_response_with_tool_result() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::Tool(
+                LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolApprovalResponse(
+                        LanguageModelToolApprovalResponsePart::new("approval-for-mcp", true),
+                    ),
+                    LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                        "regular-call-1",
+                        "calculator",
+                        LanguageModelToolResultOutput::json(json!({
+                            "result": 42
+                        })),
+                    )),
+                ]),
+            )])
+            .with_provider_options(openai_store_options(true)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "item_reference",
+                    "id": "approval-for-mcp"
+                },
+                {
+                    "type": "mcp_approval_response",
+                    "approval_request_id": "approval-for-mcp",
+                    "approve": true
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "regular-call-1",
+                    "output": "{\"result\":42}"
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn open_responses_provider_converts_tool_approval_responses_to_mcp_input() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
