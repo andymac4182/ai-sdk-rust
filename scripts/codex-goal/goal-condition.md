@@ -19,6 +19,14 @@ inventory, every provider package, every core/helper/library package, public
 APIs, examples, tests, and feature status. Do not mark the goal complete while
 any ledger row is unported, unverified, or undocumented. Re-scan upstream often.
 
+Test parity is a hard completion gate. EVERY portable test from the original
+upstream TypeScript package must exist as an equivalent Rust test in the
+matching 1:1 crate before that package can be marked verified. Rust may and
+should add extra tests for Rust-specific typing, safety, live-provider proof,
+and edge cases, but it must never have fewer portable tests than upstream. A
+broader Rust test that only generally covers the same area is not enough unless
+the ledger maps it to the exact upstream cases it covers.
+
 Required order: finish ALL common/core SDK packages together with Vercel AI
 Gateway provider coverage before taking more unrelated standalone provider
 slices. This is a hard ordering gate, not a scheduling preference. The first
