@@ -154,6 +154,11 @@ still open.
    must exist in Rust in the matching crate. Rust can add extra coverage on top,
    but it cannot have a smaller test inventory than the original TypeScript
    package for any portable surface.
+   Future-run note: when a worker claims a slice or package is complete, that
+   claim must be backed by the original upstream TypeScript test list and a
+   Rust counterpart for every portable original test/case. Additional Rust tests
+   are welcome only as additive coverage; a Rust crate with even one fewer
+   portable original TypeScript test/case is incomplete.
 5. For provider-backed behavior, require two layers of proof before marking a
    row `verified`: deterministic fake/mock/transport tests that run in normal
    validation, plus credential-gated live provider validation when a usable
