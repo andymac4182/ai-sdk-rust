@@ -22786,6 +22786,42 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_sends_web_search_request_body_with_include_and_tool() {
+        let (_, request_body) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5-nano",
+            OPEN_RESPONSES_WEB_SEARCH_TOOL_JSON_FIXTURE,
+            open_responses_web_search_call_options(),
+        );
+
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-5-nano",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "web_search"
+                    }
+                ],
+                "include": [
+                    "web_search_call.action.sources"
+                ]
+            })
+        );
+    }
+
+    #[test]
     fn open_responses_provider_generates_web_search_fixture() {
         let fixture: JsonValue = serde_json::from_str(OPEN_RESPONSES_WEB_SEARCH_TOOL_JSON_FIXTURE)
             .expect("fixture JSON parses");
@@ -24100,6 +24136,39 @@ mod tests {
             request_body["tools"][0],
             json!({
                 "type": "image_generation"
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_sends_local_shell_request_body_with_tool() {
+        let (_, request_body) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5-codex",
+            OPEN_RESPONSES_LOCAL_SHELL_TOOL_JSON_FIXTURE,
+            open_responses_local_shell_call_options(),
+        );
+
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-5-codex",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "local_shell"
+                    }
+                ]
             })
         );
     }
