@@ -8654,6 +8654,61 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_warns_for_conversation_with_previous_response_id() {
+        let (provider, captured_request) = open_responses_captured_provider("openai", "gpt-4o");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "conversation": "conv_123",
+                "previousResponseId": "resp_123"
+            }
+        }))
+        .expect("provider options deserialize");
+        let model = provider.language_model("gpt-4o");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Hello"),
+                    )]),
+                )])
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(result.warnings.len(), 1);
+        assert!(matches!(
+            result.warnings.first(),
+            Some(ai_sdk_provider::warning::Warning::Unsupported { feature, details })
+                if feature == "conversation"
+                    && details.as_deref()
+                        == Some("conversation and previousResponseId cannot be used together")
+        ));
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-4o",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "conversation": "conv_123",
+                "previous_response_id": "resp_123"
+            })
+        );
+    }
+
+    #[test]
     fn open_responses_provider_reconstructs_hosted_tool_search_history_with_store_false() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
