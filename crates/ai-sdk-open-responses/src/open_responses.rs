@@ -14727,6 +14727,139 @@ mod tests {
         );
     }
 
+    fn assert_open_responses_provider_option_request_field(
+        model_id: &str,
+        provider_options: JsonValue,
+        request_key: &str,
+        request_value: JsonValue,
+    ) {
+        let (warnings, request_body) =
+            openai_provider_option_request_body(model_id, provider_options);
+
+        assert!(warnings.is_empty());
+        let mut expected = openai_text_request_body(model_id);
+        expected
+            .as_object_mut()
+            .expect("request body is an object")
+            .insert(request_key.to_string(), request_value);
+        assert_eq!(request_body, expected);
+    }
+
+    #[test]
+    fn open_responses_provider_sends_parallel_tool_calls_provider_option() {
+        assert_open_responses_provider_option_request_field(
+            "gpt-4o",
+            json!({
+                "parallelToolCalls": false
+            }),
+            "parallel_tool_calls",
+            json!(false),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_sends_user_provider_option() {
+        assert_open_responses_provider_option_request_field(
+            "gpt-4o",
+            json!({
+                "user": "user_123"
+            }),
+            "user",
+            json!("user_123"),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_sends_conversation_provider_option() {
+        assert_open_responses_provider_option_request_field(
+            "gpt-4o",
+            json!({
+                "conversation": "conv_123"
+            }),
+            "conversation",
+            json!("conv_123"),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_sends_previous_response_id_provider_option() {
+        assert_open_responses_provider_option_request_field(
+            "gpt-4o",
+            json!({
+                "previousResponseId": "resp_123"
+            }),
+            "previous_response_id",
+            json!("resp_123"),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_matches_metadata_named_user_provider_option_upstream_case() {
+        assert_open_responses_provider_option_request_field(
+            "gpt-4o",
+            json!({
+                "user": "user_123"
+            }),
+            "user",
+            json!("user_123"),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_sends_metadata_provider_option() {
+        assert_open_responses_provider_option_request_field(
+            "gpt-4o",
+            json!({
+                "metadata": {
+                    "trace_id": "trace_123"
+                }
+            }),
+            "metadata",
+            json!({
+                "trace_id": "trace_123"
+            }),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_sends_instructions_provider_option() {
+        assert_open_responses_provider_option_request_field(
+            "gpt-4o",
+            json!({
+                "instructions": "You are a friendly assistant."
+            }),
+            "instructions",
+            json!("You are a friendly assistant."),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_sends_single_include_provider_option() {
+        assert_open_responses_provider_option_request_field(
+            "o3-mini",
+            json!({
+                "include": ["reasoning.encrypted_content"]
+            }),
+            "include",
+            json!(["reasoning.encrypted_content"]),
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_sends_multiple_include_provider_options() {
+        assert_open_responses_provider_option_request_field(
+            "o3-mini",
+            json!({
+                "include": [
+                    "reasoning.encrypted_content",
+                    "file_search_call.results"
+                ]
+            }),
+            "include",
+            json!(["reasoning.encrypted_content", "file_search_call.results"]),
+        );
+    }
+
     fn assert_open_responses_text_verbosity_provider_option(verbosity: &str) {
         let (warnings, request_body) = openai_provider_option_request_body(
             "gpt-5",
