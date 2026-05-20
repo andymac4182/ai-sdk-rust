@@ -15290,6 +15290,76 @@ mod tests {
     }
 
     #[test]
+    fn media_type_to_extension_maps_audio_mpeg_to_mp3() {
+        assert_eq!(media_type_to_extension("audio/mpeg"), "mp3");
+    }
+
+    #[test]
+    fn media_type_to_extension_maps_audio_mp3_to_mp3() {
+        assert_eq!(media_type_to_extension("audio/mp3"), "mp3");
+    }
+
+    #[test]
+    fn media_type_to_extension_maps_audio_wav_to_wav() {
+        assert_eq!(media_type_to_extension("audio/wav"), "wav");
+    }
+
+    #[test]
+    fn media_type_to_extension_maps_audio_x_wav_to_wav() {
+        assert_eq!(media_type_to_extension("audio/x-wav"), "wav");
+    }
+
+    #[test]
+    fn media_type_to_extension_maps_audio_webm_to_webm() {
+        assert_eq!(media_type_to_extension("audio/webm"), "webm");
+    }
+
+    #[test]
+    fn media_type_to_extension_maps_audio_ogg_to_ogg() {
+        assert_eq!(media_type_to_extension("audio/ogg"), "ogg");
+    }
+
+    #[test]
+    fn media_type_to_extension_maps_audio_opus_to_ogg() {
+        assert_eq!(media_type_to_extension("audio/opus"), "ogg");
+    }
+
+    #[test]
+    fn media_type_to_extension_maps_audio_mp4_to_m4a() {
+        assert_eq!(media_type_to_extension("audio/mp4"), "m4a");
+    }
+
+    #[test]
+    fn media_type_to_extension_maps_audio_x_m4a_to_m4a() {
+        assert_eq!(media_type_to_extension("audio/x-m4a"), "m4a");
+    }
+
+    #[test]
+    fn media_type_to_extension_maps_audio_flac_to_flac() {
+        assert_eq!(media_type_to_extension("audio/flac"), "flac");
+    }
+
+    #[test]
+    fn media_type_to_extension_maps_audio_aac_to_aac() {
+        assert_eq!(media_type_to_extension("audio/aac"), "aac");
+    }
+
+    #[test]
+    fn media_type_to_extension_maps_uppercase_audio_mpeg_to_mp3() {
+        assert_eq!(media_type_to_extension("AUDIO/MPEG"), "mp3");
+    }
+
+    #[test]
+    fn media_type_to_extension_maps_uppercase_audio_mp3_to_mp3() {
+        assert_eq!(media_type_to_extension("AUDIO/MP3"), "mp3");
+    }
+
+    #[test]
+    fn media_type_to_extension_maps_invalid_media_type_to_empty_string() {
+        assert_eq!(media_type_to_extension("nope"), "");
+    }
+
+    #[test]
     fn strip_file_extension_strips_single_extension() {
         assert_eq!(strip_file_extension("report.pdf"), "report");
     }
