@@ -36,10 +36,18 @@ matching crates.
 
 ## Test Parity Gate
 
-Full parity also requires every portable test from the original TypeScript
-package to exist as an equivalent Rust test in the matching Rust crate. Rust may
-add more tests for stronger typing, additional edge cases, live-provider proof,
-or Rust-specific failure modes, but it may not have fewer tests than upstream.
+Full parity requires every portable test from the original TypeScript package
+to exist as an equivalent Rust test in the matching Rust crate. This is a
+minimum bar, not an aspirational coverage target: Rust may add more tests for
+stronger typing, additional edge cases, live-provider proof, or Rust-specific
+failure modes, but it must never have fewer portable tests than upstream.
+
+Every original portable TypeScript test case must be accounted for, including
+table-driven cases, helper-backed scenarios, fixtures, snapshot-equivalent
+assertions, streaming edge cases, error paths, and type-level tests. A Rust test
+may combine several upstream assertions only when the ledger records the exact
+upstream cases it covers; otherwise, each upstream case needs a named Rust
+counterpart in the owning crate.
 
 Missing upstream tests are missing parity. A package row cannot be marked
 `verified` while any portable upstream `*.test.ts`, `*.test.tsx`,
@@ -213,6 +221,7 @@ inventory.
 | Open Responses stored assistant history item references | verified | `src/open_responses.rs` | `open_responses_provider_uses_item_references_for_stored_assistant_history` | Stored Open Responses prompt conversion now preserves assistant text, reasoning, provider-executed tool calls, and tool results as `item_reference` entries when upstream item ids are present, keeping stored conversation continuation aligned with the Responses API history model. |
 | Open Responses conversation history item filtering | verified | `src/open_responses.rs` | `open_responses_provider_skips_conversation_history_items` | When an OpenAI/Gateway Responses `conversation` id is supplied, prompt conversion skips assistant text, reasoning, tool-call, and assistant tool-result history items that already have upstream item ids instead of sending duplicate `item_reference` entries. The request still includes fresh assistant content and tool-role outputs, and emits the upstream warning when `conversation` and `previousResponseId` are combined. |
 | Open Responses tool search prompt history reconstruction | verified | `src/open_responses.rs` | `open_responses_provider_reconstructs_hosted_tool_search_history_with_store_false`; `open_responses_provider_reconstructs_client_tool_search_output_with_store_false` | Open Responses prompt conversion now mirrors upstream `tool_search` history handling when `store: false`: hosted/server assistant tool-search calls and outputs become `tool_search_call`/`tool_search_output` items with item ids, `execution`, `call_id`, `status`, and `arguments`/`tools`, while client tool-search outputs from tool-role messages use the tool-call `call_id`. |
+| Open Responses client tool-search stream call id identity | verified | `crates/ai-sdk-open-responses/src/open_responses.rs` | `open_responses_provider_streams_client_tool_search_uses_final_call_id` | Mirrors upstream OpenAI Responses `doStream > tool search tool > should use the final tool search call_id when the streamed provisional id changes`: client-executed streamed `tool_search_call` items emit tool-input start/end, tool call, and tool result parts using the final `call_id`, preserve `itemId` metadata and returned tool definitions, and assert the provisional id does not leak into stream output. |
 | Open Responses unstored hosted tool-result fallback | verified | `src/open_responses.rs` | `open_responses_provider_warns_for_unstored_hosted_tool_results` | Unsupported provider-executed assistant tool results such as `web_search` now warn and omit the result when `store: false` instead of failing prompt conversion, matching upstream behavior for hosted tools without a dedicated reconstruction shape. |
 | Open Responses assistant execution-denied tool-result filtering | verified | `src/open_responses.rs` | `open_responses_provider_skips_assistant_execution_denied_tool_results` | Assistant prompt-history conversion now skips direct and JSON-wrapped `execution-denied` tool results without emitting hosted-tool fallback warnings, preserving surrounding assistant text as separate message items to match upstream Open Responses prompt conversion. |
 | Open Responses local shell prompt history reconstruction | verified | `src/open_responses.rs` | `open_responses_provider_reconstructs_local_shell_history_with_store_false` | Open Responses prompt conversion now recognizes the OpenAI local-shell provider tool during history serialization, maps unstored local-shell prompt calls to `local_shell_call` with snake-case request action fields, and maps local-shell tool-role outputs to `local_shell_call_output`. |
@@ -728,6 +737,13 @@ focused tests for each portable behavior before changing rows to `verified`.
   and `open_responses_provider_keeps_sampling_parameters_for_top_level_reasoning_none`
   now map upstream OpenAI Responses top-level reasoning tests one-to-one while
   preserving generic `@ai-sdk/open-responses` minimal-to-low coercion.
+- 2026-05-20: OpenAI Responses client tool-search stream id parity added
+  `open_responses_provider_streams_client_tool_search_uses_final_call_id` now
+  maps upstream `doStream > tool search tool > should use the final tool search
+  call_id when the streamed provisional id changes`: client-executed streamed
+  `tool_search_call` parts emit tool-input start/end, tool call, and tool
+  result parts with the final `call_id`, preserve item metadata and returned
+  tool definitions, and assert the provisional id does not leak.
 
 ## Next Unported Work Queue
 
