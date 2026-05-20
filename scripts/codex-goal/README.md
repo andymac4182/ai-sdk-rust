@@ -36,3 +36,10 @@ The goal condition tells Codex to maintain `docs/upstream-parity.md` and keep
 working until every upstream package, provider, public API, example, testable
 behavior, and portable feature is verified or explicitly documented as
 JavaScript-only.
+
+Future iterations must treat the original upstream TypeScript test inventory as
+the floor for every package. Every portable original TypeScript test/case must
+exist as an equivalent Rust test in the matching 1:1 crate before that package
+can be marked verified. Rust may add more tests for Rust-specific safety,
+typing, live-provider proof, and edge cases, but the Rust suite must never have
+fewer portable tests than the original TypeScript package.

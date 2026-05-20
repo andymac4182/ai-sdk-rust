@@ -7573,7 +7573,8 @@ mod tests {
     use std::time::Duration;
 
     use ai_sdk_provider::language_model::{
-        LanguageModelAbortController, LanguageModelFilePart, LanguageModelFunctionTool,
+        LanguageModelAbortController, LanguageModelAssistantContentPart,
+        LanguageModelAssistantMessage, LanguageModelFilePart, LanguageModelFunctionTool,
         LanguageModelMessage, LanguageModelProviderTool, LanguageModelReasoningEffort,
         LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelTool,
         LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
@@ -8328,6 +8329,14 @@ mod tests {
     }
 
     #[test]
+    fn inject_json_instruction_handles_no_prompt_no_schema() {
+        assert_eq!(
+            inject_json_instruction(None, None, None, None),
+            "You MUST answer with JSON."
+        );
+    }
+
+    #[test]
     fn inject_json_instruction_omits_empty_prompt() {
         assert_eq!(
             inject_json_instruction(Some(""), Some(&object_schema()), None, None),
@@ -8398,6 +8407,58 @@ mod tests {
                     object_schema_json()
                 ))),
                 user_message,
+            ]
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_into_messages_handles_empty_messages_array() {
+        assert_eq!(
+            inject_json_instruction_into_messages(
+                InjectJsonInstructionIntoMessagesOptions::new(Vec::new())
+                    .with_schema(object_schema())
+            ),
+            vec![LanguageModelMessage::System(
+                LanguageModelSystemMessage::new(format!(
+                    "JSON schema:\n{}\nYou MUST answer with a JSON object that matches the JSON schema above.",
+                    object_schema_json()
+                ))
+            )]
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_into_messages_preserves_all_non_system_messages() {
+        let user_message = LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+            LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
+        ]));
+        let assistant_message =
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new("Hi")),
+            ]));
+        let second_user_message = LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+            LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Generate person")),
+        ]));
+
+        assert_eq!(
+            inject_json_instruction_into_messages(
+                InjectJsonInstructionIntoMessagesOptions::new(vec![
+                    LanguageModelMessage::System(LanguageModelSystemMessage::new(
+                        "You are helpful"
+                    )),
+                    user_message.clone(),
+                    assistant_message.clone(),
+                    second_user_message.clone(),
+                ])
+                .with_schema(object_schema())
+            ),
+            vec![
+                LanguageModelMessage::System(LanguageModelSystemMessage::new(
+                    expected_schema_instruction("You are helpful")
+                )),
+                user_message,
+                assistant_message,
+                second_user_message,
             ]
         );
     }
