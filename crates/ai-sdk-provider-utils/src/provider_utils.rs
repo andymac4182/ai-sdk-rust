@@ -8237,6 +8237,115 @@ mod tests {
     }
 
     #[test]
+    fn delayed_promise_upstream_resolves_when_accessed_after_resolution() {
+        let delayed = DelayedPromise::<String>::new();
+
+        delayed.resolve("success".to_string());
+
+        assert_eq!(poll_ready(delayed.promise()), Ok("success".to_string()));
+    }
+
+    #[test]
+    fn delayed_promise_upstream_rejects_when_accessed_after_rejection() {
+        let delayed = DelayedPromise::<String>::new();
+
+        delayed.reject("failure".to_string());
+
+        assert_eq!(poll_ready(delayed.promise()), Err("failure".to_string()));
+    }
+
+    #[test]
+    fn delayed_promise_upstream_resolves_when_accessed_before_resolution() {
+        let delayed = DelayedPromise::<String>::new();
+        let promise = delayed.promise();
+
+        delayed.resolve("success".to_string());
+
+        assert_eq!(poll_ready(promise), Ok("success".to_string()));
+    }
+
+    #[test]
+    fn delayed_promise_upstream_rejects_when_accessed_before_rejection() {
+        let delayed = DelayedPromise::<String>::new();
+        let promise = delayed.promise();
+
+        delayed.reject("failure".to_string());
+
+        assert_eq!(poll_ready(promise), Err("failure".to_string()));
+    }
+
+    #[test]
+    fn delayed_promise_upstream_maintains_resolved_state_after_multiple_accesses() {
+        let delayed = DelayedPromise::<String>::new();
+
+        delayed.resolve("success".to_string());
+
+        assert_eq!(poll_ready(delayed.promise()), Ok("success".to_string()));
+        assert_eq!(poll_ready(delayed.promise()), Ok("success".to_string()));
+    }
+
+    #[test]
+    fn delayed_promise_upstream_maintains_rejected_state_after_multiple_accesses() {
+        let delayed = DelayedPromise::<String>::new();
+
+        delayed.reject("failure".to_string());
+
+        assert_eq!(poll_ready(delayed.promise()), Err("failure".to_string()));
+        assert_eq!(poll_ready(delayed.promise()), Err("failure".to_string()));
+    }
+
+    #[test]
+    fn delayed_promise_upstream_blocks_until_resolved_when_accessed_before_resolution() {
+        let delayed = DelayedPromise::<String>::new();
+        let mut promise = Box::pin(delayed.promise());
+
+        assert!(matches!(poll_once(promise.as_mut()), Poll::Pending));
+
+        delayed.resolve("delayed-success".to_string());
+
+        assert_eq!(
+            poll_once(promise.as_mut()),
+            Poll::Ready(Ok("delayed-success".to_string()))
+        );
+    }
+
+    #[test]
+    fn delayed_promise_upstream_blocks_until_rejected_when_accessed_before_rejection() {
+        let delayed = DelayedPromise::<String>::new();
+        let mut promise = Box::pin(delayed.promise());
+
+        assert!(matches!(poll_once(promise.as_mut()), Poll::Pending));
+
+        delayed.reject("delayed-failure".to_string());
+
+        assert_eq!(
+            poll_once(promise.as_mut()),
+            Poll::Ready(Err("delayed-failure".to_string()))
+        );
+    }
+
+    #[test]
+    fn delayed_promise_upstream_resolves_all_pending_promises_when_resolved_after_access() {
+        let delayed = DelayedPromise::<String>::new();
+        let mut first = Box::pin(delayed.promise());
+        let mut second = Box::pin(delayed.promise());
+
+        assert!(matches!(poll_once(first.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(second.as_mut()), Poll::Pending));
+
+        delayed.resolve("success".to_string());
+
+        assert_eq!(
+            poll_once(first.as_mut()),
+            Poll::Ready(Ok("success".to_string()))
+        );
+        assert_eq!(
+            poll_once(second.as_mut()),
+            Poll::Ready(Ok("success".to_string()))
+        );
+    }
+
+    #[test]
     fn delay_without_duration_resolves_immediately() {
         poll_ready(delay(None));
     }
