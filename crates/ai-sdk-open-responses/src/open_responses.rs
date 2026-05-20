@@ -18803,6 +18803,275 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_prepares_code_interpreter_auto_container() {
+        let request_body = open_responses_provider_tool_request_body(
+            "openai.code_interpreter",
+            "code_interpreter",
+            JsonObject::new(),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "code_interpreter",
+                    "container": {
+                        "type": "auto"
+                    }
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_code_interpreter_string_container() {
+        let request_body = open_responses_provider_tool_request_body(
+            "openai.code_interpreter",
+            "code_interpreter",
+            json_object(json!({
+                "container": "container-123"
+            })),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "code_interpreter",
+                    "container": "container-123"
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_code_interpreter_file_ids_container() {
+        let request_body = open_responses_provider_tool_request_body(
+            "openai.code_interpreter",
+            "code_interpreter",
+            json_object(json!({
+                "container": {
+                    "fileIds": ["file-1", "file-2", "file-3"]
+                }
+            })),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "code_interpreter",
+                    "container": {
+                        "type": "auto",
+                        "file_ids": ["file-1", "file-2", "file-3"]
+                    }
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_code_interpreter_empty_file_ids() {
+        let request_body = open_responses_provider_tool_request_body(
+            "openai.code_interpreter",
+            "code_interpreter",
+            json_object(json!({
+                "container": {
+                    "fileIds": []
+                }
+            })),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "code_interpreter",
+                    "container": {
+                        "type": "auto",
+                        "file_ids": []
+                    }
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_code_interpreter_undefined_file_ids() {
+        let request_body = open_responses_provider_tool_request_body(
+            "openai.code_interpreter",
+            "code_interpreter",
+            json_object(json!({
+                "container": {}
+            })),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "code_interpreter",
+                    "container": {
+                        "type": "auto"
+                    }
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_resolves_code_interpreter_tool_choice() {
+        let request_body = open_responses_request_body_for_options(
+            LanguageModelCallOptions::new(open_responses_hello_prompt())
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.code_interpreter",
+                    "code_interpreter",
+                    JsonObject::new(),
+                )))
+                .with_tool_choice(LanguageModelToolChoice::Tool {
+                    tool_name: "code_interpreter".to_string(),
+                }),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "code_interpreter",
+                    "container": {
+                        "type": "auto"
+                    }
+                }
+            ])
+        );
+        assert_eq!(
+            request_body["tool_choice"],
+            json!({
+                "type": "code_interpreter"
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_multiple_tools_including_code_interpreter() {
+        let request_body = open_responses_request_body_for_options(
+            LanguageModelCallOptions::new(open_responses_hello_prompt())
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "testFunction",
+                        json_object(json!({
+                            "type": "object",
+                            "properties": {
+                                "input": {
+                                    "type": "string"
+                                }
+                            }
+                        })),
+                    )
+                    .with_description("A test function"),
+                ))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.code_interpreter",
+                    "code_interpreter",
+                    json_object(json!({
+                        "container": "my-container"
+                    })),
+                ))),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "function",
+                    "name": "testFunction",
+                    "description": "A test function",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "input": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                },
+                {
+                    "type": "code_interpreter",
+                    "container": "my-container"
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_image_generation_with_all_options() {
+        let request_body = open_responses_provider_tool_request_body(
+            "openai.image_generation",
+            "image_generation",
+            json_object(json!({
+                "background": "opaque",
+                "size": "1536x1024",
+                "quality": "high",
+                "moderation": "auto",
+                "outputFormat": "png",
+                "outputCompression": 100
+            })),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "image_generation",
+                    "background": "opaque",
+                    "moderation": "auto",
+                    "output_compression": 100,
+                    "output_format": "png",
+                    "quality": "high",
+                    "size": "1536x1024"
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_resolves_image_generation_tool_choice() {
+        let request_body = open_responses_request_body_for_options(
+            LanguageModelCallOptions::new(open_responses_hello_prompt())
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.image_generation",
+                    "image_generation",
+                    JsonObject::new(),
+                )))
+                .with_tool_choice(LanguageModelToolChoice::Tool {
+                    tool_name: "image_generation".to_string(),
+                }),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "image_generation"
+                }
+            ])
+        );
+        assert_eq!(
+            request_body["tool_choice"],
+            json!({
+                "type": "image_generation"
+            })
+        );
+    }
+
+    #[test]
     fn open_responses_provider_prepares_custom_tool_with_regex_format() {
         let request_body = open_responses_request_body_for_options(
             LanguageModelCallOptions::new(open_responses_hello_prompt()).with_tool(
@@ -19983,6 +20252,18 @@ mod tests {
             "type": "object",
             "properties": {}
         }))
+    }
+
+    fn open_responses_provider_tool_request_body(
+        id: &str,
+        name: &str,
+        args: JsonObject,
+    ) -> JsonValue {
+        open_responses_request_body_for_options(
+            LanguageModelCallOptions::new(open_responses_hello_prompt()).with_tool(
+                LanguageModelTool::Provider(LanguageModelProviderTool::new(id, name, args)),
+            ),
+        )
     }
 
     fn open_responses_prepared_shell_tool(args: JsonValue) -> JsonValue {
