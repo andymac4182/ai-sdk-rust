@@ -134,6 +134,10 @@ still open.
    streaming edge cases, error paths, provider option serialization, and
    type-level assertions where Rust can express them. Missing upstream tests are
    missing parity, even if broader Rust tests happen to cover similar behavior.
+   Treat the upstream TypeScript test inventory as the floor and the Rust test
+   inventory as a required superset: every portable upstream case must be
+   counted, mapped to a Rust counterpart, and kept in the ledger until ported or
+   explicitly documented as JavaScript-only.
 5. For provider-backed behavior, require two layers of proof before marking a
    row `verified`: deterministic fake/mock/transport tests that run in normal
    validation, plus credential-gated live provider validation when a usable
@@ -370,7 +374,8 @@ You are done only when:
    upstream surfaces.
 4. Every portable test from the original upstream TypeScript packages exists as
    an equivalent Rust test in the matching crate. Rust may have more tests, but
-   it must not have fewer portable tests than upstream.
+   it must not have fewer portable tests than upstream. Completion requires an
+   explicit test inventory mapping, not a sampled or reduced Rust suite.
 5. The Rust workspace has a strict 1:1 crate mapping for every portable
    upstream TypeScript package: one matching Rust crate per package, no Rust
    crate owning APIs from multiple upstream packages, and the root crate limited

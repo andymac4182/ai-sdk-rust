@@ -41,6 +41,8 @@ to exist as an equivalent Rust test in the matching Rust crate. This is a
 minimum bar, not an aspirational coverage target: Rust may add more tests for
 stronger typing, additional edge cases, live-provider proof, or Rust-specific
 failure modes, but it must never have fewer portable tests than upstream.
+The upstream TypeScript test inventory is the floor and the Rust inventory must
+be a superset, not a sampled or reduced suite.
 
 Every original portable TypeScript test case must be accounted for, including
 table-driven cases, helper-backed scenarios, fixtures, snapshot-equivalent
@@ -89,7 +91,9 @@ plus Vercel AI Gateway phase must be finished first.
   as the upstream TypeScript test inventory. Record exact Rust test names for
   every ported upstream behavior, keep unmatched upstream tests in the remaining
   work notes, and treat every missing portable upstream test as blocking
-  `verified` status.
+  `verified` status. A package cannot be considered complete until every
+  portable upstream test case is either mapped to Rust or explicitly documented
+  as JavaScript-only/non-portable.
 - Provider-backed rows need deterministic tests plus live-provider proof before
   they can be `verified`. The live proof must be an ignored credential-gated
   test or runnable example that skips cleanly without credentials, never prints

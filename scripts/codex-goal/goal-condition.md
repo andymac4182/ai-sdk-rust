@@ -25,7 +25,11 @@ matching 1:1 crate before that package can be marked verified. Rust may and
 should add extra tests for Rust-specific typing, safety, live-provider proof,
 and edge cases, but it must never have fewer portable tests than upstream. A
 broader Rust test that only generally covers the same area is not enough unless
-the ledger maps it to the exact upstream cases it covers.
+the ledger maps it to the exact upstream cases it covers. The original
+TypeScript test inventory is the floor: every portable upstream test case must
+be counted, mapped to Rust, and kept visible until ported or explicitly
+documented as JavaScript-only. Future Rust coverage may only be a superset of
+the upstream tests, never a reduced or sampled subset.
 
 Required order: finish ALL common/core SDK packages together with Vercel AI
 Gateway provider coverage before taking more unrelated standalone provider
