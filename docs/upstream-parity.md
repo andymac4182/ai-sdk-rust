@@ -263,6 +263,7 @@ inventory.
 | Open Responses Azure provider metadata keys | verified | `src/open_responses.rs` | `open_responses_provider_uses_azure_metadata_key_for_function_call_content`; `open_responses_provider_streams_azure_metadata_key_for_reasoning_and_finish` | Azure Responses now mirrors upstream provider-metadata key selection for non-streaming function-call content and streaming reasoning/finish events: generated content and stream parts use the `azure` key and do not also emit `openai` metadata. |
 | Open Responses allowed tools request option | verified | `src/open_responses.rs` | `open_responses_provider_maps_allowed_tools_to_tool_choice` | OpenAI/Gateway wrapper provider `allowedTools` now mirrors upstream by keeping the full `tools` array for prompt caching while overriding request-level `toolChoice` with Responses `tool_choice: { type: "allowed_tools", mode, tools }`, defaulting mode to `auto`, mapping tool names through provider-tool aliases, and preventing the SDK-only provider option from leaking into the request body. |
 | Open Responses web-search-preview and local-shell request tools | verified | `src/open_responses.rs` | `open_responses_provider_prepares_web_search_preview_and_local_shell_tools` | Open Responses provider-tool request preparation now mirrors upstream `openai.web_search_preview` option mapping for `searchContextSize` and `userLocation`, emits `openai.local_shell` as `{ "type": "local_shell" }`, and resolves hosted `tool_choice` to `{ "type": "web_search_preview" }`. |
+| Open Responses streaming citation annotations | verified | `crates/ai-sdk-open-responses/src/open_responses.rs` | `open_responses_provider_streams_mixed_url_and_file_citations`; `open_responses_provider_streams_file_citations_without_optional_fields`; `open_responses_provider_streams_container_file_citation`; `open_responses_provider_streams_file_path_citation` | Mirrors upstream `packages/openai/src/responses/openai-responses-language-model.test.ts` mixed citation streaming tests for URL, `file_citation`, `container_file_citation`, and `file_path` annotations. Rust emits the matching source variants, preserves raw OpenAI annotation metadata on `text-end`, keeps `responseId: null` when no `response.created` event was streamed, maps file-path citations as `application/octet-stream`, and preserves cached/reasoning usage. |
 | Open Responses code-interpreter and image-generation request tools | verified | `src/open_responses.rs` | `open_responses_provider_prepares_code_interpreter_and_image_generation_options` | Open Responses hosted-tool request preparation now mirrors upstream code-interpreter defaults and container-id passthrough, plus image-generation option mapping for background, input fidelity, input image masks, model, moderation, partial images, quality, output compression/format, size, and hosted `tool_choice` resolution. |
 | Open Responses custom provider-tool request formats | verified | `src/open_responses.rs` | `open_responses_provider_prepares_custom_tool_formats_and_choice` | Open Responses custom provider-tool request preparation now mirrors upstream grammar-tool shaping for regex and Lark formats and resolves `tool_choice` to `{ type: "custom", name }` when the selected tool name belongs to an `openai.custom` provider tool. |
 | Open Responses custom provider-tool fixtures | verified | `crates/ai-sdk-open-responses/src/open_responses.rs` | `open_responses_provider_generates_custom_tool_fixture`; `open_responses_provider_streams_custom_tool_fixture` | Mirrors upstream OpenAI Responses `openai-custom-tool.1` JSON and streaming fixtures: request tool shaping emits `type: "custom"` with regex grammar format, generated and streamed custom tool calls preserve the OpenAI item id, streamed input deltas reconstruct the SQL text, response metadata is retained, usage maps to Rust usage fields, and finish reason remains `tool-calls`. |
@@ -917,6 +918,16 @@ focused tests for each portable behavior before changing rows to `verified`.
   generated and streamed text, request-body `context_management` forwarding,
   `openai.compaction` custom content with encrypted-content metadata, response
   metadata, service tier, and cached/reasoning usage.
+- 2026-05-20: OpenAI Responses streaming citation annotation parity added
+  `open_responses_provider_streams_mixed_url_and_file_citations`,
+  `open_responses_provider_streams_file_citations_without_optional_fields`,
+  `open_responses_provider_streams_container_file_citation`, and
+  `open_responses_provider_streams_file_path_citation` now map the upstream
+  `mixed citation types` streaming tests by proving URL citation,
+  file-citation, container-file-citation, and file-path source emission,
+  raw OpenAI annotation metadata on `text-end`, `responseId: null` finish
+  metadata when no `response.created` event is streamed, file-path
+  `application/octet-stream` media typing, and cached/reasoning usage.
 
 ## Next Unported Work Queue
 
@@ -950,8 +961,9 @@ focused tests for each portable behavior before changing rows to `verified`.
    no-schema JSON, allowed-tools, hosted-tool include options,
    system-message modes, provider option edge mapping, shell/apply-patch,
    assistant filtering, custom provider-tool, phase metadata fixture, encrypted
-   reasoning fixture, compaction fixture, and OpenAI model-capability slices;
-   the next Open Responses work should compare the remaining
+   reasoning fixture, compaction fixture, streaming citation annotations, and
+   OpenAI model-capability slices; the next Open Responses work should compare
+   the remaining
    `packages/openai/src/responses` tests against the package-owned Rust crate,
    then add exact missing test names to this ledger.
 4. Keep the next slices Gateway-first within the first-phase queue: close

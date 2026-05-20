@@ -4632,6 +4632,7 @@ fn open_responses_stream_result_from_response(
                                 completed_message_text.insert(id, text.to_string());
                             }
                         } else {
+                            let had_ongoing_annotations = !ongoing_annotations.is_empty();
                             open_responses_finish_text_block(
                                 &mut stream,
                                 &mut text_buffers,
@@ -4646,6 +4647,9 @@ fn open_responses_stream_result_from_response(
                                     &ongoing_annotations,
                                 ),
                             );
+                            if had_ongoing_annotations {
+                                ongoing_annotations.clear();
+                            }
                         }
                     }
                     Some("response.reasoning_summary_text.delta")
@@ -4702,6 +4706,12 @@ fn open_responses_stream_result_from_response(
                                     completed_message_text.insert(id, text.to_string());
                                 }
                             } else {
+                                let metadata_annotations = if ongoing_annotations.is_empty() {
+                                    annotations.as_slice()
+                                } else {
+                                    ongoing_annotations.as_slice()
+                                };
+                                let had_ongoing_annotations = !ongoing_annotations.is_empty();
                                 open_responses_finish_text_block(
                                     &mut stream,
                                     &mut text_buffers,
@@ -4713,9 +4723,12 @@ fn open_responses_stream_result_from_response(
                                         provider_name,
                                         Some(&id),
                                         active_message_phase.as_deref(),
-                                        &annotations,
+                                        metadata_annotations,
                                     ),
                                 );
+                                if had_ongoing_annotations {
+                                    ongoing_annotations.clear();
+                                }
                             }
                         } else if open_responses_is_reasoning_text_part(part_type) {
                             let id = open_responses_stream_reasoning_id(&value);
@@ -7196,6 +7209,39 @@ mod tests {
                 LanguageModelTextPart::new("Hello"),
             )],
         ))]
+    }
+
+    fn open_responses_stream_parts_from_events(
+        model_id: &str,
+        events: Vec<JsonValue>,
+    ) -> Vec<LanguageModelStreamPart> {
+        let sse = open_responses_sse_from_events(events);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
+                let sse = sse.clone();
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model(model_id);
+
+        poll_ready(model.do_stream(LanguageModelCallOptions::new(open_responses_hello_prompt())))
+            .stream
+    }
+
+    fn open_responses_stream_sources(
+        stream: &[LanguageModelStreamPart],
+    ) -> Vec<LanguageModelSource> {
+        stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::Source(source) => Some(source.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn open_responses_compaction_call_options() -> LanguageModelCallOptions {
@@ -17688,6 +17734,702 @@ mod tests {
                 ]
             ]))
         );
+    }
+
+    #[test]
+    fn open_responses_provider_streams_mixed_url_and_file_citations() {
+        const TEXT: &str = "Based on web search and file content.";
+
+        let stream = open_responses_stream_parts_from_events(
+            "gpt-4o",
+            vec![
+                json!({
+                    "type": "response.content_part.added",
+                    "item_id": "msg_123",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "text": "",
+                        "annotations": []
+                    }
+                }),
+                json!({
+                    "type": "response.output_text.annotation.added",
+                    "item_id": "msg_123",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "annotation_index": 0,
+                    "annotation": {
+                        "type": "url_citation",
+                        "url": "https://example.com",
+                        "title": "Example URL",
+                        "start_index": 123,
+                        "end_index": 234
+                    }
+                }),
+                json!({
+                    "type": "response.output_text.annotation.added",
+                    "item_id": "msg_123",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "annotation_index": 1,
+                    "annotation": {
+                        "type": "file_citation",
+                        "index": 123,
+                        "file_id": "file-abc123",
+                        "filename": "resource1.json"
+                    }
+                }),
+                json!({
+                    "type": "response.content_part.done",
+                    "item_id": "msg_123",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "text": TEXT,
+                        "annotations": [
+                            {
+                                "type": "url_citation",
+                                "start_index": 0,
+                                "end_index": 10,
+                                "url": "https://example.com",
+                                "title": "Example URL"
+                            },
+                            {
+                                "type": "file_citation",
+                                "index": 123,
+                                "file_id": "file-abc123",
+                                "filename": "resource1.json"
+                            }
+                        ]
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "id": "msg_123",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": TEXT,
+                                "annotations": [
+                                    {
+                                        "type": "url_citation",
+                                        "start_index": 0,
+                                        "end_index": 10,
+                                        "url": "https://example.com",
+                                        "title": "Example URL"
+                                    },
+                                    {
+                                        "type": "file_citation",
+                                        "index": 123,
+                                        "file_id": "file-abc123",
+                                        "filename": "resource1.json"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }),
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_123",
+                        "object": "response",
+                        "created_at": 1234567890,
+                        "status": "completed",
+                        "model": "gpt-4o",
+                        "output": [],
+                        "usage": {
+                            "input_tokens": 100,
+                            "input_tokens_details": {
+                                "cached_tokens": 0
+                            },
+                            "output_tokens": 50,
+                            "output_tokens_details": {
+                                "reasoning_tokens": 0
+                            },
+                            "total_tokens": 150
+                        }
+                    }
+                }),
+            ],
+        );
+
+        let sources = open_responses_stream_sources(&stream);
+        assert_eq!(sources.len(), 2);
+        match &sources[0] {
+            LanguageModelSource::Url(source) => {
+                assert_eq!(source.id, "source-0");
+                assert_eq!(source.url, "https://example.com");
+                assert_eq!(source.title.as_deref(), Some("Example URL"));
+            }
+            other => panic!("expected URL citation source, got {other:?}"),
+        }
+        match &sources[1] {
+            LanguageModelSource::Document(source) => {
+                assert_eq!(source.id, "source-1");
+                assert_eq!(source.media_type, "text/plain");
+                assert_eq!(source.title, "resource1.json");
+                assert_eq!(source.filename.as_deref(), Some("resource1.json"));
+                let openai = source
+                    .provider_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("openai"))
+                    .expect("file source includes OpenAI metadata");
+                assert_eq!(openai["type"], "file_citation");
+                assert_eq!(openai["fileId"], "file-abc123");
+                assert_eq!(openai["index"], 123);
+            }
+            other => panic!("expected file citation source, got {other:?}"),
+        }
+        assert!(
+            stream.iter().any(|part| matches!(
+                part,
+                LanguageModelStreamPart::TextDelta(delta)
+                    if delta.id == "msg_123" && delta.delta == TEXT
+            )),
+            "stream includes final citation text"
+        );
+
+        let text_end = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextEnd(text_end) if text_end.id == "msg_123" => {
+                    Some(text_end)
+                }
+                _ => None,
+            })
+            .expect("stream includes text end");
+        assert_eq!(
+            openai_metadata_value(&text_end.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some("msg_123")
+        );
+        assert_eq!(
+            openai_metadata_value(&text_end.provider_metadata, "annotations"),
+            Some(&json!([
+                {
+                    "type": "url_citation",
+                    "url": "https://example.com",
+                    "title": "Example URL",
+                    "start_index": 123,
+                    "end_index": 234
+                },
+                {
+                    "type": "file_citation",
+                    "index": 123,
+                    "file_id": "file-abc123",
+                    "filename": "resource1.json"
+                }
+            ]))
+        );
+
+        let finish = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId"),
+            Some(&JsonValue::Null)
+        );
+        assert_eq!(finish.usage.input_tokens.total, Some(100));
+        assert_eq!(finish.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(finish.usage.input_tokens.no_cache, Some(100));
+        assert_eq!(finish.usage.output_tokens.total, Some(50));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(0));
+        assert_eq!(finish.usage.output_tokens.text, Some(50));
+    }
+
+    #[test]
+    fn open_responses_provider_streams_file_citations_without_optional_fields() {
+        const TEXT: &str = "Answer for the specified years....";
+        const FILE_ID: &str = "file-YRcoCqn3Fo2K4JgraG";
+        const FILENAME: &str = "resource1.json";
+
+        let stream = open_responses_stream_parts_from_events(
+            "gpt-5",
+            vec![
+                json!({
+                    "type": "response.content_part.added",
+                    "item_id": "msg_456",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "text": "",
+                        "annotations": []
+                    }
+                }),
+                json!({
+                    "type": "response.output_text.annotation.added",
+                    "item_id": "msg_456",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "annotation_index": 0,
+                    "annotation": {
+                        "type": "file_citation",
+                        "file_id": FILE_ID,
+                        "filename": FILENAME,
+                        "index": 145
+                    }
+                }),
+                json!({
+                    "type": "response.output_text.annotation.added",
+                    "item_id": "msg_456",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "annotation_index": 1,
+                    "annotation": {
+                        "type": "file_citation",
+                        "file_id": FILE_ID,
+                        "filename": FILENAME,
+                        "index": 192
+                    }
+                }),
+                json!({
+                    "type": "response.content_part.done",
+                    "item_id": "msg_456",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "text": TEXT,
+                        "annotations": [
+                            {
+                                "type": "file_citation",
+                                "file_id": FILE_ID,
+                                "filename": FILENAME,
+                                "index": 145
+                            },
+                            {
+                                "type": "file_citation",
+                                "file_id": FILE_ID,
+                                "filename": FILENAME,
+                                "index": 192
+                            }
+                        ]
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "id": "msg_456",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": TEXT,
+                                "annotations": [
+                                    {
+                                        "type": "file_citation",
+                                        "file_id": FILE_ID,
+                                        "filename": FILENAME,
+                                        "index": 145
+                                    },
+                                    {
+                                        "type": "file_citation",
+                                        "file_id": FILE_ID,
+                                        "filename": FILENAME,
+                                        "index": 192
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }),
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_456",
+                        "object": "response",
+                        "created_at": 1234567890,
+                        "status": "completed",
+                        "model": "gpt-5",
+                        "output": [],
+                        "usage": {
+                            "input_tokens": 50,
+                            "input_tokens_details": {
+                                "cached_tokens": 0
+                            },
+                            "output_tokens": 25,
+                            "output_tokens_details": {
+                                "reasoning_tokens": 0
+                            },
+                            "total_tokens": 75
+                        }
+                    }
+                }),
+            ],
+        );
+
+        let sources = open_responses_stream_sources(&stream);
+        assert_eq!(sources.len(), 2);
+        for (source, index, source_id) in [
+            (sources[0].clone(), 145, "source-0"),
+            (sources[1].clone(), 192, "source-1"),
+        ] {
+            match source {
+                LanguageModelSource::Document(source) => {
+                    assert_eq!(source.id, source_id);
+                    assert_eq!(source.media_type, "text/plain");
+                    assert_eq!(source.title, FILENAME);
+                    assert_eq!(source.filename.as_deref(), Some(FILENAME));
+                    let openai = source
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("openai"))
+                        .expect("file source includes OpenAI metadata");
+                    assert_eq!(openai["type"], "file_citation");
+                    assert_eq!(openai["fileId"], FILE_ID);
+                    assert_eq!(openai["index"], index);
+                }
+                other => panic!("expected file citation source, got {other:?}"),
+            }
+        }
+
+        let text_end = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextEnd(text_end) if text_end.id == "msg_456" => {
+                    Some(text_end)
+                }
+                _ => None,
+            })
+            .expect("stream includes text end");
+        assert_eq!(
+            openai_metadata_value(&text_end.provider_metadata, "annotations"),
+            Some(&json!([
+                {
+                    "type": "file_citation",
+                    "file_id": FILE_ID,
+                    "filename": FILENAME,
+                    "index": 145
+                },
+                {
+                    "type": "file_citation",
+                    "file_id": FILE_ID,
+                    "filename": FILENAME,
+                    "index": 192
+                }
+            ]))
+        );
+
+        let finish = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId"),
+            Some(&JsonValue::Null)
+        );
+        assert_eq!(finish.usage.input_tokens.total, Some(50));
+        assert_eq!(finish.usage.output_tokens.total, Some(25));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(0));
+    }
+
+    #[test]
+    fn open_responses_provider_streams_container_file_citation() {
+        const MESSAGE_ID: &str = "msg_68c2e7054ae481938354ab3e4e77abad02d3a5742c7ddae9";
+        const CONTAINER_ID: &str = "cntr_68c2e6f380d881908a57a82d394434ff02f484f5344062e9";
+        const FILE_ID: &str = "cfile_68c2e7084ab48191a67824aa1f4c90f1";
+        const FILENAME: &str = "roll2dice_sums_10000.csv";
+        const TEXT: &str = "Download the generated CSV.";
+
+        let annotation = json!({
+            "type": "container_file_citation",
+            "container_id": CONTAINER_ID,
+            "end_index": 465,
+            "file_id": FILE_ID,
+            "filename": FILENAME,
+            "start_index": 423
+        });
+        let stream = open_responses_stream_parts_from_events(
+            "gpt-5",
+            vec![
+                json!({
+                    "type": "response.content_part.added",
+                    "item_id": MESSAGE_ID,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "text": "",
+                        "annotations": []
+                    }
+                }),
+                json!({
+                    "type": "response.output_text.annotation.added",
+                    "item_id": MESSAGE_ID,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "annotation_index": 0,
+                    "annotation": annotation
+                }),
+                json!({
+                    "type": "response.content_part.done",
+                    "item_id": MESSAGE_ID,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "text": TEXT,
+                        "annotations": [annotation]
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "id": MESSAGE_ID,
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": TEXT,
+                                "annotations": [annotation]
+                            }
+                        ]
+                    }
+                }),
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_68c2e6efa238819383d5f52a2c2a3baa02d3a5742c7ddae9",
+                        "object": "response",
+                        "created_at": 1757603567,
+                        "status": "completed",
+                        "model": "gpt-5-nano-2025-08-07",
+                        "output": [],
+                        "usage": {
+                            "input_tokens": 6047,
+                            "input_tokens_details": {
+                                "cached_tokens": 2944
+                            },
+                            "output_tokens": 1623,
+                            "output_tokens_details": {
+                                "reasoning_tokens": 1408
+                            },
+                            "total_tokens": 7670
+                        }
+                    }
+                }),
+            ],
+        );
+
+        let sources = open_responses_stream_sources(&stream);
+        assert_eq!(sources.len(), 1);
+        match &sources[0] {
+            LanguageModelSource::Document(source) => {
+                assert_eq!(source.id, "source-0");
+                assert_eq!(source.media_type, "text/plain");
+                assert_eq!(source.title, FILENAME);
+                assert_eq!(source.filename.as_deref(), Some(FILENAME));
+                let openai = source
+                    .provider_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("openai"))
+                    .expect("container source includes OpenAI metadata");
+                assert_eq!(openai["type"], "container_file_citation");
+                assert_eq!(openai["fileId"], FILE_ID);
+                assert_eq!(openai["containerId"], CONTAINER_ID);
+            }
+            other => panic!("expected container file citation source, got {other:?}"),
+        }
+
+        let text_end = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextEnd(text_end) if text_end.id == MESSAGE_ID => {
+                    Some(text_end)
+                }
+                _ => None,
+            })
+            .expect("stream includes text end");
+        assert_eq!(
+            openai_metadata_value(&text_end.provider_metadata, "annotations"),
+            Some(&json!([{
+                "type": "container_file_citation",
+                "container_id": CONTAINER_ID,
+                "end_index": 465,
+                "file_id": FILE_ID,
+                "filename": FILENAME,
+                "start_index": 423
+            }]))
+        );
+
+        let finish = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.usage.input_tokens.total, Some(6047));
+        assert_eq!(finish.usage.input_tokens.cache_read, Some(2944));
+        assert_eq!(finish.usage.input_tokens.no_cache, Some(3103));
+        assert_eq!(finish.usage.output_tokens.total, Some(1623));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(1408));
+        assert_eq!(finish.usage.output_tokens.text, Some(215));
+    }
+
+    #[test]
+    fn open_responses_provider_streams_file_path_citation() {
+        const MESSAGE_ID: &str = "msg_68c2e7054ae481938354ab3e4e77abad02d3a5742c7ddae9";
+        const FILE_ID: &str = "cfile_68c2e7084ab48191a67824aa1f4c90f1";
+        const TEXT: &str = "Download the generated CSV.";
+
+        let annotation = json!({
+            "type": "file_path",
+            "file_id": FILE_ID,
+            "index": 123
+        });
+        let stream = open_responses_stream_parts_from_events(
+            "gpt-4o",
+            vec![
+                json!({
+                    "type": "response.content_part.added",
+                    "item_id": MESSAGE_ID,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "text": "",
+                        "annotations": []
+                    }
+                }),
+                json!({
+                    "type": "response.output_text.annotation.added",
+                    "item_id": MESSAGE_ID,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "annotation_index": 0,
+                    "annotation": annotation
+                }),
+                json!({
+                    "type": "response.content_part.done",
+                    "item_id": MESSAGE_ID,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "text": TEXT,
+                        "annotations": [annotation]
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "id": MESSAGE_ID,
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": TEXT,
+                                "annotations": [annotation]
+                            }
+                        ]
+                    }
+                }),
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_68c2e6efa238819383d5f52a2c2a3baa02d3a5742c7ddae9",
+                        "object": "response",
+                        "created_at": 1757603567,
+                        "status": "completed",
+                        "model": "gpt-5-nano-2025-08-07",
+                        "output": [],
+                        "usage": {
+                            "input_tokens": 6047,
+                            "input_tokens_details": {
+                                "cached_tokens": 2944
+                            },
+                            "output_tokens": 1623,
+                            "output_tokens_details": {
+                                "reasoning_tokens": 1408
+                            },
+                            "total_tokens": 7670
+                        }
+                    }
+                }),
+            ],
+        );
+
+        let sources = open_responses_stream_sources(&stream);
+        assert_eq!(sources.len(), 1);
+        match &sources[0] {
+            LanguageModelSource::Document(source) => {
+                assert_eq!(source.id, "source-0");
+                assert_eq!(source.media_type, "application/octet-stream");
+                assert_eq!(source.title, FILE_ID);
+                assert_eq!(source.filename.as_deref(), Some(FILE_ID));
+                let openai = source
+                    .provider_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("openai"))
+                    .expect("file-path source includes OpenAI metadata");
+                assert_eq!(openai["type"], "file_path");
+                assert_eq!(openai["fileId"], FILE_ID);
+                assert_eq!(openai["index"], 123);
+            }
+            other => panic!("expected file path source, got {other:?}"),
+        }
+
+        let text_end = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextEnd(text_end) if text_end.id == MESSAGE_ID => {
+                    Some(text_end)
+                }
+                _ => None,
+            })
+            .expect("stream includes text end");
+        assert_eq!(
+            openai_metadata_value(&text_end.provider_metadata, "annotations"),
+            Some(&json!([{
+                "type": "file_path",
+                "file_id": FILE_ID,
+                "index": 123
+            }]))
+        );
+
+        let finish = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId"),
+            Some(&JsonValue::Null)
+        );
+        assert_eq!(finish.usage.input_tokens.total, Some(6047));
+        assert_eq!(finish.usage.input_tokens.cache_read, Some(2944));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(1408));
+        assert_eq!(finish.usage.output_tokens.text, Some(215));
     }
 
     #[test]
