@@ -4559,6 +4559,7 @@ fn open_responses_stream_result_from_response(
     let mut active_message_items = BTreeSet::<String>::new();
     let mut completed_message_text = BTreeMap::<String, String>::new();
     let mut completed_reasoning_text = BTreeMap::<String, String>::new();
+    let mut saw_error_event = false;
     let include_logprobs =
         open_responses_logprobs_enabled(provider_name, &options.provider_options);
 
@@ -4579,6 +4580,7 @@ fn open_responses_stream_result_from_response(
                         unified: FinishReason::Error,
                         raw: Some(event_type.unwrap_or("open-responses-error").to_string()),
                     };
+                    saw_error_event = matches!(event_type, Some("error"));
                     stream.push(open_responses_stream_event_error(
                         &value,
                         Some(&raw_value.to_string()),
@@ -5709,10 +5711,12 @@ fn open_responses_stream_result_from_response(
                     Some("response.failed") => {
                         if let Some(response) = open_responses_event_response(&value) {
                             usage = open_responses_usage(response.get("usage"));
-                            finish_reason = LanguageModelFinishReason {
-                                unified: FinishReason::Error,
-                                raw: open_responses_failed_raw_finish_reason(response),
-                            };
+                            if !saw_error_event {
+                                finish_reason = LanguageModelFinishReason {
+                                    unified: FinishReason::Error,
+                                    raw: open_responses_failed_raw_finish_reason(response),
+                                };
+                            }
                             service_tier = open_responses_service_tier(response);
                         }
                     }
@@ -6957,6 +6961,9 @@ mod tests {
     const OPEN_RESPONSES_PHASE_JSON_FIXTURE: &str = include_str!("fixtures/openai-phase.1.json");
     const OPEN_RESPONSES_PHASE_CHUNKS_FIXTURE: &str =
         include_str!("fixtures/openai-phase.1.chunks.txt");
+    const OPEN_RESPONSES_ERROR_JSON_FIXTURE: &str = include_str!("fixtures/openai-error.1.json");
+    const OPEN_RESPONSES_ERROR_CHUNKS_FIXTURE: &str =
+        include_str!("fixtures/openai-error.1.chunks.txt");
     const OPEN_RESPONSES_REASONING_ENCRYPTED_CONTENT_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-reasoning-encrypted-content.1.json");
     const OPEN_RESPONSES_REASONING_ENCRYPTED_CONTENT_CHUNKS_FIXTURE: &str =
@@ -20934,6 +20941,146 @@ mod tests {
                 .map(String::as_str),
             Some("req_openrouter_quota")
         );
+    }
+
+    #[test]
+    fn open_responses_provider_generates_error_fixture_result() {
+        const ERROR_MESSAGE: &str = "You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.";
+
+        let transport: OpenResponsesTransport =
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    429,
+                    "Too Many Requests",
+                    OPEN_RESPONSES_ERROR_JSON_FIXTURE.to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4o");
+
+        let result = poll_ready(
+            model.do_generate(LanguageModelCallOptions::new(open_responses_hello_prompt())),
+        );
+
+        assert!(result.content.is_empty());
+        assert_eq!(result.finish_reason.unified, FinishReason::Error);
+        assert_eq!(
+            result.finish_reason.raw.as_deref(),
+            Some("open-responses-error")
+        );
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "errorMessage")
+                .and_then(JsonValue::as_str),
+            Some(ERROR_MESSAGE)
+        );
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "errorType")
+                .and_then(JsonValue::as_str),
+            Some("insufficient_quota")
+        );
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "errorCode")
+                .and_then(JsonValue::as_str),
+            Some("insufficient_quota")
+        );
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "statusCode"),
+            Some(&json!(429))
+        );
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "isRetryable"),
+            Some(&json!(true))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_streams_error_fixture_parts() {
+        const RESPONSE_ID: &str = "resp_05500b38c2cd9bfc00691c7c9d222481a3b595421266dab424";
+        const ERROR_MESSAGE: &str = "You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.";
+
+        let sse = open_responses_sse_from_fixture_lines(OPEN_RESPONSES_ERROR_CHUNKS_FIXTURE);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
+                let sse = sse.clone();
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse)
+                    .with_headers(Headers::from([(
+                        "content-type".to_string(),
+                        "text/event-stream".to_string(),
+                    )])))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4o-mini");
+
+        let result = poll_ready(
+            model.do_stream(LanguageModelCallOptions::new(open_responses_hello_prompt())),
+        );
+
+        let metadata = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ResponseMetadata(metadata) => Some(metadata),
+                _ => None,
+            })
+            .expect("stream includes response metadata");
+        assert_eq!(metadata.id.as_deref(), Some(RESPONSE_ID));
+        assert_eq!(
+            metadata
+                .timestamp
+                .map(|timestamp| timestamp.unix_timestamp()),
+            Some(1_763_474_589)
+        );
+        assert_eq!(metadata.model_id.as_deref(), Some("gpt-5-nano-2025-08-07"));
+
+        let error = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Error(error) => Some(&error.error),
+                _ => None,
+            })
+            .expect("stream includes error event");
+        assert_eq!(error.get("type").and_then(JsonValue::as_str), Some("error"));
+        assert_eq!(error.get("sequence_number"), Some(&json!(2)));
+        assert_eq!(
+            error
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(JsonValue::as_str),
+            Some(ERROR_MESSAGE)
+        );
+
+        assert!(
+            !result
+                .stream
+                .iter()
+                .any(|part| matches!(part, LanguageModelStreamPart::TextDelta(_)))
+        );
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Error);
+        assert_eq!(finish.finish_reason.raw.as_deref(), Some("error"));
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some(RESPONSE_ID)
+        );
+        assert!(finish.usage.input_tokens.total.is_none());
+        assert!(finish.usage.output_tokens.total.is_none());
     }
 
     #[test]
