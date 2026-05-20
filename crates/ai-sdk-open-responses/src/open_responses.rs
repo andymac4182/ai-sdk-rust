@@ -7591,6 +7591,47 @@ mod tests {
         )
     }
 
+    fn openai_response_format_request_body(
+        model_id: &str,
+        response_format: LanguageModelResponseFormat,
+        openai_options: Option<JsonValue>,
+    ) -> (Vec<Warning>, JsonValue) {
+        let (provider, captured_request) = open_responses_captured_provider("openai", model_id);
+        let model = provider.language_model(model_id);
+        let mut options = LanguageModelCallOptions::new(open_responses_hello_prompt())
+            .with_response_format(response_format);
+
+        if let Some(openai_options) = openai_options {
+            let provider_options: ProviderOptions = serde_json::from_value(json!({
+                "openai": openai_options
+            }))
+            .expect("provider options deserialize");
+            options = options.with_provider_options(provider_options);
+        }
+
+        let result = poll_ready(model.do_generate(options));
+
+        (
+            result.warnings,
+            captured_open_responses_request_body(&captured_request),
+        )
+    }
+
+    fn openai_response_format_schema() -> JsonObject {
+        serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "value": {
+                    "type": "string"
+                }
+            },
+            "required": ["value"],
+            "additionalProperties": false,
+            "$schema": "http://json-schema.org/draft-07/schema#"
+        }))
+        .expect("schema deserializes")
+    }
+
     fn openai_default_request_body(model_id: &str) -> (Vec<Warning>, JsonValue) {
         let (provider, captured_request) = open_responses_captured_provider("openai", model_id);
         let model = provider.language_model(model_id);
@@ -13591,6 +13632,92 @@ mod tests {
             .insert(
                 "include".to_string(),
                 json!(["message.output_text.logprobs"]),
+            );
+        assert_eq!(request_body, expected);
+    }
+
+    #[test]
+    fn open_responses_provider_sends_json_response_format() {
+        let (warnings, request_body) = openai_response_format_request_body(
+            "gpt-4o",
+            LanguageModelResponseFormat::json(),
+            None,
+        );
+
+        assert!(warnings.is_empty());
+        let mut expected = openai_text_request_body("gpt-4o");
+        expected
+            .as_object_mut()
+            .expect("request body is an object")
+            .insert(
+                "text".to_string(),
+                json!({ "format": { "type": "json_object" } }),
+            );
+        assert_eq!(request_body, expected);
+    }
+
+    #[test]
+    fn open_responses_provider_sends_json_schema_response_format() {
+        let schema = openai_response_format_schema();
+        let (warnings, request_body) = openai_response_format_request_body(
+            "gpt-4o",
+            LanguageModelResponseFormat::json()
+                .with_name("response")
+                .with_description("A response")
+                .with_schema(schema.clone()),
+            None,
+        );
+
+        assert!(warnings.is_empty());
+        let mut expected = openai_text_request_body("gpt-4o");
+        expected
+            .as_object_mut()
+            .expect("request body is an object")
+            .insert(
+                "text".to_string(),
+                json!({
+                    "format": {
+                        "type": "json_schema",
+                        "name": "response",
+                        "description": "A response",
+                        "schema": schema,
+                        "strict": true
+                    }
+                }),
+            );
+        assert_eq!(request_body, expected);
+    }
+
+    #[test]
+    fn open_responses_provider_sends_json_schema_response_format_with_strict_json_schema_false() {
+        let schema = openai_response_format_schema();
+        let (warnings, request_body) = openai_response_format_request_body(
+            "gpt-4o",
+            LanguageModelResponseFormat::json()
+                .with_name("response")
+                .with_description("A response")
+                .with_schema(schema.clone()),
+            Some(json!({
+                "strictJsonSchema": false
+            })),
+        );
+
+        assert!(warnings.is_empty());
+        let mut expected = openai_text_request_body("gpt-4o");
+        expected
+            .as_object_mut()
+            .expect("request body is an object")
+            .insert(
+                "text".to_string(),
+                json!({
+                    "format": {
+                        "type": "json_schema",
+                        "name": "response",
+                        "description": "A response",
+                        "schema": schema,
+                        "strict": false
+                    }
+                }),
             );
         assert_eq!(request_body, expected);
     }
