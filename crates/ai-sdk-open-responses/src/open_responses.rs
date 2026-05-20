@@ -6859,6 +6859,10 @@ mod tests {
     use std::task::{Context, Poll, Wake, Waker};
     use url::Url;
 
+    const OPEN_RESPONSES_COMPACTION_JSON_FIXTURE: &str =
+        include_str!("fixtures/openai-compaction.1.json");
+    const OPEN_RESPONSES_COMPACTION_CHUNKS_FIXTURE: &str =
+        include_str!("fixtures/openai-compaction.1.chunks.txt");
     const OPEN_RESPONSES_PHASE_JSON_FIXTURE: &str = include_str!("fixtures/openai-phase.1.json");
     const OPEN_RESPONSES_PHASE_CHUNKS_FIXTURE: &str =
         include_str!("fixtures/openai-phase.1.chunks.txt");
@@ -7192,6 +7196,24 @@ mod tests {
                 LanguageModelTextPart::new("Hello"),
             )],
         ))]
+    }
+
+    fn open_responses_compaction_call_options() -> LanguageModelCallOptions {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "store": false,
+                "contextManagement": [
+                    {
+                        "type": "compaction",
+                        "compactThreshold": 50000
+                    }
+                ]
+            }
+        }))
+        .expect("provider options deserialize");
+
+        LanguageModelCallOptions::new(open_responses_hello_prompt())
+            .with_provider_options(provider_options)
     }
 
     fn openai_text_request_body(model_id: &str) -> JsonValue {
@@ -8708,6 +8730,248 @@ mod tests {
                 ],
                 "store": false
             }))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_generates_compaction_fixture() {
+        let fixture: JsonValue = serde_json::from_str(OPEN_RESPONSES_COMPACTION_JSON_FIXTURE)
+            .expect("fixture JSON parses");
+        let output = fixture["output"].as_array().expect("fixture output array");
+        let message_item = output
+            .iter()
+            .find(|item| item["type"].as_str() == Some("message"))
+            .expect("fixture includes message item");
+        let compaction_item = output
+            .iter()
+            .find(|item| item["type"].as_str() == Some("compaction"))
+            .expect("fixture includes compaction item");
+        let expected_text = message_item["content"][0]["text"]
+            .as_str()
+            .expect("fixture message text");
+        let expected_encrypted_content = compaction_item["encrypted_content"]
+            .as_str()
+            .expect("fixture compaction encrypted content");
+
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    OPEN_RESPONSES_COMPACTION_JSON_FIXTURE.to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-5.2");
+
+        let result = poll_ready(model.do_generate(open_responses_compaction_call_options()));
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(request_body["model"], "gpt-5.2");
+        assert_eq!(request_body["store"], false);
+        assert_eq!(
+            request_body["context_management"],
+            json!([
+                {
+                    "type": "compaction",
+                    "compact_threshold": 50000
+                }
+            ])
+        );
+        assert!(request_body.get("contextManagement").is_none());
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(51097));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(result.usage.output_tokens.total, Some(2056));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(0));
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            fixture["id"].as_str()
+        );
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "serviceTier")
+                .and_then(JsonValue::as_str),
+            Some("default")
+        );
+
+        assert_eq!(result.content.len(), 2);
+        let text = match &result.content[0] {
+            LanguageModelContent::Text(text) => text,
+            other => panic!("expected text content, got {other:?}"),
+        };
+        assert_eq!(text.text, expected_text);
+        assert_eq!(
+            openai_metadata_value(&text.provider_metadata, "itemId").and_then(JsonValue::as_str),
+            message_item["id"].as_str()
+        );
+
+        let compaction = match &result.content[1] {
+            LanguageModelContent::Custom(custom) => custom,
+            other => panic!("expected compaction content, got {other:?}"),
+        };
+        assert_eq!(compaction.kind, "openai.compaction");
+        assert_eq!(
+            openai_metadata_value(&compaction.provider_metadata, "type")
+                .and_then(JsonValue::as_str),
+            Some("compaction")
+        );
+        assert_eq!(
+            openai_metadata_value(&compaction.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            compaction_item["id"].as_str()
+        );
+        assert_eq!(
+            openai_metadata_value(&compaction.provider_metadata, "encryptedContent")
+                .and_then(JsonValue::as_str),
+            Some(expected_encrypted_content)
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_streams_compaction_fixture() {
+        let fixture_events = OPEN_RESPONSES_COMPACTION_CHUNKS_FIXTURE
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<JsonValue>(line).expect("fixture event parses"))
+            .collect::<Vec<_>>();
+        let message_done = fixture_events
+            .iter()
+            .find(|event| event["type"].as_str() == Some("response.output_text.done"))
+            .expect("fixture includes final text event");
+        let compaction_done = fixture_events
+            .iter()
+            .find(|event| {
+                event["type"].as_str() == Some("response.output_item.done")
+                    && event["item"]["type"].as_str() == Some("compaction")
+            })
+            .expect("fixture includes compaction item");
+        let completed_response = fixture_events
+            .iter()
+            .find(|event| event["type"].as_str() == Some("response.completed"))
+            .map(|event| &event["response"])
+            .expect("fixture includes completed response");
+        let expected_text = message_done["text"].as_str().expect("fixture text");
+        let expected_encrypted_content = compaction_done["item"]["encrypted_content"]
+            .as_str()
+            .expect("fixture compaction encrypted content");
+
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let sse = open_responses_sse_from_fixture_lines(OPEN_RESPONSES_COMPACTION_CHUNKS_FIXTURE);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse.clone()))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-5.2");
+
+        let result = poll_ready(model.do_stream(open_responses_compaction_call_options()));
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(request_body["model"], "gpt-5.2");
+        assert_eq!(request_body["store"], false);
+        assert_eq!(request_body["stream"], true);
+        assert_eq!(
+            request_body["context_management"],
+            json!([
+                {
+                    "type": "compaction",
+                    "compact_threshold": 50000
+                }
+            ])
+        );
+        assert!(request_body.get("contextManagement").is_none());
+
+        let text = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) => Some(delta.delta.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(text, expected_text);
+
+        let compaction = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Custom(custom) => Some(custom),
+                _ => None,
+            })
+            .expect("stream includes compaction custom content");
+        assert_eq!(compaction.kind, "openai.compaction");
+        assert_eq!(
+            openai_metadata_value(&compaction.provider_metadata, "type")
+                .and_then(JsonValue::as_str),
+            Some("compaction")
+        );
+        assert_eq!(
+            openai_metadata_value(&compaction.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            compaction_done["item"]["id"].as_str()
+        );
+        assert_eq!(
+            openai_metadata_value(&compaction.provider_metadata, "encryptedContent")
+                .and_then(JsonValue::as_str),
+            Some(expected_encrypted_content)
+        );
+
+        let finish = result
+            .stream
+            .iter()
+            .rev()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(
+            finish.usage.input_tokens.total,
+            completed_response["usage"]["input_tokens"].as_u64()
+        );
+        assert_eq!(
+            finish.usage.input_tokens.cache_read,
+            completed_response["usage"]["input_tokens_details"]["cached_tokens"].as_u64()
+        );
+        assert_eq!(
+            finish.usage.output_tokens.total,
+            completed_response["usage"]["output_tokens"].as_u64()
+        );
+        assert_eq!(
+            finish.usage.output_tokens.reasoning,
+            completed_response["usage"]["output_tokens_details"]["reasoning_tokens"].as_u64()
+        );
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            completed_response["id"].as_str()
+        );
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "serviceTier")
+                .and_then(JsonValue::as_str),
+            completed_response["service_tier"].as_str()
         );
     }
 
