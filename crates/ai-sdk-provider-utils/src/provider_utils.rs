@@ -9673,17 +9673,17 @@ mod tests {
     }
 
     #[test]
-    fn as_array_returns_empty_array_for_missing_value() {
+    fn as_array_upstream_returns_empty_array_for_undefined() {
         assert_eq!(as_array::<String>(None), Vec::<String>::new());
     }
 
     #[test]
-    fn as_array_wraps_single_value_in_array() {
+    fn as_array_upstream_wraps_single_value_in_array() {
         assert_eq!(as_array(Some(Arrayable::single("value"))), vec!["value"]);
     }
 
     #[test]
-    fn as_array_returns_array_values_unchanged() {
+    fn as_array_upstream_returns_array_value_unchanged() {
         let value = vec!["a", "b"];
 
         assert_eq!(as_array(Some(Arrayable::array(value.clone()))), value);
@@ -17367,22 +17367,22 @@ mod tests {
     }
 
     #[test]
-    fn strip_file_extension_strips_single_extension() {
+    fn strip_file_extension_upstream_strips_extension_from_filename() {
         assert_eq!(strip_file_extension("report.pdf"), "report");
     }
 
     #[test]
-    fn strip_file_extension_returns_input_when_there_is_no_dot() {
+    fn strip_file_extension_upstream_returns_input_when_there_is_no_extension() {
         assert_eq!(strip_file_extension("report"), "report");
     }
 
     #[test]
-    fn strip_file_extension_strips_all_extension_segments() {
+    fn strip_file_extension_upstream_strips_all_extension_segments_for_multi_dot_filenames() {
         assert_eq!(strip_file_extension("archive.tar.gz"), "archive");
     }
 
     #[test]
-    fn strip_file_extension_strips_a_trailing_dot() {
+    fn strip_file_extension_upstream_strips_a_trailing_dot() {
         assert_eq!(strip_file_extension("report."), "report");
     }
 
