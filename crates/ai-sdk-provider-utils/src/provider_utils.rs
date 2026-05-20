@@ -16837,6 +16837,34 @@ mod tests {
     }
 
     #[test]
+    fn handle_fetch_error_upstream_returns_abort_error_as_is() {
+        let error = FetchErrorInfo::new("Aborted").with_name("AbortError");
+
+        let result = handle_fetch_error(
+            error.clone(),
+            "https://api.example.com/v1/chat",
+            json!({ "prompt": "test" }),
+        );
+
+        assert_eq!(result, HandledFetchError::Original { error });
+    }
+
+    fn assert_retryable_fetch_api_call(
+        result: HandledFetchError,
+        expected_message: &str,
+    ) -> Box<ApiCallError> {
+        let HandledFetchError::ApiCall { error } = result else {
+            panic!("fetch error should become an API call error");
+        };
+
+        assert_eq!(error.message(), expected_message);
+        assert_eq!(error.url(), "https://api.example.com/v1/chat");
+        assert_eq!(error.request_body_values(), &json!({ "prompt": "test" }));
+        assert!(error.is_retryable());
+        error
+    }
+
+    #[test]
     fn handle_fetch_error_wraps_node_fetch_failed_type_errors() {
         let result = handle_fetch_error(
             FetchErrorInfo::new("fetch failed")
@@ -16858,6 +16886,20 @@ mod tests {
     }
 
     #[test]
+    fn handle_fetch_error_upstream_handles_type_error_with_fetch_failed_message() {
+        let result = handle_fetch_error(
+            FetchErrorInfo::new("fetch failed")
+                .with_name("TypeError")
+                .with_cause_message("ECONNREFUSED"),
+            "https://api.example.com/v1/chat",
+            json!({ "prompt": "test" }),
+        );
+
+        let error = assert_retryable_fetch_api_call(result, "Cannot connect to API: ECONNREFUSED");
+        assert_eq!(error.status_code(), None);
+    }
+
+    #[test]
     fn handle_fetch_error_wraps_browser_failed_to_fetch_type_errors() {
         let result = handle_fetch_error(
             FetchErrorInfo::new("Failed to fetch")
@@ -16873,6 +16915,19 @@ mod tests {
 
         assert_eq!(error.message(), "Cannot connect to API: Network error");
         assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn handle_fetch_error_upstream_handles_type_error_with_failed_to_fetch_message() {
+        let result = handle_fetch_error(
+            FetchErrorInfo::new("Failed to fetch")
+                .with_name("TypeError")
+                .with_cause_message("Network error"),
+            "https://api.example.com/v1/chat",
+            json!({ "prompt": "test" }),
+        );
+
+        assert_retryable_fetch_api_call(result, "Cannot connect to API: Network error");
     }
 
     #[test]
@@ -16912,11 +16967,86 @@ mod tests {
     }
 
     #[test]
+    fn handle_fetch_error_upstream_handles_connection_refused_error() {
+        let result = handle_fetch_error(
+            FetchErrorInfo::new("Unable to connect. Is the computer able to access the url?")
+                .with_code("ConnectionRefused"),
+            "https://api.example.com/v1/chat",
+            json!({ "prompt": "test" }),
+        );
+
+        assert_retryable_fetch_api_call(
+            result,
+            "Cannot connect to API: Unable to connect. Is the computer able to access the url?",
+        );
+    }
+
+    #[test]
+    fn handle_fetch_error_upstream_handles_connection_closed_error() {
+        let result = handle_fetch_error(
+            FetchErrorInfo::new("The socket connection was closed unexpectedly")
+                .with_code("ConnectionClosed"),
+            "https://api.example.com/v1/chat",
+            json!({ "prompt": "test" }),
+        );
+
+        assert_retryable_fetch_api_call(
+            result,
+            "Cannot connect to API: The socket connection was closed unexpectedly",
+        );
+    }
+
+    #[test]
+    fn handle_fetch_error_upstream_handles_failed_to_open_socket_error() {
+        let result = handle_fetch_error(
+            FetchErrorInfo::new("Was there a typo in the url or port?")
+                .with_code("FailedToOpenSocket"),
+            "https://api.example.com/v1/chat",
+            json!({ "prompt": "test" }),
+        );
+
+        assert_retryable_fetch_api_call(
+            result,
+            "Cannot connect to API: Was there a typo in the url or port?",
+        );
+    }
+
+    #[test]
+    fn handle_fetch_error_upstream_handles_econnreset_error() {
+        let result = handle_fetch_error(
+            FetchErrorInfo::new(
+                "Client network socket disconnected before secure TLS connection was established",
+            )
+            .with_code("ECONNRESET"),
+            "https://api.example.com/v1/chat",
+            json!({ "prompt": "test" }),
+        );
+
+        assert_retryable_fetch_api_call(
+            result,
+            "Cannot connect to API: Client network socket disconnected before secure TLS connection was established",
+        );
+    }
+
+    #[test]
     fn handle_fetch_error_returns_unknown_errors_unchanged() {
         let error = FetchErrorInfo::new("Something unexpected");
 
         let result =
             handle_fetch_error(error.clone(), "https://api.example.com/v1/chat", json!({}));
+
+        assert_eq!(result, HandledFetchError::Original { error });
+    }
+
+    #[test]
+    fn handle_fetch_error_upstream_returns_unknown_errors_as_is() {
+        let error = FetchErrorInfo::new("Something unexpected");
+
+        let result = handle_fetch_error(
+            error.clone(),
+            "https://api.example.com/v1/chat",
+            json!({ "prompt": "test" }),
+        );
 
         assert_eq!(result, HandledFetchError::Original { error });
     }
