@@ -15387,6 +15387,419 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_streams_upstream_service_tier() {
+        const RESPONSE_ID: &str = "resp_68b08bfa71908196889e9ae5668b2ae40cd677a623b867d5";
+        const REASONING_ID: &str = "rs_68b08bfb9f3c819682c5cff6edee6e4d0cd677a623b867d5";
+        const MESSAGE_ID: &str = "msg_68b08bfc9a548196b15465b6020b04e40cd677a623b867d5";
+
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "serviceTier": "flex"
+            }
+        }))
+        .expect("provider options deserialize");
+        let options = LanguageModelCallOptions::new(open_responses_hello_prompt())
+            .with_provider_options(provider_options);
+
+        let stream = open_responses_stream_parts_from_events_with_options(
+            "gpt-5-nano",
+            vec![
+                json!({
+                    "type": "response.created",
+                    "sequence_number": 0,
+                    "response": {
+                        "id": RESPONSE_ID,
+                        "object": "response",
+                        "created_at": 1756400634,
+                        "status": "in_progress",
+                        "background": false,
+                        "error": null,
+                        "incomplete_details": null,
+                        "instructions": null,
+                        "max_output_tokens": null,
+                        "max_tool_calls": null,
+                        "model": "gpt-5-nano-2025-08-07",
+                        "output": [],
+                        "parallel_tool_calls": true,
+                        "previous_response_id": null,
+                        "prompt_cache_key": null,
+                        "reasoning": {
+                            "effort": "medium",
+                            "summary": null
+                        },
+                        "safety_identifier": null,
+                        "service_tier": "flex",
+                        "store": true,
+                        "temperature": 1,
+                        "text": {
+                            "format": {
+                                "type": "text"
+                            },
+                            "verbosity": "medium"
+                        },
+                        "tool_choice": "auto",
+                        "tools": [],
+                        "top_logprobs": 0,
+                        "top_p": 1,
+                        "truncation": "disabled",
+                        "usage": null,
+                        "user": null,
+                        "metadata": {}
+                    }
+                }),
+                json!({
+                    "type": "response.in_progress",
+                    "sequence_number": 1,
+                    "response": {
+                        "id": RESPONSE_ID,
+                        "object": "response",
+                        "created_at": 1756400634,
+                        "status": "in_progress",
+                        "background": false,
+                        "error": null,
+                        "incomplete_details": null,
+                        "instructions": null,
+                        "max_output_tokens": null,
+                        "max_tool_calls": null,
+                        "model": "gpt-5-nano-2025-08-07",
+                        "output": [],
+                        "parallel_tool_calls": true,
+                        "previous_response_id": null,
+                        "prompt_cache_key": null,
+                        "reasoning": {
+                            "effort": "medium",
+                            "summary": null
+                        },
+                        "safety_identifier": null,
+                        "service_tier": "flex",
+                        "store": true,
+                        "temperature": 1,
+                        "text": {
+                            "format": {
+                                "type": "text"
+                            },
+                            "verbosity": "medium"
+                        },
+                        "tool_choice": "auto",
+                        "tools": [],
+                        "top_logprobs": 0,
+                        "top_p": 1,
+                        "truncation": "disabled",
+                        "usage": null,
+                        "user": null,
+                        "metadata": {}
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.added",
+                    "sequence_number": 2,
+                    "output_index": 0,
+                    "item": {
+                        "id": REASONING_ID,
+                        "type": "reasoning",
+                        "summary": []
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "sequence_number": 3,
+                    "output_index": 0,
+                    "item": {
+                        "id": REASONING_ID,
+                        "type": "reasoning",
+                        "summary": []
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.added",
+                    "sequence_number": 4,
+                    "output_index": 1,
+                    "item": {
+                        "id": MESSAGE_ID,
+                        "type": "message",
+                        "status": "in_progress",
+                        "content": [],
+                        "role": "assistant"
+                    }
+                }),
+                json!({
+                    "type": "response.content_part.added",
+                    "sequence_number": 5,
+                    "item_id": MESSAGE_ID,
+                    "output_index": 1,
+                    "content_index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "annotations": [],
+                        "logprobs": [],
+                        "text": ""
+                    }
+                }),
+                json!({
+                    "type": "response.output_text.delta",
+                    "sequence_number": 6,
+                    "item_id": MESSAGE_ID,
+                    "output_index": 1,
+                    "content_index": 0,
+                    "delta": "blue",
+                    "logprobs": [],
+                    "obfuscation": "A3q16QVxivdK"
+                }),
+                json!({
+                    "type": "response.output_text.done",
+                    "sequence_number": 7,
+                    "item_id": MESSAGE_ID,
+                    "output_index": 1,
+                    "content_index": 0,
+                    "text": "blue",
+                    "logprobs": []
+                }),
+                json!({
+                    "type": "response.content_part.done",
+                    "sequence_number": 8,
+                    "item_id": MESSAGE_ID,
+                    "output_index": 1,
+                    "content_index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "annotations": [],
+                        "logprobs": [],
+                        "text": "blue"
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "sequence_number": 9,
+                    "output_index": 1,
+                    "item": {
+                        "id": MESSAGE_ID,
+                        "type": "message",
+                        "status": "completed",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "annotations": [],
+                                "logprobs": [],
+                                "text": "blue"
+                            }
+                        ],
+                        "role": "assistant"
+                    }
+                }),
+                json!({
+                    "type": "response.completed",
+                    "sequence_number": 10,
+                    "response": {
+                        "id": RESPONSE_ID,
+                        "object": "response",
+                        "created_at": 1756400634,
+                        "status": "completed",
+                        "background": false,
+                        "error": null,
+                        "incomplete_details": null,
+                        "instructions": null,
+                        "max_output_tokens": null,
+                        "max_tool_calls": null,
+                        "model": "gpt-5-nano-2025-08-07",
+                        "output": [
+                            {
+                                "id": REASONING_ID,
+                                "type": "reasoning",
+                                "summary": []
+                            },
+                            {
+                                "id": MESSAGE_ID,
+                                "type": "message",
+                                "status": "completed",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "annotations": [],
+                                        "logprobs": [],
+                                        "text": "blue"
+                                    }
+                                ],
+                                "role": "assistant"
+                            }
+                        ],
+                        "parallel_tool_calls": true,
+                        "previous_response_id": null,
+                        "prompt_cache_key": null,
+                        "reasoning": {
+                            "effort": "medium",
+                            "summary": null
+                        },
+                        "safety_identifier": null,
+                        "service_tier": "flex",
+                        "store": true,
+                        "temperature": 1,
+                        "text": {
+                            "format": {
+                                "type": "text"
+                            },
+                            "verbosity": "medium"
+                        },
+                        "tool_choice": "auto",
+                        "tools": [],
+                        "top_logprobs": 0,
+                        "top_p": 1,
+                        "truncation": "disabled",
+                        "usage": {
+                            "input_tokens": 15,
+                            "input_tokens_details": {
+                                "cached_tokens": 0
+                            },
+                            "output_tokens": 263,
+                            "output_tokens_details": {
+                                "reasoning_tokens": 256
+                            },
+                            "total_tokens": 278
+                        },
+                        "user": null,
+                        "metadata": {}
+                    }
+                }),
+            ],
+            options,
+        );
+
+        let stream_start = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::StreamStart(start) => Some(start),
+                _ => None,
+            })
+            .expect("stream includes start");
+        assert!(stream_start.warnings.is_empty());
+
+        let response_metadata = stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ResponseMetadata(metadata) => Some(metadata),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(response_metadata.len(), 1);
+        assert_eq!(response_metadata[0].id.as_deref(), Some(RESPONSE_ID));
+        assert_eq!(
+            response_metadata[0].model_id.as_deref(),
+            Some("gpt-5-nano-2025-08-07")
+        );
+        assert_eq!(
+            response_metadata[0]
+                .timestamp
+                .map(|timestamp| timestamp.unix_timestamp()),
+            Some(1_756_400_634)
+        );
+
+        let reasoning_start = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ReasoningStart(start) => Some(start),
+                _ => None,
+            })
+            .expect("stream includes reasoning start");
+        assert_eq!(reasoning_start.id, format!("{REASONING_ID}:0"));
+        assert_eq!(
+            openai_metadata_value(&reasoning_start.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(REASONING_ID)
+        );
+        assert_eq!(
+            openai_metadata_value(
+                &reasoning_start.provider_metadata,
+                "reasoningEncryptedContent"
+            ),
+            Some(&JsonValue::Null)
+        );
+
+        let reasoning_end = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ReasoningEnd(end) => Some(end),
+                _ => None,
+            })
+            .expect("stream includes reasoning end");
+        assert_eq!(reasoning_end.id, format!("{REASONING_ID}:0"));
+        assert_eq!(
+            openai_metadata_value(&reasoning_end.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(REASONING_ID)
+        );
+        assert_eq!(
+            openai_metadata_value(
+                &reasoning_end.provider_metadata,
+                "reasoningEncryptedContent"
+            ),
+            Some(&JsonValue::Null)
+        );
+
+        let text_start = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextStart(start) => Some(start),
+                _ => None,
+            })
+            .expect("stream includes text start");
+        assert_eq!(text_start.id, MESSAGE_ID);
+        assert_eq!(
+            openai_metadata_value(&text_start.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(MESSAGE_ID)
+        );
+
+        let text_delta = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) => Some(delta),
+                _ => None,
+            })
+            .expect("stream includes text delta");
+        assert_eq!(text_delta.id, MESSAGE_ID);
+        assert_eq!(text_delta.delta, "blue");
+
+        let text_end = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextEnd(end) => Some(end),
+                _ => None,
+            })
+            .expect("stream includes text end");
+        assert_eq!(text_end.id, MESSAGE_ID);
+        assert_eq!(
+            openai_metadata_value(&text_end.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(MESSAGE_ID)
+        );
+
+        let finish = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(finish.finish_reason.raw.as_deref(), None);
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some(RESPONSE_ID)
+        );
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "serviceTier")
+                .and_then(JsonValue::as_str),
+            Some("flex")
+        );
+        assert_eq!(finish.usage.input_tokens.total, Some(15));
+        assert_eq!(finish.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(finish.usage.input_tokens.no_cache, Some(15));
+        assert_eq!(finish.usage.output_tokens.total, Some(263));
+        assert_eq!(finish.usage.output_tokens.text, Some(7));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(256));
+    }
+
+    #[test]
     fn open_responses_provider_handles_prompt_file_defaults_and_unsupported_files() {
         let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
         let captured_requests_for_transport = Arc::clone(&captured_requests);
