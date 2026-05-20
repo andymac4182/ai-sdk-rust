@@ -17796,6 +17796,166 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_streams_shell_local_multiturn_fixture() {
+        const RESPONSE_ID: &str = "resp_0b0392bd3bb81302006994e83ac0ac819396f3f5aa5f239e03";
+        const SHELL_ITEM_ID: &str = "sh_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e50";
+        const PRIOR_MESSAGE_ID: &str = "msg_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e52";
+        const MESSAGE_ID: &str = "msg_0b0392bd3bb81302006994e83b32748193aa637cdb31658266";
+        const SHELL_CALL_ID: &str = "call_abc123def456ghi789jkl012";
+        const STDOUT: &str = "Darwin mac-host 24.6.0 Darwin Kernel Version 24.6.0 root:xnu-11417.60.45.601.5~1/RELEASE_ARM64_T6041 arm64\n";
+        const FINAL_TEXT: &str = "`arm64` (Apple Silicon).";
+
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport = Arc::new(
+            move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                let sse = [
+                    r#"data: {"type":"response.created","response":{"id":"resp_0b0392bd3bb81302006994e83ac0ac819396f3f5aa5f239e03","object":"response","created_at":1771366458,"status":"in_progress","background":false,"completed_at":null,"error":null,"frequency_penalty":0,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5.2-2025-12-11","output":[],"parallel_tool_calls":true,"presence_penalty":0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"none","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"shell","environment":{"type":"local"}}],"top_logprobs":0,"top_p":0.98,"truncation":"disabled","usage":null,"user":null,"metadata":{}},"sequence_number":0}"#,
+                    "",
+                    r#"data: {"type":"response.in_progress","response":{"id":"resp_0b0392bd3bb81302006994e83ac0ac819396f3f5aa5f239e03","object":"response","created_at":1771366458,"status":"in_progress","background":false,"completed_at":null,"error":null,"frequency_penalty":0,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5.2-2025-12-11","output":[],"parallel_tool_calls":true,"presence_penalty":0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"none","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"shell","environment":{"type":"local"}}],"top_logprobs":0,"top_p":0.98,"truncation":"disabled","usage":null,"user":null,"metadata":{}},"sequence_number":1}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","item":{"id":"msg_0b0392bd3bb81302006994e83b32748193aa637cdb31658266","type":"message","status":"in_progress","content":[],"role":"assistant"},"output_index":0,"sequence_number":2}"#,
+                    "",
+                    r#"data: {"type":"response.content_part.added","content_index":0,"item_id":"msg_0b0392bd3bb81302006994e83b32748193aa637cdb31658266","output_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""},"sequence_number":3}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":"`","item_id":"msg_0b0392bd3bb81302006994e83b32748193aa637cdb31658266","logprobs":[],"obfuscation":"mMOcmYeOZsxvKYe","output_index":0,"sequence_number":4}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":"arm","item_id":"msg_0b0392bd3bb81302006994e83b32748193aa637cdb31658266","logprobs":[],"obfuscation":"9K5kBsGervAOp","output_index":0,"sequence_number":5}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":"64","item_id":"msg_0b0392bd3bb81302006994e83b32748193aa637cdb31658266","logprobs":[],"obfuscation":"0boaZJfX9CEp5M","output_index":0,"sequence_number":6}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":"`","item_id":"msg_0b0392bd3bb81302006994e83b32748193aa637cdb31658266","logprobs":[],"obfuscation":"gEFIB2vRsUYWyeN","output_index":0,"sequence_number":7}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":" (","item_id":"msg_0b0392bd3bb81302006994e83b32748193aa637cdb31658266","logprobs":[],"obfuscation":"u3vzSitmuhxTHB","output_index":0,"sequence_number":8}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":"Apple","item_id":"msg_0b0392bd3bb81302006994e83b32748193aa637cdb31658266","logprobs":[],"obfuscation":"CVvR2W83B0g","output_index":0,"sequence_number":9}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":" Silicon","item_id":"msg_0b0392bd3bb81302006994e83b32748193aa637cdb31658266","logprobs":[],"obfuscation":"IPIYG4rO","output_index":0,"sequence_number":10}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":").","item_id":"msg_0b0392bd3bb81302006994e83b32748193aa637cdb31658266","logprobs":[],"obfuscation":"CmEOx6IKEmUDCH","output_index":0,"sequence_number":11}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.done","content_index":0,"item_id":"msg_0b0392bd3bb81302006994e83b32748193aa637cdb31658266","logprobs":[],"output_index":0,"sequence_number":12,"text":"`arm64` (Apple Silicon)."}"#,
+                    "",
+                    r#"data: {"type":"response.content_part.done","content_index":0,"item_id":"msg_0b0392bd3bb81302006994e83b32748193aa637cdb31658266","output_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":"`arm64` (Apple Silicon)."},"sequence_number":13}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","item":{"id":"msg_0b0392bd3bb81302006994e83b32748193aa637cdb31658266","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":"`arm64` (Apple Silicon)."}],"role":"assistant"},"output_index":0,"sequence_number":14}"#,
+                    "",
+                    r#"data: {"type":"response.completed","response":{"id":"resp_0b0392bd3bb81302006994e83ac0ac819396f3f5aa5f239e03","object":"response","created_at":1771366458,"status":"completed","background":false,"completed_at":1771366459,"error":null,"frequency_penalty":0,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5.2-2025-12-11","output":[{"id":"msg_0b0392bd3bb81302006994e83b32748193aa637cdb31658266","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":"`arm64` (Apple Silicon)."}],"role":"assistant"}],"parallel_tool_calls":true,"presence_penalty":0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"none","summary":null},"safety_identifier":null,"service_tier":"default","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"shell","environment":{"type":"local"}}],"top_logprobs":0,"top_p":0.98,"truncation":"disabled","usage":{"input_tokens":444,"input_tokens_details":{"cached_tokens":0},"output_tokens":12,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":456},"user":null,"metadata":{}},"sequence_number":15}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-5.2");
+
+        let result =
+            poll_ready(model.do_stream(open_responses_shell_local_multiturn_call_options()));
+
+        let metadata = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ResponseMetadata(metadata) => Some(metadata),
+                _ => None,
+            })
+            .expect("stream includes response metadata");
+        assert_eq!(metadata.id.as_deref(), Some(RESPONSE_ID));
+        assert_eq!(metadata.model_id.as_deref(), Some("gpt-5.2-2025-12-11"));
+
+        let streamed_text = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) if delta.id == MESSAGE_ID => {
+                    Some(delta.delta.as_str())
+                }
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(streamed_text, FINAL_TEXT);
+
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(finish.usage.input_tokens.total, Some(444));
+        assert_eq!(finish.usage.output_tokens.total, Some(12));
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Run uname -a"
+                        }
+                    ]
+                },
+                {
+                    "type": "item_reference",
+                    "id": SHELL_ITEM_ID
+                },
+                {
+                    "type": "shell_call_output",
+                    "call_id": SHELL_CALL_ID,
+                    "output": [
+                        {
+                            "stdout": STDOUT,
+                            "stderr": "",
+                            "outcome": {
+                                "type": "exit",
+                                "exit_code": 0
+                            }
+                        }
+                    ]
+                },
+                {
+                    "type": "item_reference",
+                    "id": PRIOR_MESSAGE_ID
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "What architecture do you run in?"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(
+            request_body["tools"][0],
+            json!({
+                "type": "shell"
+            })
+        );
+    }
+
+    #[test]
     fn open_responses_provider_maps_web_search_api_sources_and_missing_action() {
         let transport: OpenResponsesTransport =
             Arc::new(move |_request| -> OpenResponsesTransportFuture {
@@ -19028,6 +19188,77 @@ mod tests {
                     "type": "containerAuto"
                 }
             })),
+        )))
+    }
+
+    fn open_responses_shell_local_multiturn_call_options() -> LanguageModelCallOptions {
+        let item_options = |item_id: &str| -> ProviderOptions {
+            serde_json::from_value(json!({
+                "openai": {
+                    "itemId": item_id
+                }
+            }))
+            .expect("provider options deserialize")
+        };
+
+        LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Run uname -a")),
+            ])),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(
+                    LanguageModelToolCallPart::new(
+                        "call_abc123def456ghi789jkl012",
+                        "shell",
+                        json!({
+                            "action": {
+                                "commands": ["uname -a"]
+                            }
+                        }),
+                    )
+                    .with_provider_options(item_options(
+                        "sh_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e50",
+                    )),
+                ),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call_abc123def456ghi789jkl012",
+                    "shell",
+                    LanguageModelToolResultOutput::json(json!({
+                        "output": [
+                            {
+                                "stdout": "Darwin mac-host 24.6.0 Darwin Kernel Version 24.6.0 root:xnu-11417.60.45.601.5~1/RELEASE_ARM64_T6041 arm64\n",
+                                "stderr": "",
+                                "outcome": {
+                                    "type": "exit",
+                                    "exitCode": 0
+                                }
+                            }
+                        ]
+                    })),
+                )),
+            ])),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::Text(
+                    LanguageModelTextPart::new(
+                        "Darwin mac-host 24.6.0 Darwin Kernel Version 24.6.0 arm64",
+                    )
+                    .with_provider_options(item_options(
+                        "msg_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e52",
+                    )),
+                ),
+            ])),
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
+                    "What architecture do you run in?",
+                )),
+            ])),
+        ])
+        .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+            "openai.shell",
+            "shell",
+            JsonObject::new(),
         )))
     }
 
