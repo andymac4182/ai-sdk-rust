@@ -33,6 +33,9 @@ covers. The original TypeScript test inventory is the floor: every portable
 upstream test case must be counted, mapped to Rust, and kept visible until
 ported or explicitly documented as JavaScript-only. Future Rust coverage may
 only be a superset of the upstream tests, never a reduced or sampled subset.
+Do not let a broader Rust test suite replace the original upstream inventory:
+future iterations must port every original TypeScript case one-to-one first,
+then add any additional Rust-specific coverage on top.
 
 Required order: finish ALL common/core SDK packages together with Vercel AI
 Gateway provider coverage before taking more unrelated standalone provider
