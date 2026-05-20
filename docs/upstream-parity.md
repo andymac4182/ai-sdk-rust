@@ -286,7 +286,7 @@ inventory.
 | Open Responses inline reasoning summary streaming variants | verified | `crates/ai-sdk-open-responses/src/open_responses.rs` | `open_responses_provider_streams_reasoning_with_summary_parts`; `open_responses_provider_streams_reasoning_with_empty_summary`; `open_responses_provider_streams_encrypted_reasoning_with_summary_parts`; `open_responses_provider_streams_encrypted_reasoning_with_empty_summary`; `open_responses_provider_streams_multiple_reasoning_blocks` | Maps upstream OpenAI Responses inline reasoning stream tests one-to-one: summary-part start/delta/end events with multiple summary indices, empty summary arrays, encrypted-content start/final metadata, multiple interleaved reasoning/message blocks, request-body `reasoning` and `include` shaping, final text reconstruction, finish metadata, and usage are preserved. |
 | Open Responses compaction fixtures | verified | `crates/ai-sdk-open-responses/src/open_responses.rs`, `crates/ai-sdk-open-responses/src/fixtures/openai-compaction.1.json`, `crates/ai-sdk-open-responses/src/fixtures/openai-compaction.1.chunks.txt` | `open_responses_provider_generates_compaction_fixture`; `open_responses_provider_streams_compaction_fixture` | Mirrors upstream OpenAI Responses `openai-compaction.1` JSON and streaming fixtures byte-for-byte: request bodies forward `store: false` and `context_management` with `compact_threshold`, generated and streamed text content stay aligned with the fixture, compaction items map to `openai.compaction` custom content with `itemId`, `type`, and `encryptedContent` metadata, and response/service-tier/usage metadata is preserved. |
 | Open Responses reasoning prompt history reconstruction | verified | `src/open_responses.rs` | `open_responses_provider_reconstructs_reasoning_history_with_store_false`; `open_responses_provider_warns_for_unstored_reasoning_without_encrypted_content` | Open Responses prompt conversion now reconstructs assistant reasoning history when `store` is disabled, merges repeated reasoning item IDs into one `reasoning` item with summary parts, updates encrypted content from later parts, supports encrypted reasoning without an item id, deduplicates stored reasoning item references, and warns/skips reasoning parts that cannot be sent without encrypted content. |
-| Open Responses compaction prompt history reconstruction | verified | `src/open_responses.rs` | `open_responses_provider_reconstructs_compaction_history_with_store_false`; `open_responses_provider_uses_item_references_for_stored_assistant_history` | Open Responses prompt conversion now maps assistant `openai.compaction` custom prompt history to `compaction` items with encrypted content when `store` is disabled and to stored `item_reference` entries when the compaction item is persisted. |
+| Open Responses compaction prompt history reconstruction | verified | `crates/ai-sdk-open-responses/src/open_responses.rs` | `open_responses_provider_reconstructs_compaction_history_with_store_false`; `open_responses_provider_uses_item_references_for_stored_assistant_history`; `open_responses_provider_converts_compaction_to_item_reference_when_stored`; `open_responses_provider_converts_compaction_to_full_item_when_unstored`; `open_responses_provider_skips_compaction_item_ids_when_conversation_is_set`; `open_responses_provider_converts_compaction_alongside_fresh_text_when_unstored`; `open_responses_provider_converts_compaction_alongside_text_to_item_references_when_stored` | Maps the upstream `convertToOpenAIResponsesInput > compaction` tests one-to-one: assistant `openai.compaction` custom prompt history becomes stored `item_reference` entries when `store` is true, full `compaction` items with encrypted content when `store` is false, is skipped when `conversation` indicates the item already lives in the conversation, and preserves ordering beside assistant text for both stored and unstored prompts. |
 | Open Responses multipart tool-result file outputs | verified | `src/open_responses.rs` | `open_responses_provider_converts_tool_result_file_content_outputs` | Multipart tool-result `content` outputs now convert text plus image/file URL and data parts into Responses `function_call_output` arrays using `input_text`, `input_image`, and `input_file`, forwards OpenAI `imageDetail` provider options on image outputs, and keeps unsupported file data forms and custom parts warning-backed. |
 | Open Responses assistant function-call prompt arguments | verified | `src/open_responses.rs` | `open_responses_provider_stringifies_assistant_function_call_arguments` | Assistant prompt tool-call conversion now sends Open Responses `function_call.arguments` as a string, stringifying JSON object inputs, passing through already-string inputs, and converting Rust null inputs to `{}` as the equivalent of upstream missing tool input. |
 | Open Responses function tool strict modes | verified | `crates/ai-sdk-open-responses/src/open_responses.rs` | `open_responses_provider_passes_strict_true_function_tool`; `open_responses_provider_passes_strict_false_function_tool`; `open_responses_provider_omits_undefined_strict_function_tool`; `open_responses_provider_passes_mixed_strict_function_tools`; `open_responses_provider_prepares_function_tool_strict_modes` | Open Responses function-tool request preparation now maps upstream `prepareResponsesTools` strict-mode cases one-to-one: `strict: true` and `strict: false` are preserved on the tool definition, omitted strict mode leaves the request field absent, and mixed strict/non-strict/default function tools preserve per-tool settings. Rust request-body assertions omit TypeScript-only `undefined` fields but preserve the portable serialized OpenAI shape. |
@@ -1218,6 +1218,15 @@ focused tests for each portable behavior before changing rows to `verified`.
   and `open_responses_provider_skips_reasoning_item_ids_when_conversation_is_set`
   now map the upstream `convertToOpenAIResponsesInput > hasConversation`
   tests one-to-one in the package-owned Open Responses crate.
+- 2026-05-20: OpenAI Responses compaction prompt parity added
+  `open_responses_provider_converts_compaction_to_item_reference_when_stored`,
+  `open_responses_provider_converts_compaction_to_full_item_when_unstored`,
+  `open_responses_provider_skips_compaction_item_ids_when_conversation_is_set`,
+  `open_responses_provider_converts_compaction_alongside_fresh_text_when_unstored`,
+  and
+  `open_responses_provider_converts_compaction_alongside_text_to_item_references_when_stored`
+  now map the upstream `convertToOpenAIResponsesInput > compaction` tests
+  one-to-one in the package-owned Open Responses crate.
 
 ## Next Unported Work Queue
 
@@ -1234,7 +1243,16 @@ focused tests for each portable behavior before changing rows to `verified`.
    standalone providers.
    Standalone provider slices are blocked while any of these rows are not yet
    verified or explicitly documented as intentionally non-portable.
-2. Treat real-provider validation as part of parity evidence, not a later QA
+2. Treat the original upstream TypeScript tests as the non-negotiable floor for
+   every slice. Each future iteration must start from the exact original
+   package test list and ensure every portable `it`/`test` case, table row,
+   fixture/snapshot-equivalent case, streaming/error/provider-option case, and
+   portable type-level assertion exists as Rust in the matching crate.
+   Rust-specific tests can be added on top, but they are additive only; they
+   never replace, collapse, or hide a missing upstream test. A slice with even
+   one fewer portable original TypeScript test/case than upstream is incomplete,
+   even if broader Rust tests appear to cover the same behavior.
+3. Treat real-provider validation as part of parity evidence, not a later QA
    task. Each provider-backed row needs deterministic tests and an ignored
    credential-gated live test or runnable example before it can move to
    `verified`; if live credentials are unavailable, keep the row `in-progress`
@@ -1245,7 +1263,7 @@ focused tests for each portable behavior before changing rows to `verified`.
    exporter shape and the real Rust `opentelemetry` SDK/exporter path. Once root
    telemetry wiring is available, live provider tests should also assert that
    telemetry export.
-3. Continue the remaining first-phase Open Responses/OpenAI Responses audit
+4. Continue the remaining first-phase Open Responses/OpenAI Responses audit
    from current upstream tests instead of the old topic list. The verified rows
    now cover the previously named request-tool, prompt-file, unsupported-option,
    no-schema JSON, allowed-tools, hosted-tool include options,
@@ -1258,7 +1276,7 @@ focused tests for each portable behavior before changing rows to `verified`.
    work should continue comparing the remaining
    `packages/openai/src/responses` tests against the package-owned Rust crate,
    then add exact missing test names to this ledger.
-4. Keep the next slices Gateway-first within the first-phase queue: close
+5. Keep the next slices Gateway-first within the first-phase queue: close
    the whole common/core plus Vercel AI Gateway first-phase queue before
    expanding to unrelated providers. Continue choosing from `packages/ai`,
    `packages/provider`, `packages/provider-utils`, `packages/openai-compatible`,
@@ -1266,27 +1284,27 @@ focused tests for each portable behavior before changing rows to `verified`.
    OTel, Workflow, telemetry, UI transport, chat state management, and
    test-server support until those rows are verified or intentionally
    documented as non-portable.
-5. Continue `packages/mcp` inside `crates/ai-sdk-mcp` by broadening the new
+6. Continue `packages/mcp` inside `crates/ai-sdk-mcp` by broadening the new
    authenticated loopback Streamable HTTP proof into remaining MCP examples for
    hosted auth variants plus, where credentials are available,
    protected live MCP service validation.
-6. Continue `streamText` parity with remaining retry/backoff edge cases,
+7. Continue `streamText` parity with remaining retry/backoff edge cases,
    true post-return `createUIMessageStream` delayed-merge behavior if a live
    stream abstraction is introduced, and remaining smoothStream delay
    scheduling because Gateway relies on this high-level library surface.
-7. Continue `streamObject` parity with remaining retry/backoff edge cases and
+8. Continue `streamObject` parity with remaining retry/backoff edge cases and
    remaining partial-output strategy edge cases after the Gateway
    text/stream/UI path is stronger.
-8. Expand native Gateway beyond the current language, streaming,
+9. Expand native Gateway beyond the current language, streaming,
    image/embedding/reranking/video, account metadata, auth/observability,
    provider-executed tools, and error-classification slices with broader
    provider package tests.
-9. Do not resume unrelated standalone provider wrappers until the common/core
+10. Do not resume unrelated standalone provider wrappers until the common/core
    SDK and Vercel AI Gateway rows above are verified or explicitly documented
    as intentionally non-portable. When standalone provider work resumes,
    continue it only as package-owned crates that match their upstream
    TypeScript packages; do not add new root-owned provider modules.
-10. Crate splitting is an immediate hard acceptance gate, not optional cleanup
+11. Crate splitting is an immediate hard acceptance gate, not optional cleanup
    after the port is otherwise complete. The Rust workspace must have a strict
    1:1 mapping between upstream `vercel/ai` TypeScript packages and Rust
    crates: every portable upstream package gets exactly one corresponding Rust

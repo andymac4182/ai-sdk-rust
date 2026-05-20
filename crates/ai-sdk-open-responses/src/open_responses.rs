@@ -7421,6 +7421,14 @@ mod tests {
         }))
     }
 
+    fn openai_compaction_options(item_id: &str, encrypted_content: &str) -> ProviderOptions {
+        openai_provider_options(json!({
+            "type": "compaction",
+            "itemId": item_id,
+            "encryptedContent": encrypted_content
+        }))
+    }
+
     fn openai_conversation_options() -> ProviderOptions {
         openai_provider_options(json!({
             "conversation": "conv_123",
@@ -9445,6 +9453,182 @@ mod tests {
                 ],
                 "store": false
             }))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_compaction_to_item_reference_when_stored() {
+        let (_, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Custom(
+                        LanguageModelCustomPart::new("openai.compaction").with_provider_options(
+                            openai_compaction_options("cmp_123", "encrypted_data_here"),
+                        ),
+                    ),
+                ]),
+            )])
+            .with_provider_options(openai_provider_options(json!({
+                "store": true
+            }))),
+        );
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "item_reference",
+                    "id": "cmp_123"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_compaction_to_full_item_when_unstored() {
+        let (_, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Custom(
+                        LanguageModelCustomPart::new("openai.compaction").with_provider_options(
+                            openai_compaction_options("cmp_456", "encrypted_compaction_state"),
+                        ),
+                    ),
+                ]),
+            )])
+            .with_provider_options(openai_provider_options(json!({
+                "store": false
+            }))),
+        );
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "compaction",
+                    "id": "cmp_456",
+                    "encrypted_content": "encrypted_compaction_state"
+                }
+            ])
+        );
+        assert_eq!(request_body["store"], false);
+    }
+
+    #[test]
+    fn open_responses_provider_skips_compaction_item_ids_when_conversation_is_set() {
+        let (_, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![
+                open_responses_user_text_message("Hello"),
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Custom(
+                        LanguageModelCustomPart::new("openai.compaction").with_provider_options(
+                            openai_compaction_options("cmp_789", "encrypted_data"),
+                        ),
+                    ),
+                ])),
+            ])
+            .with_provider_options(openai_conversation_options()),
+        );
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Hello"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(request_body["conversation"], "conv_123");
+    }
+
+    #[test]
+    fn open_responses_provider_converts_compaction_alongside_fresh_text_when_unstored() {
+        let (_, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(
+                        LanguageModelTextPart::new("Here is my response.")
+                            .with_provider_options(openai_item_options("msg_001")),
+                    ),
+                    LanguageModelAssistantContentPart::Custom(
+                        LanguageModelCustomPart::new("openai.compaction").with_provider_options(
+                            openai_compaction_options("cmp_001", "encrypted_state"),
+                        ),
+                    ),
+                ]),
+            )])
+            .with_provider_options(openai_provider_options(json!({
+                "store": false
+            }))),
+        );
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "assistant",
+                    "id": "msg_001",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Here is my response."
+                        }
+                    ]
+                },
+                {
+                    "type": "compaction",
+                    "id": "cmp_001",
+                    "encrypted_content": "encrypted_state"
+                }
+            ])
+        );
+        assert_eq!(request_body["store"], false);
+    }
+
+    #[test]
+    fn open_responses_provider_converts_compaction_alongside_text_to_item_references_when_stored() {
+        let (_, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(
+                        LanguageModelTextPart::new("Response text")
+                            .with_provider_options(openai_item_options("msg_002")),
+                    ),
+                    LanguageModelAssistantContentPart::Custom(
+                        LanguageModelCustomPart::new("openai.compaction").with_provider_options(
+                            openai_compaction_options("cmp_002", "encrypted_data"),
+                        ),
+                    ),
+                ]),
+            )])
+            .with_provider_options(openai_provider_options(json!({
+                "store": true
+            }))),
+        );
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "item_reference",
+                    "id": "msg_002"
+                },
+                {
+                    "type": "item_reference",
+                    "id": "cmp_002"
+                }
+            ])
         );
     }
 
