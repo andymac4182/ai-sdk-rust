@@ -12653,6 +12653,115 @@ mod tests {
     }
 
     #[test]
+    fn with_user_agent_suffix_upstream_creates_new_user_agent_header() {
+        let headers = with_user_agent_suffix(
+            Some(vec![
+                ("content-type", Some("application/json")),
+                ("authorization", Some("Bearer token123")),
+            ]),
+            ["ai-sdk/0.0.0-test", "provider/test-openai"],
+        );
+
+        assert_eq!(
+            headers.get("user-agent"),
+            Some(&"ai-sdk/0.0.0-test provider/test-openai".to_string())
+        );
+        assert_eq!(
+            headers.get("content-type"),
+            Some(&"application/json".to_string())
+        );
+        assert_eq!(
+            headers.get("authorization"),
+            Some(&"Bearer token123".to_string())
+        );
+    }
+
+    #[test]
+    fn with_user_agent_suffix_upstream_appends_suffix_parts_to_existing_user_agent_header() {
+        let headers = with_user_agent_suffix(
+            Some(vec![
+                ("user-agent", Some("TestApp/0.0.0-test")),
+                ("accept", Some("application/json")),
+            ]),
+            ["ai-sdk/0.0.0-test", "provider/test-anthropic"],
+        );
+
+        assert_eq!(
+            headers.get("user-agent"),
+            Some(&"TestApp/0.0.0-test ai-sdk/0.0.0-test provider/test-anthropic".to_string())
+        );
+        assert_eq!(headers.get("accept"), Some(&"application/json".to_string()));
+    }
+
+    #[test]
+    fn with_user_agent_suffix_upstream_removes_missing_header_entries() {
+        let headers = with_user_agent_suffix(
+            Some(vec![
+                ("content-type", Some("application/json")),
+                ("authorization", None),
+                ("user-agent", Some("TestApp/0.0.0-test")),
+                ("accept", Some("application/json")),
+                ("cache-control", None),
+            ]),
+            ["ai-sdk/0.0.0-test"],
+        );
+
+        assert_eq!(
+            headers.get("user-agent"),
+            Some(&"TestApp/0.0.0-test ai-sdk/0.0.0-test".to_string())
+        );
+        assert_eq!(
+            headers.get("content-type"),
+            Some(&"application/json".to_string())
+        );
+        assert_eq!(headers.get("accept"), Some(&"application/json".to_string()));
+        assert!(!headers.contains_key("authorization"));
+        assert!(!headers.contains_key("cache-control"));
+    }
+
+    #[test]
+    fn with_user_agent_suffix_upstream_preserves_headers_instance_entries() {
+        let headers = with_user_agent_suffix(
+            Some(vec![
+                ("Authorization", Some("Bearer token123")),
+                ("X-Custom", Some("value")),
+            ]),
+            ["ai-sdk/0.0.0-test"],
+        );
+
+        assert_eq!(
+            headers.get("authorization"),
+            Some(&"Bearer token123".to_string())
+        );
+        assert_eq!(headers.get("x-custom"), Some(&"value".to_string()));
+        assert_eq!(
+            headers.get("user-agent"),
+            Some(&"ai-sdk/0.0.0-test".to_string())
+        );
+    }
+
+    #[test]
+    fn with_user_agent_suffix_upstream_handles_array_header_entries() {
+        let headers = with_user_agent_suffix(
+            Some(vec![
+                ("Authorization", Some("Bearer token123")),
+                ("X-Feature", Some("alpha")),
+            ]),
+            ["ai-sdk/0.0.0-test"],
+        );
+
+        assert_eq!(
+            headers.get("authorization"),
+            Some(&"Bearer token123".to_string())
+        );
+        assert_eq!(headers.get("x-feature"), Some(&"alpha".to_string()));
+        assert_eq!(
+            headers.get("user-agent"),
+            Some(&"ai-sdk/0.0.0-test".to_string())
+        );
+    }
+
+    #[test]
     fn with_provider_utils_user_agent_adds_version_and_runtime_suffixes() {
         let headers = with_provider_utils_user_agent(
             Some(vec![

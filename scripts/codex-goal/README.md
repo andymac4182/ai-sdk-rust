@@ -43,3 +43,6 @@ exist as an equivalent Rust test in the matching 1:1 crate before that package
 can be marked verified. Rust may add more tests for Rust-specific safety,
 typing, live-provider proof, and edge cases, but the Rust suite must never have
 fewer portable tests than the original TypeScript package.
+Put plainly: EVERY portable original TypeScript test/case must exist in Rust;
+additional Rust tests are welcome, but a crate with even one fewer portable
+original TypeScript test/case is incomplete.
