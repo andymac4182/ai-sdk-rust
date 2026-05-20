@@ -8086,6 +8086,37 @@ mod tests {
         serde_json::to_string(&object_schema()).expect("schema serializes")
     }
 
+    fn schema_object(value: JsonValue) -> JsonSchema {
+        value.as_object().expect("schema is an object").clone()
+    }
+
+    fn basic_person_schema() -> JsonSchema {
+        schema_object(json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" },
+                "age": { "type": "number" }
+            },
+            "required": ["name", "age"]
+        }))
+    }
+
+    fn schema_json(schema: &JsonSchema) -> String {
+        serde_json::to_string(schema).expect("schema serializes")
+    }
+
+    fn expected_json_instruction(prompt: Option<&str>, schema: &JsonSchema) -> String {
+        let schema_instruction = format!(
+            "JSON schema:\n{}\nYou MUST answer with a JSON object that matches the JSON schema above.",
+            schema_json(schema)
+        );
+
+        match prompt.filter(|prompt| !prompt.is_empty()) {
+            Some(prompt) => format!("{prompt}\n\n{schema_instruction}"),
+            None => schema_instruction,
+        }
+    }
+
     #[derive(Debug, Eq, PartialEq, serde::Deserialize)]
     struct Person {
         name: String,
@@ -8364,6 +8395,150 @@ mod tests {
     }
 
     #[test]
+    fn inject_json_instruction_upstream_basic_case_with_prompt_and_schema() {
+        let schema = basic_person_schema();
+
+        assert_eq!(
+            inject_json_instruction(Some("Generate a person"), Some(&schema), None, None),
+            expected_json_instruction(Some("Generate a person"), &schema)
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_upstream_only_prompt_no_schema() {
+        assert_eq!(
+            inject_json_instruction(Some("Generate a person"), None, None, None),
+            "Generate a person\n\nYou MUST answer with JSON."
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_upstream_only_schema_no_prompt() {
+        let schema = basic_person_schema();
+
+        assert_eq!(
+            inject_json_instruction(None, Some(&schema), None, None),
+            expected_json_instruction(None, &schema)
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_upstream_no_prompt_no_schema() {
+        assert_eq!(
+            inject_json_instruction(None, None, None, None),
+            "You MUST answer with JSON."
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_upstream_custom_schema_prefix_and_suffix() {
+        let schema = basic_person_schema();
+
+        assert_eq!(
+            inject_json_instruction(
+                Some("Generate a person"),
+                Some(&schema),
+                Some("Custom prefix:"),
+                Some("Custom suffix"),
+            ),
+            format!(
+                "Generate a person\n\nCustom prefix:\n{}\nCustom suffix",
+                schema_json(&schema)
+            )
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_upstream_empty_string_prompt() {
+        let schema = basic_person_schema();
+
+        assert_eq!(
+            inject_json_instruction(Some(""), Some(&schema), None, None),
+            expected_json_instruction(None, &schema)
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_upstream_empty_object_schema() {
+        let schema = JsonSchema::new();
+
+        assert_eq!(
+            inject_json_instruction(Some("Generate something"), Some(&schema), None, None),
+            expected_json_instruction(Some("Generate something"), &schema)
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_upstream_complex_nested_schema() {
+        let schema = schema_object(json!({
+            "type": "object",
+            "properties": {
+                "person": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "age": { "type": "number" },
+                        "address": {
+                            "type": "object",
+                            "properties": {
+                                "street": { "type": "string" },
+                                "city": { "type": "string" }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+
+        assert_eq!(
+            inject_json_instruction(Some("Generate a complex person"), Some(&schema), None, None),
+            expected_json_instruction(Some("Generate a complex person"), &schema)
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_upstream_schema_with_special_characters() {
+        let schema = schema_object(json!({
+            "type": "object",
+            "properties": {
+                "special@property": { "type": "string" },
+                "emoji😊": { "type": "string" }
+            }
+        }));
+
+        assert_eq!(
+            inject_json_instruction(None, Some(&schema), None, None),
+            expected_json_instruction(None, &schema)
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_upstream_very_long_prompt_and_schema() {
+        let long_prompt = "A".repeat(1000);
+        let mut properties = JsonObject::new();
+        for index in 0..100 {
+            properties.insert(format!("prop{index}"), json!({ "type": "string" }));
+        }
+        let schema = schema_object(json!({
+            "type": "object",
+            "properties": properties
+        }));
+
+        assert_eq!(
+            inject_json_instruction(Some(&long_prompt), Some(&schema), None, None),
+            expected_json_instruction(Some(&long_prompt), &schema)
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_upstream_undefined_values_for_optional_parameters() {
+        assert_eq!(
+            inject_json_instruction(None, None, None, None),
+            "You MUST answer with JSON."
+        );
+    }
+
+    #[test]
     fn inject_json_instruction_into_messages_updates_existing_system_message() {
         let messages = vec![
             LanguageModelMessage::System(LanguageModelSystemMessage::new("Generate weather")),
@@ -8387,6 +8562,187 @@ mod tests {
         assert_eq!(
             messages[0],
             LanguageModelMessage::System(LanguageModelSystemMessage::new("Generate weather"))
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_into_messages_upstream_basic_case_with_prompt_and_schema() {
+        let schema = basic_person_schema();
+
+        assert_eq!(
+            inject_json_instruction_into_messages(
+                InjectJsonInstructionIntoMessagesOptions::new(vec![LanguageModelMessage::System(
+                    LanguageModelSystemMessage::new("Generate a person")
+                ),])
+                .with_schema(schema.clone())
+            ),
+            vec![LanguageModelMessage::System(
+                LanguageModelSystemMessage::new(expected_json_instruction(
+                    Some("Generate a person"),
+                    &schema
+                ))
+            )]
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_into_messages_upstream_does_not_mutate_input_messages() {
+        let schema = basic_person_schema();
+        let original_messages = vec![LanguageModelMessage::System(
+            LanguageModelSystemMessage::new("Generate a person"),
+        )];
+
+        let _ = inject_json_instruction_into_messages(
+            InjectJsonInstructionIntoMessagesOptions::new(original_messages.clone())
+                .with_schema(schema),
+        );
+
+        assert_eq!(
+            original_messages,
+            vec![LanguageModelMessage::System(
+                LanguageModelSystemMessage::new("Generate a person")
+            )]
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_into_messages_upstream_empty_messages_array() {
+        let schema = basic_person_schema();
+
+        assert_eq!(
+            inject_json_instruction_into_messages(
+                InjectJsonInstructionIntoMessagesOptions::new(Vec::new())
+                    .with_schema(schema.clone())
+            ),
+            vec![LanguageModelMessage::System(
+                LanguageModelSystemMessage::new(expected_json_instruction(None, &schema))
+            )]
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_into_messages_upstream_messages_without_initial_system_message() {
+        let schema = basic_person_schema();
+        let user_message = LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+            LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
+        ]));
+        let assistant_message =
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new("Hi there")),
+            ]));
+
+        assert_eq!(
+            inject_json_instruction_into_messages(
+                InjectJsonInstructionIntoMessagesOptions::new(vec![
+                    user_message.clone(),
+                    assistant_message.clone(),
+                ])
+                .with_schema(schema.clone())
+            ),
+            vec![
+                LanguageModelMessage::System(LanguageModelSystemMessage::new(
+                    expected_json_instruction(None, &schema)
+                )),
+                user_message,
+                assistant_message,
+            ]
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_into_messages_upstream_system_message_with_empty_content() {
+        let schema = basic_person_schema();
+        let user_message = LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+            LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Generate data")),
+        ]));
+
+        assert_eq!(
+            inject_json_instruction_into_messages(
+                InjectJsonInstructionIntoMessagesOptions::new(vec![
+                    LanguageModelMessage::System(LanguageModelSystemMessage::new("")),
+                    user_message.clone(),
+                ])
+                .with_schema(schema.clone())
+            ),
+            vec![
+                LanguageModelMessage::System(LanguageModelSystemMessage::new(
+                    expected_json_instruction(None, &schema)
+                )),
+                user_message,
+            ]
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_into_messages_upstream_preserves_all_non_system_messages() {
+        let schema = basic_person_schema();
+        let user_message = LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+            LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
+        ]));
+        let assistant_message =
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new("Hi")),
+            ]));
+        let second_user_message = LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+            LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Generate person")),
+        ]));
+
+        assert_eq!(
+            inject_json_instruction_into_messages(
+                InjectJsonInstructionIntoMessagesOptions::new(vec![
+                    LanguageModelMessage::System(LanguageModelSystemMessage::new(
+                        "You are helpful"
+                    )),
+                    user_message.clone(),
+                    assistant_message.clone(),
+                    second_user_message.clone(),
+                ])
+                .with_schema(schema.clone())
+            ),
+            vec![
+                LanguageModelMessage::System(LanguageModelSystemMessage::new(
+                    expected_json_instruction(Some("You are helpful"), &schema)
+                )),
+                user_message,
+                assistant_message,
+                second_user_message,
+            ]
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_into_messages_upstream_case_with_no_schema() {
+        assert_eq!(
+            inject_json_instruction_into_messages(InjectJsonInstructionIntoMessagesOptions::new(
+                vec![LanguageModelMessage::System(
+                    LanguageModelSystemMessage::new("Generate data")
+                )],
+            )),
+            vec![LanguageModelMessage::System(
+                LanguageModelSystemMessage::new("Generate data\n\nYou MUST answer with JSON.")
+            )]
+        );
+    }
+
+    #[test]
+    fn inject_json_instruction_into_messages_upstream_custom_schema_prefix_and_suffix() {
+        let schema = basic_person_schema();
+
+        assert_eq!(
+            inject_json_instruction_into_messages(
+                InjectJsonInstructionIntoMessagesOptions::new(vec![LanguageModelMessage::System(
+                    LanguageModelSystemMessage::new("Generate data")
+                ),])
+                .with_schema(schema.clone())
+                .with_schema_prefix("Custom schema:")
+                .with_schema_suffix("Follow this format exactly.")
+            ),
+            vec![LanguageModelMessage::System(
+                LanguageModelSystemMessage::new(format!(
+                    "Generate data\n\nCustom schema:\n{}\nFollow this format exactly.",
+                    schema_json(&schema)
+                ))
+            )]
         );
     }
 
