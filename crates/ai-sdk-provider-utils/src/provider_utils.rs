@@ -8922,14 +8922,14 @@ mod tests {
     }
 
     #[test]
-    fn filter_nullable_removes_missing_values() {
+    fn filter_nullable_removes_null_and_undefined_values_from_value_list() {
         let values = vec![Some(1), None, Some(2), None, Some(3)];
 
         assert_eq!(filter_nullable(values), vec![1, 2, 3]);
     }
 
     #[test]
-    fn filter_nullable_preserves_falsy_equivalent_values() {
+    fn filter_nullable_preserves_other_falsy_values() {
         let values = vec![Some(json!(0)), Some(json!(false)), Some(json!("")), None];
 
         assert_eq!(
@@ -8939,29 +8939,84 @@ mod tests {
     }
 
     #[test]
-    fn remove_undefined_entries_removes_missing_values() {
+    fn remove_undefined_entries_should_remove_undefined_entries_from_record() {
         let record = remove_undefined_entries([
-            ("present", Some(json!("value"))),
-            ("missing", None),
-            ("alsoPresent", Some(json!({ "nested": true }))),
+            ("a", Some(json!(1))),
+            ("b", None),
+            ("c", Some(json!("test"))),
+            ("d", None),
         ]);
 
         assert_eq!(
             record,
             BTreeMap::from([
-                ("alsoPresent".to_string(), json!({ "nested": true })),
-                ("present".to_string(), json!("value")),
+                ("a".to_string(), json!(1)),
+                ("c".to_string(), json!("test")),
             ])
         );
     }
 
     #[test]
-    fn remove_undefined_entries_preserves_falsy_equivalent_values() {
+    fn remove_undefined_entries_should_handle_empty_object() {
+        let record: BTreeMap<String, JsonValue> =
+            remove_undefined_entries(Vec::<(String, Option<JsonValue>)>::new());
+
+        assert_eq!(record, BTreeMap::new());
+    }
+
+    #[test]
+    fn remove_undefined_entries_should_handle_object_with_all_undefined_values() {
+        let record: BTreeMap<String, JsonValue> =
+            remove_undefined_entries([("a", None::<JsonValue>), ("b", None::<JsonValue>)]);
+
+        assert_eq!(record, BTreeMap::new());
+    }
+
+    #[test]
+    fn remove_undefined_entries_should_remove_null_values() {
+        let input: BTreeMap<String, Option<JsonValue>> = serde_json::from_value(json!({
+            "a": null,
+            "c": "test"
+        }))
+        .expect("record with null deserializes into optional values");
+        let mut entries: Vec<_> = input.into_iter().collect();
+        entries.push(("b".to_string(), None));
+
+        assert_eq!(
+            remove_undefined_entries(entries),
+            BTreeMap::from([("c".to_string(), json!("test"))])
+        );
+    }
+
+    #[test]
+    fn remove_undefined_entries_should_preserve_falsy_values_except_null_and_undefined() {
+        let input: BTreeMap<String, Option<JsonValue>> = serde_json::from_value(json!({
+            "a": false,
+            "b": 0,
+            "c": "",
+            "e": null
+        }))
+        .expect("record with falsy and null values deserializes into optional values");
+        let mut entries: Vec<_> = input.into_iter().collect();
+        entries.push(("d".to_string(), None));
+
+        assert_eq!(
+            remove_undefined_entries(entries),
+            BTreeMap::from([
+                ("a".to_string(), json!(false)),
+                ("b".to_string(), json!(0)),
+                ("c".to_string(), json!("")),
+            ])
+        );
+    }
+
+    #[test]
+    fn remove_undefined_entries_preserves_manual_null_json_values_for_rust_callers() {
         let record = remove_undefined_entries([
             ("zero", Some(json!(0))),
             ("false", Some(json!(false))),
             ("emptyString", Some(json!(""))),
-            ("nullish", None),
+            ("nullJson", Some(json!(null))),
         ]);
 
         assert_eq!(
@@ -8969,22 +9024,9 @@ mod tests {
             BTreeMap::from([
                 ("emptyString".to_string(), json!("")),
                 ("false".to_string(), json!(false)),
+                ("nullJson".to_string(), json!(null)),
                 ("zero".to_string(), json!(0)),
             ])
-        );
-    }
-
-    #[test]
-    fn remove_undefined_entries_handles_json_null_values_as_missing() {
-        let record: BTreeMap<String, Option<serde_json::Value>> = serde_json::from_value(json!({
-            "keep": "value",
-            "drop": null
-        }))
-        .expect("record deserializes");
-
-        assert_eq!(
-            remove_undefined_entries(record),
-            BTreeMap::from([("keep".to_string(), json!("value"))])
         );
     }
 
