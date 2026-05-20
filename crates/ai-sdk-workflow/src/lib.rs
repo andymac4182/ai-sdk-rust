@@ -229,6 +229,7 @@ pub fn to_ui_message_chunk(part: &LanguageModelStreamPart) -> Option<UiMessageCh
         LanguageModelStreamPart::File(part) => Some(UiMessageChunk::File {
             media_type: part.media_type.clone(),
             url: language_model_file_url(&part.media_type, &part.data),
+            provider_metadata: part.provider_metadata.clone(),
         }),
         LanguageModelStreamPart::Source(source) => match source {
             LanguageModelSource::Url(source) => Some(UiMessageChunk::SourceUrl {
@@ -249,6 +250,9 @@ pub fn to_ui_message_chunk(part: &LanguageModelStreamPart) -> Option<UiMessageCh
             tool_call_id: part.id.clone(),
             tool_name: part.tool_name.clone(),
             provider_executed: part.provider_executed,
+            provider_metadata: part.provider_metadata.clone(),
+            dynamic: part.dynamic,
+            title: part.title.clone(),
         }),
         LanguageModelStreamPart::ToolInputDelta(part) => Some(UiMessageChunk::ToolInputDelta {
             tool_call_id: part.id.clone(),
@@ -260,15 +264,24 @@ pub fn to_ui_message_chunk(part: &LanguageModelStreamPart) -> Option<UiMessageCh
             input: parse_tool_input(&part.input),
             provider_executed: part.provider_executed,
             provider_metadata: part.provider_metadata.clone(),
+            tool_metadata: None,
+            dynamic: part.dynamic,
+            title: None,
         }),
         LanguageModelStreamPart::ToolResult(part) => Some(UiMessageChunk::ToolOutputAvailable {
             tool_call_id: part.tool_call_id.clone(),
             output: part.result.as_value().clone(),
+            provider_executed: None,
+            provider_metadata: part.provider_metadata.clone(),
+            tool_metadata: None,
+            preliminary: part.preliminary,
+            dynamic: part.dynamic,
         }),
         LanguageModelStreamPart::ToolApprovalRequest(part) => {
             Some(UiMessageChunk::ToolApprovalRequest {
                 approval_id: part.approval_id.clone(),
                 tool_call_id: part.tool_call_id.clone(),
+                provider_metadata: part.provider_metadata.clone(),
             })
         }
         LanguageModelStreamPart::Error(part) => Some(UiMessageChunk::Error {
@@ -512,6 +525,9 @@ mod tests {
                 tool_call_id: "call-1".to_string(),
                 tool_name: "getWeather".to_string(),
                 provider_executed: Some(true),
+                provider_metadata: None,
+                dynamic: None,
+                title: None,
             })
         );
 
@@ -537,6 +553,9 @@ mod tests {
                 input: json!({ "city": "Brisbane" }),
                 provider_executed: Some(true),
                 provider_metadata: Some(provider_metadata),
+                tool_metadata: None,
+                dynamic: None,
+                title: None,
             })
         );
     }
@@ -559,6 +578,7 @@ mod tests {
             Some(UiMessageChunk::File {
                 media_type: "text/plain".to_string(),
                 url: "data:text/plain;base64,aGk=".to_string(),
+                provider_metadata: None,
             })
         );
 
@@ -601,6 +621,11 @@ mod tests {
             Some(UiMessageChunk::ToolOutputAvailable {
                 tool_call_id: "call-1".to_string(),
                 output: json!({ "temperature": 22 }),
+                provider_executed: None,
+                provider_metadata: None,
+                tool_metadata: None,
+                preliminary: None,
+                dynamic: None,
             })
         );
 
@@ -611,6 +636,7 @@ mod tests {
             Some(UiMessageChunk::ToolApprovalRequest {
                 approval_id: "approval-1".to_string(),
                 tool_call_id: "call-1".to_string(),
+                provider_metadata: None,
             })
         );
 
