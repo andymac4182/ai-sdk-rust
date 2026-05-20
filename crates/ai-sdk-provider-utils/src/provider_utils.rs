@@ -10670,6 +10670,51 @@ mod tests {
     }
 
     #[test]
+    fn create_id_generator_upstream_generates_id_with_correct_length() {
+        let id_generator =
+            create_id_generator(IdGeneratorOptions::new().with_size(10)).expect("generator valid");
+
+        let id = id_generator();
+
+        assert_eq!(id.len(), 10);
+    }
+
+    #[test]
+    fn create_id_generator_upstream_generates_id_with_correct_default_length() {
+        let id_generator = create_id_generator(IdGeneratorOptions::new()).expect("generator valid");
+
+        let id = id_generator();
+
+        assert_eq!(id.len(), 16);
+    }
+
+    #[test]
+    fn create_id_generator_upstream_throws_error_when_separator_is_part_of_alphabet() {
+        let error = match create_id_generator(
+            IdGeneratorOptions::new()
+                .with_separator("a")
+                .with_prefix("b"),
+        ) {
+            Ok(_) => panic!("separator in alphabet is invalid when prefixed"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.argument(), "separator");
+        assert_eq!(
+            error.message(),
+            "The separator \"a\" must not be part of the alphabet \"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz\"."
+        );
+    }
+
+    #[test]
+    fn generate_id_upstream_generates_unique_ids() {
+        let id1 = generate_id();
+        let id2 = generate_id();
+
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
     fn is_provider_reference_accepts_plain_records() {
         assert!(is_provider_reference(&json!({
             "openai": "file-abc123"
