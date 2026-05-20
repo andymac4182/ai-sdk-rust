@@ -5802,11 +5802,7 @@ fn reject_forbidden_json_keys(value: &JsonValue) -> Result<(), SecureJsonParseEr
                 return Err(SecureJsonParseError::ForbiddenPrototypeProperty);
             }
 
-            if object
-                .get("constructor")
-                .and_then(JsonValue::as_object)
-                .is_some_and(|constructor| constructor.contains_key("prototype"))
-            {
+            if object.get("constructor").is_some_and(JsonValue::is_object) {
                 return Err(SecureJsonParseError::ForbiddenPrototypeProperty);
             }
 
@@ -7631,8 +7627,8 @@ mod tests {
         prepare_post_to_api_request, prepare_tools, prepare_tools_with_context,
         read_response_with_size_limit, remove_undefined_entries, resolve, resolve_full_media_type,
         resolve_provider_reference, safe_parse_json, safe_parse_json_with_schema,
-        safe_validate_types, serialize_model_options, strip_file_extension, tool,
-        validate_download_url, validate_types, with_provider_utils_user_agent,
+        safe_validate_types, secure_json_parse, serialize_model_options, strip_file_extension,
+        tool, validate_download_url, validate_types, with_provider_utils_user_agent,
         with_user_agent_suffix, without_trailing_slash,
     };
 
@@ -11827,6 +11823,100 @@ mod tests {
         );
     }
 
+    fn expect_secure_json_parse_rejected(text: &str) {
+        let error = secure_json_parse(text).expect_err("secure JSON parse rejects text");
+
+        assert_eq!(
+            error.to_string(),
+            "Object contains forbidden prototype property"
+        );
+    }
+
+    #[test]
+    fn secure_json_parse_upstream_parses_object_string() {
+        assert_eq!(
+            secure_json_parse(r#"{"a": 5, "b": 6}"#).expect("JSON parses"),
+            json!({ "a": 5, "b": 6 })
+        );
+    }
+
+    #[test]
+    fn secure_json_parse_upstream_parses_null_string() {
+        assert_eq!(
+            secure_json_parse("null").expect("JSON parses"),
+            JsonValue::Null
+        );
+    }
+
+    #[test]
+    fn secure_json_parse_upstream_parses_zero_string() {
+        assert_eq!(secure_json_parse("0").expect("JSON parses"), json!(0));
+    }
+
+    #[test]
+    fn secure_json_parse_upstream_parses_string_string() {
+        assert_eq!(
+            secure_json_parse(r#""X""#).expect("JSON parses"),
+            json!("X")
+        );
+    }
+
+    #[test]
+    fn secure_json_parse_upstream_allows_constructor_property_with_non_object_value() {
+        assert_eq!(
+            secure_json_parse(r#"{ "constructor": "string value" }"#).expect("JSON parses"),
+            json!({ "constructor": "string value" })
+        );
+    }
+
+    #[test]
+    fn secure_json_parse_upstream_allows_constructor_property_with_null_value() {
+        assert_eq!(
+            secure_json_parse(r#"{ "constructor": null }"#).expect("JSON parses"),
+            json!({ "constructor": null })
+        );
+    }
+
+    #[test]
+    fn secure_json_parse_upstream_errors_on_constructor_property() {
+        expect_secure_json_parse_rejected(
+            r#"{ "a": 5, "b": 6, "constructor": { "x": 7 }, "c": { "d": 0, "e": "text", "__proto__": { "y": 8 }, "f": { "g": 2 } } }"#,
+        );
+    }
+
+    #[test]
+    fn secure_json_parse_upstream_errors_on_proto_property() {
+        expect_secure_json_parse_rejected(
+            r#"{ "a": 5, "b": 6, "__proto__": { "x": 7 }, "c": { "d": 0, "e": "text", "__proto__": { "y": 8 }, "f": { "g": 2 } } }"#,
+        );
+    }
+
+    #[test]
+    fn secure_json_parse_upstream_errors_on_unicode_escaped_proto_property() {
+        expect_secure_json_parse_rejected(r#"{ "\u005f\u005fproto__": { "isAdmin": true } }"#);
+    }
+
+    #[test]
+    fn secure_json_parse_upstream_errors_on_fully_unicode_escaped_proto_property() {
+        expect_secure_json_parse_rejected(
+            r#"{ "\u005f\u005f\u0070\u0072\u006f\u0074\u006f\u005f\u005f": { "isAdmin": true } }"#,
+        );
+    }
+
+    #[test]
+    fn secure_json_parse_upstream_errors_on_unicode_escaped_constructor_property() {
+        expect_secure_json_parse_rejected(
+            r#"{ "\u0063\u006fnstructor": { "prototype": { "isAdmin": true } } }"#,
+        );
+    }
+
+    #[test]
+    fn secure_json_parse_upstream_errors_on_fully_unicode_escaped_constructor_property() {
+        expect_secure_json_parse_rejected(
+            r#"{ "\u0063\u006f\u006e\u0073\u0074\u0072\u0075\u0063\u0074\u006f\u0072": { "prototype": { "isAdmin": true } } }"#,
+        );
+    }
+
     #[test]
     fn parse_json_wraps_invalid_json_in_provider_error() {
         let error = parse_json("invalid json").expect_err("invalid JSON fails");
@@ -11870,10 +11960,6 @@ mod tests {
         assert_eq!(
             parse_json(r#"{ "constructor": null }"#).expect("JSON parses"),
             json!({ "constructor": null })
-        );
-        assert_eq!(
-            parse_json(r#"{ "constructor": { "safe": true } }"#).expect("JSON parses"),
-            json!({ "constructor": { "safe": true } })
         );
     }
 
