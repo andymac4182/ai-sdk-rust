@@ -16978,6 +16978,189 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_streams_local_shell_fixture_call() {
+        const RESPONSE_ID: &str = "resp_68da7fd5d24481949fc2cf1cc60377050faf5df54b42d9a6";
+        const REASONING_ID: &str = "rs_68da7fd65a3481948bbb35ff2c79c6c20faf5df54b42d9a6";
+        const LOCAL_SHELL_ITEM_ID: &str = "lsh_68da7fd99b3c8194bd624b18c0c0851b0faf5df54b42d9a6";
+        const LOCAL_SHELL_CALL_ID: &str = "call_h3nm8hUG0KO9tVNuRACkL1ri";
+
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport = Arc::new(
+            move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                let sse = [
+                    r#"data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_68da7fd5d24481949fc2cf1cc60377050faf5df54b42d9a6","object":"response","created_at":1759150037,"status":"in_progress","background":false,"error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5-codex","output":[],"parallel_tool_calls":true,"previous_response_id":null,"prompt_cache_key":null,"reasoning":{"effort":"medium","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":null,"user":null,"metadata":{}}}"#,
+                    "",
+                    r#"data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_68da7fd5d24481949fc2cf1cc60377050faf5df54b42d9a6","object":"response","created_at":1759150037,"status":"in_progress","background":false,"error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5-codex","output":[],"parallel_tool_calls":true,"previous_response_id":null,"prompt_cache_key":null,"reasoning":{"effort":"medium","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":null,"user":null,"metadata":{}}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"rs_68da7fd65a3481948bbb35ff2c79c6c20faf5df54b42d9a6","type":"reasoning","summary":[]}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","sequence_number":3,"output_index":0,"item":{"id":"rs_68da7fd65a3481948bbb35ff2c79c6c20faf5df54b42d9a6","type":"reasoning","summary":[]}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","sequence_number":4,"output_index":1,"item":{"id":"lsh_68da7fd99b3c8194bd624b18c0c0851b0faf5df54b42d9a6","type":"local_shell_call","status":"in_progress","action":{"type":"exec","command":[],"env":{}},"call_id":"call_h3nm8hUG0KO9tVNuRACkL1ri"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","sequence_number":5,"output_index":1,"item":{"id":"lsh_68da7fd99b3c8194bd624b18c0c0851b0faf5df54b42d9a6","type":"local_shell_call","status":"completed","action":{"type":"exec","command":["ls","-a","~"],"env":{}},"call_id":"call_h3nm8hUG0KO9tVNuRACkL1ri"}}"#,
+                    "",
+                    r#"data: {"type":"response.completed","sequence_number":6,"response":{"id":"resp_68da7fd5d24481949fc2cf1cc60377050faf5df54b42d9a6","object":"response","created_at":1759150037,"status":"completed","background":false,"error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5-codex","output":[{"id":"rs_68da7fd65a3481948bbb35ff2c79c6c20faf5df54b42d9a6","type":"reasoning","summary":[]},{"id":"lsh_68da7fd99b3c8194bd624b18c0c0851b0faf5df54b42d9a6","type":"local_shell_call","status":"completed","action":{"type":"exec","command":["ls","-a","~"],"env":{}},"call_id":"call_h3nm8hUG0KO9tVNuRACkL1ri"}],"parallel_tool_calls":true,"previous_response_id":null,"prompt_cache_key":null,"reasoning":{"effort":"medium","summary":null},"safety_identifier":null,"service_tier":"default","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":{"input_tokens":407,"input_tokens_details":{"cached_tokens":0},"output_tokens":151,"output_tokens_details":{"reasoning_tokens":128},"total_tokens":558},"user":null,"metadata":{}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-5-codex");
+
+        let result = poll_ready(model.do_stream(open_responses_local_shell_call_options()));
+
+        let stream_start = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::StreamStart(start) => Some(start),
+                _ => None,
+            })
+            .expect("stream includes stream start");
+        assert!(stream_start.warnings.is_empty());
+
+        let metadata = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ResponseMetadata(metadata) => Some(metadata),
+                _ => None,
+            })
+            .expect("stream includes response metadata");
+        assert_eq!(metadata.id.as_deref(), Some(RESPONSE_ID));
+        assert_eq!(metadata.model_id.as_deref(), Some("gpt-5-codex"));
+        assert_eq!(
+            metadata
+                .timestamp
+                .map(|timestamp| timestamp.unix_timestamp()),
+            Some(1_759_150_037)
+        );
+
+        let reasoning_start = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ReasoningStart(reasoning_start) => Some(reasoning_start),
+                _ => None,
+            })
+            .expect("stream includes reasoning start");
+        assert_eq!(reasoning_start.id, format!("{REASONING_ID}:0"));
+        assert_eq!(
+            openai_metadata_value(&reasoning_start.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(REASONING_ID)
+        );
+        assert_eq!(
+            openai_metadata_value(
+                &reasoning_start.provider_metadata,
+                "reasoningEncryptedContent"
+            ),
+            Some(&JsonValue::Null)
+        );
+
+        let reasoning_end = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ReasoningEnd(reasoning_end) => Some(reasoning_end),
+                _ => None,
+            })
+            .expect("stream includes reasoning end");
+        assert_eq!(reasoning_end.id, format!("{REASONING_ID}:0"));
+        assert_eq!(
+            openai_metadata_value(&reasoning_end.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(REASONING_ID)
+        );
+
+        let tool_call = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call)
+                    if tool_call.tool_call_id == LOCAL_SHELL_CALL_ID =>
+                {
+                    Some(tool_call)
+                }
+                _ => None,
+            })
+            .expect("stream includes local shell tool call");
+        assert_eq!(tool_call.tool_name, "shell");
+        assert_eq!(tool_call.provider_executed, None);
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&tool_call.input).expect("local shell input parses"),
+            json!({
+                "action": {
+                    "type": "exec",
+                    "command": ["ls", "-a", "~"],
+                    "env": {}
+                }
+            })
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_call.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(LOCAL_SHELL_ITEM_ID)
+        );
+        assert!(!result.stream.iter().any(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::ToolResult(tool_result)
+                    if tool_result.tool_call_id == LOCAL_SHELL_CALL_ID
+            )
+        }));
+
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(finish.usage.input_tokens.total, Some(407));
+        assert_eq!(finish.usage.input_tokens.no_cache, Some(407));
+        assert_eq!(finish.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(finish.usage.output_tokens.total, Some(151));
+        assert_eq!(finish.usage.output_tokens.text, Some(23));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(128));
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some(RESPONSE_ID)
+        );
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "serviceTier")
+                .and_then(JsonValue::as_str),
+            Some("default")
+        );
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(
+            request_body["tools"][0],
+            json!({
+                "type": "local_shell"
+            })
+        );
+    }
+
+    #[test]
     fn open_responses_provider_maps_web_search_api_sources_and_missing_action() {
         let transport: OpenResponsesTransport =
             Arc::new(move |_request| -> OpenResponsesTransportFuture {
@@ -18102,6 +18285,16 @@ mod tests {
             LanguageModelTool::Provider(LanguageModelProviderTool::new(
                 "openai.image_generation",
                 "generateImage",
+                JsonObject::new(),
+            )),
+        )
+    }
+
+    fn open_responses_local_shell_call_options() -> LanguageModelCallOptions {
+        LanguageModelCallOptions::new(open_responses_hello_prompt()).with_tool(
+            LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                "openai.local_shell",
+                "shell",
                 JsonObject::new(),
             )),
         )
