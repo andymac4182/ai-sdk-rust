@@ -7666,6 +7666,24 @@ mod tests {
         };
     }
 
+    macro_rules! openai_responses_reasoning_provider_options_case {
+        ($name:ident, $model_id:literal) => {
+            #[test]
+            fn $name() {
+                assert_openai_reasoning_provider_options_for_model($model_id);
+            }
+        };
+    }
+
+    macro_rules! openai_responses_non_reasoning_provider_options_case {
+        ($name:ident, $model_id:literal) => {
+            #[test]
+            fn $name() {
+                assert_openai_non_reasoning_provider_options_warning_for_model($model_id);
+            }
+        };
+    }
+
     fn open_responses_stream_parts_from_events(
         model_id: &str,
         events: Vec<JsonValue>,
@@ -8025,6 +8043,50 @@ mod tests {
             result.warnings,
             captured_open_responses_request_body(&captured_request),
         )
+    }
+
+    fn assert_openai_reasoning_provider_options_for_model(model_id: &str) {
+        let (warnings, request_body) = openai_provider_option_request_body(
+            model_id,
+            json!({
+                "reasoningEffort": "low",
+                "reasoningSummary": "auto"
+            }),
+        );
+
+        let mut expected_body = openai_text_request_body(model_id);
+        expected_body["reasoning"] = json!({
+            "effort": "low",
+            "summary": "auto"
+        });
+        assert_eq!(
+            request_body, expected_body,
+            "unexpected request body for {model_id}"
+        );
+        assert!(warnings.is_empty(), "unexpected warnings for {model_id}");
+    }
+
+    fn assert_openai_non_reasoning_provider_options_warning_for_model(model_id: &str) {
+        let (warnings, request_body) = openai_provider_option_request_body(
+            model_id,
+            json!({
+                "reasoningEffort": "low"
+            }),
+        );
+
+        assert_eq!(
+            request_body,
+            openai_text_request_body(model_id),
+            "unexpected request body for {model_id}"
+        );
+        assert_eq!(
+            unsupported_warning_details(&warnings),
+            vec![(
+                "reasoningEffort",
+                Some("reasoningEffort is not supported for non-reasoning models")
+            )],
+            "unexpected warnings for {model_id}"
+        );
     }
 
     fn openai_response_format_request_body(
@@ -16520,6 +16582,248 @@ mod tests {
         );
     }
 
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_o1,
+        "o1"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_o1_2024_12_17,
+        "o1-2024-12-17"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_o3,
+        "o3"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_o3_2025_04_16,
+        "o3-2025-04-16"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_o3_mini,
+        "o3-mini"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_o3_mini_2025_01_31,
+        "o3-mini-2025-01-31"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_o4_mini,
+        "o4-mini"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_o4_mini_2025_04_16,
+        "o4-mini-2025-04-16"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5,
+        "gpt-5"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_2025_08_07,
+        "gpt-5-2025-08-07"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_codex,
+        "gpt-5-codex"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_mini,
+        "gpt-5-mini"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_mini_2025_08_07,
+        "gpt-5-mini-2025-08-07"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_nano,
+        "gpt-5-nano"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_nano_2025_08_07,
+        "gpt-5-nano-2025-08-07"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_pro,
+        "gpt-5-pro"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_pro_2025_10_06,
+        "gpt-5-pro-2025-10-06"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_1,
+        "gpt-5.1"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_1_chat_latest,
+        "gpt-5.1-chat-latest"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_1_codex_mini,
+        "gpt-5.1-codex-mini"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_1_codex,
+        "gpt-5.1-codex"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_1_codex_max,
+        "gpt-5.1-codex-max"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_2,
+        "gpt-5.2"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_2_chat_latest,
+        "gpt-5.2-chat-latest"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_2_pro,
+        "gpt-5.2-pro"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_2_codex,
+        "gpt-5.2-codex"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_3_chat_latest,
+        "gpt-5.3-chat-latest"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_3_codex,
+        "gpt-5.3-codex"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_4,
+        "gpt-5.4"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_4_2026_03_05,
+        "gpt-5.4-2026-03-05"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_4_mini,
+        "gpt-5.4-mini"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_4_mini_2026_03_17,
+        "gpt-5.4-mini-2026-03-17"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_4_nano,
+        "gpt-5.4-nano"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_4_nano_2026_03_17,
+        "gpt-5.4-nano-2026-03-17"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_4_pro,
+        "gpt-5.4-pro"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_4_pro_2026_03_05,
+        "gpt-5.4-pro-2026-03-05"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_5,
+        "gpt-5.5"
+    );
+    openai_responses_reasoning_provider_options_case!(
+        open_responses_provider_sends_reasoning_options_for_reasoning_model_gpt_5_5_2026_04_23,
+        "gpt-5.5-2026-04-23"
+    );
+
+    openai_responses_non_reasoning_provider_options_case!(
+        open_responses_provider_warns_for_reasoning_options_on_non_reasoning_model_gpt_4_1,
+        "gpt-4.1"
+    );
+    openai_responses_non_reasoning_provider_options_case!(
+        open_responses_provider_warns_for_reasoning_options_on_non_reasoning_model_gpt_4_1_2025_04_14,
+        "gpt-4.1-2025-04-14"
+    );
+    openai_responses_non_reasoning_provider_options_case!(
+        open_responses_provider_warns_for_reasoning_options_on_non_reasoning_model_gpt_4_1_mini,
+        "gpt-4.1-mini"
+    );
+    openai_responses_non_reasoning_provider_options_case!(
+        open_responses_provider_warns_for_reasoning_options_on_non_reasoning_model_gpt_4_1_mini_2025_04_14,
+        "gpt-4.1-mini-2025-04-14"
+    );
+    openai_responses_non_reasoning_provider_options_case!(
+        open_responses_provider_warns_for_reasoning_options_on_non_reasoning_model_gpt_4_1_nano,
+        "gpt-4.1-nano"
+    );
+    openai_responses_non_reasoning_provider_options_case!(
+        open_responses_provider_warns_for_reasoning_options_on_non_reasoning_model_gpt_4_1_nano_2025_04_14,
+        "gpt-4.1-nano-2025-04-14"
+    );
+    openai_responses_non_reasoning_provider_options_case!(
+        open_responses_provider_warns_for_reasoning_options_on_non_reasoning_model_gpt_4o,
+        "gpt-4o"
+    );
+    openai_responses_non_reasoning_provider_options_case!(
+        open_responses_provider_warns_for_reasoning_options_on_non_reasoning_model_gpt_4o_2024_05_13,
+        "gpt-4o-2024-05-13"
+    );
+    openai_responses_non_reasoning_provider_options_case!(
+        open_responses_provider_warns_for_reasoning_options_on_non_reasoning_model_gpt_4o_2024_08_06,
+        "gpt-4o-2024-08-06"
+    );
+    openai_responses_non_reasoning_provider_options_case!(
+        open_responses_provider_warns_for_reasoning_options_on_non_reasoning_model_gpt_4o_2024_11_20,
+        "gpt-4o-2024-11-20"
+    );
+    openai_responses_non_reasoning_provider_options_case!(
+        open_responses_provider_warns_for_reasoning_options_on_non_reasoning_model_gpt_4o_audio_preview,
+        "gpt-4o-audio-preview"
+    );
+    openai_responses_non_reasoning_provider_options_case!(
+        open_responses_provider_warns_for_reasoning_options_on_non_reasoning_model_gpt_4o_audio_preview_2024_12_17,
+        "gpt-4o-audio-preview-2024-12-17"
+    );
+    openai_responses_non_reasoning_provider_options_case!(
+        open_responses_provider_warns_for_reasoning_options_on_non_reasoning_model_gpt_4o_search_preview,
+        "gpt-4o-search-preview"
+    );
+    openai_responses_non_reasoning_provider_options_case!(
+        open_responses_provider_warns_for_reasoning_options_on_non_reasoning_model_gpt_4o_search_preview_2025_03_11,
+        "gpt-4o-search-preview-2025-03-11"
+    );
+    openai_responses_non_reasoning_provider_options_case!(
+        open_responses_provider_warns_for_reasoning_options_on_non_reasoning_model_gpt_4o_mini_search_preview,
+        "gpt-4o-mini-search-preview"
+    );
+    openai_responses_non_reasoning_provider_options_case!(
+        open_responses_provider_warns_for_reasoning_options_on_non_reasoning_model_gpt_4o_mini_search_preview_2025_03_11,
+        "gpt-4o-mini-search-preview-2025-03-11"
+    );
+    openai_responses_non_reasoning_provider_options_case!(
+        open_responses_provider_warns_for_reasoning_options_on_non_reasoning_model_gpt_4o_mini,
+        "gpt-4o-mini"
+    );
+    openai_responses_non_reasoning_provider_options_case!(
+        open_responses_provider_warns_for_reasoning_options_on_non_reasoning_model_gpt_4o_mini_2024_07_18,
+        "gpt-4o-mini-2024-07-18"
+    );
+    openai_responses_non_reasoning_provider_options_case!(
+        open_responses_provider_warns_for_reasoning_options_on_non_reasoning_model_gpt_3_5_turbo_0125,
+        "gpt-3.5-turbo-0125"
+    );
+    openai_responses_non_reasoning_provider_options_case!(
+        open_responses_provider_warns_for_reasoning_options_on_non_reasoning_model_gpt_3_5_turbo,
+        "gpt-3.5-turbo"
+    );
+    openai_responses_non_reasoning_provider_options_case!(
+        open_responses_provider_warns_for_reasoning_options_on_non_reasoning_model_gpt_3_5_turbo_1106,
+        "gpt-3.5-turbo-1106"
+    );
+    openai_responses_non_reasoning_provider_options_case!(
+        open_responses_provider_warns_for_reasoning_options_on_non_reasoning_model_gpt_5_chat_latest,
+        "gpt-5-chat-latest"
+    );
+
     #[test]
     fn open_responses_provider_warns_for_reasoning_effort_on_non_reasoning_models() {
         let non_reasoning_model_ids = [
@@ -16548,53 +16852,7 @@ mod tests {
         ];
 
         for model_id in non_reasoning_model_ids {
-            let (provider, captured_request) = open_responses_captured_provider("openai", model_id);
-            let provider_options: ProviderOptions = serde_json::from_value(json!({
-                "openai": {
-                    "reasoningEffort": "low"
-                }
-            }))
-            .expect("provider options deserialize");
-            let model = provider.language_model(model_id);
-
-            let result = poll_ready(
-                model.do_generate(
-                    LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
-                        LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
-                            LanguageModelTextPart::new("Hello"),
-                        )]),
-                    )])
-                    .with_provider_options(provider_options),
-                ),
-            );
-
-            assert_eq!(
-                unsupported_warning_details(&result.warnings),
-                vec![(
-                    "reasoningEffort",
-                    Some("reasoningEffort is not supported for non-reasoning models")
-                )],
-                "unexpected warnings for {model_id}"
-            );
-            let request_body = captured_open_responses_request_body(&captured_request);
-            assert_eq!(
-                request_body,
-                json!({
-                    "model": model_id,
-                    "input": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "input_text",
-                                    "text": "Hello"
-                                }
-                            ]
-                        }
-                    ]
-                }),
-                "unexpected request body for {model_id}"
-            );
+            assert_openai_non_reasoning_provider_options_warning_for_model(model_id);
         }
     }
 
@@ -26599,6 +26857,48 @@ mod tests {
         assert_eq!(
             openai_metadata_value(&result.provider_metadata, "isRetryable"),
             Some(&json!(true))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_maps_generate_error_fixture_like_upstream_throw_case() {
+        const ERROR_MESSAGE: &str = "You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.";
+
+        let transport: OpenResponsesTransport =
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    429,
+                    "Too Many Requests",
+                    OPEN_RESPONSES_ERROR_JSON_FIXTURE.to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4o");
+
+        let result = poll_ready(
+            model.do_generate(LanguageModelCallOptions::new(open_responses_hello_prompt())),
+        );
+
+        assert!(result.content.is_empty());
+        assert_eq!(result.finish_reason.unified, FinishReason::Error);
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "errorMessage")
+                .and_then(JsonValue::as_str),
+            Some(ERROR_MESSAGE)
+        );
+        assert_eq!(
+            result
+                .response
+                .as_ref()
+                .and_then(|response| response.body.as_ref())
+                .and_then(|body| body.get("error"))
+                .and_then(|error| error.get("message"))
+                .and_then(JsonValue::as_str),
+            Some(ERROR_MESSAGE)
         );
     }
 
