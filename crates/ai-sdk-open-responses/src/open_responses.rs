@@ -7493,6 +7493,17 @@ mod tests {
         (result, request_body)
     }
 
+    fn open_responses_basic_text_body() -> JsonValue {
+        open_responses_citation_response_body(
+            "resp_67c97c0203188190a025beb4a75242bc",
+            "gpt-4o-2024-07-18",
+            "msg_67c97c02656c81908e080dfdf4a03cd1",
+            "answer text",
+            Vec::new(),
+            (345, 234, 538, 123),
+        )
+    }
+
     fn open_responses_citation_response_body(
         response_id: &str,
         model_id: &str,
@@ -7768,6 +7779,65 @@ mod tests {
         assert_eq!(
             map_open_responses_finish_reason(Some("unknown"), true).unified,
             FinishReason::ToolCalls
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_generates_basic_text_response() {
+        let result =
+            open_responses_generate_result_from_body("gpt-4o", open_responses_basic_text_body());
+
+        assert_eq!(result.content.len(), 1);
+        let text = match &result.content[0] {
+            LanguageModelContent::Text(text) => text,
+            other => panic!("expected text content, got {other:?}"),
+        };
+        assert_eq!(text.text, "answer text");
+        assert_eq!(
+            openai_metadata_value(&text.provider_metadata, "itemId").and_then(JsonValue::as_str),
+            Some("msg_67c97c02656c81908e080dfdf4a03cd1")
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_extracts_basic_text_usage() {
+        let result =
+            open_responses_generate_result_from_body("gpt-4o", open_responses_basic_text_body());
+
+        assert_eq!(result.usage.input_tokens.total, Some(345));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(234));
+        assert_eq!(result.usage.input_tokens.cache_write, None);
+        assert_eq!(result.usage.input_tokens.no_cache, Some(111));
+        assert_eq!(result.usage.output_tokens.total, Some(538));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(123));
+        assert_eq!(result.usage.output_tokens.text, Some(415));
+
+        let raw = result.usage.raw.as_ref().expect("raw usage is retained");
+        assert_eq!(raw.get("input_tokens"), Some(&json!(345)));
+        assert_eq!(
+            raw.get("input_tokens_details"),
+            Some(&json!({
+                "cached_tokens": 234
+            }))
+        );
+        assert_eq!(raw.get("output_tokens"), Some(&json!(538)));
+        assert_eq!(
+            raw.get("output_tokens_details"),
+            Some(&json!({
+                "reasoning_tokens": 123
+            }))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_extracts_basic_text_response_id_metadata() {
+        let result =
+            open_responses_generate_result_from_body("gpt-4o", open_responses_basic_text_body());
+
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some("resp_67c97c0203188190a025beb4a75242bc")
         );
     }
 
