@@ -19022,6 +19022,185 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_prepares_apply_patch_tool() {
+        let request_body = open_responses_request_body_for_options(
+            LanguageModelCallOptions::new(open_responses_hello_prompt()).with_tool(
+                LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.apply_patch",
+                    "apply_patch",
+                    JsonObject::new(),
+                )),
+            ),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "apply_patch"
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_resolves_apply_patch_tool_choice() {
+        let request_body = open_responses_request_body_for_options(
+            LanguageModelCallOptions::new(open_responses_hello_prompt())
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.apply_patch",
+                    "apply_patch",
+                    JsonObject::new(),
+                )))
+                .with_tool_choice(LanguageModelToolChoice::Tool {
+                    tool_name: "apply_patch".to_string(),
+                }),
+        );
+
+        assert_eq!(
+            request_body["tool_choice"],
+            json!({
+                "type": "apply_patch"
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_multiple_tools_including_apply_patch() {
+        let request_body = open_responses_request_body_for_options(
+            LanguageModelCallOptions::new(open_responses_hello_prompt())
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "testFunction",
+                        json_object(json!({
+                            "type": "object",
+                            "properties": {
+                                "input": {
+                                    "type": "string"
+                                }
+                            }
+                        })),
+                    )
+                    .with_description("A test function"),
+                ))
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.apply_patch",
+                    "apply_patch",
+                    JsonObject::new(),
+                ))),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "function",
+                    "name": "testFunction",
+                    "description": "A test function",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "input": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                },
+                {
+                    "type": "apply_patch"
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_tool_search_tool() {
+        let request_body = open_responses_request_body_for_options(
+            LanguageModelCallOptions::new(open_responses_hello_prompt()).with_tool(
+                LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.tool_search",
+                    "toolSearch",
+                    JsonObject::new(),
+                )),
+            ),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "tool_search"
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_prepares_tool_search_with_deferred_function_tool() {
+        let defer_loading_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "deferLoading": true
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let request_body = open_responses_request_body_for_options(
+            LanguageModelCallOptions::new(open_responses_hello_prompt())
+                .with_tool(LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                    "openai.tool_search",
+                    "toolSearch",
+                    JsonObject::new(),
+                )))
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "get_weather",
+                        json_object(json!({
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": ["location"],
+                            "additionalProperties": false
+                        })),
+                    )
+                    .with_description("Get the current weather")
+                    .with_provider_options(defer_loading_options),
+                )),
+        );
+
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "tool_search"
+                },
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "description": "Get the current weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {
+                                "type": "string"
+                            }
+                        },
+                        "required": ["location"],
+                        "additionalProperties": false
+                    },
+                    "defer_loading": true
+                }
+            ])
+        );
+        assert!(request_body.get("tool_choice").is_none());
+    }
+
+    #[test]
     fn open_responses_provider_prepares_apply_patch_and_tool_search_tools() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
