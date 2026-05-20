@@ -19269,20 +19269,61 @@ mod tests {
     }
 
     #[test]
-    fn open_responses_provider_generates_apply_patch_create_file_fixture() {
+    fn open_responses_provider_generates_apply_patch_create_file_fixture_request_body() {
+        let body = json!({
+            "id": "resp_apply_patch_request_body",
+            "object": "response",
+            "created_at": 1764182460,
+            "status": "completed",
+            "model": "gpt-5.1-2025-11-13",
+            "output": [],
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "total_tokens": 2
+            }
+        })
+        .to_string();
+        let (_, request_body) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5.1-2025-11-13",
+            &body,
+            open_responses_apply_patch_fixture_call_options(),
+        );
+
+        assert_eq!(
+            request_body,
+            json!({
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "model": "gpt-5.1-2025-11-13",
+                "tools": [
+                    {
+                        "type": "apply_patch"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_generates_apply_patch_create_file_fixture_content() {
         const RESPONSE_ID: &str = "resp_0b04c5f8dfc43af500692749bc5b288197b45e830995fd32d3";
         const APPLY_PATCH_ID: &str = "apc_0b04c5f8dfc43af500692749bd60908197b0e453c38f30191a";
         const CALL_ID: &str = "call_CdXiGtcRl49Q6Ek20tG9lYOr";
         const DIFF: &str = "+## Shopping Checklist\n+\n+- [ ] Milk\n+- [ ] Bread\n+- [ ] Eggs\n+- [ ] Apples\n+- [ ] Coffee\n+\n";
 
-        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
-        let captured_request_for_transport = Arc::clone(&captured_request);
         let transport: OpenResponsesTransport =
-            Arc::new(move |request| -> OpenResponsesTransportFuture {
-                *captured_request_for_transport
-                    .lock()
-                    .expect("captured request mutex is not poisoned") = Some(request.clone());
-
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
                 Box::pin(ready(Ok(ProviderApiResponse::text(
                     200,
                     "OK",
@@ -19363,30 +19404,6 @@ mod tests {
 
         let result =
             poll_ready(model.do_generate(open_responses_apply_patch_fixture_call_options()));
-
-        assert_eq!(
-            captured_open_responses_request_body(&captured_request),
-            json!({
-                "input": [
-                    {
-                        "type": "message",
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text": "Hello"
-                            }
-                        ]
-                    }
-                ],
-                "model": "gpt-5.1-2025-11-13",
-                "tools": [
-                    {
-                        "type": "apply_patch"
-                    }
-                ]
-            })
-        );
 
         assert_eq!(result.finish_reason.unified, FinishReason::Stop);
         assert_eq!(result.usage.input_tokens.total, Some(642));
