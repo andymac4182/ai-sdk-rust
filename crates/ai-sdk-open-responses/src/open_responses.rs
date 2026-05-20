@@ -11046,6 +11046,144 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_adds_encrypted_reasoning_include_for_reasoning_store_false() {
+        let (provider, captured_request) = open_responses_captured_provider("openai", "gpt-5-mini");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "store": false
+            }
+        }))
+        .expect("provider options deserialize");
+        let model = provider.language_model("gpt-5-mini");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Hello"),
+                    )]),
+                )])
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-5-mini",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "store": false,
+                "include": [
+                    "reasoning.encrypted_content"
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_omits_encrypted_reasoning_include_for_non_reasoning_store_false() {
+        let (provider, captured_request) = open_responses_captured_provider("openai", "gpt-4o");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "store": false
+            }
+        }))
+        .expect("provider options deserialize");
+        let model = provider.language_model("gpt-4o");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Hello"),
+                    )]),
+                )])
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-4o",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "store": false
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_omits_encrypted_reasoning_include_for_store_true() {
+        let (provider, captured_request) = open_responses_captured_provider("openai", "gpt-4o");
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "store": true
+            }
+        }))
+        .expect("provider options deserialize");
+        let model = provider.language_model("gpt-4o");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Hello"),
+                    )]),
+                )])
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-4o",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "store": true
+            })
+        );
+    }
+
+    #[test]
     fn open_responses_provider_validates_openai_service_tier_model_capabilities() {
         let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
         let captured_requests_for_transport = Arc::clone(&captured_requests);
