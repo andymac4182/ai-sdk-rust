@@ -15717,6 +15717,228 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_maps_web_search_api_sources_and_missing_action() {
+        let transport: OpenResponsesTransport =
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "resp_web_search_schema_edges",
+                        "created_at": 1711115037,
+                        "model": "gpt-4o",
+                        "output": [
+                            {
+                                "id": "ws_api_sources",
+                                "type": "web_search_call",
+                                "status": "completed",
+                                "action": {
+                                    "type": "search",
+                                    "query": "current price of BTC",
+                                    "sources": [
+                                        {
+                                            "type": "url",
+                                            "url": "https://example.com?a=1&utm_source=openai"
+                                        },
+                                        {
+                                            "type": "api",
+                                            "name": "oai-finance"
+                                        }
+                                    ]
+                                }
+                            },
+                            {
+                                "id": "ws_missing_action",
+                                "type": "web_search_call",
+                                "status": "completed"
+                            },
+                            {
+                                "id": "msg_done",
+                                "type": "message",
+                                "status": "completed",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "BTC is trading at ..."
+                                    }
+                                ]
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 10,
+                            "output_tokens": 5
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4o");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Use web search"),
+                    )]),
+                )])
+                .with_tool(LanguageModelTool::Provider(
+                    LanguageModelProviderTool::new(
+                        "openai.web_search",
+                        "webSearch",
+                        JsonObject::new(),
+                    ),
+                )),
+            ),
+        );
+
+        let tool_calls = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let tool_results = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(tool_calls.len(), 2);
+        assert!(
+            tool_calls
+                .iter()
+                .all(|tool_call| tool_call.provider_executed == Some(true))
+        );
+        assert_eq!(tool_calls[0].tool_call_id, "ws_api_sources");
+        assert_eq!(tool_calls[0].tool_name, "webSearch");
+        assert_eq!(
+            tool_results[0].result.as_value(),
+            &json!({
+                "action": {
+                    "type": "search",
+                    "query": "current price of BTC"
+                },
+                "sources": [
+                    {
+                        "type": "url",
+                        "url": "https://example.com?a=1&utm_source=openai"
+                    },
+                    {
+                        "type": "api",
+                        "name": "oai-finance"
+                    }
+                ]
+            })
+        );
+        assert_eq!(tool_calls[1].tool_call_id, "ws_missing_action");
+        assert_eq!(tool_results[1].result.as_value(), &json!({}));
+    }
+
+    #[test]
+    fn open_responses_provider_streams_web_search_api_sources_and_missing_action() {
+        let transport: OpenResponsesTransport = Arc::new(
+            move |_request| -> OpenResponsesTransportFuture {
+                let sse = [
+                    r#"data: {"type":"response.created","response":{"id":"resp_stream_web_search_schema_edges","created_at":1711115037,"model":"gpt-4o"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":0,"item":{"id":"ws_api_sources","type":"web_search_call","status":"in_progress"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":0,"item":{"id":"ws_api_sources","type":"web_search_call","status":"completed","action":{"type":"search","query":"current price of BTC","sources":[{"type":"url","url":"https://example.com?a=1&utm_source=openai"},{"type":"api","name":"oai-finance"}]}}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.added","output_index":1,"item":{"id":"ws_missing_action","type":"web_search_call","status":"in_progress"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_item.done","output_index":1,"item":{"id":"ws_missing_action","type":"web_search_call","status":"completed"}}"#,
+                    "",
+                    r#"data: {"type":"response.completed","response":{"id":"resp_stream_web_search_schema_edges","created_at":1711115037,"model":"gpt-4o","usage":{"input_tokens":10,"output_tokens":5}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
+            },
+        );
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gpt-4o");
+
+        let result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Use web search"),
+                    )]),
+                )])
+                .with_tool(LanguageModelTool::Provider(
+                    LanguageModelProviderTool::new(
+                        "openai.web_search",
+                        "webSearch",
+                        JsonObject::new(),
+                    ),
+                )),
+            ),
+        );
+
+        let tool_results = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(tool_results.len(), 2);
+        assert_eq!(
+            tool_results[0].result.as_value(),
+            &json!({
+                "action": {
+                    "type": "search",
+                    "query": "current price of BTC"
+                },
+                "sources": [
+                    {
+                        "type": "url",
+                        "url": "https://example.com?a=1&utm_source=openai"
+                    },
+                    {
+                        "type": "api",
+                        "name": "oai-finance"
+                    }
+                ]
+            })
+        );
+        assert_eq!(tool_results[1].result.as_value(), &json!({}));
+        assert!(
+            result
+                .stream
+                .iter()
+                .any(|part| matches!(part, LanguageModelStreamPart::ToolInputStart(start) if start.id == "ws_api_sources" && start.provider_executed == Some(true)))
+        );
+        assert!(
+            result
+                .stream
+                .iter()
+                .any(|part| matches!(part, LanguageModelStreamPart::ToolInputStart(start) if start.id == "ws_missing_action" && start.provider_executed == Some(true)))
+        );
+    }
+
+    #[test]
     fn open_responses_provider_streams_tool_input_delta_refinements() {
         let transport: OpenResponsesTransport = Arc::new(
             move |_request| -> OpenResponsesTransportFuture {
