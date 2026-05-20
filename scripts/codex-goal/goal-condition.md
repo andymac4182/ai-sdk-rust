@@ -40,6 +40,9 @@ In practical terms, the matching Rust crate must include every portable test
 from the original TypeScript package and may include more Rust tests, but never
 fewer. Missing one original upstream test/case is a parity failure until it is
 ported or explicitly documented as JavaScript-only/non-portable in the ledger.
+The minimum acceptable Rust test inventory is the full portable original
+TypeScript test inventory for that package; Rust-specific tests are only extra
+coverage and never reduce or replace that floor.
 
 Required order: finish ALL common/core SDK packages together with Vercel AI
 Gateway provider coverage before taking more unrelated standalone provider

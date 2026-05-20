@@ -159,6 +159,9 @@ still open.
    Rust counterpart for every portable original test/case. Additional Rust tests
    are welcome only as additive coverage; a Rust crate with even one fewer
    portable original TypeScript test/case is incomplete.
+   The minimum passing state is the complete portable original TypeScript test
+   inventory recreated in Rust for that matching crate, with any Rust-only tests
+   counted only as extra coverage on top.
 5. For provider-backed behavior, require two layers of proof before marking a
    row `verified`: deterministic fake/mock/transport tests that run in normal
    validation, plus credential-gated live provider validation when a usable

@@ -79,6 +79,9 @@ Acceptance is equality-plus only: EVERY original portable TypeScript test/case
 must exist as a Rust test in the matching crate, and Rust may add more tests but
 must never have a smaller portable test inventory than the original TypeScript
 package.
+The minimum passing Rust suite for a package is therefore the full portable
+original TypeScript test inventory, plus any additional Rust-only tests; no
+Rust-only coverage can offset a missing upstream test.
 
 ## Required Work Order
 
