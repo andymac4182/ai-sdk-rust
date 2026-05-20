@@ -7215,6 +7215,18 @@ mod tests {
         model_id: &str,
         events: Vec<JsonValue>,
     ) -> Vec<LanguageModelStreamPart> {
+        open_responses_stream_parts_from_events_with_options(
+            model_id,
+            events,
+            LanguageModelCallOptions::new(open_responses_hello_prompt()),
+        )
+    }
+
+    fn open_responses_stream_parts_from_events_with_options(
+        model_id: &str,
+        events: Vec<JsonValue>,
+        options: LanguageModelCallOptions,
+    ) -> Vec<LanguageModelStreamPart> {
         let sse = open_responses_sse_from_events(events);
         let transport: OpenResponsesTransport =
             Arc::new(move |_request| -> OpenResponsesTransportFuture {
@@ -7228,13 +7240,24 @@ mod tests {
         .with_transport(transport);
         let model = provider.language_model(model_id);
 
-        poll_ready(model.do_stream(LanguageModelCallOptions::new(open_responses_hello_prompt())))
-            .stream
+        poll_ready(model.do_stream(options)).stream
     }
 
     fn open_responses_generate_result_from_body(
         model_id: &str,
         body: JsonValue,
+    ) -> LanguageModelGenerateResult {
+        open_responses_generate_result_from_body_with_options(
+            model_id,
+            body,
+            LanguageModelCallOptions::new(open_responses_hello_prompt()),
+        )
+    }
+
+    fn open_responses_generate_result_from_body_with_options(
+        model_id: &str,
+        body: JsonValue,
+        options: LanguageModelCallOptions,
     ) -> LanguageModelGenerateResult {
         let transport: OpenResponsesTransport =
             Arc::new(move |_request| -> OpenResponsesTransportFuture {
@@ -7251,7 +7274,7 @@ mod tests {
         .with_transport(transport);
         let model = provider.language_model(model_id);
 
-        poll_ready(model.do_generate(LanguageModelCallOptions::new(open_responses_hello_prompt())))
+        poll_ready(model.do_generate(options))
     }
 
     fn open_responses_citation_response_body(
@@ -13039,6 +13062,410 @@ mod tests {
                 "{leaked_key} should not leak into the Open Responses request body"
             );
         }
+    }
+
+    #[test]
+    fn open_responses_provider_generates_logprobs_provider_metadata() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "logprobs": 2
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = open_responses_generate_result_from_body_with_options(
+            "gpt-4o",
+            json!({
+                "id": "resp_67c97c0203188190a025beb4a75242bc",
+                "object": "response",
+                "created_at": 1741257730,
+                "status": "completed",
+                "error": null,
+                "incomplete_details": null,
+                "input": [],
+                "instructions": null,
+                "max_output_tokens": null,
+                "model": "gpt-4o-2024-07-18",
+                "output": [
+                    {
+                        "id": "msg_67c97c02656c81908e080dfdf4a03cd1",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "answer text",
+                                "annotations": [],
+                                "logprobs": [
+                                    {
+                                        "token": "Hello",
+                                        "logprob": -0.0009994634,
+                                        "top_logprobs": [
+                                            {
+                                                "token": "Hello",
+                                                "logprob": -0.0009994634
+                                            },
+                                            {
+                                                "token": "Hi",
+                                                "logprob": -0.2
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "token": "!",
+                                        "logprob": -0.13410144,
+                                        "top_logprobs": [
+                                            {
+                                                "token": "!",
+                                                "logprob": -0.13410144
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ],
+                "parallel_tool_calls": true,
+                "previous_response_id": null,
+                "reasoning": {
+                    "effort": null,
+                    "summary": null
+                },
+                "store": true,
+                "temperature": 1,
+                "text": {
+                    "format": {
+                        "type": "text"
+                    }
+                },
+                "tool_choice": "auto",
+                "tools": [],
+                "top_p": 1,
+                "truncation": "disabled",
+                "usage": {
+                    "input_tokens": 345,
+                    "input_tokens_details": {
+                        "cached_tokens": 234
+                    },
+                    "output_tokens": 538,
+                    "output_tokens_details": {
+                        "reasoning_tokens": 123
+                    },
+                    "total_tokens": 572
+                },
+                "user": null,
+                "metadata": {}
+            }),
+            LanguageModelCallOptions::new(open_responses_hello_prompt())
+                .with_provider_options(provider_options),
+        );
+
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "logprobs"),
+            Some(&json!([
+                [
+                    {
+                        "token": "Hello",
+                        "logprob": -0.0009994634,
+                        "top_logprobs": [
+                            {
+                                "token": "Hello",
+                                "logprob": -0.0009994634
+                            },
+                            {
+                                "token": "Hi",
+                                "logprob": -0.2
+                            }
+                        ]
+                    },
+                    {
+                        "token": "!",
+                        "logprob": -0.13410144,
+                        "top_logprobs": [
+                            {
+                                "token": "!",
+                                "logprob": -0.13410144
+                            }
+                        ]
+                    }
+                ]
+            ]))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_streams_logprobs_provider_metadata() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "logprobs": 1
+            }
+        }))
+        .expect("provider options deserialize");
+        let token_logprobs = json!([
+            {
+                "bytes": [78],
+                "logprob": -2.9266366958618164,
+                "token": "N",
+                "top_logprobs": [
+                    {
+                        "bytes": [80, 108, 101, 97, 115, 101],
+                        "logprob": -0.5516367554664612,
+                        "token": "Please"
+                    },
+                    {
+                        "bytes": [89],
+                        "logprob": -1.0516366958618164,
+                        "token": "Y"
+                    },
+                    {
+                        "bytes": [78],
+                        "logprob": -2.9266366958618164,
+                        "token": "N"
+                    },
+                    {
+                        "bytes": [83, 117, 114, 101],
+                        "logprob": -4.551636695861816,
+                        "token": "Sure"
+                    },
+                    {
+                        "bytes": [67, 111, 117, 108, 100],
+                        "logprob": -5.176636695861816,
+                        "token": "Could"
+                    }
+                ]
+            }
+        ]);
+        let stream = open_responses_stream_parts_from_events_with_options(
+            "gpt-4o",
+            vec![
+                json!({
+                    "type": "response.created",
+                    "sequence_number": 0,
+                    "response": {
+                        "id": "resp_689cec4cf608819583c56813ccb0f5040f92af1765dd5aad",
+                        "object": "response",
+                        "created_at": 1755114572,
+                        "status": "in_progress",
+                        "background": false,
+                        "error": null,
+                        "incomplete_details": null,
+                        "instructions": null,
+                        "max_output_tokens": 1024,
+                        "max_tool_calls": null,
+                        "model": "gpt-4.1-nano-2025-04-14",
+                        "output": [],
+                        "parallel_tool_calls": true,
+                        "previous_response_id": null,
+                        "prompt_cache_key": null,
+                        "reasoning": {
+                            "effort": null,
+                            "summary": null
+                        },
+                        "safety_identifier": null,
+                        "service_tier": "auto",
+                        "store": true,
+                        "temperature": 1,
+                        "text": {
+                            "format": {
+                                "type": "text"
+                            },
+                            "verbosity": "medium"
+                        },
+                        "tool_choice": "auto",
+                        "tools": [],
+                        "top_logprobs": 5,
+                        "top_p": 1,
+                        "truncation": "disabled",
+                        "usage": null,
+                        "user": null,
+                        "metadata": {}
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.added",
+                    "sequence_number": 2,
+                    "output_index": 0,
+                    "item": {
+                        "id": "msg_689cec4d46448195905a27fb9e12ff670f92af1765dd5aad",
+                        "type": "message",
+                        "status": "in_progress",
+                        "content": [],
+                        "role": "assistant"
+                    }
+                }),
+                json!({
+                    "type": "response.content_part.added",
+                    "sequence_number": 3,
+                    "item_id": "msg_689cec4d46448195905a27fb9e12ff670f92af1765dd5aad",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "annotations": [],
+                        "logprobs": [],
+                        "text": ""
+                    }
+                }),
+                json!({
+                    "type": "response.output_text.delta",
+                    "sequence_number": 4,
+                    "item_id": "msg_689cec4d46448195905a27fb9e12ff670f92af1765dd5aad",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": "N",
+                    "logprobs": token_logprobs,
+                    "obfuscation": "t9egcKewVOXiQ6N"
+                }),
+                json!({
+                    "type": "response.output_text.done",
+                    "sequence_number": 5,
+                    "item_id": "msg_689cec4d46448195905a27fb9e12ff670f92af1765dd5aad",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "text": "N",
+                    "logprobs": token_logprobs
+                }),
+                json!({
+                    "type": "response.content_part.done",
+                    "sequence_number": 6,
+                    "item_id": "msg_689cec4d46448195905a27fb9e12ff670f92af1765dd5aad",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "annotations": [],
+                        "logprobs": [],
+                        "text": "N"
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "sequence_number": 7,
+                    "output_index": 0,
+                    "item": {
+                        "id": "msg_689cec4d46448195905a27fb9e12ff670f92af1765dd5aad",
+                        "type": "message",
+                        "status": "completed",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "annotations": [],
+                                "logprobs": token_logprobs,
+                                "text": "N"
+                            }
+                        ],
+                        "role": "assistant"
+                    }
+                }),
+                json!({
+                    "type": "response.completed",
+                    "sequence_number": 8,
+                    "response": {
+                        "id": "resp_689cec4cf608819583c56813ccb0f5040f92af1765dd5aad",
+                        "object": "response",
+                        "created_at": 1755114572,
+                        "status": "completed",
+                        "background": false,
+                        "error": null,
+                        "incomplete_details": null,
+                        "max_output_tokens": 1024,
+                        "model": "gpt-4.1-nano-2025-04-14",
+                        "output": [
+                            {
+                                "id": "msg_689cec4d46448195905a27fb9e12ff670f92af1765dd5aad",
+                                "type": "message",
+                                "status": "completed",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "annotations": [],
+                                        "logprobs": token_logprobs,
+                                        "text": "N"
+                                    }
+                                ],
+                                "role": "assistant"
+                            }
+                        ],
+                        "parallel_tool_calls": true,
+                        "previous_response_id": null,
+                        "reasoning": {
+                            "effort": null,
+                            "summary": null
+                        },
+                        "safety_identifier": null,
+                        "service_tier": "default",
+                        "store": true,
+                        "temperature": 1,
+                        "text": {
+                            "format": {
+                                "type": "text"
+                            },
+                            "verbosity": "medium"
+                        },
+                        "tool_choice": "auto",
+                        "tools": [],
+                        "top_logprobs": 5,
+                        "top_p": 1,
+                        "truncation": "disabled",
+                        "usage": {
+                            "input_tokens": 12,
+                            "input_tokens_details": {
+                                "cached_tokens": 0
+                            },
+                            "output_tokens": 2,
+                            "output_tokens_details": {
+                                "reasoning_tokens": 0
+                            },
+                            "total_tokens": 14
+                        },
+                        "user": null,
+                        "metadata": {}
+                    }
+                }),
+            ],
+            LanguageModelCallOptions::new(open_responses_hello_prompt())
+                .with_provider_options(provider_options),
+        );
+
+        let text_delta = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) => Some(delta),
+                _ => None,
+            })
+            .expect("stream includes text delta");
+        assert_eq!(
+            text_delta.id,
+            "msg_689cec4d46448195905a27fb9e12ff670f92af1765dd5aad"
+        );
+        assert_eq!(text_delta.delta, "N");
+        assert_eq!(text_delta.provider_metadata, None);
+
+        let finish = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish part");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(finish.usage.input_tokens.total, Some(12));
+        assert_eq!(finish.usage.output_tokens.total, Some(2));
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some("resp_689cec4cf608819583c56813ccb0f5040f92af1765dd5aad")
+        );
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "serviceTier")
+                .and_then(JsonValue::as_str),
+            Some("default")
+        );
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "logprobs"),
+            Some(&json!([token_logprobs]))
+        );
     }
 
     #[test]
