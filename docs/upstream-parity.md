@@ -41,6 +41,9 @@ to exist as an equivalent Rust test in the matching Rust crate. This is a
 minimum bar, not an aspirational coverage target: Rust may add more tests for
 stronger typing, additional edge cases, live-provider proof, or Rust-specific
 failure modes, but it must never have fewer portable tests than upstream.
+Future iterations must treat the original TypeScript test inventory as
+mandatory: EVERY original portable TypeScript test/case must exist in Rust,
+and the Rust suite may only be larger, never smaller.
 The required comparison is equality-plus: every original portable TypeScript
 test must exist in Rust, and any Rust-only tests are additive coverage only.
 The upstream TypeScript test inventory is the floor and the Rust inventory must
@@ -240,7 +243,8 @@ inventory.
 | Error types and messages | in-progress | `crates/ai-sdk-provider/src/provider.rs`, `crates/ai-sdk-provider-utils`, `crates/ai-sdk-gateway/src/gateway_error.rs`, `src/generate_text.rs`, model modules | Existing error serialization/message tests; `gateway_error::*` tests | Many upstream errors exist, including Gateway-specific error classifications. Other provider-specific error types remain unported. |
 | `generateText` non-streaming | verified | `src/generate_text.rs` | `generate_text_*` tests in `src/generate_text.rs`; `examples/kitchen_sink.rs` | Covers deterministic model calls, retryable pre-content provider failures up to `maxRetries`, `maxRetries` start-event configuration, tool loops, result shaping, usage, warnings, metadata, and response messages. |
 | Tool calling, tool execution, tool approval, repair, refinement, active tools, pruning | verified | `src/generate_text.rs`, `crates/ai-sdk-provider-utils`, `crates/ai-sdk-gateway/src/gateway_tools.rs` | Tool loop, approval, repair, execution, pruning, provider-executed factory, Gateway tools, and mapping tests | Provider-executed deferred results and Gateway provider-executed tools are represented in Rust. Most concrete provider-specific tools remain unported. |
-| Open Responses basic text generated result | verified | `crates/ai-sdk-open-responses/src/open_responses.rs` | `open_responses_provider_generates_basic_text_response`; `open_responses_provider_extracts_basic_text_usage`; `open_responses_provider_extracts_basic_text_response_id_metadata` | Mirrors the upstream `OpenAIResponsesLanguageModel > doGenerate > basic text response` generated-result tests one-to-one for text content, text item id metadata, detailed usage conversion (`cacheRead`, `noCache`, reasoning/text output split, and raw provider usage), and top-level OpenAI `responseId` provider metadata. The adjacent request-body cases remain in the next Open Responses audit because they expose the broader upstream input-message shape mismatch. |
+| Open Responses basic text generated result | verified | `crates/ai-sdk-open-responses/src/open_responses.rs` | `open_responses_provider_generates_basic_text_response`; `open_responses_provider_extracts_basic_text_usage`; `open_responses_provider_extracts_basic_text_response_id_metadata` | Mirrors the upstream `OpenAIResponsesLanguageModel > doGenerate > basic text response` generated-result tests one-to-one for text content, text item id metadata, detailed usage conversion (`cacheRead`, `noCache`, reasoning/text output split, and raw provider usage), and top-level OpenAI `responseId` provider metadata. |
+| Open Responses basic request body and reasoning-model settings | verified | `crates/ai-sdk-open-responses/src/open_responses.rs` | `open_responses_provider_sends_model_id_settings_and_input`; `open_responses_provider_keeps_temperature_and_top_p_for_gpt_5_1_reasoning_none`; `open_responses_provider_removes_unsupported_settings_for_o1`; `open_responses_provider_removes_unsupported_settings_for_reasoning_model_*` generated cases | Mirrors upstream `OpenAIResponsesLanguageModel > doGenerate` request-body tests `should send model id, settings, and input`, `should keep temperature and topP for gpt-5.1 models when reasoning effort is none`, `should remove unsupported settings for o1`, and the full `openaiResponsesReasoningModelIds` table. Rust now serializes role-based Responses input messages without the extra `type: "message"` field, preserves GPT-5.1+ sampling parameters only for `reasoningEffort: none`, and emits one Rust test per upstream reasoning model id: `o1`, `o1-2024-12-17`, `o3`, `o3-2025-04-16`, `o3-mini`, `o3-mini-2025-01-31`, `o4-mini`, `o4-mini-2025-04-16`, `gpt-5`, `gpt-5-2025-08-07`, `gpt-5-codex`, `gpt-5-mini`, `gpt-5-mini-2025-08-07`, `gpt-5-nano`, `gpt-5-nano-2025-08-07`, `gpt-5-pro`, `gpt-5-pro-2025-10-06`, `gpt-5.1`, `gpt-5.1-chat-latest`, `gpt-5.1-codex-mini`, `gpt-5.1-codex`, `gpt-5.1-codex-max`, `gpt-5.2`, `gpt-5.2-chat-latest`, `gpt-5.2-pro`, `gpt-5.2-codex`, `gpt-5.3-chat-latest`, `gpt-5.3-codex`, `gpt-5.4`, `gpt-5.4-2026-03-05`, `gpt-5.4-mini`, `gpt-5.4-mini-2026-03-17`, `gpt-5.4-nano`, `gpt-5.4-nano-2026-03-17`, `gpt-5.4-pro`, `gpt-5.4-pro-2026-03-05`, `gpt-5.5`, and `gpt-5.5-2026-04-23`. |
 | Open Responses MCP approval response continuation | verified | `src/open_responses.rs` | `open_responses_provider_converts_tool_approval_responses_to_mcp_input`; `open_responses_provider_aliases_mcp_calls_from_prompt_approval_metadata`; `open_responses_provider_streams_additional_tool_items` | Open Responses prompt conversion now maps upstream `tool-approval-response` parts to `mcp_approval_response` input, uses stored item references when `store` is enabled, deduplicates repeated approval ids, skips the synthetic execution-denied tool result that accompanies denied provider-executed approvals, generates local dummy tool-call ids for MCP approval requests, preserves `approvalRequestId` metadata, and aliases later MCP calls with `approval_request_id` back to the local tool-call id in prompt and stream paths. |
 | Open Responses stored assistant history item references | verified | `src/open_responses.rs` | `open_responses_provider_uses_item_references_for_stored_assistant_history` | Stored Open Responses prompt conversion now preserves assistant text, reasoning, provider-executed tool calls, and tool results as `item_reference` entries when upstream item ids are present, keeping stored conversation continuation aligned with the Responses API history model. |
 | Open Responses conversation history item filtering | verified | `src/open_responses.rs` | `open_responses_provider_skips_conversation_history_items` | When an OpenAI/Gateway Responses `conversation` id is supplied, prompt conversion skips assistant text, reasoning, tool-call, and assistant tool-result history items that already have upstream item ids instead of sending duplicate `item_reference` entries. The request still includes fresh assistant content and tool-role outputs, and emits the upstream warning when `conversation` and `previousResponseId` are combined. |
@@ -722,10 +726,15 @@ focused tests for each portable behavior before changing rows to `verified`.
   `open_responses_provider_extracts_basic_text_usage`, and
   `open_responses_provider_extracts_basic_text_response_id_metadata` now map
   the upstream basic text response result tests one-to-one for generated text,
-  item id metadata, detailed usage, raw usage, and response id metadata. The
-  neighboring request-body tests remain in the Open Responses audit queue
-  because current Rust still emits explicit message `type` fields where
-  upstream omits them.
+  item id metadata, detailed usage, raw usage, and response id metadata.
+- 2026-05-20: OpenAI Responses basic request-body parity added
+  `open_responses_provider_sends_model_id_settings_and_input`,
+  `open_responses_provider_keeps_temperature_and_top_p_for_gpt_5_1_reasoning_none`,
+  `open_responses_provider_removes_unsupported_settings_for_o1`, and 38
+  `open_responses_provider_removes_unsupported_settings_for_reasoning_model_*`
+  generated tests now map the adjacent upstream request-body block one-to-one.
+  Rust request serialization now omits `type: "message"` on role-based
+  Responses input messages, matching upstream `convertToOpenAIResponsesInput`.
 - 2026-05-20: OpenAI Responses model capability parity added
   `open_responses_provider_adds_encrypted_reasoning_include_for_reasoning_store_false`; `open_responses_provider_omits_encrypted_reasoning_include_for_non_reasoning_store_false`; `open_responses_provider_omits_encrypted_reasoning_include_for_store_true`; `open_responses_provider_allows_force_reasoning_for_unrecognized_model_ids`; `open_responses_provider_sends_xhigh_reasoning_effort_for_codex_max_model`; `open_responses_provider_warns_for_reasoning_effort_on_non_reasoning_models`; `open_responses_provider_applies_openai_model_capability_rules` and
   `open_responses_provider_validates_openai_service_tier_model_capabilities`
@@ -1235,19 +1244,12 @@ focused tests for each portable behavior before changing rows to `verified`.
    system-message modes, provider option edge mapping, shell/apply-patch,
    assistant filtering, custom provider-tool, exact error fixtures, phase
    metadata fixture, encrypted reasoning fixture, compaction fixture, generated
-   and streaming citation annotations, OpenAI model-capability, and upstream streamed
+   and streaming citation annotations, OpenAI model-capability, upstream basic
+   request-body/model-settings cases, and upstream streamed
    incomplete/tool-call/namespace/service-tier slices; the next Open Responses
-   work should compare the remaining
+   work should continue comparing the remaining
    `packages/openai/src/responses` tests against the package-owned Rust crate,
    then add exact missing test names to this ledger.
-   The next exact OpenAI Responses language-model gap is the adjacent basic
-   request-body block: `should send model id, settings, and input`,
-   `should keep temperature and topP for gpt-5.1 models when reasoning effort
-   is none`, `should remove unsupported settings for o1`, and the
-   `openaiResponsesReasoningModelIds` table for unsupported reasoning-model
-   settings. These need a deliberate input-shape slice because upstream omits
-   explicit `type: "message"` fields on message input objects where current
-   Rust request assertions still include them.
 4. Keep the next slices Gateway-first within the first-phase queue: close
    the whole common/core plus Vercel AI Gateway first-phase queue before
    expanding to unrelated providers. Continue choosing from `packages/ai`,
