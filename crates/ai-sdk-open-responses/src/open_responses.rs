@@ -7710,6 +7710,84 @@ mod tests {
         })
     }
 
+    fn open_responses_schema_alignment_response_body(output: Vec<JsonValue>) -> JsonValue {
+        json!({
+            "id": "resp_schema_alignment",
+            "object": "response",
+            "created_at": 1711115037,
+            "status": "completed",
+            "model": "gpt-4.1-mini",
+            "output": output,
+            "usage": {
+                "input_tokens": 1,
+                "input_tokens_details": {
+                    "cached_tokens": 0
+                },
+                "output_tokens": 1,
+                "output_tokens_details": {
+                    "reasoning_tokens": 0
+                },
+                "total_tokens": 2
+            }
+        })
+    }
+
+    fn open_responses_schema_alignment_created_event() -> JsonValue {
+        json!({
+            "type": "response.created",
+            "response": {
+                "id": "resp_schema_alignment",
+                "object": "response",
+                "created_at": 1711115037,
+                "status": "in_progress",
+                "model": "gpt-4.1-mini",
+                "output": [],
+                "usage": null
+            }
+        })
+    }
+
+    fn open_responses_schema_alignment_completed_event(output: Vec<JsonValue>) -> JsonValue {
+        json!({
+            "type": "response.completed",
+            "response": open_responses_schema_alignment_response_body(output)
+        })
+    }
+
+    fn open_responses_content_tool_result_value<'a>(
+        content: &'a [LanguageModelContent],
+        tool_name: &str,
+    ) -> &'a JsonValue {
+        content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::ToolResult(tool_result)
+                    if tool_result.tool_name == tool_name =>
+                {
+                    Some(tool_result.result.as_value())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("content includes {tool_name} tool result"))
+    }
+
+    fn open_responses_stream_tool_result_value<'a>(
+        stream: &'a [LanguageModelStreamPart],
+        tool_name: &str,
+    ) -> &'a JsonValue {
+        stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ToolResult(tool_result)
+                    if tool_result.tool_name == tool_name =>
+                {
+                    Some(tool_result.result.as_value())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("stream includes {tool_name} tool result"))
+    }
+
     fn open_responses_stream_sources(
         stream: &[LanguageModelStreamPart],
     ) -> Vec<LanguageModelSource> {
@@ -30753,6 +30831,528 @@ mod tests {
             stream
                 .iter()
                 .any(|part| matches!(part, LanguageModelStreamPart::ToolInputStart(start) if start.id == "ws_missing_action" && start.provider_executed == Some(true)))
+        );
+    }
+
+    #[test]
+    fn open_responses_schema_alignment_matches_annotation_shape_between_stream_and_response() {
+        let annotations = json!([
+            {
+                "type": "url_citation",
+                "url": "https://example.com/schema",
+                "title": "Schema Example",
+                "start_index": 0,
+                "end_index": 6
+            }
+        ]);
+        let message = json!({
+            "id": "msg_schema_annotation",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": "Cited text",
+                    "annotations": annotations.clone()
+                }
+            ]
+        });
+
+        let generated = open_responses_generate_result_from_body(
+            "gpt-4.1-mini",
+            open_responses_schema_alignment_response_body(vec![message.clone()]),
+        );
+        let generated_text = generated
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::Text(text) => Some(text),
+                _ => None,
+            })
+            .expect("generated response includes text");
+        assert_eq!(
+            openai_metadata_value(&generated_text.provider_metadata, "annotations"),
+            Some(&annotations)
+        );
+        let generated_sources = open_responses_content_sources(&generated.content);
+        assert_eq!(generated_sources.len(), 1);
+
+        let stream = open_responses_stream_parts_from_events(
+            "gpt-4.1-mini",
+            vec![
+                open_responses_schema_alignment_created_event(),
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        "id": "msg_schema_annotation",
+                        "type": "message",
+                        "status": "in_progress",
+                        "role": "assistant",
+                        "content": []
+                    }
+                }),
+                json!({
+                    "type": "response.content_part.added",
+                    "item_id": "msg_schema_annotation",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "text": "",
+                        "annotations": []
+                    }
+                }),
+                json!({
+                    "type": "response.output_text.annotation.added",
+                    "item_id": "msg_schema_annotation",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "annotation_index": 0,
+                    "annotation": annotations[0].clone()
+                }),
+                json!({
+                    "type": "response.output_text.done",
+                    "item_id": "msg_schema_annotation",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "text": "Cited text"
+                }),
+                json!({
+                    "type": "response.content_part.done",
+                    "item_id": "msg_schema_annotation",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "text": "Cited text",
+                        "annotations": annotations.clone()
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": message.clone()
+                }),
+                open_responses_schema_alignment_completed_event(vec![message]),
+            ],
+        );
+
+        let text_end = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextEnd(text_end) => Some(text_end),
+                _ => None,
+            })
+            .expect("stream includes text end");
+        assert_eq!(
+            openai_metadata_value(&text_end.provider_metadata, "annotations"),
+            Some(&annotations)
+        );
+        let streamed_sources = open_responses_stream_sources(&stream);
+        assert_eq!(streamed_sources.len(), 1);
+        match (&generated_sources[0], &streamed_sources[0]) {
+            (LanguageModelSource::Url(generated), LanguageModelSource::Url(streamed)) => {
+                assert_eq!(generated.url, streamed.url);
+                assert_eq!(generated.title, streamed.title);
+            }
+            (generated, streamed) => {
+                panic!("expected matching URL sources, got {generated:?} and {streamed:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn open_responses_schema_alignment_aligns_web_search_call_actions() {
+        let action = json!({
+            "type": "search",
+            "query": "AI SDK Rust",
+            "sources": [
+                {
+                    "type": "url",
+                    "url": "https://example.com/schema"
+                }
+            ]
+        });
+        let item = json!({
+            "id": "ws_schema_alignment",
+            "type": "web_search_call",
+            "status": "completed",
+            "action": action
+        });
+        let expected = json!({
+            "action": {
+                "type": "search",
+                "query": "AI SDK Rust"
+            },
+            "sources": [
+                {
+                    "type": "url",
+                    "url": "https://example.com/schema"
+                }
+            ]
+        });
+
+        let generated = open_responses_generate_result_from_body_with_options(
+            "gpt-4.1-mini",
+            open_responses_schema_alignment_response_body(vec![item.clone()]),
+            open_responses_web_search_call_options(),
+        );
+        assert_eq!(
+            open_responses_content_tool_result_value(&generated.content, "webSearch"),
+            &expected
+        );
+
+        let stream = open_responses_stream_parts_from_events_with_options(
+            "gpt-4.1-mini",
+            vec![
+                open_responses_schema_alignment_created_event(),
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        "id": "ws_schema_alignment",
+                        "type": "web_search_call",
+                        "status": "in_progress"
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": item.clone()
+                }),
+                open_responses_schema_alignment_completed_event(vec![item]),
+            ],
+            open_responses_web_search_call_options(),
+        );
+        assert_eq!(
+            open_responses_stream_tool_result_value(&stream, "webSearch"),
+            &expected
+        );
+    }
+
+    #[test]
+    fn open_responses_schema_alignment_aligns_code_interpreter_outputs() {
+        let outputs = json!([
+            {
+                "type": "logs",
+                "logs": "1\n"
+            }
+        ]);
+        let item = json!({
+            "id": "ci_schema_alignment",
+            "type": "code_interpreter_call",
+            "status": "completed",
+            "code": "print(1)\n",
+            "container_id": "container_schema_alignment",
+            "outputs": outputs.clone()
+        });
+        let expected = json!({
+            "outputs": outputs
+        });
+
+        let generated = open_responses_generate_result_from_body_with_options(
+            "gpt-4.1-mini",
+            open_responses_schema_alignment_response_body(vec![item.clone()]),
+            open_responses_code_interpreter_call_options(),
+        );
+        assert_eq!(
+            open_responses_content_tool_result_value(&generated.content, "codeExecution"),
+            &expected
+        );
+
+        let stream = open_responses_stream_parts_from_events_with_options(
+            "gpt-4.1-mini",
+            vec![
+                open_responses_schema_alignment_created_event(),
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        "id": "ci_schema_alignment",
+                        "type": "code_interpreter_call",
+                        "status": "in_progress",
+                        "container_id": "container_schema_alignment"
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": item.clone()
+                }),
+                open_responses_schema_alignment_completed_event(vec![item]),
+            ],
+            open_responses_code_interpreter_call_options(),
+        );
+        assert_eq!(
+            open_responses_stream_tool_result_value(&stream, "codeExecution"),
+            &expected
+        );
+    }
+
+    #[test]
+    fn open_responses_schema_alignment_aligns_file_search_call_results() {
+        let results = json!([
+            {
+                "attributes": {
+                    "kind": "docs"
+                },
+                "file_id": "file_schema_alignment",
+                "filename": "guide.md",
+                "score": 0.91,
+                "text": "Guide text"
+            }
+        ]);
+        let item = json!({
+            "id": "fs_schema_alignment",
+            "type": "file_search_call",
+            "status": "completed",
+            "queries": ["rust sdk"],
+            "results": results
+        });
+        let expected = json!({
+            "queries": ["rust sdk"],
+            "results": [
+                {
+                    "attributes": {
+                        "kind": "docs"
+                    },
+                    "fileId": "file_schema_alignment",
+                    "filename": "guide.md",
+                    "score": 0.91,
+                    "text": "Guide text"
+                }
+            ]
+        });
+
+        let generated = open_responses_generate_result_from_body_with_options(
+            "gpt-4.1-mini",
+            open_responses_schema_alignment_response_body(vec![item.clone()]),
+            open_responses_file_search_call_options(None),
+        );
+        assert_eq!(
+            open_responses_content_tool_result_value(&generated.content, "fileSearch"),
+            &expected
+        );
+
+        let stream = open_responses_stream_parts_from_events_with_options(
+            "gpt-4.1-mini",
+            vec![
+                open_responses_schema_alignment_created_event(),
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        "id": "fs_schema_alignment",
+                        "type": "file_search_call",
+                        "status": "in_progress"
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": item.clone()
+                }),
+                open_responses_schema_alignment_completed_event(vec![item]),
+            ],
+            open_responses_file_search_call_options(None),
+        );
+        assert_eq!(
+            open_responses_stream_tool_result_value(&stream, "fileSearch"),
+            &expected
+        );
+    }
+
+    #[test]
+    fn open_responses_schema_alignment_aligns_message_phase_between_added_done_and_response() {
+        let message = json!({
+            "id": "msg_schema_phase",
+            "type": "message",
+            "status": "completed",
+            "phase": "final_answer",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": "Phase text",
+                    "annotations": []
+                }
+            ]
+        });
+
+        let generated = open_responses_generate_result_from_body(
+            "gpt-4.1-mini",
+            open_responses_schema_alignment_response_body(vec![message.clone()]),
+        );
+        let generated_text = generated
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::Text(text) => Some(text),
+                _ => None,
+            })
+            .expect("generated response includes text");
+        assert_eq!(
+            openai_metadata_value(&generated_text.provider_metadata, "phase")
+                .and_then(JsonValue::as_str),
+            Some("final_answer")
+        );
+
+        let stream = open_responses_stream_parts_from_events(
+            "gpt-4.1-mini",
+            vec![
+                open_responses_schema_alignment_created_event(),
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        "id": "msg_schema_phase",
+                        "type": "message",
+                        "status": "in_progress",
+                        "phase": "final_answer",
+                        "role": "assistant",
+                        "content": []
+                    }
+                }),
+                json!({
+                    "type": "response.output_text.delta",
+                    "item_id": "msg_schema_phase",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": "Phase text"
+                }),
+                json!({
+                    "type": "response.output_text.done",
+                    "item_id": "msg_schema_phase",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "text": "Phase text"
+                }),
+                json!({
+                    "type": "response.content_part.done",
+                    "item_id": "msg_schema_phase",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "text": "Phase text",
+                        "annotations": []
+                    }
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": message.clone()
+                }),
+                open_responses_schema_alignment_completed_event(vec![message]),
+            ],
+        );
+
+        let text_start = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextStart(text_start) => Some(text_start),
+                _ => None,
+            })
+            .expect("stream includes text start");
+        assert_openai_phase_metadata(
+            &text_start.provider_metadata,
+            "msg_schema_phase",
+            "final_answer",
+        );
+
+        let text_end = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextEnd(text_end) => Some(text_end),
+                _ => None,
+            })
+            .expect("stream includes text end");
+        assert_openai_phase_metadata(
+            &text_end.provider_metadata,
+            "msg_schema_phase",
+            "final_answer",
+        );
+    }
+
+    #[test]
+    fn open_responses_schema_alignment_aligns_output_text_logprobs() {
+        let token_logprobs = json!([
+            {
+                "token": "Token",
+                "logprob": -0.125,
+                "top_logprobs": [
+                    {
+                        "token": "Token",
+                        "logprob": -0.125
+                    }
+                ]
+            }
+        ]);
+        let message = json!({
+            "id": "msg_schema_logprobs",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": "Token",
+                    "annotations": [],
+                    "logprobs": token_logprobs.clone()
+                }
+            ]
+        });
+        let options = LanguageModelCallOptions::new(open_responses_hello_prompt())
+            .with_provider_options(openai_provider_options(json!({
+                "logprobs": 1
+            })));
+
+        let generated = open_responses_generate_result_from_body_with_options(
+            "gpt-4.1-mini",
+            open_responses_schema_alignment_response_body(vec![message.clone()]),
+            options.clone(),
+        );
+        assert_eq!(
+            openai_metadata_value(&generated.provider_metadata, "logprobs"),
+            Some(&json!([token_logprobs.clone()]))
+        );
+
+        let stream = open_responses_stream_parts_from_events_with_options(
+            "gpt-4.1-mini",
+            vec![
+                open_responses_schema_alignment_created_event(),
+                json!({
+                    "type": "response.output_text.delta",
+                    "item_id": "msg_schema_logprobs",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": "Token",
+                    "logprobs": token_logprobs.clone()
+                }),
+                json!({
+                    "type": "response.output_text.done",
+                    "item_id": "msg_schema_logprobs",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "text": "Token",
+                    "logprobs": token_logprobs.clone()
+                }),
+                open_responses_schema_alignment_completed_event(vec![message]),
+            ],
+            options,
+        );
+        let finish = stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "logprobs"),
+            Some(&json!([token_logprobs]))
         );
     }
 
