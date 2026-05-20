@@ -12385,6 +12385,500 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_converts_stored_provider_executed_tool_history_to_item_reference() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "ci_68c2e2cf522c81908f3e2c1bccd1493b0b24aae9c6c01e4f",
+                            "code_interpreter",
+                            json!({
+                                "code": "example code",
+                                "containerId": "container_123"
+                            }),
+                        )
+                        .with_provider_executed(true),
+                    ),
+                    LanguageModelAssistantContentPart::ToolResult(
+                        LanguageModelToolResultPart::new(
+                            "ci_68c2e2cf522c81908f3e2c1bccd1493b0b24aae9c6c01e4f",
+                            "code_interpreter",
+                            LanguageModelToolResultOutput::json(json!({
+                                "outputs": [
+                                    {
+                                        "type": "logs",
+                                        "logs": "example logs"
+                                    }
+                                ]
+                            })),
+                        ),
+                    ),
+                ]),
+            )])
+            .with_provider_options(openai_store_options(true)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "item_reference",
+                    "id": "ci_68c2e2cf522c81908f3e2c1bccd1493b0b24aae9c6c01e4f"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_reconstructs_hosted_tool_search_call_and_output_with_store_false() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "tsc_hosted_123",
+                            "tool_search",
+                            JsonValue::String(
+                                json!({
+                                    "arguments": {
+                                        "paths": ["get_weather"]
+                                    },
+                                    "call_id": null
+                                })
+                                .to_string(),
+                            ),
+                        )
+                        .with_provider_executed(true)
+                        .with_provider_options(openai_item_options("tsc_hosted_123")),
+                    ),
+                    LanguageModelAssistantContentPart::ToolResult(
+                        LanguageModelToolResultPart::new(
+                            "tsc_hosted_123",
+                            "tool_search",
+                            LanguageModelToolResultOutput::json(json!({
+                                "tools": [
+                                    {
+                                        "type": "function",
+                                        "name": "get_weather",
+                                        "defer_loading": true
+                                    }
+                                ]
+                            })),
+                        )
+                        .with_provider_options(openai_item_options("tso_hosted_456")),
+                    ),
+                ]),
+            )])
+            .with_provider_options(openai_store_options(false)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "tool_search_call",
+                    "id": "tsc_hosted_123",
+                    "execution": "server",
+                    "call_id": null,
+                    "status": "completed",
+                    "arguments": {
+                        "paths": ["get_weather"]
+                    }
+                },
+                {
+                    "type": "tool_search_output",
+                    "id": "tso_hosted_456",
+                    "execution": "server",
+                    "call_id": null,
+                    "status": "completed",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "get_weather",
+                            "defer_loading": true
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_uses_distinct_hosted_tool_search_item_references_when_stored() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "tsc_hosted_123",
+                            "tool_search",
+                            JsonValue::String(
+                                json!({
+                                    "arguments": {
+                                        "paths": ["get_weather"]
+                                    },
+                                    "call_id": null
+                                })
+                                .to_string(),
+                            ),
+                        )
+                        .with_provider_executed(true)
+                        .with_provider_options(openai_item_options("tsc_hosted_123")),
+                    ),
+                    LanguageModelAssistantContentPart::ToolResult(
+                        LanguageModelToolResultPart::new(
+                            "tsc_hosted_123",
+                            "tool_search",
+                            LanguageModelToolResultOutput::json(json!({
+                                "tools": [
+                                    {
+                                        "type": "function",
+                                        "name": "get_weather"
+                                    }
+                                ]
+                            })),
+                        )
+                        .with_provider_options(openai_item_options("tso_hosted_456")),
+                    ),
+                ]),
+            )])
+            .with_provider_options(openai_store_options(true)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "item_reference",
+                    "id": "tsc_hosted_123"
+                },
+                {
+                    "type": "item_reference",
+                    "id": "tso_hosted_456"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_serializes_client_tool_search_output_with_call_id_from_tool_role() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "call_abc123",
+                            "tool_search",
+                            JsonValue::String(
+                                json!({
+                                    "arguments": {
+                                        "goal": "Find weather tools"
+                                    },
+                                    "call_id": "call_abc123"
+                                })
+                                .to_string(),
+                            ),
+                        )
+                        .with_provider_options(openai_item_options("tsc_client_1")),
+                    ),
+                ])),
+                LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                        "call_abc123",
+                        "tool_search",
+                        LanguageModelToolResultOutput::json(json!({
+                            "tools": [
+                                {
+                                    "type": "function",
+                                    "name": "get_weather",
+                                    "description": "Get weather",
+                                    "defer_loading": true,
+                                    "parameters": {
+                                        "type": "object",
+                                        "properties": {
+                                            "location": {
+                                                "type": "string"
+                                            }
+                                        },
+                                        "required": ["location"]
+                                    }
+                                }
+                            ]
+                        })),
+                    )),
+                ])),
+            ])
+            .with_provider_options(openai_store_options(false)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "type": "tool_search_call",
+                    "id": "tsc_client_1",
+                    "execution": "client",
+                    "call_id": "call_abc123",
+                    "status": "completed",
+                    "arguments": {
+                        "goal": "Find weather tools"
+                    }
+                },
+                {
+                    "type": "tool_search_output",
+                    "execution": "client",
+                    "call_id": "call_abc123",
+                    "status": "completed",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "get_weather",
+                            "description": "Get weather",
+                            "defer_loading": true,
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "location": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["location"]
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_uses_client_tool_search_call_id_not_item_id() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "call_xyz789",
+                            "tool_search",
+                            JsonValue::String(
+                                json!({
+                                    "arguments": {
+                                        "goal": "Find tools"
+                                    },
+                                    "call_id": "call_xyz789"
+                                })
+                                .to_string(),
+                            ),
+                        )
+                        .with_provider_options(openai_item_options("tsc_item_id")),
+                    ),
+                ]),
+            )])
+            .with_provider_options(openai_store_options(false)),
+        );
+
+        assert!(warnings.is_empty());
+        let tool_search_call = request_body["input"]
+            .as_array()
+            .expect("input is an array")
+            .iter()
+            .find(|item| item["type"].as_str() == Some("tool_search_call"))
+            .expect("tool search call is present");
+
+        assert_eq!(tool_search_call["call_id"], "call_xyz789");
+        assert_eq!(tool_search_call["id"], "tsc_item_id");
+        assert_eq!(tool_search_call["execution"], "client");
+    }
+
+    #[test]
+    fn open_responses_provider_excludes_provider_executed_tool_history_with_store_false() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "Let me search for recent news from San Francisco.",
+                    )),
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "ws_67cf2b3051e88190b006770db6fdb13d",
+                            "web_search",
+                            json!({
+                                "query": "San Francisco major news events June 22 2025"
+                            }),
+                        )
+                        .with_provider_executed(true),
+                    ),
+                    LanguageModelAssistantContentPart::ToolResult(
+                        LanguageModelToolResultPart::new(
+                            "ws_67cf2b3051e88190b006770db6fdb13d",
+                            "web_search",
+                            LanguageModelToolResultOutput::json(json!({
+                                "action": {
+                                    "type": "search",
+                                    "query": "San Francisco major news events June 22 2025"
+                                },
+                                "sources": [
+                                    {
+                                        "type": "url",
+                                        "url": "https://patch.com/california/san-francisco/calendar"
+                                    }
+                                ]
+                            })),
+                        ),
+                    ),
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "Based on the search results, several significant events took place in San Francisco yesterday (June 22, 2025).",
+                    )),
+                ]),
+            )])
+            .with_provider_options(openai_store_options(false)),
+        );
+
+        assert_eq!(
+            warning_messages(&warnings),
+            vec!["Results for OpenAI tool web_search are not sent to the API when store is false"]
+        );
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Let me search for recent news from San Francisco."
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Based on the search results, several significant events took place in San Francisco yesterday (June 22, 2025)."
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_skips_execution_denied_tool_results_in_assistant_messages() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "I need approval before running that tool.",
+                    )),
+                    LanguageModelAssistantContentPart::ToolResult(
+                        LanguageModelToolResultPart::new(
+                            "ws_denied_123",
+                            "web_search",
+                            LanguageModelToolResultOutput::execution_denied()
+                                .with_reason("User denied the tool execution"),
+                        ),
+                    ),
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "The tool was not run.",
+                    )),
+                ]),
+            )])
+            .with_provider_options(openai_store_options(false)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "I need approval before running that tool."
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "The tool was not run."
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_skips_json_wrapped_execution_denied_tool_results() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "I need approval before running that tool.",
+                    )),
+                    LanguageModelAssistantContentPart::ToolResult(
+                        LanguageModelToolResultPart::new(
+                            "ws_denied_json_123",
+                            "web_search",
+                            LanguageModelToolResultOutput::json(json!({
+                                "type": "execution-denied",
+                                "reason": "User denied the tool execution"
+                            })),
+                        ),
+                    ),
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "The tool was not run.",
+                    )),
+                ]),
+            )])
+            .with_provider_options(openai_store_options(false)),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "I need approval before running that tool."
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "The tool was not run."
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn open_responses_provider_reconstructs_hosted_tool_search_history_with_store_false() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
