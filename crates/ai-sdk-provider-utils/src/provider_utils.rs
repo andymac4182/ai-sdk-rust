@@ -9690,8 +9690,8 @@ mod tests {
     }
 
     #[test]
-    fn add_additional_properties_to_json_schema_closes_nested_objects() {
-        let schema = json!({
+    fn add_additional_properties_to_json_schema_upstream_adds_to_objects_recursively() {
+        let schema = schema_object(json!({
             "type": "object",
             "properties": {
                 "user": {
@@ -9702,14 +9702,11 @@ mod tests {
                 },
                 "age": { "type": "number" }
             }
-        })
-        .as_object()
-        .expect("schema is an object")
-        .clone();
+        }));
 
         assert_eq!(
             add_additional_properties_to_json_schema(schema),
-            json!({
+            schema_object(json!({
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
@@ -9722,16 +9719,13 @@ mod tests {
                     },
                     "age": { "type": "number" }
                 }
-            })
-            .as_object()
-            .expect("schema is an object")
-            .clone()
+            }))
         );
     }
 
     #[test]
-    fn add_additional_properties_to_json_schema_closes_objects_in_arrays_and_unions() {
-        let schema = json!({
+    fn add_additional_properties_to_json_schema_upstream_adds_to_objects_inside_arrays() {
+        let schema = schema_object(json!({
             "type": "object",
             "properties": {
                 "ingredients": {
@@ -9739,25 +9733,19 @@ mod tests {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "name": { "type": "string" }
-                        }
-                    }
-                },
-                "response": {
-                    "type": ["object", "null"],
-                    "properties": {
-                        "ok": { "type": "boolean" }
+                            "name": { "type": "string" },
+                            "amount": { "type": "string" }
+                        },
+                        "required": ["name", "amount"]
                     }
                 }
-            }
-        })
-        .as_object()
-        .expect("schema is an object")
-        .clone();
+            },
+            "required": ["ingredients"]
+        }));
 
         assert_eq!(
             add_additional_properties_to_json_schema(schema),
-            json!({
+            schema_object(json!({
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
@@ -9767,61 +9755,67 @@ mod tests {
                             "type": "object",
                             "additionalProperties": false,
                             "properties": {
-                                "name": { "type": "string" }
-                            }
-                        }
-                    },
-                    "response": {
-                        "type": ["object", "null"],
-                        "additionalProperties": false,
-                        "properties": {
-                            "ok": { "type": "boolean" }
+                                "name": { "type": "string" },
+                                "amount": { "type": "string" }
+                            },
+                            "required": ["name", "amount"]
                         }
                     }
-                }
-            })
-            .as_object()
-            .expect("schema is an object")
-            .clone()
+                },
+                "required": ["ingredients"]
+            }))
         );
     }
 
     #[test]
-    fn add_additional_properties_to_json_schema_visits_compositions_and_definitions() {
-        let schema = json!({
+    fn add_additional_properties_to_json_schema_upstream_adds_when_union_includes_object() {
+        let schema = schema_object(json!({
+            "type": "object",
+            "properties": {
+                "response": {
+                    "type": ["object", "null"],
+                    "properties": {
+                        "name": { "type": "string" }
+                    }
+                }
+            }
+        }));
+
+        assert_eq!(
+            add_additional_properties_to_json_schema(schema),
+            schema_object(json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "response": {
+                        "type": ["object", "null"],
+                        "additionalProperties": false,
+                        "properties": {
+                            "name": { "type": "string" }
+                        }
+                    }
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn add_additional_properties_to_json_schema_upstream_adds_to_objects_inside_any_of() {
+        let schema = schema_object(json!({
             "type": "object",
             "properties": {
                 "response": {
                     "anyOf": [
                         { "type": "object", "properties": { "name": { "type": "string" } } },
-                        { "type": "string" }
-                    ],
-                    "allOf": [
-                        { "type": "object", "properties": { "age": { "type": "number" } } }
-                    ],
-                    "oneOf": [
-                        { "type": "object", "properties": { "success": { "type": "boolean" } } }
+                        { "type": "object", "properties": { "amount": { "type": "string" } } }
                     ]
-                },
-                "node": { "$ref": "#/definitions/Node" }
-            },
-            "definitions": {
-                "Node": {
-                    "type": "object",
-                    "additionalProperties": true,
-                    "properties": {
-                        "value": { "type": "string" }
-                    }
                 }
             }
-        })
-        .as_object()
-        .expect("schema is an object")
-        .clone();
+        }));
 
         assert_eq!(
             add_additional_properties_to_json_schema(schema),
-            json!({
+            schema_object(json!({
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
@@ -9832,23 +9826,120 @@ mod tests {
                                 "additionalProperties": false,
                                 "properties": { "name": { "type": "string" } }
                             },
-                            { "type": "string" }
-                        ],
+                            {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": { "amount": { "type": "string" } }
+                            }
+                        ]
+                    }
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn add_additional_properties_to_json_schema_upstream_adds_to_objects_inside_all_of() {
+        let schema = schema_object(json!({
+            "type": "object",
+            "properties": {
+                "response": {
+                    "allOf": [
+                        { "type": "object", "properties": { "name": { "type": "string" } } },
+                        { "type": "object", "properties": { "age": { "type": "number" } } }
+                    ]
+                }
+            }
+        }));
+
+        assert_eq!(
+            add_additional_properties_to_json_schema(schema),
+            schema_object(json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "response": {
                         "allOf": [
+                            {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": { "name": { "type": "string" } }
+                            },
                             {
                                 "type": "object",
                                 "additionalProperties": false,
                                 "properties": { "age": { "type": "number" } }
                             }
-                        ],
+                        ]
+                    }
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn add_additional_properties_to_json_schema_upstream_adds_to_objects_inside_one_of() {
+        let schema = schema_object(json!({
+            "type": "object",
+            "properties": {
+                "response": {
+                    "oneOf": [
+                        { "type": "object", "properties": { "success": { "type": "boolean" } } },
+                        { "type": "object", "properties": { "error": { "type": "string" } } }
+                    ]
+                }
+            }
+        }));
+
+        assert_eq!(
+            add_additional_properties_to_json_schema(schema),
+            schema_object(json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "response": {
                         "oneOf": [
                             {
                                 "type": "object",
                                 "additionalProperties": false,
                                 "properties": { "success": { "type": "boolean" } }
+                            },
+                            {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": { "error": { "type": "string" } }
                             }
                         ]
-                    },
+                    }
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn add_additional_properties_to_json_schema_upstream_adds_to_objects_inside_definitions() {
+        let schema = schema_object(json!({
+            "type": "object",
+            "properties": {
+                "node": { "$ref": "#/definitions/Node" }
+            },
+            "definitions": {
+                "Node": {
+                    "type": "object",
+                    "properties": {
+                        "value": { "type": "string" },
+                        "next": { "$ref": "#/definitions/Node" }
+                    }
+                }
+            }
+        }));
+
+        assert_eq!(
+            add_additional_properties_to_json_schema(schema),
+            schema_object(json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
                     "node": { "$ref": "#/definitions/Node" }
                 },
                 "definitions": {
@@ -9856,34 +9947,115 @@ mod tests {
                         "type": "object",
                         "additionalProperties": false,
                         "properties": {
-                            "value": { "type": "string" }
+                            "value": { "type": "string" },
+                            "next": { "$ref": "#/definitions/Node" }
                         }
                     }
                 }
-            })
-            .as_object()
-            .expect("schema is an object")
-            .clone()
+            }))
         );
     }
 
     #[test]
-    fn add_additional_properties_to_json_schema_leaves_non_object_schema_unchanged() {
-        let schema = json!({
-            "type": "string"
-        })
-        .as_object()
-        .expect("schema is an object")
-        .clone();
+    fn add_additional_properties_to_json_schema_upstream_overwrites_existing_flags() {
+        let schema = schema_object(json!({
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                        "id": { "type": "string" }
+                    }
+                }
+            }
+        }));
 
         assert_eq!(
             add_additional_properties_to_json_schema(schema),
-            json!({
+            schema_object(json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "meta": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "id": { "type": "string" }
+                        }
+                    }
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn add_additional_properties_to_json_schema_upstream_leaves_non_object_schemas_unchanged() {
+        let schema = schema_object(json!({
+            "type": "string"
+        }));
+
+        assert_eq!(
+            add_additional_properties_to_json_schema(schema),
+            schema_object(json!({
                 "type": "string"
-            })
-            .as_object()
-            .expect("schema is an object")
-            .clone()
+            }))
+        );
+    }
+
+    #[test]
+    fn add_additional_properties_to_json_schema_visits_tuple_items() {
+        let schema = schema_object(json!({
+            "type": "object",
+            "properties": {
+                "tuple": {
+                    "type": "array",
+                    "items": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "first": { "type": "string" }
+                            }
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "second": { "type": "number" }
+                            }
+                        }
+                    ]
+                }
+            }
+        }));
+
+        assert_eq!(
+            add_additional_properties_to_json_schema(schema),
+            schema_object(json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "tuple": {
+                        "type": "array",
+                        "items": [
+                            {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": {
+                                    "first": { "type": "string" }
+                                }
+                            },
+                            {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": {
+                                    "second": { "type": "number" }
+                                }
+                            }
+                        ]
+                    }
+                }
+            }))
         );
     }
 
