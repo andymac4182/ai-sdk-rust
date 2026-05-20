@@ -6964,6 +6964,10 @@ mod tests {
         include_str!("fixtures/openai-image-generation-tool.1.json");
     const OPEN_RESPONSES_CLIENT_TOOL_SEARCH_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-client-tool-search.1.json");
+    const OPEN_RESPONSES_LOCAL_SHELL_TOOL_JSON_FIXTURE: &str =
+        include_str!("fixtures/openai-local-shell-tool.1.json");
+    const OPEN_RESPONSES_WEB_SEARCH_TOOL_JSON_FIXTURE: &str =
+        include_str!("fixtures/openai-web-search-tool.1.json");
     const OPEN_RESPONSES_WEB_SEARCH_TOOL_CHUNKS_FIXTURE: &str =
         include_str!("fixtures/openai-web-search-tool.1.chunks.txt");
 
@@ -22216,6 +22220,136 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_generates_web_search_fixture() {
+        let fixture: JsonValue = serde_json::from_str(OPEN_RESPONSES_WEB_SEARCH_TOOL_JSON_FIXTURE)
+            .expect("fixture JSON parses");
+        let output = fixture["output"]
+            .as_array()
+            .expect("fixture output is array");
+        let web_search_items = output
+            .iter()
+            .filter(|item| item["type"].as_str() == Some("web_search_call"))
+            .collect::<Vec<_>>();
+        let message_item = output
+            .iter()
+            .find(|item| item["type"].as_str() == Some("message"))
+            .expect("fixture includes final message");
+        let message_content = &message_item["content"][0];
+        let expected_annotations = message_content["annotations"]
+            .as_array()
+            .expect("fixture annotations are array");
+
+        let (result, request_body) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5-nano",
+            OPEN_RESPONSES_WEB_SEARCH_TOOL_JSON_FIXTURE,
+            open_responses_web_search_call_options(),
+        );
+
+        assert_eq!(request_body["model"], "gpt-5-nano");
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "web_search"
+                }
+            ])
+        );
+        assert_eq!(
+            request_body["include"],
+            json!(["web_search_call.action.sources"])
+        );
+
+        let tool_calls = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::ToolCall(tool_call) if tool_call.tool_name == "webSearch" => {
+                    Some(tool_call)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let tool_results = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelContent::ToolResult(tool_result)
+                    if tool_result.tool_name == "webSearch" =>
+                {
+                    Some(tool_result)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(web_search_items.len(), 3);
+        assert_eq!(tool_calls.len(), web_search_items.len());
+        assert_eq!(tool_results.len(), web_search_items.len());
+
+        for (index, item) in web_search_items.iter().enumerate() {
+            let item_id = item["id"].as_str().expect("web search item has id");
+            assert_eq!(tool_calls[index].tool_call_id, item_id);
+            assert_eq!(tool_calls[index].input, "{}");
+            assert_eq!(tool_calls[index].provider_executed, Some(true));
+            assert_eq!(tool_results[index].tool_call_id, item_id);
+
+            let action = item["action"]
+                .as_object()
+                .expect("web search item has action");
+            let result_value = tool_results[index].result.as_value();
+            let expected_action_type = match action.get("type").and_then(JsonValue::as_str) {
+                Some("open_page") => "openPage",
+                Some("find_in_page") => "findInPage",
+                Some(action_type) => action_type,
+                None => panic!("web search action has type"),
+            };
+            assert_eq!(
+                result_value["action"]["type"].as_str(),
+                Some(expected_action_type)
+            );
+            if let Some(query) = action.get("query") {
+                assert_eq!(result_value["action"]["query"], *query);
+            }
+            if let Some(url) = action.get("url") {
+                assert_eq!(result_value["action"]["url"], *url);
+            }
+            if let Some(pattern) = action.get("pattern") {
+                assert_eq!(result_value["action"]["pattern"], *pattern);
+            }
+            if let Some(sources) = action.get("sources") {
+                assert_eq!(result_value["sources"], *sources);
+            } else {
+                assert!(result_value.get("sources").is_none());
+            }
+        }
+
+        let text = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::Text(text) => Some(text),
+                _ => None,
+            })
+            .expect("content includes final text");
+        assert_eq!(text.text, message_content["text"].as_str().unwrap());
+        assert_eq!(
+            openai_metadata_value(&text.provider_metadata, "itemId").and_then(JsonValue::as_str),
+            message_item["id"].as_str()
+        );
+        assert_eq!(
+            openai_metadata_value(&text.provider_metadata, "annotations"),
+            Some(&message_content["annotations"])
+        );
+
+        let sources = open_responses_content_sources(&result.content);
+        assert_eq!(sources.len(), expected_annotations.len());
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(19_681));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(3_712));
+        assert_eq!(result.usage.output_tokens.total, Some(3_773));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(3_136));
+    }
+
+    #[test]
     fn open_responses_provider_streams_upstream_web_search_tool_fixture() {
         let fixture_events = OPEN_RESPONSES_WEB_SEARCH_TOOL_CHUNKS_FIXTURE
             .lines()
@@ -22263,15 +22397,7 @@ mod tests {
         .with_transport(transport);
         let model = provider.language_model("gpt-5-nano");
 
-        let result = poll_ready(model.do_stream(
-            LanguageModelCallOptions::new(open_responses_hello_prompt()).with_tool(
-                LanguageModelTool::Provider(LanguageModelProviderTool::new(
-                    "openai.web_search",
-                    "webSearch",
-                    JsonObject::new(),
-                )),
-            ),
-        ));
+        let result = poll_ready(model.do_stream(open_responses_web_search_call_options()));
 
         let request_body = captured_open_responses_request_body(&captured_request);
         assert_eq!(request_body["model"], "gpt-5-nano");
@@ -23334,6 +23460,88 @@ mod tests {
                 "type": "image_generation"
             })
         );
+    }
+
+    #[test]
+    fn open_responses_provider_generates_local_shell_fixture_call() {
+        let fixture: JsonValue = serde_json::from_str(OPEN_RESPONSES_LOCAL_SHELL_TOOL_JSON_FIXTURE)
+            .expect("fixture JSON parses");
+        let output = fixture["output"]
+            .as_array()
+            .expect("fixture output is array");
+        let reasoning_item = output
+            .iter()
+            .find(|item| item["type"].as_str() == Some("reasoning"))
+            .expect("fixture includes reasoning item");
+        let local_shell_item = output
+            .iter()
+            .find(|item| item["type"].as_str() == Some("local_shell_call"))
+            .expect("fixture includes local shell call");
+
+        let (result, request_body) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5-codex",
+            OPEN_RESPONSES_LOCAL_SHELL_TOOL_JSON_FIXTURE,
+            open_responses_local_shell_call_options(),
+        );
+
+        assert_eq!(request_body["model"], "gpt-5-codex");
+        assert_eq!(
+            request_body["tools"],
+            json!([
+                {
+                    "type": "local_shell"
+                }
+            ])
+        );
+        assert!(request_body.get("include").is_none());
+
+        let reasoning = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::Reasoning(reasoning) => Some(reasoning),
+                _ => None,
+            })
+            .expect("content includes empty reasoning part");
+        assert_eq!(reasoning.text, "");
+        assert_eq!(
+            openai_metadata_value(&reasoning.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            reasoning_item["id"].as_str()
+        );
+
+        let tool_call = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::ToolCall(tool_call) if tool_call.tool_name == "shell" => {
+                    Some(tool_call)
+                }
+                _ => None,
+            })
+            .expect("content includes local shell tool call");
+        assert_eq!(
+            tool_call.tool_call_id,
+            local_shell_item["call_id"].as_str().unwrap()
+        );
+        assert_eq!(tool_call.provider_executed, None);
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&tool_call.input).expect("tool input is JSON"),
+            json!({
+                "action": local_shell_item["action"].clone()
+            })
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_call.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            local_shell_item["id"].as_str()
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(result.usage.input_tokens.total, Some(407));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(result.usage.output_tokens.total, Some(24));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(0));
     }
 
     #[test]
@@ -30409,6 +30617,16 @@ mod tests {
             LanguageModelTool::Provider(LanguageModelProviderTool::new(
                 "openai.local_shell",
                 "shell",
+                JsonObject::new(),
+            )),
+        )
+    }
+
+    fn open_responses_web_search_call_options() -> LanguageModelCallOptions {
+        LanguageModelCallOptions::new(open_responses_hello_prompt()).with_tool(
+            LanguageModelTool::Provider(LanguageModelProviderTool::new(
+                "openai.web_search",
+                "webSearch",
                 JsonObject::new(),
             )),
         )
