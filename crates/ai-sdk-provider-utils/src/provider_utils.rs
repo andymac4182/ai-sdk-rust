@@ -15732,25 +15732,49 @@ mod tests {
     }
 
     #[test]
-    fn get_runtime_environment_user_agent_matches_upstream_branches() {
+    fn get_runtime_environment_user_agent_upstream_returns_correct_user_agent_for_browsers() {
         assert_eq!(
             get_runtime_environment_user_agent(&RuntimeEnvironment::browser()),
             "runtime/browser"
         );
+    }
+
+    #[test]
+    fn get_runtime_environment_user_agent_upstream_returns_correct_user_agent_for_test() {
+        assert_eq!(
+            get_runtime_environment_user_agent(&RuntimeEnvironment::navigator_user_agent("test")),
+            "runtime/test"
+        );
+    }
+
+    #[test]
+    fn get_runtime_environment_user_agent_upstream_returns_correct_user_agent_for_edge_runtime() {
+        assert_eq!(
+            get_runtime_environment_user_agent(&RuntimeEnvironment::vercel_edge()),
+            "runtime/vercel-edge"
+        );
+    }
+
+    #[test]
+    fn get_runtime_environment_user_agent_upstream_returns_correct_user_agent_for_node_js() {
+        assert_eq!(
+            get_runtime_environment_user_agent(&RuntimeEnvironment::node_js("test")),
+            "runtime/node.js/test"
+        );
+    }
+
+    #[test]
+    fn get_runtime_environment_user_agent_lowercases_navigator_user_agents() {
         assert_eq!(
             get_runtime_environment_user_agent(&RuntimeEnvironment::navigator_user_agent(
                 "Deno/2.0 TEST"
             )),
             "runtime/deno/2.0 test"
         );
-        assert_eq!(
-            get_runtime_environment_user_agent(&RuntimeEnvironment::node_js("v22.0.0")),
-            "runtime/node.js/v22.0.0"
-        );
-        assert_eq!(
-            get_runtime_environment_user_agent(&RuntimeEnvironment::vercel_edge()),
-            "runtime/vercel-edge"
-        );
+    }
+
+    #[test]
+    fn get_runtime_environment_user_agent_returns_unknown_for_missing_runtime() {
         assert_eq!(
             get_runtime_environment_user_agent(&RuntimeEnvironment::unknown()),
             "runtime/unknown"
