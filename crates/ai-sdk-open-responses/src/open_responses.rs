@@ -7383,6 +7383,13 @@ mod tests {
     fn open_responses_assistant_message_request_body(
         content: Vec<LanguageModelAssistantContentPart>,
     ) -> (JsonValue, Vec<Warning>) {
+        open_responses_assistant_message_request_body_with_store(content, true)
+    }
+
+    fn open_responses_assistant_message_request_body_with_store(
+        content: Vec<LanguageModelAssistantContentPart>,
+        store: bool,
+    ) -> (JsonValue, Vec<Warning>) {
         let (provider, captured_request) =
             open_responses_captured_provider("openai", "gpt-4.1-mini");
         let model = provider.language_model("gpt-4.1-mini");
@@ -7392,7 +7399,7 @@ mod tests {
                     LanguageModelAssistantMessage::new(content),
                 )])
                 .with_provider_options(openai_provider_options(json!({
-                    "store": true
+                    "store": store
                 }))),
             ),
         );
@@ -8665,6 +8672,77 @@ mod tests {
                 "instructions": "You are concise.\nUse metric units."
             })
         );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_system_message_to_system_role() {
+        let (_, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::System(
+                LanguageModelSystemMessage::new("Hello"),
+            )])
+            .with_provider_options(openai_provider_options(json!({
+                "systemMessageMode": "system"
+            }))),
+        );
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "system",
+                    "content": "Hello"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_system_message_to_developer_role() {
+        let (_, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::System(
+                LanguageModelSystemMessage::new("Hello"),
+            )])
+            .with_provider_options(openai_provider_options(json!({
+                "systemMessageMode": "developer"
+            }))),
+        );
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "developer",
+                    "content": "Hello"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_removes_system_message() {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4.1-mini",
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::System(
+                LanguageModelSystemMessage::new("Hello"),
+            )])
+            .with_provider_options(openai_provider_options(json!({
+                "systemMessageMode": "remove"
+            }))),
+        );
+
+        assert!(
+            warnings.iter().any(|warning| {
+                matches!(
+                    warning,
+                    Warning::Other { message }
+                        if message == "system messages are removed for this model"
+                )
+            }),
+            "remove mode should warn"
+        );
+        assert_eq!(request_body["input"], json!([]));
     }
 
     #[test]
@@ -15346,6 +15424,125 @@ mod tests {
                     "call_id": "call_custom_001",
                     "name": "write_sql",
                     "arguments": "\"SELECT 1\""
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_converts_assistant_text_part_to_output_text() {
+        let (request_body, warnings) = open_responses_assistant_message_request_body(vec![
+            LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new("Hello")),
+        ]);
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Hello"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_includes_commentary_phase_on_assistant_text() {
+        let (request_body, warnings) = open_responses_assistant_message_request_body_with_store(
+            vec![LanguageModelAssistantContentPart::Text(
+                LanguageModelTextPart::new("I will search for that").with_provider_options(
+                    openai_provider_options(json!({
+                        "itemId": "msg_001",
+                        "phase": "commentary"
+                    })),
+                ),
+            )],
+            false,
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "I will search for that"
+                        }
+                    ],
+                    "id": "msg_001",
+                    "phase": "commentary"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_includes_final_answer_phase_on_assistant_text() {
+        let (request_body, warnings) = open_responses_assistant_message_request_body_with_store(
+            vec![LanguageModelAssistantContentPart::Text(
+                LanguageModelTextPart::new("The capital of France is Paris.")
+                    .with_provider_options(openai_provider_options(json!({
+                        "itemId": "msg_002",
+                        "phase": "final_answer"
+                    }))),
+            )],
+            false,
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "The capital of France is Paris."
+                        }
+                    ],
+                    "id": "msg_002",
+                    "phase": "final_answer"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_omits_phase_when_not_set_on_assistant_text() {
+        let (request_body, warnings) = open_responses_assistant_message_request_body_with_store(
+            vec![LanguageModelAssistantContentPart::Text(
+                LanguageModelTextPart::new("Hello").with_provider_options(openai_provider_options(
+                    json!({
+                        "itemId": "msg_003"
+                    }),
+                )),
+            )],
+            false,
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Hello"
+                        }
+                    ],
+                    "id": "msg_003"
                 }
             ])
         );
