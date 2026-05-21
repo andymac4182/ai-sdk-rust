@@ -875,6 +875,12 @@ focused tests for each portable behavior before changing rows to `verified`.
   `result.toTextStreamResponse`, and `result.pipeTextStreamToResponse` object
   output cases with default `200` status, `text/plain; charset=utf-8`, chunk
   preservation, and response finalization.
+- 2026-05-21: `streamObject` request-option parity added
+  `stream_object_passes_headers_to_model` and
+  `stream_object_passes_provider_options_to_model` in `src/stream_object.rs`,
+  mapping upstream `options.headers` and `options.providerOptions` cases by
+  proving user headers and nested provider options reach the model call while
+  preserving the Rust AI user-agent suffix behavior.
 - 2026-05-20: `streamText` smooth stream chunking parity added
   `smooth_stream_combines_partial_words`,
   `smooth_stream_supports_line_and_pattern_chunking`,

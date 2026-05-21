@@ -1575,6 +1575,57 @@ mod tests {
     }
 
     #[test]
+    fn stream_object_passes_headers_to_model() {
+        let model = MockLanguageModel::new()
+            .with_stream_result(LanguageModelStreamResult::new(object_stream()));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_header("custom-request-header", "request-header-value"),
+        ));
+
+        assert_eq!(
+            result.partial_object_stream.last(),
+            Some(&json!({"content": "Hello, world!"}))
+        );
+        let calls = model.stream_calls();
+        let headers = calls[0].headers.as_ref().expect("headers are forwarded");
+        assert_eq!(
+            headers.get("custom-request-header").map(String::as_str),
+            Some("request-header-value")
+        );
+        assert!(
+            headers
+                .get("user-agent")
+                .is_some_and(|user_agent| user_agent.contains("ai/"))
+        );
+    }
+
+    #[test]
+    fn stream_object_passes_provider_options_to_model() {
+        let model = MockLanguageModel::new()
+            .with_stream_result(LanguageModelStreamResult::new(object_stream()));
+        let mut provider_options = ProviderOptions::new();
+        let mut provider = serde_json::Map::new();
+        provider.insert("someKey".to_string(), json!("someValue"));
+        provider_options.insert("aProvider".to_string(), provider);
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_provider_options(provider_options.clone()),
+        ));
+
+        assert_eq!(
+            result.partial_object_stream.last(),
+            Some(&json!({"content": "Hello, world!"}))
+        );
+        let calls = model.stream_calls();
+        assert_eq!(calls[0].provider_options, Some(provider_options));
+    }
+
+    #[test]
     fn stream_object_array_output_unwraps_elements() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
