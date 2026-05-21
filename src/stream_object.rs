@@ -2474,6 +2474,124 @@ mod tests {
     }
 
     #[test]
+    fn stream_object_on_finish_is_called_when_valid_object_is_generated() {
+        let mut provider_metadata = ProviderMetadata::new();
+        let mut test_provider_metadata = serde_json::Map::new();
+        test_provider_metadata.insert("testKey".to_string(), json!("testValue"));
+        provider_metadata.insert("testProvider".to_string(), test_provider_metadata);
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ResponseMetadata(
+                    LanguageModelStreamResponseMetadata::new()
+                        .with_id("id-0")
+                        .with_model_id("mock-model-id")
+                        .with_timestamp(time::OffsetDateTime::UNIX_EPOCH),
+                ),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    r#"{ "content": "Hello, world!" }"#,
+                )),
+                LanguageModelStreamPart::Finish(
+                    LanguageModelStreamFinish::new(usage(), finish_reason())
+                        .with_provider_metadata(provider_metadata.clone()),
+                ),
+            ]));
+        let finish_events = Arc::new(Mutex::new(Vec::<GenerateObjectEndEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_on_finish(move |event| {
+                    let finish_events = Arc::clone(&finish_events_for_callback);
+                    async move {
+                        finish_events
+                            .lock()
+                            .expect("finish events lock")
+                            .push(event);
+                    }
+                }),
+        ));
+
+        assert_eq!(result.object, Some(json!({ "content": "Hello, world!" })));
+        let events = finish_events.lock().expect("finish events lock");
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert!(event.call_id.starts_with("aiobj-"));
+        assert_eq!(event.object, Some(json!({ "content": "Hello, world!" })));
+        assert_eq!(event.error, None);
+        assert_eq!(event.finish_reason, FinishReason::Stop);
+        assert_eq!(event.usage, usage());
+        assert_eq!(event.response.id.as_deref(), Some("id-0"));
+        assert_eq!(event.response.model_id.as_deref(), Some("mock-model-id"));
+        assert_eq!(
+            event.response.timestamp,
+            Some(time::OffsetDateTime::UNIX_EPOCH)
+        );
+        assert_eq!(event.provider_metadata, Some(provider_metadata));
+    }
+
+    #[test]
+    fn stream_object_on_finish_is_called_when_object_does_not_match_schema() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ResponseMetadata(
+                    LanguageModelStreamResponseMetadata::new()
+                        .with_id("id-0")
+                        .with_model_id("mock-model-id")
+                        .with_timestamp(time::OffsetDateTime::UNIX_EPOCH),
+                ),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "{ ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    r#""invalid": "#,
+                )),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", r#""Hello, "#)),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", r#"!""#)),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", " }")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let finish_events = Arc::new(Mutex::new(Vec::<GenerateObjectEndEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_on_finish(move |event| {
+                    let finish_events = Arc::clone(&finish_events_for_callback);
+                    async move {
+                        finish_events
+                            .lock()
+                            .expect("finish events lock")
+                            .push(event);
+                    }
+                }),
+        ));
+
+        assert_eq!(result.object, None);
+        assert!(result.error.is_some());
+        let events = finish_events.lock().expect("finish events lock");
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert!(event.call_id.starts_with("aiobj-"));
+        assert_eq!(event.object, None);
+        assert!(event.error.is_some());
+        assert_eq!(event.finish_reason, FinishReason::Stop);
+        assert_eq!(event.usage, usage());
+        assert_eq!(event.response.id.as_deref(), Some("id-0"));
+        assert_eq!(event.response.model_id.as_deref(), Some("mock-model-id"));
+        assert_eq!(
+            event.response.timestamp,
+            Some(time::OffsetDateTime::UNIX_EPOCH)
+        );
+        assert_eq!(event.provider_metadata, None);
+    }
+
+    #[test]
     fn stream_object_dispatches_telemetry_lifecycle_events() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
