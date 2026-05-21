@@ -7514,6 +7514,13 @@ mod tests {
         .expect("provider options deserialize")
     }
 
+    fn lmstudio_provider_options(value: JsonValue) -> ProviderOptions {
+        serde_json::from_value(json!({
+            "lmstudio": value
+        }))
+        .expect("provider options deserialize")
+    }
+
     fn openai_item_options(item_id: &str) -> ProviderOptions {
         openai_provider_options(json!({
             "itemId": item_id
@@ -16189,227 +16196,194 @@ mod tests {
         assert!(request_body.get("frequency_penalty").is_none());
     }
 
-    #[test]
-    fn open_responses_provider_maps_reasoning_effort_and_summary_options() {
-        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
-        let captured_requests_for_transport = Arc::clone(&captured_requests);
-        let transport: OpenResponsesTransport =
-            Arc::new(move |request| -> OpenResponsesTransportFuture {
-                captured_requests_for_transport
-                    .lock()
-                    .expect("captured requests mutex is not poisoned")
-                    .push(request.clone());
-
-                Box::pin(ready(Ok(ProviderApiResponse::text(
-                    200,
-                    "OK",
-                    json!({
-                        "id": "resp_reasoning",
-                        "created_at": 1711115037,
-                        "model": "gemma-7b-it",
-                        "output": [
-                            {
-                                "type": "message",
-                                "role": "assistant",
-                                "content": [
-                                    {
-                                        "type": "output_text",
-                                        "text": "Reasoning accepted"
-                                    }
-                                ]
-                            }
-                        ],
-                        "usage": {
-                            "input_tokens": 5,
-                            "output_tokens": 3
-                        }
-                    })
-                    .to_string(),
-                ))))
-            });
-        let provider = create_open_responses(
-            OpenResponsesProviderSettings::new(
-                "lmstudio",
-                "https://api.lmstudio.test/v1/responses",
-            )
-            .with_api_key("test-api-key"),
-        )
-        .with_transport(transport);
+    fn lmstudio_reasoning_request_body(
+        options: LanguageModelCallOptions,
+    ) -> (Vec<Warning>, JsonValue) {
+        let (provider, captured_request) =
+            open_responses_captured_provider("lmstudio", "gemma-7b-it");
         let model = provider.language_model("gemma-7b-it");
-        let prompt = || {
-            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
-                vec![LanguageModelUserContentPart::Text(
-                    LanguageModelTextPart::new("Hello"),
-                )],
-            ))]
-        };
-        let provider_options = |value: JsonValue| -> ProviderOptions {
-            serde_json::from_value(value).expect("provider options deserialize")
-        };
+        let result = poll_ready(model.do_generate(options));
 
-        let high_result = poll_ready(
-            model.do_generate(
-                LanguageModelCallOptions::new(prompt())
-                    .with_reasoning(LanguageModelReasoningEffort::High),
-            ),
-        );
-        let minimal_result = poll_ready(
-            model.do_generate(
-                LanguageModelCallOptions::new(prompt())
-                    .with_reasoning(LanguageModelReasoningEffort::Minimal)
-                    .with_provider_options(provider_options(json!({
-                        "lmstudio": {
-                            "reasoningSummary": "auto",
-                            "store": false,
-                            "metadata": {
-                                "trace": "ignored"
-                            }
-                        }
-                    }))),
-            ),
-        );
-        let none_result = poll_ready(
-            model.do_generate(
-                LanguageModelCallOptions::new(prompt())
-                    .with_reasoning(LanguageModelReasoningEffort::None),
-            ),
-        );
-        let xhigh_result = poll_ready(
-            model.do_generate(
-                LanguageModelCallOptions::new(prompt())
-                    .with_reasoning(LanguageModelReasoningEffort::Xhigh),
-            ),
-        );
-        let default_result = poll_ready(
-            model.do_generate(
-                LanguageModelCallOptions::new(prompt())
-                    .with_reasoning(LanguageModelReasoningEffort::ProviderDefault),
-            ),
-        );
-        let detailed_summary_result = poll_ready(model.do_generate(
-            LanguageModelCallOptions::new(prompt()).with_provider_options(provider_options(
-                json!({
-                    "lmstudio": {
-                        "reasoningSummary": "detailed"
-                    }
-                }),
-            )),
-        ));
-        let combined_result = poll_ready(
-            model.do_generate(
-                LanguageModelCallOptions::new(prompt())
-                    .with_reasoning(LanguageModelReasoningEffort::High)
-                    .with_provider_options(provider_options(json!({
-                        "lmstudio": {
-                            "reasoningSummary": "auto"
-                        }
-                    }))),
-            ),
-        );
-        let concise_summary_result = poll_ready(model.do_generate(
-            LanguageModelCallOptions::new(prompt()).with_provider_options(provider_options(
-                json!({
-                    "lmstudio": {
-                        "reasoningSummary": "concise"
-                    }
-                }),
-            )),
-        ));
-        let empty_provider_options_result = poll_ready(
-            model.do_generate(
-                LanguageModelCallOptions::new(prompt())
-                    .with_provider_options(provider_options(json!({ "lmstudio": {} }))),
-            ),
-        );
+        (
+            result.warnings,
+            captured_open_responses_request_body(&captured_request),
+        )
+    }
 
-        assert_eq!(minimal_result.warnings.len(), 1);
+    fn lmstudio_hello_options() -> LanguageModelCallOptions {
+        LanguageModelCallOptions::new(open_responses_hello_prompt())
+    }
+
+    fn assert_minimal_reasoning_warning(warnings: &[Warning]) {
+        assert_eq!(warnings.len(), 1);
         assert!(matches!(
-            minimal_result.warnings.first(),
+            warnings.first(),
             Some(ai_sdk_provider::warning::Warning::Compatibility { feature, details })
                 if feature == "reasoning"
                     && details.as_deref() == Some(
                         "reasoning \"minimal\" is not directly supported by this model. mapped to effort \"low\"."
                     )
         ));
-        for result in [
-            &high_result,
-            &none_result,
-            &xhigh_result,
-            &default_result,
-            &detailed_summary_result,
-            &combined_result,
-            &concise_summary_result,
-            &empty_provider_options_result,
-        ] {
-            assert!(result.warnings.is_empty());
-        }
+    }
 
-        let requests = captured_requests
-            .lock()
-            .expect("captured requests mutex is not poisoned");
-        assert_eq!(requests.len(), 9);
-        let bodies = requests
-            .iter()
-            .map(|request| {
-                request
-                    .body
-                    .as_ref()
-                    .and_then(ProviderApiRequestBody::as_text)
-                    .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
-                    .expect("request body is JSON")
-            })
-            .collect::<Vec<_>>();
+    #[test]
+    fn open_responses_provider_maps_top_level_reasoning_high_to_effort() {
+        let (warnings, request_body) = lmstudio_reasoning_request_body(
+            lmstudio_hello_options().with_reasoning(LanguageModelReasoningEffort::High),
+        );
 
+        assert!(warnings.is_empty());
         assert_eq!(
-            bodies[0]["reasoning"],
+            request_body["reasoning"],
             json!({
                 "effort": "high"
             })
         );
+    }
+
+    #[test]
+    fn open_responses_provider_maps_top_level_reasoning_minimal_to_low() {
+        let (warnings, request_body) = lmstudio_reasoning_request_body(
+            lmstudio_hello_options().with_reasoning(LanguageModelReasoningEffort::Minimal),
+        );
+
+        assert_minimal_reasoning_warning(&warnings);
         assert_eq!(
-            bodies[1]["reasoning"],
+            request_body["reasoning"],
             json!({
-                "effort": "low",
-                "summary": "auto"
+                "effort": "low"
             })
         );
-        assert!(bodies[1].get("reasoningSummary").is_none());
-        assert!(bodies[1].get("store").is_none());
-        assert!(bodies[1].get("metadata").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_maps_top_level_reasoning_none_to_none() {
+        let (warnings, request_body) = lmstudio_reasoning_request_body(
+            lmstudio_hello_options().with_reasoning(LanguageModelReasoningEffort::None),
+        );
+
+        assert!(warnings.is_empty());
         assert_eq!(
-            bodies[2]["reasoning"],
+            request_body["reasoning"],
             json!({
                 "effort": "none"
             })
         );
+    }
+
+    #[test]
+    fn open_responses_provider_passes_top_level_reasoning_xhigh_directly() {
+        let (warnings, request_body) = lmstudio_reasoning_request_body(
+            lmstudio_hello_options().with_reasoning(LanguageModelReasoningEffort::Xhigh),
+        );
+
+        assert!(warnings.is_empty());
         assert_eq!(
-            bodies[3]["reasoning"],
+            request_body["reasoning"],
             json!({
                 "effort": "xhigh"
             })
         );
-        assert!(bodies[4].get("reasoning").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_omits_reasoning_when_not_specified() {
+        let (warnings, request_body) = lmstudio_reasoning_request_body(lmstudio_hello_options());
+
+        assert!(warnings.is_empty());
+        assert!(request_body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_sends_detailed_reasoning_summary_from_provider_options() {
+        let (warnings, request_body) = lmstudio_reasoning_request_body(
+            lmstudio_hello_options().with_provider_options(lmstudio_provider_options(json!({
+                "reasoningSummary": "detailed"
+            }))),
+        );
+
+        assert!(warnings.is_empty());
         assert_eq!(
-            bodies[5]["reasoning"],
+            request_body["reasoning"],
             json!({
                 "summary": "detailed"
             })
         );
-        assert!(bodies[5].get("reasoningSummary").is_none());
+        assert!(request_body.get("reasoningSummary").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_combines_top_level_reasoning_with_summary() {
+        let (warnings, request_body) = lmstudio_reasoning_request_body(
+            lmstudio_hello_options()
+                .with_reasoning(LanguageModelReasoningEffort::High)
+                .with_provider_options(lmstudio_provider_options(json!({
+                    "reasoningSummary": "auto"
+                }))),
+        );
+
+        assert!(warnings.is_empty());
         assert_eq!(
-            bodies[6]["reasoning"],
+            request_body["reasoning"],
             json!({
                 "effort": "high",
                 "summary": "auto"
             })
         );
+    }
+
+    #[test]
+    fn open_responses_provider_sends_concise_reasoning_summary_from_provider_options() {
+        let (warnings, request_body) = lmstudio_reasoning_request_body(
+            lmstudio_hello_options().with_provider_options(lmstudio_provider_options(json!({
+                "reasoningSummary": "concise"
+            }))),
+        );
+
+        assert!(warnings.is_empty());
         assert_eq!(
-            bodies[7]["reasoning"],
+            request_body["reasoning"],
             json!({
                 "summary": "concise"
             })
         );
-        assert!(bodies[8].get("reasoning").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_omits_reasoning_for_empty_provider_options() {
+        let (warnings, request_body) = lmstudio_reasoning_request_body(
+            lmstudio_hello_options().with_provider_options(lmstudio_provider_options(json!({}))),
+        );
+
+        assert!(warnings.is_empty());
+        assert!(request_body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_filters_non_reasoning_generic_provider_options() {
+        let (warnings, request_body) = lmstudio_reasoning_request_body(
+            lmstudio_hello_options()
+                .with_reasoning(LanguageModelReasoningEffort::Minimal)
+                .with_provider_options(lmstudio_provider_options(json!({
+                    "reasoningSummary": "auto",
+                    "store": false,
+                    "metadata": {
+                        "trace": "ignored"
+                    }
+                }))),
+        );
+
+        assert_minimal_reasoning_warning(&warnings);
+        assert_eq!(
+            request_body["reasoning"],
+            json!({
+                "effort": "low",
+                "summary": "auto"
+            })
+        );
+        assert!(request_body.get("reasoningSummary").is_none());
+        assert!(request_body.get("store").is_none());
+        assert!(request_body.get("metadata").is_none());
     }
 
     #[test]
