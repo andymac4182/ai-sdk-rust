@@ -47,6 +47,8 @@ Put plainly: EVERY portable original TypeScript test/case must exist in Rust;
 additional Rust tests are welcome, but a crate with even one fewer portable
 original TypeScript test/case is incomplete.
 The non-negotiable rule is potentially more Rust tests, but never fewer than
-the full portable original TypeScript test inventory.
+the full portable original TypeScript test inventory. Every portable test from
+the original TypeScript suite must exist in Rust first; additional Rust tests
+are additive only, and no smaller Rust suite can be considered parity.
 Do not count a larger Rust-only suite as parity if any original portable
 TypeScript test/case is missing.
