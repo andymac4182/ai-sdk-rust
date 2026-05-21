@@ -45,7 +45,7 @@ use crate::language_model::{
     LanguageModelToolInputEnd, LanguageModelToolInputStart, LanguageModelToolResult,
     LanguageModelUsage,
 };
-use crate::prompt::{Prompt, standardize_prompt};
+use crate::prompt::{Prompt, prompt_has_url_files, standardize_prompt};
 use crate::provider::{ApiCallError, InvalidPromptError, ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{
     ExperimentalSandbox, Tool, convert_to_base64, prepare_tools_with_context,
@@ -2263,6 +2263,9 @@ where
         step_call_options.prompt = step_prompt.clone();
         step_call_options.tools = step_language_model_tools;
         append_stream_text_user_agent(&mut step_call_options);
+        if prompt_has_url_files(&step_call_options.prompt) {
+            let _ = model.supported_urls().await;
+        }
 
         if on_step_start.is_some() || telemetry_dispatcher.is_enabled() {
             let step_start_event = GenerateTextStepStartEvent {
@@ -4034,21 +4037,21 @@ mod tests {
     use serde_json::{Map, json};
 
     use super::*;
-    use crate::file_data::FileDataContent;
+    use crate::file_data::{FileData, FileDataContent};
     use crate::generate_text::{ToolApprovalStatusKind, has_tool_call};
     use crate::json::NonNullJsonValue;
     use crate::language_model::{
         FinishReason, InputTokenUsage, LanguageModelAssistantContentPart,
         LanguageModelDocumentSource, LanguageModelErrorStreamPart, LanguageModelFile,
-        LanguageModelFileData, LanguageModelFinishReason, LanguageModelMessage,
-        LanguageModelRawStreamPart, LanguageModelReasoningDelta, LanguageModelReasoningFile,
-        LanguageModelStreamFinish, LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
-        LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSystemMessage,
-        LanguageModelTextDelta, LanguageModelTextPart, LanguageModelToolApprovalRequest,
-        LanguageModelToolCall, LanguageModelToolContentPart, LanguageModelToolInputDelta,
-        LanguageModelToolInputEnd, LanguageModelToolInputStart, LanguageModelToolResult,
-        LanguageModelToolResultOutput, LanguageModelUrlSource, LanguageModelUserContentPart,
-        LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelFileData, LanguageModelFilePart, LanguageModelFinishReason,
+        LanguageModelMessage, LanguageModelRawStreamPart, LanguageModelReasoningDelta,
+        LanguageModelReasoningFile, LanguageModelStreamFinish, LanguageModelStreamResponseMetadata,
+        LanguageModelStreamResult, LanguageModelStreamResultResponse, LanguageModelStreamStart,
+        LanguageModelSystemMessage, LanguageModelTextDelta, LanguageModelTextPart,
+        LanguageModelToolApprovalRequest, LanguageModelToolCall, LanguageModelToolContentPart,
+        LanguageModelToolInputDelta, LanguageModelToolInputEnd, LanguageModelToolInputStart,
+        LanguageModelToolResult, LanguageModelToolResultOutput, LanguageModelUrlSource,
+        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::mock_models::MockLanguageModel;
     use crate::prompt::Prompt;
@@ -4057,6 +4060,7 @@ mod tests {
         TelemetryEvent, TelemetryEventKind, TelemetryIntegration, TelemetryOptions,
     };
     use crate::ui_message_stream::UiMessageRole;
+    use url::Url;
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
         let waker = Waker::noop();
@@ -4378,6 +4382,42 @@ mod tests {
                 .and_then(|headers| headers.get("user-agent"))
                 .is_some_and(|user_agent| user_agent.contains("ai/"))
         );
+    }
+
+    #[test]
+    fn stream_text_messages_with_url_file_calls_model_supported_urls() {
+        let model = MockLanguageModel::new()
+            .with_model_id("mock-model-id")
+            .with_supported_urls(BTreeMap::from([(
+                "image/*".to_string(),
+                vec![r"^https://.*$".to_string()],
+            )]))
+            .with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", ", ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let prompt = vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![LanguageModelUserContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Url {
+                        url: Url::parse("https://example.com/test.jpg").expect("url parses"),
+                    },
+                    "image/jpeg",
+                ),
+            )],
+        ))];
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(&model, prompt)));
+
+        assert_eq!(result.text, "Hello, world!");
+        assert_eq!(model.supported_urls_calls(), 1);
     }
 
     #[test]

@@ -14,7 +14,7 @@ use crate::language_model::{
     LanguageModelGenerateResult, LanguageModelPrompt, LanguageModelReasoning, LanguageModelRequest,
     LanguageModelResponse, LanguageModelResponseFormat, LanguageModelText, LanguageModelUsage,
 };
-use crate::prompt::{Prompt, standardize_prompt};
+use crate::prompt::{Prompt, prompt_has_url_files, standardize_prompt};
 use crate::provider::{
     ApiCallError, InvalidPromptError, ProviderMetadata, ProviderOptions, TypeValidationError,
 };
@@ -963,6 +963,9 @@ where
     let event_schema = response_format_schema(&response_format);
     call_options.response_format = Some(response_format);
     append_generate_object_user_agent(&mut call_options);
+    if prompt_has_url_files(&call_options.prompt) {
+        let _ = model.supported_urls().await;
+    }
     let call_id = generate_object_call_id();
     let telemetry_dispatcher = create_telemetry_dispatcher(telemetry);
 
@@ -1530,14 +1533,16 @@ mod tests {
         array_json_schema, enum_json_schema, generate_object,
     };
     use crate::VERSION;
+    use crate::file_data::FileData;
     use crate::headers::Headers;
     use crate::language_model::{
         FinishReason, InputTokenUsage, LanguageModel, LanguageModelCallOptions,
-        LanguageModelContent, LanguageModelFinishReason, LanguageModelGenerateResult,
-        LanguageModelMessage, LanguageModelPrompt, LanguageModelReasoning, LanguageModelResponse,
-        LanguageModelResponseFormat, LanguageModelStreamResult, LanguageModelSupportedUrls,
-        LanguageModelSystemMessage, LanguageModelText, LanguageModelTextPart, LanguageModelUsage,
-        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelContent, LanguageModelFilePart, LanguageModelFinishReason,
+        LanguageModelGenerateResult, LanguageModelMessage, LanguageModelPrompt,
+        LanguageModelReasoning, LanguageModelResponse, LanguageModelResponseFormat,
+        LanguageModelStreamResult, LanguageModelSupportedUrls, LanguageModelSystemMessage,
+        LanguageModelText, LanguageModelTextPart, LanguageModelUsage, LanguageModelUserContentPart,
+        LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::mock_models::MockLanguageModel;
     use crate::prompt::Prompt;
@@ -1548,19 +1553,34 @@ mod tests {
         TelemetryEvent, TelemetryEventKind, TelemetryIntegration, TelemetryOptions,
     };
     use crate::warning::Warning;
+    use url::Url;
 
     #[derive(Debug)]
     struct StaticObjectModel {
+        model_id: String,
         result: LanguageModelGenerateResult,
         seen_options: Mutex<Vec<LanguageModelCallOptions>>,
+        supported_urls_called: Option<Arc<Mutex<bool>>>,
     }
 
     impl StaticObjectModel {
         fn new(result: LanguageModelGenerateResult) -> Self {
             Self {
+                model_id: "object-test".to_string(),
                 result,
                 seen_options: Mutex::new(Vec::new()),
+                supported_urls_called: None,
             }
+        }
+
+        fn with_model_id(mut self, model_id: impl Into<String>) -> Self {
+            self.model_id = model_id.into();
+            self
+        }
+
+        fn with_supported_urls_called(mut self, supported_urls_called: Arc<Mutex<bool>>) -> Self {
+            self.supported_urls_called = Some(supported_urls_called);
+            self
         }
 
         fn seen_options(&self) -> Vec<LanguageModelCallOptions> {
@@ -1594,11 +1614,20 @@ mod tests {
         }
 
         fn model_id(&self) -> &str {
-            "object-test"
+            &self.model_id
         }
 
         fn supported_urls(&self) -> Self::SupportedUrlsFuture<'_> {
-            ready(LanguageModelSupportedUrls::new())
+            if let Some(supported_urls_called) = &self.supported_urls_called {
+                *supported_urls_called
+                    .lock()
+                    .expect("supported urls called lock") = self.model_id() == "mock-model-id";
+            }
+
+            ready(LanguageModelSupportedUrls::from([(
+                "image/*".to_string(),
+                vec![r"^https://.*$".to_string()],
+            )]))
         }
 
         fn do_generate(&self, options: LanguageModelCallOptions) -> Self::GenerateFuture<'_> {
@@ -1932,6 +1961,67 @@ mod tests {
         assert_eq!(
             headers.get("user-agent").map(String::as_str),
             Some(format!("ai/{VERSION}").as_str())
+        );
+    }
+
+    #[test]
+    fn generate_object_messages_with_url_file_calls_model_supported_urls() {
+        let supported_urls_called = Arc::new(Mutex::new(false));
+        let schema = json_schema(
+            serde_json::from_value(json!({
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "properties": {
+                    "content": { "type": "string" }
+                },
+                "required": ["content"],
+                "additionalProperties": false
+            }))
+            .expect("content schema is valid"),
+        )
+        .with_validator(|value| {
+            if value
+                .get("content")
+                .is_some_and(serde_json::Value::is_string)
+            {
+                ValidationResult::success(value.clone())
+            } else {
+                ValidationResult::failure("content must be a string")
+            }
+        });
+        let model = StaticObjectModel::new(LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                r#"{ "content": "Hello, world!" }"#,
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        ))
+        .with_model_id("mock-model-id")
+        .with_supported_urls_called(Arc::clone(&supported_urls_called));
+        let prompt = vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![LanguageModelUserContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Url {
+                        url: Url::parse("https://example.com/test.jpg").expect("url parses"),
+                    },
+                    "image/jpeg",
+                ),
+            )],
+        ))];
+
+        let result = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt).with_schema(schema),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(result.object, json!({ "content": "Hello, world!" }));
+        assert!(
+            *supported_urls_called
+                .lock()
+                .expect("supported urls called lock")
         );
     }
 

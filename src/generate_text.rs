@@ -28,7 +28,7 @@ use crate::language_model::{
     LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
     OutputTokenUsage,
 };
-use crate::prompt::{Prompt, standardize_prompt};
+use crate::prompt::{Prompt, prompt_has_url_files, standardize_prompt};
 use crate::provider::{
     ApiCallError, InvalidPromptError, JsonParseError, TypeValidationContext, TypeValidationError,
     get_error_message,
@@ -5276,6 +5276,10 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
         step_call_options.provider_options =
             merge_provider_options(base_provider_options.as_ref(), step_provider_options);
 
+        if prompt_has_url_files(&step_call_options.prompt) {
+            let _ = step_model.supported_urls().await;
+        }
+
         let step_prompt = step_call_options.prompt.clone();
         if on_step_start.is_some() || telemetry_dispatcher.is_enabled() {
             let step_start_event = GenerateTextStepStartEvent {
@@ -7491,13 +7495,13 @@ mod tests {
         generate_text, has_tool_call, is_loop_finished, is_step_count, is_stop_condition_met,
         normalize_tool_approval_status, prune_messages, resolve_tool_approval, step_count_is,
     };
-    use crate::file_data::FileDataContent;
+    use crate::file_data::{FileData, FileDataContent};
     use crate::headers::Headers;
     use crate::json::{JsonObject, JsonValue};
     use crate::language_model::{
         FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
         LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
-        LanguageModelFile, LanguageModelFileData, LanguageModelFinishReason,
+        LanguageModelFile, LanguageModelFileData, LanguageModelFilePart, LanguageModelFinishReason,
         LanguageModelFunctionTool, LanguageModelGenerateResult, LanguageModelMessage,
         LanguageModelPrompt, LanguageModelProviderTool, LanguageModelReasoning,
         LanguageModelReasoningFile, LanguageModelReasoningPart, LanguageModelRequest,
@@ -7535,6 +7539,7 @@ mod tests {
     };
     use std::task::{Context, Poll, Waker};
     use time::OffsetDateTime;
+    use url::Url;
 
     fn no_object_response() -> LanguageModelResponse {
         let timestamp = OffsetDateTime::parse(
@@ -8667,21 +8672,30 @@ mod tests {
     }
 
     struct FakeLanguageModel {
+        model_id: String,
         calls: RefCell<Vec<LanguageModelCallOptions>>,
         include_body_metadata: bool,
         content: Vec<LanguageModelContent>,
+        supported_urls_called: Option<Arc<AtomicBool>>,
     }
 
     impl FakeLanguageModel {
         fn new() -> Self {
             Self {
+                model_id: "test-model".to_string(),
                 calls: RefCell::new(Vec::new()),
                 include_body_metadata: false,
                 content: vec![
                     LanguageModelContent::Text(LanguageModelText::new("Hello ")),
                     LanguageModelContent::Text(LanguageModelText::new("world")),
                 ],
+                supported_urls_called: None,
             }
+        }
+
+        fn with_model_id(mut self, model_id: impl Into<String>) -> Self {
+            self.model_id = model_id.into();
+            self
         }
 
         fn with_body_metadata(mut self) -> Self {
@@ -8691,6 +8705,11 @@ mod tests {
 
         fn with_content(mut self, content: Vec<LanguageModelContent>) -> Self {
             self.content = content;
+            self
+        }
+
+        fn with_supported_urls_called(mut self, supported_urls_called: Arc<AtomicBool>) -> Self {
+            self.supported_urls_called = Some(supported_urls_called);
             self
         }
     }
@@ -8718,11 +8737,18 @@ mod tests {
         }
 
         fn model_id(&self) -> &str {
-            "test-model"
+            &self.model_id
         }
 
         fn supported_urls(&self) -> Self::SupportedUrlsFuture<'_> {
-            ready(BTreeMap::new())
+            if let Some(supported_urls_called) = &self.supported_urls_called {
+                supported_urls_called.store(self.model_id() == "mock-model-id", Ordering::SeqCst);
+            }
+
+            ready(BTreeMap::from([(
+                "image/*".to_string(),
+                vec![r"^https://.*$".to_string()],
+            )]))
         }
 
         fn do_generate(&self, options: LanguageModelCallOptions) -> Self::GenerateFuture<'_> {
@@ -9286,6 +9312,32 @@ mod tests {
         assert_eq!(performance.input_tokens_per_second, None);
         assert_eq!(performance.tool_execution_ms, BTreeMap::new());
         assert_eq!(performance.time_to_first_output_token_ms, None);
+    }
+
+    #[test]
+    fn generate_text_messages_with_url_file_calls_model_supported_urls() {
+        let supported_urls_called = Arc::new(AtomicBool::new(false));
+        let model = FakeLanguageModel::new()
+            .with_model_id("mock-model-id")
+            .with_content(vec![LanguageModelContent::Text(LanguageModelText::new(
+                "Hello, world!",
+            ))])
+            .with_supported_urls_called(Arc::clone(&supported_urls_called));
+        let prompt = vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![LanguageModelUserContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Url {
+                        url: Url::parse("https://example.com/test.jpg").expect("url parses"),
+                    },
+                    "image/jpeg",
+                ),
+            )],
+        ))];
+
+        let result = poll_ready(generate_text(GenerateTextOptions::new(&model, prompt)));
+
+        assert_eq!(result.text, "Hello, world!");
+        assert!(supported_urls_called.load(Ordering::SeqCst));
     }
 
     #[test]

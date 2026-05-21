@@ -7,7 +7,6 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use crate::VERSION;
-use crate::file_data::FileData;
 use crate::generate_object::{
     GenerateObjectEndEvent, GenerateObjectOnFinish, GenerateObjectOnStart,
     GenerateObjectOnStepFinish, GenerateObjectOnStepStart, GenerateObjectOutputKind,
@@ -20,11 +19,11 @@ use crate::headers::Headers;
 use crate::json::{JsonSchema, JsonValue};
 use crate::language_model::{
     FinishReason, LanguageModel, LanguageModelAbortController, LanguageModelAbortSignal,
-    LanguageModelCallOptions, LanguageModelMessage, LanguageModelPrompt, LanguageModelRequest,
+    LanguageModelCallOptions, LanguageModelPrompt, LanguageModelRequest,
     LanguageModelResponseFormat, LanguageModelStreamPart, LanguageModelStreamResult,
-    LanguageModelUsage, LanguageModelUserContentPart,
+    LanguageModelUsage,
 };
-use crate::prompt::{Prompt, standardize_prompt};
+use crate::prompt::{Prompt, prompt_has_url_files, standardize_prompt};
 use crate::provider::{ApiCallError, InvalidPromptError, ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{
     FlexibleSchema, ParseJsonResult, ValidateTypesResult, safe_validate_types,
@@ -540,7 +539,7 @@ where
     call_options.response_format = Some(response_format);
     call_options.include_raw_chunks = Some(false);
     append_stream_object_user_agent(&mut call_options);
-    if stream_object_prompt_has_url_files(&call_options.prompt) {
+    if prompt_has_url_files(&call_options.prompt) {
         let _ = model.supported_urls().await;
     }
     let call_id = generate_object_call_id();
@@ -1214,18 +1213,6 @@ fn stream_object_abort_error_from_signal(
     }
 
     Some(JsonValue::Object(error))
-}
-
-fn stream_object_prompt_has_url_files(prompt: &LanguageModelPrompt) -> bool {
-    prompt.iter().any(|message| match message {
-        LanguageModelMessage::User(message) => message.content.iter().any(|part| match part {
-            LanguageModelUserContentPart::File(file) => matches!(file.data, FileData::Url { .. }),
-            LanguageModelUserContentPart::Text(_) => false,
-        }),
-        LanguageModelMessage::System(_)
-        | LanguageModelMessage::Assistant(_)
-        | LanguageModelMessage::Tool(_) => false,
-    })
 }
 
 #[cfg(test)]
