@@ -1230,8 +1230,8 @@ mod tests {
         LanguageModelResponseFormat, LanguageModelStreamFinish,
         LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
         LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
-        LanguageModelTextDelta, LanguageModelTextPart, LanguageModelUserContentPart,
-        LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelSystemMessage, LanguageModelTextDelta, LanguageModelTextPart,
+        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::mock_models::MockLanguageModel;
     use crate::provider_utils::{Schema, ValidationResult, json_schema};
@@ -1326,6 +1326,14 @@ mod tests {
                 finish_reason(),
             )),
         ]
+    }
+
+    fn object_stream_with_warnings(warnings: Vec<Warning>) -> Vec<LanguageModelStreamPart> {
+        let mut stream = vec![LanguageModelStreamPart::StreamStart(
+            LanguageModelStreamStart::new(warnings),
+        )];
+        stream.extend(object_stream());
+        stream
     }
 
     fn array_three_element_stream() -> Vec<LanguageModelStreamPart> {
@@ -1521,6 +1529,71 @@ mod tests {
             self.abort_controller
                 .abort_with_reason("client-disconnected");
             ready(LanguageModelStreamResult::new(object_stream()))
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct RecordingStreamModel {
+        events: Arc<Mutex<Vec<String>>>,
+        stream: Vec<LanguageModelStreamPart>,
+    }
+
+    impl RecordingStreamModel {
+        fn new(events: Arc<Mutex<Vec<String>>>) -> Self {
+            Self {
+                events,
+                stream: object_stream(),
+            }
+        }
+    }
+
+    impl LanguageModel for RecordingStreamModel {
+        type SupportedUrlsFuture<'a>
+            = Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a;
+
+        type GenerateFuture<'a>
+            = Ready<LanguageModelGenerateResult>
+        where
+            Self: 'a;
+
+        type Stream = Vec<LanguageModelStreamPart>;
+
+        type StreamFuture<'a>
+            = Ready<LanguageModelStreamResult<Self::Stream>>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "test-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+
+        fn supported_urls(&self) -> Self::SupportedUrlsFuture<'_> {
+            ready(LanguageModelSupportedUrls::new())
+        }
+
+        fn do_generate(&self, _options: LanguageModelCallOptions) -> Self::GenerateFuture<'_> {
+            ready(LanguageModelGenerateResult::new(
+                Vec::<LanguageModelContent>::new(),
+                LanguageModelFinishReason {
+                    unified: FinishReason::Other,
+                    raw: None,
+                },
+                LanguageModelUsage::default(),
+            ))
+        }
+
+        fn do_stream(&self, _options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
+            self.events
+                .lock()
+                .expect("recording events lock")
+                .push("doStream".to_string());
+            ready(LanguageModelStreamResult::new(self.stream.clone()))
         }
     }
 
@@ -2150,6 +2223,88 @@ mod tests {
     }
 
     #[test]
+    fn stream_object_warnings_resolve_empty_when_no_warnings_are_present() {
+        let model = MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(
+            object_stream_with_warnings(Vec::new()),
+        ));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
+
+        assert_eq!(result.warnings, Vec::new());
+    }
+
+    #[test]
+    fn stream_object_warnings_resolve_model_warnings() {
+        let expected_warnings = vec![
+            Warning::Unsupported {
+                feature: "frequency_penalty".to_string(),
+                details: Some("This model does not support the frequency_penalty setting.".into()),
+            },
+            Warning::Other {
+                message: "Test warning message".to_string(),
+            },
+        ];
+        let model = MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(
+            object_stream_with_warnings(expected_warnings.clone()),
+        ));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
+
+        assert_eq!(result.warnings, expected_warnings);
+    }
+
+    #[test]
+    fn stream_object_warnings_are_available_to_step_finish_and_finish_callbacks() {
+        let expected_warnings = vec![
+            Warning::Other {
+                message: "Setting is not supported".to_string(),
+            },
+            Warning::Unsupported {
+                feature: "temperature".to_string(),
+                details: Some("Temperature parameter not supported".to_string()),
+            },
+        ];
+        let model = MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(
+            object_stream_with_warnings(expected_warnings.clone()),
+        ));
+        let step_warnings = Arc::new(Mutex::new(Vec::<Warning>::new()));
+        let finish_warnings = Arc::new(Mutex::new(Vec::<Warning>::new()));
+        let step_warnings_for_callback = Arc::clone(&step_warnings);
+        let finish_warnings_for_callback = Arc::clone(&finish_warnings);
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_on_step_finish(move |event| {
+                    let step_warnings = Arc::clone(&step_warnings_for_callback);
+                    async move {
+                        *step_warnings.lock().expect("step warnings lock") = event.warnings;
+                    }
+                })
+                .with_on_finish(move |event| {
+                    let finish_warnings = Arc::clone(&finish_warnings_for_callback);
+                    async move {
+                        *finish_warnings.lock().expect("finish warnings lock") = event.warnings;
+                    }
+                }),
+        ));
+
+        assert_eq!(result.warnings, expected_warnings);
+        assert_eq!(
+            *step_warnings.lock().expect("step warnings lock"),
+            expected_warnings
+        );
+        assert_eq!(
+            *finish_warnings.lock().expect("finish warnings lock"),
+            expected_warnings
+        );
+    }
+
+    #[test]
     fn stream_object_enum_output_unwraps_result() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
@@ -2650,6 +2805,264 @@ mod tests {
 
         assert_eq!(result.object, None);
         assert!(result.error.is_some());
+    }
+
+    #[test]
+    fn stream_object_on_start_runs_before_model_call() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let model = RecordingStreamModel::new(Arc::clone(&events));
+        let start_events = Arc::clone(&events);
+
+        poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_experimental_on_start(move |_| {
+                    let start_events = Arc::clone(&start_events);
+                    async move {
+                        start_events
+                            .lock()
+                            .expect("recording events lock")
+                            .push("onStart".to_string());
+                    }
+                }),
+        ));
+
+        assert_eq!(
+            *events.lock().expect("recording events lock"),
+            vec!["onStart".to_string(), "doStream".to_string()]
+        );
+    }
+
+    #[test]
+    fn stream_object_on_start_sends_text_prompt_information() {
+        let model = MockLanguageModel::new()
+            .with_provider("test-provider")
+            .with_model_id("test-model")
+            .with_stream_result(LanguageModelStreamResult::new(object_stream()));
+        let start_event = Arc::new(Mutex::new(None::<GenerateObjectStartEvent>));
+        let start_event_for_callback = Arc::clone(&start_event);
+
+        poll_ready(stream_object(
+            StreamObjectOptions::from_prompt(
+                &model,
+                Prompt::from_prompt("test-prompt").with_instructions("Return an answer"),
+            )
+            .expect("prompt standardizes")
+            .with_schema(answer_schema())
+            .with_schema_name("test-schema")
+            .with_schema_description("A test schema")
+            .with_temperature(0.5)
+            .with_max_output_tokens(100)
+            .with_experimental_on_start(move |event| {
+                let start_event = Arc::clone(&start_event_for_callback);
+                async move {
+                    *start_event.lock().expect("start event lock") = Some(event);
+                }
+            }),
+        ));
+
+        let event = start_event
+            .lock()
+            .expect("start event lock")
+            .clone()
+            .expect("start event captured");
+        assert!(event.call_id.starts_with("aiobj-"));
+        assert_eq!(event.operation_id, "ai.streamObject");
+        assert_eq!(event.provider, "test-provider");
+        assert_eq!(event.model_id, "test-model");
+        assert_eq!(event.temperature, Some(0.5));
+        assert_eq!(event.max_output_tokens, Some(100));
+        assert_eq!(event.output, GenerateObjectOutputKind::Object);
+        assert_eq!(event.schema_name.as_deref(), Some("test-schema"));
+        assert_eq!(event.schema_description.as_deref(), Some("A test schema"));
+        assert_eq!(
+            event.messages,
+            vec![
+                LanguageModelMessage::System(LanguageModelSystemMessage::new("Return an answer")),
+                user_message("test-prompt")
+            ]
+        );
+    }
+
+    #[test]
+    fn stream_object_on_step_start_runs_before_model_call() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let model = RecordingStreamModel::new(Arc::clone(&events));
+        let step_start_events = Arc::clone(&events);
+
+        poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_experimental_on_step_start(move |_| {
+                    let step_start_events = Arc::clone(&step_start_events);
+                    async move {
+                        step_start_events
+                            .lock()
+                            .expect("recording events lock")
+                            .push("onStepStart".to_string());
+                    }
+                }),
+        ));
+
+        assert_eq!(
+            *events.lock().expect("recording events lock"),
+            vec!["onStepStart".to_string(), "doStream".to_string()]
+        );
+    }
+
+    #[test]
+    fn stream_object_on_step_start_provides_step_number_and_model_info() {
+        let model = MockLanguageModel::new()
+            .with_provider("test-provider")
+            .with_model_id("test-model")
+            .with_stream_result(LanguageModelStreamResult::new(object_stream()));
+        let step_start_event = Arc::new(Mutex::new(None::<GenerateObjectStepStartEvent>));
+        let step_start_event_for_callback = Arc::clone(&step_start_event);
+
+        poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_experimental_on_step_start(move |event| {
+                    let step_start_event = Arc::clone(&step_start_event_for_callback);
+                    async move {
+                        *step_start_event.lock().expect("step start event lock") = Some(event);
+                    }
+                }),
+        ));
+
+        let event = step_start_event
+            .lock()
+            .expect("step start event lock")
+            .clone()
+            .expect("step start event captured");
+        assert_eq!(event.step_number, 0);
+        assert_eq!(event.provider, "test-provider");
+        assert_eq!(event.model_id, "test-model");
+        assert!(event.call_id.starts_with("aiobj-"));
+        assert_eq!(event.prompt_messages, prompt());
+    }
+
+    #[test]
+    fn stream_object_on_step_finish_runs_after_model_call() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let model = RecordingStreamModel::new(Arc::clone(&events));
+        let step_finish_events = Arc::clone(&events);
+
+        poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_on_step_finish(move |_| {
+                    let step_finish_events = Arc::clone(&step_finish_events);
+                    async move {
+                        step_finish_events
+                            .lock()
+                            .expect("recording events lock")
+                            .push("onStepFinish".to_string());
+                    }
+                }),
+        ));
+
+        assert_eq!(
+            *events.lock().expect("recording events lock"),
+            vec!["doStream".to_string(), "onStepFinish".to_string()]
+        );
+    }
+
+    #[test]
+    fn stream_object_on_step_finish_provides_raw_object_text_and_usage() {
+        let model = MockLanguageModel::new()
+            .with_provider("test-provider")
+            .with_model_id("test-model")
+            .with_stream_result(LanguageModelStreamResult::new(object_stream()));
+        let step_finish_event = Arc::new(Mutex::new(None::<GenerateObjectStepEndEvent>));
+        let step_finish_event_for_callback = Arc::clone(&step_finish_event);
+
+        poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_on_step_finish(move |event| {
+                    let step_finish_event = Arc::clone(&step_finish_event_for_callback);
+                    async move {
+                        *step_finish_event.lock().expect("step finish event lock") = Some(event);
+                    }
+                }),
+        ));
+
+        let event = step_finish_event
+            .lock()
+            .expect("step finish event lock")
+            .clone()
+            .expect("step finish event captured");
+        assert_eq!(event.step_number, 0);
+        assert_eq!(event.provider, "test-provider");
+        assert_eq!(event.model_id, "test-model");
+        assert_eq!(event.object_text, r#"{ "content": "Hello, world!" }"#);
+        assert_eq!(event.finish_reason, FinishReason::Stop);
+        assert_eq!(event.usage, usage());
+        assert!(event.call_id.starts_with("aiobj-"));
+    }
+
+    #[test]
+    fn stream_object_callbacks_fire_in_upstream_order_with_model_call() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let model = RecordingStreamModel::new(Arc::clone(&events));
+
+        let on_start_events = Arc::clone(&events);
+        let on_step_start_events = Arc::clone(&events);
+        let on_step_finish_events = Arc::clone(&events);
+        let on_finish_events = Arc::clone(&events);
+
+        poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_experimental_on_start(move |_| {
+                    let events = Arc::clone(&on_start_events);
+                    async move {
+                        events
+                            .lock()
+                            .expect("recording events lock")
+                            .push("onStart".to_string());
+                    }
+                })
+                .with_experimental_on_step_start(move |_| {
+                    let events = Arc::clone(&on_step_start_events);
+                    async move {
+                        events
+                            .lock()
+                            .expect("recording events lock")
+                            .push("onStepStart".to_string());
+                    }
+                })
+                .with_on_step_finish(move |_| {
+                    let events = Arc::clone(&on_step_finish_events);
+                    async move {
+                        events
+                            .lock()
+                            .expect("recording events lock")
+                            .push("onStepFinish".to_string());
+                    }
+                })
+                .with_on_finish(move |_| {
+                    let events = Arc::clone(&on_finish_events);
+                    async move {
+                        events
+                            .lock()
+                            .expect("recording events lock")
+                            .push("onFinish".to_string());
+                    }
+                }),
+        ));
+
+        assert_eq!(
+            *events.lock().expect("recording events lock"),
+            vec![
+                "onStart".to_string(),
+                "onStepStart".to_string(),
+                "doStream".to_string(),
+                "onStepFinish".to_string(),
+                "onFinish".to_string(),
+            ]
+        );
     }
 
     #[test]
