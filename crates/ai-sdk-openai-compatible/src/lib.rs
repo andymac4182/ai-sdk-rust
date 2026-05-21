@@ -14,6 +14,6 @@ pub use openai_compatible::{
     OpenAICompatibleExtractMetadataFuture, OpenAICompatibleImageModel,
     OpenAICompatibleMetadataExtractor, OpenAICompatibleModelEntry,
     OpenAICompatibleModelListResponse, OpenAICompatibleProvider, OpenAICompatibleProviderSettings,
-    OpenAICompatibleStreamMetadataExtractor, OpenAICompatibleTransport,
-    OpenAICompatibleTransportFuture, create_openai_compatible,
+    OpenAICompatibleRequestBodyTransformer, OpenAICompatibleStreamMetadataExtractor,
+    OpenAICompatibleTransport, OpenAICompatibleTransportFuture, create_openai_compatible,
 };
