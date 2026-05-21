@@ -935,6 +935,317 @@ mod tests {
     }
 
     #[test]
+    fn fix_json_upstream_handles_empty_input() {
+        assert_eq!(fix_json(""), "");
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_incomplete_null() {
+        assert_eq!(fix_json("nul"), "null");
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_incomplete_true() {
+        assert_eq!(fix_json("t"), "true");
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_incomplete_false() {
+        assert_eq!(fix_json("fals"), "false");
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_incomplete_numbers() {
+        assert_eq!(fix_json("12."), "12");
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_numbers_with_dot() {
+        assert_eq!(fix_json("12.2"), "12.2");
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_negative_numbers() {
+        assert_eq!(fix_json("-12"), "-12");
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_incomplete_negative_numbers() {
+        assert_eq!(fix_json("-"), "");
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_e_notation_numbers() {
+        assert_eq!(fix_json("2.5e"), "2.5");
+        assert_eq!(fix_json("2.5e-"), "2.5");
+        assert_eq!(fix_json("2.5e3"), "2.5e3");
+        assert_eq!(fix_json("-2.5e3"), "-2.5e3");
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_uppercase_e_notation_numbers() {
+        assert_eq!(fix_json("2.5E"), "2.5");
+        assert_eq!(fix_json("2.5E-"), "2.5");
+        assert_eq!(fix_json("2.5E3"), "2.5E3");
+        assert_eq!(fix_json("-2.5E3"), "-2.5E3");
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_incomplete_exponent_numbers() {
+        assert_eq!(fix_json("12.e"), "12");
+        assert_eq!(fix_json("12.34e"), "12.34");
+        assert_eq!(fix_json("5e"), "5");
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_incomplete_strings() {
+        assert_eq!(fix_json(r#""abc"#), r#""abc""#);
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_escape_sequences() {
+        assert_eq!(
+            fix_json(r#""value with \"quoted\" text and \\ escape"#),
+            r#""value with \"quoted\" text and \\ escape""#
+        );
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_incomplete_escape_sequences() {
+        assert_eq!(fix_json(r#""value with \"#), r#""value with ""#);
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_unicode_characters() {
+        assert_eq!(
+            fix_json(r#""value with unicode <""#),
+            r#""value with unicode <""#
+        );
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_incomplete_array() {
+        assert_eq!(fix_json("["), "[]");
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_closing_bracket_after_number_in_array() {
+        assert_eq!(fix_json("[[1], [2"), "[[1], [2]]");
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_closing_bracket_after_string_in_array() {
+        assert_eq!(fix_json(r#"[["1"], ["2"#), r#"[["1"], ["2"]]"#);
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_closing_bracket_after_literal_in_array() {
+        assert_eq!(fix_json("[[false], [nu"), "[[false], [null]]");
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_closing_bracket_after_array_in_array() {
+        assert_eq!(fix_json("[[[]], [[]"), "[[[]], [[]]]");
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_closing_bracket_after_object_in_array() {
+        assert_eq!(fix_json("[[{}], [{"), "[[{}], [{}]]");
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_trailing_comma() {
+        assert_eq!(fix_json("[1, "), "[1]");
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_closing_array() {
+        assert_eq!(fix_json("[[], 123"), "[[], 123]");
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_keys_without_values() {
+        assert_eq!(fix_json(r#"{"key":"#), "{}");
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_closing_brace_after_number_in_object() {
+        assert_eq!(
+            fix_json(r#"{"a": {"b": 1}, "c": {"d": 2"#),
+            r#"{"a": {"b": 1}, "c": {"d": 2}}"#
+        );
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_closing_brace_after_string_in_object() {
+        assert_eq!(
+            fix_json(r#"{"a": {"b": "1"}, "c": {"d": 2"#),
+            r#"{"a": {"b": "1"}, "c": {"d": 2}}"#
+        );
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_closing_brace_after_literal_in_object() {
+        assert_eq!(
+            fix_json(r#"{"a": {"b": false}, "c": {"d": 2"#),
+            r#"{"a": {"b": false}, "c": {"d": 2}}"#
+        );
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_closing_brace_after_array_in_object() {
+        assert_eq!(
+            fix_json(r#"{"a": {"b": []}, "c": {"d": 2"#),
+            r#"{"a": {"b": []}, "c": {"d": 2}}"#
+        );
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_closing_brace_after_object_in_object() {
+        assert_eq!(
+            fix_json(r#"{"a": {"b": {}}, "c": {"d": 2"#),
+            r#"{"a": {"b": {}}, "c": {"d": 2}}"#
+        );
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_partial_keys_first_key() {
+        assert_eq!(fix_json(r#"{"ke"#), "{}");
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_partial_keys_second_key() {
+        assert_eq!(fix_json(r#"{"k1": 1, "k2"#), r#"{"k1": 1}"#);
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_partial_keys_with_colon_second_key() {
+        assert_eq!(fix_json(r#"{"k1": 1, "k2":"#), r#"{"k1": 1}"#);
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_trailing_whitespace() {
+        assert_eq!(fix_json(r#"{"key": "value"  "#), r#"{"key": "value"}"#);
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_closing_after_empty_object() {
+        assert_eq!(fix_json(r#"{"a": {"b": {}"#), r#"{"a": {"b": {}}}"#);
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_nested_arrays_with_numbers() {
+        assert_eq!(fix_json("[1, [2, 3, ["), "[1, [2, 3, []]]");
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_nested_arrays_with_literals() {
+        assert_eq!(fix_json("[false, [true, ["), "[false, [true, []]]");
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_nested_objects() {
+        assert_eq!(fix_json(r#"{"key": {"subKey":"#), r#"{"key": {}}"#);
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_nested_objects_with_numbers() {
+        assert_eq!(
+            fix_json(r#"{"key": 123, "key2": {"subKey":"#),
+            r#"{"key": 123, "key2": {}}"#
+        );
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_nested_objects_with_literals() {
+        assert_eq!(
+            fix_json(r#"{"key": null, "key2": {"subKey":"#),
+            r#"{"key": null, "key2": {}}"#
+        );
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_arrays_within_objects() {
+        assert_eq!(fix_json(r#"{"key": [1, 2, {"#), r#"{"key": [1, 2, {}]}"#);
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_objects_within_arrays() {
+        assert_eq!(
+            fix_json(r#"[1, 2, {"key": "value","#),
+            r#"[1, 2, {"key": "value"}]"#
+        );
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_nested_arrays_and_objects() {
+        assert_eq!(
+            fix_json(r#"{"a": {"b": ["c", {"d": "e","#),
+            r#"{"a": {"b": ["c", {"d": "e"}]}}"#
+        );
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_deeply_nested_objects() {
+        assert_eq!(
+            fix_json(r#"{"a": {"b": {"c": {"d":"#),
+            r#"{"a": {"b": {"c": {}}}}"#
+        );
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_potential_nested_arrays_or_objects() {
+        assert_eq!(fix_json(r#"{"a": 1, "b": ["#), r#"{"a": 1, "b": []}"#);
+        assert_eq!(fix_json(r#"{"a": 1, "b": {"#), r#"{"a": 1, "b": {}}"#);
+        assert_eq!(fix_json(r#"{"a": 1, "b": ""#), r#"{"a": 1, "b": ""}"#);
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_complex_nesting_1() {
+        assert_eq!(
+            fix_json(
+                [
+                    "{",
+                    r#"  "a": ["#,
+                    "    {",
+                    r#"      "a1": "v1","#,
+                    r#"      "a2": "v2","#,
+                    r#"      "a3": "v3""#,
+                    "    }",
+                    "  ],",
+                    r#"  "b": ["#,
+                    "    {",
+                    r#"      "b1": "n"#,
+                ]
+                .join("\n")
+                .as_str()
+            ),
+            [
+                "{",
+                r#"  "a": ["#,
+                "    {",
+                r#"      "a1": "v1","#,
+                r#"      "a2": "v2","#,
+                r#"      "a3": "v3""#,
+                "    }",
+                "  ],",
+                r#"  "b": ["#,
+                "    {",
+                r#"      "b1": "n"}]}"#,
+            ]
+            .join("\n")
+        );
+    }
+
+    #[test]
+    fn fix_json_upstream_handles_empty_objects_inside_nested_objects_and_arrays() {
+        assert_eq!(
+            fix_json(r#"{"type":"div","children":[{"type":"Card","props":{}"#),
+            r#"{"type":"div","children":[{"type":"Card","props":{}}]}"#
+        );
+    }
+
+    #[test]
     fn invalid_argument_error_retains_parameter_value_and_message() {
         let error = InvalidArgumentError::new("messages", json!(null), "messages are required");
 
