@@ -8168,35 +8168,85 @@ mod tests {
 
     use super::map_open_responses_finish_reason;
 
+    fn assert_open_responses_finish_reason(
+        finish_reason: Option<&str>,
+        has_tool_calls: bool,
+        expected_unified: FinishReason,
+        expected_raw: Option<&str>,
+    ) {
+        let mapped = map_open_responses_finish_reason(finish_reason, has_tool_calls);
+
+        assert_eq!(mapped.unified, expected_unified);
+        assert_eq!(mapped.raw.as_deref(), expected_raw);
+    }
+
     #[test]
-    fn open_responses_finish_reason_mapping_matches_upstream() {
-        assert_eq!(
-            map_open_responses_finish_reason(None, false).unified,
-            FinishReason::Stop
+    fn open_responses_finish_reason_undefined_with_tool_calls_maps_tool_calls() {
+        assert_open_responses_finish_reason(None, true, FinishReason::ToolCalls, None);
+    }
+
+    #[test]
+    fn open_responses_finish_reason_null_with_tool_calls_maps_tool_calls() {
+        assert_open_responses_finish_reason(None, true, FinishReason::ToolCalls, None);
+    }
+
+    #[test]
+    fn open_responses_finish_reason_undefined_without_tool_calls_maps_stop() {
+        assert_open_responses_finish_reason(None, false, FinishReason::Stop, None);
+    }
+
+    #[test]
+    fn open_responses_finish_reason_null_without_tool_calls_maps_stop() {
+        assert_open_responses_finish_reason(None, false, FinishReason::Stop, None);
+    }
+
+    #[test]
+    fn open_responses_finish_reason_max_output_tokens_maps_length() {
+        assert_open_responses_finish_reason(
+            Some("max_output_tokens"),
+            false,
+            FinishReason::Length,
+            Some("max_output_tokens"),
         );
-        assert_eq!(
-            map_open_responses_finish_reason(None, true).unified,
-            FinishReason::ToolCalls
+    }
+
+    #[test]
+    fn open_responses_finish_reason_content_filter_maps_content_filter() {
+        assert_open_responses_finish_reason(
+            Some("content_filter"),
+            false,
+            FinishReason::ContentFilter,
+            Some("content_filter"),
         );
-        assert_eq!(
-            map_open_responses_finish_reason(Some("max_output_tokens"), false).unified,
-            FinishReason::Length
+    }
+
+    #[test]
+    fn open_responses_finish_reason_unknown_with_tool_calls_maps_tool_calls() {
+        assert_open_responses_finish_reason(
+            Some("completed"),
+            true,
+            FinishReason::ToolCalls,
+            Some("completed"),
         );
-        assert_eq!(
-            map_open_responses_finish_reason(Some("max_tokens"), false).unified,
-            FinishReason::Length
+    }
+
+    #[test]
+    fn open_responses_finish_reason_unknown_without_tool_calls_maps_other() {
+        assert_open_responses_finish_reason(
+            Some("completed"),
+            false,
+            FinishReason::Other,
+            Some("completed"),
         );
-        assert_eq!(
-            map_open_responses_finish_reason(Some("content_filter"), false).unified,
-            FinishReason::ContentFilter
-        );
-        assert_eq!(
-            map_open_responses_finish_reason(Some("unknown"), false).unified,
-            FinishReason::Other
-        );
-        assert_eq!(
-            map_open_responses_finish_reason(Some("unknown"), true).unified,
-            FinishReason::ToolCalls
+    }
+
+    #[test]
+    fn open_responses_finish_reason_maps_legacy_max_tokens_to_length() {
+        assert_open_responses_finish_reason(
+            Some("max_tokens"),
+            false,
+            FinishReason::Length,
+            Some("max_tokens"),
         );
     }
 
