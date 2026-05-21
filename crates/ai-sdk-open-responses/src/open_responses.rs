@@ -8696,25 +8696,20 @@ mod tests {
     }
 
     #[test]
-    fn open_responses_provider_keeps_generic_system_messages_as_instructions() {
-        let (provider, captured_request) =
-            open_responses_captured_provider("lmstudio", "qwen/qwen3");
-        let model = provider.language_model("qwen/qwen3");
+    fn open_responses_provider_sends_instructions_from_system_message() {
+        let (warnings, request_body) =
+            open_responses_lmstudio_request_body(LanguageModelCallOptions::new(vec![
+                LanguageModelMessage::System(LanguageModelSystemMessage::new(
+                    "You are a helpful assistant.",
+                )),
+                open_responses_user_text_message("Hello"),
+            ]));
 
-        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
-            LanguageModelMessage::System(LanguageModelSystemMessage::new("You are concise.")),
-            LanguageModelMessage::System(LanguageModelSystemMessage::new("Use metric units.")),
-            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
-                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
-            ])),
-        ])));
-
-        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
-        let request_body = captured_open_responses_request_body(&captured_request);
+        assert!(warnings.is_empty());
         assert_eq!(
             request_body,
             json!({
-                "model": "qwen/qwen3",
+                "model": "gemma-7b-it",
                 "input": [
                     {
                         "role": "user",
@@ -8726,7 +8721,39 @@ mod tests {
                         ]
                     }
                 ],
-                "instructions": "You are concise.\nUse metric units."
+                "instructions": "You are a helpful assistant."
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_joins_multiple_system_messages_with_newlines() {
+        let (warnings, request_body) =
+            open_responses_lmstudio_request_body(LanguageModelCallOptions::new(vec![
+                LanguageModelMessage::System(LanguageModelSystemMessage::new(
+                    "You are a helpful assistant.",
+                )),
+                LanguageModelMessage::System(LanguageModelSystemMessage::new("Always be concise.")),
+                open_responses_user_text_message("Hello"),
+            ]));
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gemma-7b-it",
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "instructions": "You are a helpful assistant.\nAlways be concise."
             })
         );
     }
@@ -16196,7 +16223,7 @@ mod tests {
         assert!(request_body.get("frequency_penalty").is_none());
     }
 
-    fn lmstudio_reasoning_request_body(
+    fn open_responses_lmstudio_request_body(
         options: LanguageModelCallOptions,
     ) -> (Vec<Warning>, JsonValue) {
         let (provider, captured_request) =
@@ -16208,6 +16235,12 @@ mod tests {
             result.warnings,
             captured_open_responses_request_body(&captured_request),
         )
+    }
+
+    fn lmstudio_reasoning_request_body(
+        options: LanguageModelCallOptions,
+    ) -> (Vec<Warning>, JsonValue) {
+        open_responses_lmstudio_request_body(options)
     }
 
     fn lmstudio_hello_options() -> LanguageModelCallOptions {
