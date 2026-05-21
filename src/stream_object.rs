@@ -1306,6 +1306,22 @@ mod tests {
         })
     }
 
+    fn enum_response_schema(enum_values: &[&str]) -> JsonSchema {
+        serde_json::from_value(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": {
+                "result": {
+                    "type": "string",
+                    "enum": enum_values,
+                }
+            },
+            "required": ["result"],
+            "additionalProperties": false,
+        }))
+        .expect("enum response schema is a JSON object")
+    }
+
     fn object_stream() -> Vec<LanguageModelStreamPart> {
         vec![
             LanguageModelStreamPart::ResponseMetadata(
@@ -2327,6 +2343,40 @@ mod tests {
     }
 
     #[test]
+    fn stream_object_enum_output_streams_value_and_sends_response_format() {
+        let enum_values = ["sunny", "rainy", "snowy"];
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "{ ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    r#""result": "#,
+                )),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", r#""su"#)),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "nny")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", r#"""#)),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", " }")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_enum_values(enum_values),
+        ));
+
+        assert_eq!(result.object, Some(json!("sunny")));
+        assert_eq!(result.partial_object_stream, vec![json!("sunny")]);
+        assert_eq!(
+            model.stream_calls()[0].response_format,
+            Some(
+                LanguageModelResponseFormat::json().with_schema(enum_response_schema(&enum_values))
+            )
+        );
+    }
+
+    #[test]
     fn stream_object_enum_output_completes_unambiguous_prefixes() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
@@ -2396,6 +2446,33 @@ mod tests {
 
         assert_eq!(result.object, None);
         assert_eq!(result.partial_object_stream, Vec::<JsonValue>::new());
+    }
+
+    #[test]
+    fn stream_object_enum_output_handles_non_ambiguous_values() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "{ ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    r#""result": "#,
+                )),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", r#""foo"#)),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "bar")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", r#"""#)),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", " }")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_enum_values(["foobar", "barfoo"]),
+        ));
+
+        assert_eq!(result.object, Some(json!("foobar")));
+        assert_eq!(result.partial_object_stream, vec![json!("foobar")]);
     }
 
     #[test]
