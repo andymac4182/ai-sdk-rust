@@ -293,14 +293,45 @@ impl<'transport, 'agent, M: LanguageModel + ?Sized> DirectChatTransport<'transpo
     }
 }
 
+/// Options for converting portable UI messages into model messages.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConvertUiMessagesToModelMessagesOptions {
+    /// Ignore incomplete tool calls before converting the remaining parts.
+    #[serde(default)]
+    pub ignore_incomplete_tool_calls: bool,
+}
+
+impl ConvertUiMessagesToModelMessagesOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_ignore_incomplete_tool_calls(mut self, ignore: bool) -> Self {
+        self.ignore_incomplete_tool_calls = ignore;
+        self
+    }
+}
+
 /// Converts portable UI messages into model messages for in-process transports.
 pub fn convert_ui_messages_to_model_messages(
     messages: &[UiMessage],
 ) -> Result<LanguageModelPrompt, ChatTransportError> {
+    convert_ui_messages_to_model_messages_with_options(
+        messages,
+        ConvertUiMessagesToModelMessagesOptions::default(),
+    )
+}
+
+/// Converts portable UI messages into model messages with conversion options.
+pub fn convert_ui_messages_to_model_messages_with_options(
+    messages: &[UiMessage],
+    options: ConvertUiMessagesToModelMessagesOptions,
+) -> Result<LanguageModelPrompt, ChatTransportError> {
     let mut model_messages = Vec::new();
 
     for message in messages {
-        model_messages.extend(convert_ui_message_to_model_messages(message)?);
+        model_messages.extend(convert_ui_message_to_model_messages(message, options)?);
     }
 
     Ok(model_messages)
@@ -308,6 +339,7 @@ pub fn convert_ui_messages_to_model_messages(
 
 fn convert_ui_message_to_model_messages(
     message: &UiMessage,
+    options: ConvertUiMessagesToModelMessagesOptions,
 ) -> Result<Vec<LanguageModelMessage>, ChatTransportError> {
     if message.id.is_empty() {
         return Err(ChatTransportError::InvalidMessage(
@@ -318,7 +350,7 @@ fn convert_ui_message_to_model_messages(
     match message.role {
         UiMessageRole::System => convert_system_ui_message(message).map(|message| vec![message]),
         UiMessageRole::User => convert_user_ui_message(message).map(|message| vec![message]),
-        UiMessageRole::Assistant => convert_assistant_ui_message(message),
+        UiMessageRole::Assistant => convert_assistant_ui_message(message, options),
     }
 }
 
@@ -381,6 +413,7 @@ fn convert_user_ui_message(
 
 fn convert_assistant_ui_message(
     message: &UiMessage,
+    options: ConvertUiMessagesToModelMessagesOptions,
 ) -> Result<Vec<LanguageModelMessage>, ChatTransportError> {
     let mut model_messages = Vec::new();
     let mut block = Vec::new();
@@ -389,6 +422,8 @@ fn convert_assistant_ui_message(
         let kind = ui_message_part_type(part)?;
         if kind == "step-start" {
             flush_assistant_ui_message_block(&mut model_messages, &mut block)?;
+        } else if should_ignore_incomplete_tool_part(part, kind, options)? {
+            continue;
         } else {
             block.push(part);
         }
@@ -396,6 +431,21 @@ fn convert_assistant_ui_message(
     flush_assistant_ui_message_block(&mut model_messages, &mut block)?;
 
     Ok(model_messages)
+}
+
+fn should_ignore_incomplete_tool_part(
+    part: &JsonValue,
+    kind: &str,
+    options: ConvertUiMessagesToModelMessagesOptions,
+) -> Result<bool, ChatTransportError> {
+    if !options.ignore_incomplete_tool_calls
+        || !(kind == "dynamic-tool" || kind.starts_with("tool-"))
+    {
+        return Ok(false);
+    }
+
+    let state = ui_message_string_field(part, "state")?;
+    Ok(state == "input-streaming" || state == "input-available")
 }
 
 fn flush_assistant_ui_message_block(
@@ -3360,6 +3410,88 @@ mod tests {
                             "toolCallId": "call-4",
                             "toolName": "screenshot",
                             "output": { "type": "text", "value": "result-4" }
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "response" }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "Thanks!" }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_can_ignore_incomplete_tool_calls() {
+        let messages = convert_ui_messages_to_model_messages_with_options(
+            &[
+                UiMessage::new("msg-1", UiMessageRole::Assistant)
+                    .with_part(json!({ "type": "step-start" }))
+                    .with_part(json!({
+                        "type": "tool-screenshot",
+                        "state": "output-available",
+                        "toolCallId": "call-1",
+                        "input": { "value": "value-1" },
+                        "output": "result-1"
+                    }))
+                    .with_part(json!({ "type": "step-start" }))
+                    .with_part(json!({
+                        "type": "tool-screenshot",
+                        "state": "input-streaming",
+                        "toolCallId": "call-2",
+                        "input": { "value": "value-2" }
+                    }))
+                    .with_part(json!({
+                        "type": "tool-screenshot",
+                        "state": "input-available",
+                        "toolCallId": "call-3",
+                        "input": { "value": "value-3" }
+                    }))
+                    .with_part(json!({
+                        "type": "dynamic-tool",
+                        "toolName": "tool-screenshot2",
+                        "state": "input-available",
+                        "toolCallId": "call-3",
+                        "input": { "value": "value-3" }
+                    }))
+                    .with_part(json!({ "type": "text", "text": "response", "state": "done" })),
+                UiMessage::new("msg-2", UiMessageRole::User)
+                    .with_part(json!({ "type": "text", "text": "Thanks!" })),
+            ],
+            ConvertUiMessagesToModelMessagesOptions::new().with_ignore_incomplete_tool_calls(true),
+        )
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-1",
+                            "toolName": "screenshot",
+                            "input": { "value": "value-1" }
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-1",
+                            "toolName": "screenshot",
+                            "output": { "type": "text", "value": "result-1" }
                         }
                     ]
                 },
