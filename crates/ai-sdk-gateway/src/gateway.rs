@@ -1092,6 +1092,7 @@ impl GatewayProvider {
     pub fn video_model(&self, model_id: impl Into<String>) -> GatewayVideoModel {
         GatewayVideoModel {
             model_id: model_id.into(),
+            provider_id: GATEWAY_PROVIDER_ID.to_string(),
             settings: self.settings.clone(),
             transport: Arc::clone(&self.transport),
         }
@@ -1321,6 +1322,7 @@ pub struct GatewayRerankingModel {
 #[derive(Clone)]
 pub struct GatewayVideoModel {
     model_id: String,
+    provider_id: String,
     settings: GatewayProviderSettings,
     transport: GatewayTransport,
 }
@@ -1865,6 +1867,12 @@ impl GatewayVideoModel {
         self
     }
 
+    /// Returns a copy of this model with an explicit provider identifier.
+    pub fn with_provider_id(mut self, provider_id: impl Into<String>) -> Self {
+        self.provider_id = provider_id.into();
+        self
+    }
+
     async fn do_generate_result(&self, options: VideoModelCallOptions) -> VideoModelResult {
         let request_body = gateway_video_request_body(&options);
         let request_headers = self.request_headers(options.headers.as_ref());
@@ -2095,7 +2103,7 @@ impl VideoModel for GatewayVideoModel {
     }
 
     fn provider(&self) -> &str {
-        GATEWAY_PROVIDER_ID
+        &self.provider_id
     }
 
     fn model_id(&self) -> &str {
@@ -3609,7 +3617,7 @@ mod tests {
         GatewayProviderOptions, GatewayProviderOptionsSort, GatewayProviderSettings,
         GatewayProviderTimeouts, GatewayRerankingModel, GatewaySpendReportDatePart,
         GatewaySpendReportGroupBy, GatewaySpendReportParams, GatewayTransport,
-        GatewayTransportFuture, create_gateway, gateway, gateway_base_url,
+        GatewayTransportFuture, GatewayVideoModel, create_gateway, gateway, gateway_base_url,
         gateway_observability_headers_with_env, gateway_provider_headers_with_env,
         gateway_provider_options, get_gateway_auth_token_with_env, metadata_cache_refresh_duration,
         try_gateway_provider_headers_with_env, try_gateway_provider_options,
@@ -3624,7 +3632,8 @@ mod tests {
         LanguageModelUserMessage, Provider, ProviderMetadata, ProviderOptions,
         ProviderWithRerankingModel, ProviderWithVideoModel, RerankingModel,
         RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
-        SpecificationVersion, VideoModel, VideoModelCallOptions, VideoModelFile, Warning,
+        SpecificationVersion, VideoModel, VideoModelCallOptions, VideoModelFile,
+        VideoModelVideoData, Warning,
     };
     use ai_sdk_provider_utils::{
         FetchErrorInfo, ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod,
@@ -4113,6 +4122,85 @@ mod tests {
             "images": ["base64-image-1"]
         })
         .to_string()
+    }
+
+    const GATEWAY_VIDEO_TEST_MODEL_ID: &str = "google/veo-2.0-generate-001";
+
+    fn capturing_video_transport(
+        status_code: u16,
+        status_text: impl Into<String>,
+        body: impl Into<String>,
+        headers: Option<Headers>,
+    ) -> (GatewayTransport, Arc<Mutex<Option<ProviderApiRequest>>>) {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let status_text = status_text.into();
+        let body = body.into();
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            let mut response =
+                ProviderApiResponse::text(status_code, status_text.clone(), body.clone());
+
+            if let Some(headers) = headers.clone() {
+                response = response.with_headers(headers);
+            }
+
+            Box::pin(ready(Ok(response)))
+        });
+
+        (transport, captured_request)
+    }
+
+    fn captured_video_request(
+        captured_request: &Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) -> ProviderApiRequest {
+        captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+    }
+
+    fn gateway_video_test_model(
+        transport: GatewayTransport,
+        model_id: impl Into<String>,
+    ) -> GatewayVideoModel {
+        GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .video_model(model_id)
+    }
+
+    fn gateway_video_request_json(request: &ProviderApiRequest) -> JsonValue {
+        request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("video request body is JSON")
+    }
+
+    fn gateway_video_sse_body(event: JsonValue) -> String {
+        format!("data: {event}\n\n")
+    }
+
+    fn gateway_video_success_response_body() -> String {
+        gateway_video_sse_body(json!({
+                "type": "result",
+                "videos": [
+                    {
+                        "type": "base64",
+                        "data": "base64-video-1",
+                        "mediaType": "video/mp4"
+                    }
+                ]
+        }))
     }
 
     fn assert_auth_token_case(
@@ -8492,6 +8580,1054 @@ mod tests {
                 .and_then(|metadata| metadata.get("statusCode"))
                 .and_then(JsonValue::as_u64),
             Some(200)
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_creates_instance_with_correct_properties() {
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .video_model(GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        assert_eq!(model.model_id(), GATEWAY_VIDEO_TEST_MODEL_ID);
+        assert_eq!(model.provider(), "gateway");
+        assert_eq!(model.specification_version(), SpecificationVersion::V4);
+        assert_eq!(poll_ready(model.max_videos_per_call()), Some(usize::MAX));
+    }
+
+    #[test]
+    fn gateway_video_model_avoids_client_side_splitting_for_video_models() {
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .video_model("fal/luma-ray-2");
+
+        assert_eq!(poll_ready(model.max_videos_per_call()), Some(usize::MAX));
+    }
+
+    #[test]
+    fn gateway_video_model_accepts_custom_provider_name() {
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .video_model(GATEWAY_VIDEO_TEST_MODEL_ID)
+        .with_provider_id("custom-gateway");
+
+        assert_eq!(model.provider(), "custom-gateway");
+    }
+
+    #[test]
+    fn gateway_video_model_sends_correct_request_headers() {
+        let (transport, captured_request) =
+            capturing_video_transport(200, "OK", gateway_video_success_response_body(), None);
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result = poll_ready(model.do_generate(
+            VideoModelCallOptions::new(1).with_prompt("A beautiful sunset over mountains"),
+        ));
+
+        assert_eq!(result.videos.len(), 1);
+        let request = captured_video_request(&captured_request);
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-token")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-video-model-specification-version")
+                .map(String::as_str),
+            Some("4")
+        );
+        assert_eq!(
+            request.headers.get("ai-model-id").map(String::as_str),
+            Some(GATEWAY_VIDEO_TEST_MODEL_ID)
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_sends_correct_request_body_with_all_parameters() {
+        let (transport, captured_request) =
+            capturing_video_transport(200, "OK", gateway_video_success_response_body(), None);
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+        let mut provider_options = ProviderOptions::new();
+        provider_options.insert(
+            "fal".to_string(),
+            json_object(json!({
+                "motionStrength": 0.8
+            })),
+        );
+
+        let result = poll_ready(
+            model.do_generate(
+                VideoModelCallOptions::new(1)
+                    .with_prompt("A cat playing piano")
+                    .with_aspect_ratio("16:9")
+                    .with_resolution("1920x1080")
+                    .with_duration(5.0)
+                    .with_fps(24.0)
+                    .with_seed(42)
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(result.videos.len(), 1);
+        let request = captured_video_request(&captured_request);
+        assert_eq!(
+            gateway_video_request_json(&request),
+            json!({
+                "prompt": "A cat playing piano",
+                "n": 1,
+                "aspectRatio": "16:9",
+                "resolution": "1920x1080",
+                "duration": 5.0,
+                "fps": 24.0,
+                "seed": 42,
+                "providerOptions": {
+                    "fal": {
+                        "motionStrength": 0.8
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_omits_optional_parameters_when_not_provided() {
+        let (transport, captured_request) =
+            capturing_video_transport(200, "OK", gateway_video_success_response_body(), None);
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result = poll_ready(
+            model.do_generate(VideoModelCallOptions::new(1).with_prompt("A simple prompt")),
+        );
+
+        assert_eq!(result.videos.len(), 1);
+        let request = captured_video_request(&captured_request);
+        let request_body = gateway_video_request_json(&request);
+        assert_eq!(
+            request_body,
+            json!({
+                "prompt": "A simple prompt",
+                "n": 1,
+                "providerOptions": {}
+            })
+        );
+        assert!(request_body.get("aspectRatio").is_none());
+        assert!(request_body.get("resolution").is_none());
+        assert!(request_body.get("duration").is_none());
+        assert!(request_body.get("fps").is_none());
+        assert!(request_body.get("seed").is_none());
+    }
+
+    #[test]
+    fn gateway_video_model_returns_videos_array_correctly() {
+        let (transport, _) = capturing_video_transport(
+            200,
+            "OK",
+            gateway_video_sse_body(json!({
+                "type": "result",
+                "videos": [
+                    {
+                        "type": "base64",
+                        "data": "base64-video-1",
+                        "mediaType": "video/mp4"
+                    },
+                    {
+                        "type": "base64",
+                        "data": "base64-video-2",
+                        "mediaType": "video/webm"
+                    }
+                ]
+            })),
+            None,
+        );
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(2).with_prompt("Test prompt")));
+
+        assert_eq!(
+            result.videos,
+            vec![
+                VideoModelVideoData::base64("base64-video-1", "video/mp4"),
+                VideoModelVideoData::base64("base64-video-2", "video/webm")
+            ]
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_returns_url_type_videos_correctly() {
+        let video_url = Url::parse("https://example.com/video.mp4").expect("URL is valid");
+        let (transport, _) = capturing_video_transport(
+            200,
+            "OK",
+            gateway_video_sse_body(json!({
+                "type": "result",
+                "videos": [
+                    {
+                        "type": "url",
+                        "url": video_url.as_str(),
+                        "mediaType": "video/mp4"
+                    }
+                ]
+            })),
+            None,
+        );
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert_eq!(
+            result.videos,
+            vec![VideoModelVideoData::url(video_url, "video/mp4")]
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_returns_provider_metadata_correctly() {
+        let expected_metadata: ProviderMetadata = serde_json::from_value(json!({
+            "fal": {
+                "videos": [
+                    {
+                        "duration": 5.0,
+                        "fps": 24,
+                        "width": 1280,
+                        "height": 720
+                    }
+                ]
+            },
+            "gateway": {
+                "routing": {
+                    "provider": "fal"
+                },
+                "cost": "0.15"
+            }
+        }))
+        .expect("provider metadata deserializes");
+        let (transport, _) = capturing_video_transport(
+            200,
+            "OK",
+            gateway_video_sse_body(json!({
+                "type": "result",
+                "videos": [
+                    {
+                        "type": "base64",
+                        "data": "base64-1",
+                        "mediaType": "video/mp4"
+                    }
+                ],
+                "providerMetadata": expected_metadata
+            })),
+            None,
+        );
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert_eq!(result.provider_metadata, Some(expected_metadata));
+    }
+
+    #[test]
+    fn gateway_video_model_handles_provider_metadata_without_videos_field() {
+        let expected_metadata: ProviderMetadata = serde_json::from_value(json!({
+            "gateway": {
+                "routing": {
+                    "provider": "google"
+                },
+                "cost": "0.10"
+            }
+        }))
+        .expect("provider metadata deserializes");
+        let (transport, _) = capturing_video_transport(
+            200,
+            "OK",
+            gateway_video_sse_body(json!({
+                "type": "result",
+                "videos": [
+                    {
+                        "type": "base64",
+                        "data": "base64-1",
+                        "mediaType": "video/mp4"
+                    }
+                ],
+                "providerMetadata": expected_metadata
+            })),
+            None,
+        );
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert_eq!(result.provider_metadata, Some(expected_metadata));
+    }
+
+    #[test]
+    fn gateway_video_model_handles_empty_provider_metadata() {
+        let (transport, _) = capturing_video_transport(
+            200,
+            "OK",
+            gateway_video_sse_body(json!({
+                "type": "result",
+                "videos": [
+                    {
+                        "type": "base64",
+                        "data": "base64-1",
+                        "mediaType": "video/mp4"
+                    }
+                ],
+                "providerMetadata": {}
+            })),
+            None,
+        );
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert_eq!(result.provider_metadata, Some(ProviderMetadata::new()));
+    }
+
+    #[test]
+    fn gateway_video_model_handles_undefined_provider_metadata() {
+        let (transport, _) =
+            capturing_video_transport(200, "OK", gateway_video_success_response_body(), None);
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert!(result.provider_metadata.is_none());
+    }
+
+    #[test]
+    fn gateway_video_model_returns_warnings_when_provided() {
+        let (transport, _) = capturing_video_transport(
+            200,
+            "OK",
+            gateway_video_sse_body(json!({
+                "type": "result",
+                "videos": [
+                    {
+                        "type": "base64",
+                        "data": "base64-1",
+                        "mediaType": "video/mp4"
+                    }
+                ],
+                "warnings": [
+                    {
+                        "type": "other",
+                        "message": "Duration exceeds maximum"
+                    }
+                ]
+            })),
+            None,
+        );
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Other {
+                message: "Duration exceeds maximum".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_returns_unsupported_warnings_correctly() {
+        let (transport, _) = capturing_video_transport(
+            200,
+            "OK",
+            gateway_video_sse_body(json!({
+                "type": "result",
+                "videos": [
+                    {
+                        "type": "base64",
+                        "data": "base64-1",
+                        "mediaType": "video/mp4"
+                    }
+                ],
+                "warnings": [
+                    {
+                        "type": "unsupported",
+                        "feature": "aspectRatio",
+                        "details": "KlingAI image-to-video does not support aspectRatio. The output dimensions are determined by the input image."
+                    }
+                ]
+            })),
+            None,
+        );
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Unsupported {
+                feature: "aspectRatio".to_string(),
+                details: Some("KlingAI image-to-video does not support aspectRatio. The output dimensions are determined by the input image.".to_string())
+            }]
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_returns_compatibility_warnings_correctly() {
+        let (transport, _) = capturing_video_transport(
+            200,
+            "OK",
+            gateway_video_sse_body(json!({
+                "type": "result",
+                "videos": [
+                    {
+                        "type": "base64",
+                        "data": "base64-1",
+                        "mediaType": "video/mp4"
+                    }
+                ],
+                "warnings": [
+                    {
+                        "type": "compatibility",
+                        "feature": "resolution",
+                        "details": "Resolution was adjusted to nearest supported value."
+                    }
+                ]
+            })),
+            None,
+        );
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Compatibility {
+                feature: "resolution".to_string(),
+                details: Some("Resolution was adjusted to nearest supported value.".to_string())
+            }]
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_returns_empty_warnings_array_when_not_provided() {
+        let (transport, _) =
+            capturing_video_transport(200, "OK", gateway_video_success_response_body(), None);
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert_eq!(result.warnings, Vec::<Warning>::new());
+    }
+
+    #[test]
+    fn gateway_video_model_includes_response_metadata() {
+        let mut headers = Headers::new();
+        headers.insert("x-request-id".to_string(), "req-video-123".to_string());
+        let (transport, _) = capturing_video_transport(
+            200,
+            "OK",
+            gateway_video_success_response_body(),
+            Some(headers),
+        );
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert_eq!(result.response.model_id, GATEWAY_VIDEO_TEST_MODEL_ID);
+        assert!(result.response.timestamp.unix_timestamp() > 0);
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("req-video-123")
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_merges_custom_headers_with_config_headers() {
+        let (transport, captured_request) =
+            capturing_video_transport(200, "OK", gateway_video_success_response_body(), None);
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result = poll_ready(
+            model.do_generate(
+                VideoModelCallOptions::new(1)
+                    .with_prompt("Test prompt")
+                    .with_header("X-Custom-Header", "custom-value"),
+            ),
+        );
+
+        assert_eq!(result.videos.len(), 1);
+        let request = captured_video_request(&captured_request);
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-token")
+        );
+        assert_eq!(
+            request.headers.get("x-custom-header").map(String::as_str),
+            Some("custom-value")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-video-model-specification-version")
+                .map(String::as_str),
+            Some("4")
+        );
+        assert_eq!(
+            request.headers.get("ai-model-id").map(String::as_str),
+            Some(GATEWAY_VIDEO_TEST_MODEL_ID)
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_includes_o11y_headers() {
+        let (transport, captured_request) =
+            capturing_video_transport(200, "OK", gateway_video_success_response_body(), None);
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token")
+                .with_vercel_request_id("dpl_123"),
+        )
+        .with_transport(transport)
+        .video_model(GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert_eq!(result.videos.len(), 1);
+        let request = captured_video_request(&captured_request);
+        assert_eq!(
+            request
+                .headers
+                .get("ai-o11y-request-id")
+                .map(String::as_str),
+            Some("dpl_123")
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_passes_abort_signal_to_fetch() {
+        let (transport, captured_request) =
+            capturing_video_transport(200, "OK", gateway_video_success_response_body(), None);
+        let abort_controller = LanguageModelAbortController::new();
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result = poll_ready(
+            model.do_generate(
+                VideoModelCallOptions::new(1)
+                    .with_prompt("Test prompt")
+                    .with_abort_signal(abort_controller.signal()),
+            ),
+        );
+
+        assert_eq!(result.videos.len(), 1);
+        let request = captured_video_request(&captured_request);
+        assert_request_tracks_abort_signal(&request, &abort_controller);
+    }
+
+    #[test]
+    fn gateway_video_model_handles_api_errors_correctly() {
+        let (transport, _) = capturing_video_transport(
+            400,
+            "Bad Request",
+            json!({
+                "error": {
+                    "message": "Invalid request",
+                    "code": "invalid_request"
+                }
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert!(result.videos.is_empty());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("errorMessage"))
+                .and_then(JsonValue::as_str),
+            Some("Invalid request")
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("statusCode"))
+                .and_then(JsonValue::as_u64),
+            Some(400)
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_handles_authentication_errors() {
+        let (transport, _) = capturing_video_transport(
+            401,
+            "Unauthorized",
+            json!({
+                "error": {
+                    "message": "Unauthorized",
+                    "code": "unauthorized"
+                }
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert!(result.videos.is_empty());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("errorMessage"))
+                .and_then(JsonValue::as_str),
+            Some("Unauthorized")
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("statusCode"))
+                .and_then(JsonValue::as_u64),
+            Some(401)
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_throws_on_sse_error_event_with_correct_message_and_status() {
+        let (transport, _) = capturing_video_transport(
+            200,
+            "OK",
+            gateway_video_sse_body(json!({
+                "type": "error",
+                "message": "Rate limit exceeded",
+                "errorType": "rate_limit_exceeded",
+                "statusCode": 429,
+                "param": null
+            })),
+            None,
+        );
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert!(result.videos.is_empty());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("errorMessage"))
+                .and_then(JsonValue::as_str),
+            Some("Rate limit exceeded")
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("statusCode"))
+                .and_then(JsonValue::as_u64),
+            Some(429)
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_throws_on_sse_error_event_with_provider_routing_failure() {
+        let (transport, _) = capturing_video_transport(
+            200,
+            "OK",
+            gateway_video_sse_body(json!({
+                "type": "error",
+                "message": "All providers failed",
+                "errorType": "internal_server_error",
+                "statusCode": 500,
+                "param": null
+            })),
+            None,
+        );
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert!(result.videos.is_empty());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("errorMessage"))
+                .and_then(JsonValue::as_str),
+            Some("All providers failed")
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("statusCode"))
+                .and_then(JsonValue::as_u64),
+            Some(500)
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_throws_on_empty_sse_stream() {
+        let (transport, _) = capturing_video_transport(200, "OK", "", None);
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert!(result.videos.is_empty());
+        assert!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("errorMessage"))
+                .and_then(JsonValue::as_str)
+                .is_some_and(|message| message.contains("SSE stream ended without a data event"))
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_ignores_sse_heartbeat_comments_and_parses_data_event() {
+        let (transport, _) = capturing_video_transport(
+            200,
+            "OK",
+            format!(
+                ":\n\n:\n\n{}",
+                gateway_video_sse_body(json!({
+                    "type": "result",
+                    "videos": [
+                        {
+                            "type": "base64",
+                            "data": "base64-1",
+                            "mediaType": "video/mp4"
+                        }
+                    ]
+                }))
+            ),
+            None,
+        );
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert_eq!(
+            result.videos,
+            vec![VideoModelVideoData::base64("base64-1", "video/mp4")]
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_includes_provider_options_object_in_request_body() {
+        let (transport, captured_request) =
+            capturing_video_transport(200, "OK", gateway_video_success_response_body(), None);
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+        let mut provider_options = ProviderOptions::new();
+        provider_options.insert(
+            "fal".to_string(),
+            json_object(json!({
+                "motionStrength": 0.8,
+                "loop": true
+            })),
+        );
+        provider_options.insert(
+            "google".to_string(),
+            json_object(json!({
+                "enhancePrompt": true
+            })),
+        );
+
+        let result = poll_ready(
+            model.do_generate(
+                VideoModelCallOptions::new(1)
+                    .with_prompt("Test prompt")
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(result.videos.len(), 1);
+        let request = captured_video_request(&captured_request);
+        assert_eq!(
+            gateway_video_request_json(&request),
+            json!({
+                "prompt": "Test prompt",
+                "n": 1,
+                "providerOptions": {
+                    "fal": {
+                        "motionStrength": 0.8,
+                        "loop": true
+                    },
+                    "google": {
+                        "enhancePrompt": true
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_handles_empty_provider_options() {
+        let (transport, captured_request) =
+            capturing_video_transport(200, "OK", gateway_video_success_response_body(), None);
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert_eq!(result.videos.len(), 1);
+        let request = captured_video_request(&captured_request);
+        assert_eq!(
+            gateway_video_request_json(&request),
+            json!({
+                "prompt": "Test prompt",
+                "n": 1,
+                "providerOptions": {}
+            })
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_handles_different_model_ids() {
+        let (transport, captured_request) =
+            capturing_video_transport(200, "OK", gateway_video_success_response_body(), None);
+        let model = gateway_video_test_model(transport, "fal/luma-ray-2");
+
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert_eq!(result.videos.len(), 1);
+        let request = captured_video_request(&captured_request);
+        assert_eq!(
+            request.headers.get("ai-model-id").map(String::as_str),
+            Some("fal/luma-ray-2")
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_handles_complex_provider_metadata_with_multiple_providers() {
+        let expected_metadata: ProviderMetadata = serde_json::from_value(json!({
+            "fal": {
+                "videos": [
+                    {
+                        "duration": 5.0,
+                        "fps": 24,
+                        "width": 1920,
+                        "height": 1080
+                    }
+                ],
+                "usage": {
+                    "computeUnits": 10
+                }
+            },
+            "gateway": {
+                "routing": {
+                    "provider": "fal",
+                    "attempts": [
+                        {
+                            "provider": "google",
+                            "success": false
+                        },
+                        {
+                            "provider": "fal",
+                            "success": true
+                        }
+                    ]
+                },
+                "cost": "0.20",
+                "marketCost": "0.30",
+                "generationId": "gen-xyz-789"
+            }
+        }))
+        .expect("provider metadata deserializes");
+        let (transport, _) = capturing_video_transport(
+            200,
+            "OK",
+            gateway_video_sse_body(json!({
+                "type": "result",
+                "videos": [
+                    {
+                        "type": "base64",
+                        "data": "base64-1",
+                        "mediaType": "video/mp4"
+                    }
+                ],
+                "providerMetadata": expected_metadata
+            })),
+            None,
+        );
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(VideoModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert_eq!(result.provider_metadata, Some(expected_metadata));
+    }
+
+    #[test]
+    fn gateway_video_model_encodes_uint8_array_image_to_base64_string() {
+        let (transport, captured_request) =
+            capturing_video_transport(200, "OK", gateway_video_success_response_body(), None);
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result = poll_ready(
+            model.do_generate(
+                VideoModelCallOptions::new(1)
+                    .with_prompt("Animate this image")
+                    .with_image(VideoModelFile::file(
+                        "image/png",
+                        FileDataContent::Bytes(b"Hello".to_vec()),
+                    )),
+            ),
+        );
+
+        assert_eq!(result.videos.len(), 1);
+        let request = captured_video_request(&captured_request);
+        assert_eq!(
+            gateway_video_request_json(&request).get("image"),
+            Some(&json!({
+                "type": "file",
+                "mediaType": "image/png",
+                "data": "SGVsbG8="
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_passes_through_image_with_string_data_unchanged() {
+        let (transport, captured_request) =
+            capturing_video_transport(200, "OK", gateway_video_success_response_body(), None);
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result = poll_ready(
+            model.do_generate(
+                VideoModelCallOptions::new(1)
+                    .with_prompt("Animate this image")
+                    .with_image(VideoModelFile::file(
+                        "image/png",
+                        FileDataContent::Base64("already-base64-encoded".to_string()),
+                    )),
+            ),
+        );
+
+        assert_eq!(result.videos.len(), 1);
+        let request = captured_video_request(&captured_request);
+        assert_eq!(
+            gateway_video_request_json(&request).get("image"),
+            Some(&json!({
+                "type": "file",
+                "mediaType": "image/png",
+                "data": "already-base64-encoded"
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_passes_through_url_type_image_unchanged() {
+        let (transport, captured_request) =
+            capturing_video_transport(200, "OK", gateway_video_success_response_body(), None);
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+
+        let result = poll_ready(
+            model.do_generate(
+                VideoModelCallOptions::new(1)
+                    .with_prompt("Animate this image")
+                    .with_image(VideoModelFile::url(
+                        Url::parse("https://example.com/image.png").expect("URL is valid"),
+                    )),
+            ),
+        );
+
+        assert_eq!(result.videos.len(), 1);
+        let request = captured_video_request(&captured_request);
+        assert_eq!(
+            gateway_video_request_json(&request).get("image"),
+            Some(&json!({
+                "type": "url",
+                "url": "https://example.com/image.png"
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_video_model_preserves_provider_options_on_image_during_encoding() {
+        let (transport, captured_request) =
+            capturing_video_transport(200, "OK", gateway_video_success_response_body(), None);
+        let model = gateway_video_test_model(transport, GATEWAY_VIDEO_TEST_MODEL_ID);
+        let file_options: ProviderMetadata = serde_json::from_value(json!({
+            "fal": {
+                "enhanceImage": true
+            }
+        }))
+        .expect("provider metadata deserializes");
+
+        let result = poll_ready(
+            model.do_generate(
+                VideoModelCallOptions::new(1)
+                    .with_prompt("Animate this image")
+                    .with_image(
+                        VideoModelFile::file(
+                            "image/png",
+                            FileDataContent::Bytes(b"Hello".to_vec()),
+                        )
+                        .with_provider_options(file_options),
+                    ),
+            ),
+        );
+
+        assert_eq!(result.videos.len(), 1);
+        let request = captured_video_request(&captured_request);
+        assert_eq!(
+            gateway_video_request_json(&request).get("image"),
+            Some(&json!({
+                "type": "file",
+                "mediaType": "image/png",
+                "data": "SGVsbG8=",
+                "providerOptions": {
+                    "fal": {
+                        "enhanceImage": true
+                    }
+                }
+            }))
         );
     }
 
