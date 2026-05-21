@@ -6994,6 +6994,8 @@ mod tests {
         include_str!("fixtures/openai-web-search-tool.1.json");
     const OPEN_RESPONSES_WEB_SEARCH_TOOL_CHUNKS_FIXTURE: &str =
         include_str!("fixtures/openai-web-search-tool.1.chunks.txt");
+    const OPEN_RESPONSES_LMSTUDIO_BASIC_CHUNKS_FIXTURE: &str =
+        include_str!("fixtures/lmstudio-basic.1.chunks.txt");
 
     fn openai_metadata_value<'a>(
         provider_metadata: &'a Option<ProviderMetadata>,
@@ -22158,6 +22160,147 @@ mod tests {
                 .as_ref()
                 .and_then(|raw| raw.get("total_tokens")),
             Some(&json!(3813))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_streams_lmstudio_basic_content() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    open_responses_sse_from_fixture_lines(
+                        OPEN_RESPONSES_LMSTUDIO_BASIC_CHUNKS_FIXTURE,
+                    ),
+                ))))
+            });
+        let provider = create_open_responses(
+            OpenResponsesProviderSettings::new("lmstudio", "https://localhost:1234/v1/responses")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("gemma-7b-it");
+
+        let stream_result = poll_ready(model.do_stream(lmstudio_hello_options()));
+
+        let fixture_events = OPEN_RESPONSES_LMSTUDIO_BASIC_CHUNKS_FIXTURE
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<JsonValue>(line).expect("fixture event is JSON"))
+            .collect::<Vec<_>>();
+        let expected_deltas = fixture_events
+            .iter()
+            .filter(|event| {
+                event.get("type").and_then(JsonValue::as_str) == Some("response.output_text.delta")
+            })
+            .map(|event| {
+                event
+                    .get("delta")
+                    .and_then(JsonValue::as_str)
+                    .expect("fixture delta event includes delta")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        let expected_final_text = fixture_events
+            .iter()
+            .find(|event| {
+                event.get("type").and_then(JsonValue::as_str) == Some("response.output_text.done")
+            })
+            .and_then(|event| event.get("text"))
+            .and_then(JsonValue::as_str)
+            .expect("fixture includes completed text");
+
+        let stream_start = stream_result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::StreamStart(start) => Some(start),
+                _ => None,
+            })
+            .expect("stream includes start");
+        assert!(stream_start.warnings.is_empty());
+
+        let text_start = stream_result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextStart(start) => Some(start),
+                _ => None,
+            })
+            .expect("stream includes text start");
+        assert_eq!(text_start.id, "msg_j8xwiqp4xj0qgn3hrsoit9");
+
+        let actual_deltas = stream_result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) => Some(delta.delta.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual_deltas, expected_deltas);
+        assert_eq!(actual_deltas.concat(), expected_final_text);
+
+        let text_end = stream_result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::TextEnd(end) => Some(end),
+                _ => None,
+            })
+            .expect("stream includes text end");
+        assert_eq!(text_end.id, "msg_j8xwiqp4xj0qgn3hrsoit9");
+
+        let finish = stream_result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish part");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(finish.finish_reason.raw, None);
+        assert_eq!(finish.usage.input_tokens.total, Some(31));
+        assert_eq!(finish.usage.input_tokens.no_cache, Some(1));
+        assert_eq!(finish.usage.input_tokens.cache_read, Some(30));
+        assert_eq!(finish.usage.output_tokens.total, Some(282));
+        assert_eq!(finish.usage.output_tokens.text, Some(282));
+        assert_eq!(finish.usage.output_tokens.reasoning, Some(0));
+        assert_eq!(
+            finish
+                .usage
+                .raw
+                .as_ref()
+                .and_then(|usage| usage.get("total_tokens")),
+            Some(&json!(313))
+        );
+
+        let request_body = captured_open_responses_request_body(&captured_request);
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gemma-7b-it",
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "stream": true
+            })
         );
     }
 
