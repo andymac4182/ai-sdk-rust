@@ -4566,10 +4566,11 @@ mod tests {
         LanguageModelContent, LanguageModelFilePart, LanguageModelFunctionTool,
         LanguageModelGenerateResult, LanguageModelMessage, LanguageModelProviderTool,
         LanguageModelReasoningEffort, LanguageModelReasoningPart, LanguageModelResponseFormat,
-        LanguageModelStreamPart, LanguageModelSystemMessage, LanguageModelTextPart,
-        LanguageModelTool, LanguageModelToolCallPart, LanguageModelToolChoice,
-        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultOutput,
-        LanguageModelToolResultPart, LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelStreamFinish, LanguageModelStreamPart, LanguageModelSystemMessage,
+        LanguageModelTextPart, LanguageModelTool, LanguageModelToolCallPart,
+        LanguageModelToolChoice, LanguageModelToolContentPart, LanguageModelToolMessage,
+        LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUserContentPart,
+        LanguageModelUserMessage,
     };
     use ai_sdk_provider::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
     use ai_sdk_provider::warning::Warning;
@@ -4795,6 +4796,71 @@ mod tests {
             .and_then(|body| body.as_text().map(str::to_string))
             .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok())
             .expect("request body is JSON")
+    }
+
+    fn openai_compatible_chat_empty_stream_body() -> String {
+        sse_body([json!({
+            "id": "chatcmpl-stream-test",
+            "object": "chat.completion.chunk",
+            "created": 1711115037,
+            "model": "grok-3",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 0,
+                "total_tokens": 10
+            }
+        })])
+    }
+
+    fn openai_compatible_chat_stream_test_model(
+        response_body: impl Into<String>,
+    ) -> (
+        OpenAICompatibleChatLanguageModel,
+        Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) {
+        let response_body = response_body.into();
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+                let response_body = response_body.clone();
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    response_body,
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
+            "test-provider",
+            "https://my.api.com/v1",
+        ))
+        .with_transport(transport)
+        .chat_model("grok-3");
+
+        (model, captured_request)
+    }
+
+    fn openai_compatible_chat_stream_finish(
+        stream: &[LanguageModelStreamPart],
+    ) -> &LanguageModelStreamFinish {
+        stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("finish part is present")
     }
 
     fn openai_compatible_test_provider_metadata_entry<'a>(
@@ -8933,6 +8999,255 @@ mod tests {
                     .and_then(JsonValue::as_str)
                     == Some("<Sig>")
         ));
+    }
+
+    #[test]
+    fn openai_compatible_chat_stream_accepts_camel_case_provider_options_key_for_hyphenated_provider_name()
+     {
+        let (model, captured_request) =
+            openai_compatible_chat_stream_test_model(openai_compatible_chat_empty_stream_body());
+        let provider_options = test_provider_options(json!({
+            "testProvider": {
+                "someCustomOption": "test-value"
+            }
+        }));
+
+        poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_provider_options(provider_options)
+                    .with_include_raw_chunks(false),
+            ),
+        );
+
+        assert_eq!(
+            captured_openai_compatible_chat_request_body(&captured_request).get("someCustomOption"),
+            Some(&json!("test-value"))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_stream_prefers_camel_case_options_over_raw_name_options() {
+        let (model, captured_request) =
+            openai_compatible_chat_stream_test_model(openai_compatible_chat_empty_stream_body());
+        let provider_options = test_provider_options(json!({
+            "test-provider": {
+                "someCustomOption": "raw-value"
+            },
+            "testProvider": {
+                "someCustomOption": "camel-value"
+            }
+        }));
+
+        poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_provider_options(provider_options)
+                    .with_include_raw_chunks(false),
+            ),
+        );
+
+        assert_eq!(
+            captured_openai_compatible_chat_request_body(&captured_request).get("someCustomOption"),
+            Some(&json!("camel-value"))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_stream_emits_deprecated_warning_when_raw_provider_options_key_is_used()
+     {
+        let (model, _captured_request) =
+            openai_compatible_chat_stream_test_model(openai_compatible_chat_empty_stream_body());
+        let provider_options = test_provider_options(json!({
+            "test-provider": {
+                "reasoningEffort": "high"
+            }
+        }));
+
+        let result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_provider_options(provider_options)
+                    .with_include_raw_chunks(false),
+            ),
+        );
+
+        assert!(matches!(
+            result.stream.first(),
+            Some(LanguageModelStreamPart::StreamStart(start))
+                if start.warnings == vec![Warning::Deprecated {
+                    setting: "providerOptions key 'test-provider'".to_string(),
+                    message: "Use 'testProvider' instead.".to_string()
+                }]
+        ));
+    }
+
+    #[test]
+    fn openai_compatible_chat_stream_does_not_warn_when_camel_case_provider_options_key_is_used() {
+        let (model, _captured_request) =
+            openai_compatible_chat_stream_test_model(openai_compatible_chat_empty_stream_body());
+        let provider_options = test_provider_options(json!({
+            "testProvider": {
+                "reasoningEffort": "high"
+            }
+        }));
+
+        let result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_provider_options(provider_options)
+                    .with_include_raw_chunks(false),
+            ),
+        );
+
+        assert!(matches!(
+            result.stream.first(),
+            Some(LanguageModelStreamPart::StreamStart(start)) if start.warnings.is_empty()
+        ));
+    }
+
+    #[test]
+    fn openai_compatible_chat_stream_uses_camel_case_metadata_key_in_finish_event_when_camel_case_options_are_used()
+     {
+        let (model, _captured_request) =
+            openai_compatible_chat_stream_test_model(openai_compatible_chat_empty_stream_body());
+        let provider_options = test_provider_options(json!({
+            "testProvider": {}
+        }));
+
+        let result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_provider_options(provider_options)
+                    .with_include_raw_chunks(false),
+            ),
+        );
+
+        let metadata = openai_compatible_chat_stream_finish(&result.stream)
+            .provider_metadata
+            .as_ref()
+            .expect("provider metadata exists");
+        assert!(metadata.contains_key("testProvider"));
+        assert!(!metadata.contains_key("test-provider"));
+    }
+
+    #[test]
+    fn openai_compatible_chat_stream_uses_raw_metadata_key_in_finish_event_when_raw_options_are_used()
+     {
+        let (model, _captured_request) =
+            openai_compatible_chat_stream_test_model(openai_compatible_chat_empty_stream_body());
+        let provider_options = test_provider_options(json!({
+            "test-provider": {}
+        }));
+
+        let result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_provider_options(provider_options)
+                    .with_include_raw_chunks(false),
+            ),
+        );
+
+        let metadata = openai_compatible_chat_stream_finish(&result.stream)
+            .provider_metadata
+            .as_ref()
+            .expect("provider metadata exists");
+        assert!(metadata.contains_key("test-provider"));
+    }
+
+    #[test]
+    fn openai_compatible_chat_stream_uses_raw_metadata_key_in_finish_event_when_no_provider_options_are_passed()
+     {
+        let (model, _captured_request) =
+            openai_compatible_chat_stream_test_model(openai_compatible_chat_empty_stream_body());
+
+        let result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_include_raw_chunks(false),
+            ),
+        );
+
+        let metadata = openai_compatible_chat_stream_finish(&result.stream)
+            .provider_metadata
+            .as_ref()
+            .expect("provider metadata exists");
+        assert!(metadata.contains_key("test-provider"));
+    }
+
+    #[test]
+    fn openai_compatible_chat_stream_uses_camel_case_metadata_key_for_thought_signatures_in_streamed_tool_calls()
+     {
+        let (model, _captured_request) = openai_compatible_chat_stream_test_model(sse_body([
+            json!({
+                "id": "chat-id",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "test_tool",
+                                        "arguments": "{\"a\":1}"
+                                    },
+                                    "extra_content": {
+                                        "google": {
+                                            "thought_signature": "<Sig>"
+                                        }
+                                    }
+                                }
+                            ]
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chat-id",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "tool_calls"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "total_tokens": 15
+                }
+            }),
+        ]));
+        let provider_options = test_provider_options(json!({
+            "testProvider": {}
+        }));
+
+        let result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_provider_options(provider_options)
+                    .with_include_raw_chunks(false),
+            ),
+        );
+
+        assert!(result.stream.iter().any(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::ToolCall(tool_call)
+                    if tool_call
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("testProvider"))
+                        .and_then(|metadata| metadata.get("thoughtSignature"))
+                        .and_then(JsonValue::as_str)
+                        == Some("<Sig>")
+            )
+        }));
     }
 
     #[test]
