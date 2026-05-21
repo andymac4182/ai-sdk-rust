@@ -3385,6 +3385,13 @@ fn gateway_error_metadata_entry(error: &GatewayError) -> JsonObject {
     gateway.insert("statusCode".to_string(), json!(error.status_code()));
     gateway.insert("isRetryable".to_string(), json!(error.is_retryable()));
 
+    if let Some(cause_message) = error.cause_message() {
+        gateway.insert(
+            "causeMessage".to_string(),
+            JsonValue::String(cause_message.to_string()),
+        );
+    }
+
     if let Some(generation_id) = error.generation_id() {
         gateway.insert(
             "generationId".to_string(),
@@ -3508,6 +3515,13 @@ fn gateway_stream_error_from_gateway_error(
         "isRetryable".to_string(),
         json!(gateway_error.is_retryable()),
     );
+
+    if let Some(cause_message) = gateway_error.cause_message() {
+        error.insert(
+            "causeMessage".to_string(),
+            JsonValue::String(cause_message.to_string()),
+        );
+    }
 
     if let Some(generation_id) = gateway_error.generation_id() {
         error.insert(
@@ -3776,6 +3790,45 @@ mod tests {
                 })
             )])
             .collect::<String>()
+    }
+
+    fn gateway_language_generate_request_body(
+        options: LanguageModelCallOptions,
+    ) -> (JsonValue, LanguageModelGenerateResult) {
+        let (transport, captured_request) = capturing_language_transport(
+            200,
+            "OK",
+            gateway_language_success_response_body(json!({
+                "type": "text",
+                "text": "Test response"
+            })),
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+
+        let result = poll_ready(model.do_generate(options));
+        let request_body =
+            gateway_language_request_json(&captured_language_request(&captured_request));
+
+        (request_body, result)
+    }
+
+    fn gateway_language_stream_request_body(
+        options: LanguageModelCallOptions,
+    ) -> (JsonValue, Vec<LanguageModelStreamPart>) {
+        let (transport, captured_request) = capturing_language_transport(
+            200,
+            "OK",
+            gateway_language_stream_response_body(&["Hello", " world"]),
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+
+        let result = poll_ready(model.do_stream(options));
+        let request_body =
+            gateway_language_request_json(&captured_language_request(&captured_request));
+
+        (request_body, result.stream)
     }
 
     fn capturing_language_transport(
@@ -7948,6 +8001,618 @@ mod tests {
                     "mediaType": "image/png"
                 }
             ]))
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_filters_raw_chunks_based_on_include_raw_chunks_option() {
+        let (transport, _) = capturing_language_transport(
+            200,
+            "OK",
+            [
+                r#"data: {"type":"stream-start","warnings":[]}"#,
+                "\n\n",
+                r#"data: {"type":"raw","rawValue":{"id":"test-chunk","object":"chat.completion.chunk","choices":[{"delta":{"content":"Hello"}}]}}"#,
+                "\n\n",
+                r#"data: {"type":"text-delta","textDelta":"Hello"}"#,
+                "\n\n",
+                r#"data: {"type":"raw","rawValue":{"id":"test-chunk-2","object":"chat.completion.chunk","choices":[{"delta":{"content":" world"}}]}}"#,
+                "\n\n",
+                r#"data: {"type":"text-delta","textDelta":" world"}"#,
+                "\n\n",
+                r#"data: {"type":"finish","finishReason":"stop","usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+                "\n\n",
+            ]
+            .concat(),
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+
+        let result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(gateway_language_test_prompt())
+                    .with_include_raw_chunks(false),
+            ),
+        );
+
+        assert!(matches!(
+            result.stream.first(),
+            Some(LanguageModelStreamPart::StreamStart(start)) if start.warnings.is_empty()
+        ));
+        assert!(
+            result
+                .stream
+                .iter()
+                .all(|part| !matches!(part, LanguageModelStreamPart::Raw(_)))
+        );
+        let text_deltas = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) => Some(delta.delta.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(text_deltas, vec!["Hello", " world"]);
+    }
+
+    #[test]
+    fn gateway_language_model_includes_raw_chunks_when_include_raw_chunks_is_true() {
+        let (transport, _) = capturing_language_transport(
+            200,
+            "OK",
+            [
+                r#"data: {"type":"stream-start","warnings":[]}"#,
+                "\n\n",
+                r#"data: {"type":"raw","rawValue":{"id":"test-chunk","object":"chat.completion.chunk","choices":[{"delta":{"content":"Hello"}}]}}"#,
+                "\n\n",
+                r#"data: {"type":"text-delta","textDelta":"Hello"}"#,
+                "\n\n",
+                r#"data: {"type":"finish","finishReason":"stop","usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+                "\n\n",
+            ]
+            .concat(),
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+
+        let result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(gateway_language_test_prompt())
+                    .with_include_raw_chunks(true),
+            ),
+        );
+
+        let raw_values = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::Raw(raw) => Some(raw.raw_value.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            raw_values,
+            vec![json!({
+                "id": "test-chunk",
+                "object": "chat.completion.chunk",
+                "choices": [{
+                    "delta": {
+                        "content": "Hello"
+                    }
+                }]
+            })]
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_converts_timestamp_strings_to_offset_date_time_in_response_metadata_chunks()
+     {
+        let timestamp_string = "2023-12-07T10:30:00.000Z";
+        let (transport, _) = capturing_language_transport(
+            200,
+            "OK",
+            format!(
+                "data: {{\"type\":\"stream-start\",\"warnings\":[]}}\n\n\
+                 data: {{\"type\":\"response-metadata\",\"id\":\"test-id\",\"modelId\":\"test-model\",\"timestamp\":\"{timestamp_string}\"}}\n\n\
+                 data: {{\"type\":\"text-delta\",\"textDelta\":\"Hello\"}}\n\n\
+                 data: {{\"type\":\"finish\",\"finishReason\":\"stop\",\"usage\":{{\"prompt_tokens\":10,\"completion_tokens\":5}}}}\n\n"
+            ),
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+
+        let result = poll_ready(
+            model.do_stream(LanguageModelCallOptions::new(gateway_language_test_prompt())),
+        );
+
+        let metadata = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ResponseMetadata(metadata) => Some(metadata),
+                _ => None,
+            })
+            .expect("response metadata chunk is emitted");
+        assert_eq!(metadata.id.as_deref(), Some("test-id"));
+        assert_eq!(metadata.model_id.as_deref(), Some("test-model"));
+        assert_eq!(
+            metadata
+                .timestamp
+                .expect("timestamp is parsed")
+                .unix_timestamp(),
+            1_701_945_000
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_preserves_response_metadata_without_timestamp() {
+        let (transport, _) = capturing_language_transport(
+            200,
+            "OK",
+            "data: {\"type\":\"stream-start\",\"warnings\":[]}\n\n\
+             data: {\"type\":\"response-metadata\",\"id\":\"test-id\",\"modelId\":\"test-model\"}\n\n\
+             data: {\"type\":\"text-delta\",\"textDelta\":\"Hello\"}\n\n\
+             data: {\"type\":\"finish\",\"finishReason\":\"stop\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\n",
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+
+        let result = poll_ready(
+            model.do_stream(LanguageModelCallOptions::new(gateway_language_test_prompt())),
+        );
+
+        let metadata = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ResponseMetadata(metadata) => Some(metadata),
+                _ => None,
+            })
+            .expect("response metadata chunk is emitted");
+        assert_eq!(metadata.id.as_deref(), Some("test-id"));
+        assert_eq!(metadata.model_id.as_deref(), Some("test-model"));
+        assert!(metadata.timestamp.is_none());
+    }
+
+    #[test]
+    fn gateway_language_model_handles_null_response_metadata_timestamp_gracefully() {
+        let (transport, _) = capturing_language_transport(
+            200,
+            "OK",
+            "data: {\"type\":\"stream-start\",\"warnings\":[]}\n\n\
+             data: {\"type\":\"response-metadata\",\"id\":\"test-id\",\"modelId\":\"test-model\",\"timestamp\":null}\n\n\
+             data: {\"type\":\"text-delta\",\"textDelta\":\"Hello\"}\n\n\
+             data: {\"type\":\"finish\",\"finishReason\":\"stop\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\n",
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+
+        let result = poll_ready(
+            model.do_stream(LanguageModelCallOptions::new(gateway_language_test_prompt())),
+        );
+
+        let metadata = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::ResponseMetadata(metadata) => Some(metadata),
+                _ => None,
+            })
+            .expect("response metadata chunk is emitted");
+        assert_eq!(metadata.id.as_deref(), Some("test-id"));
+        assert_eq!(metadata.model_id.as_deref(), Some("test-model"));
+        assert!(metadata.timestamp.is_none());
+    }
+
+    #[test]
+    fn gateway_language_model_ignores_extra_timestamp_fields_on_non_metadata_stream_parts() {
+        let timestamp_string = "2023-12-07T10:30:00.000Z";
+        let (transport, _) = capturing_language_transport(
+            200,
+            "OK",
+            format!(
+                "data: {{\"type\":\"stream-start\",\"warnings\":[]}}\n\n\
+                 data: {{\"type\":\"text-delta\",\"textDelta\":\"Hello\",\"timestamp\":\"{timestamp_string}\"}}\n\n\
+                 data: {{\"type\":\"finish\",\"finishReason\":\"stop\",\"usage\":{{\"prompt_tokens\":10,\"completion_tokens\":5}},\"timestamp\":\"{timestamp_string}\"}}\n\n"
+            ),
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+
+        let result = poll_ready(
+            model.do_stream(LanguageModelCallOptions::new(gateway_language_test_prompt())),
+        );
+
+        assert!(result.stream.iter().any(|part| {
+            matches!(part, LanguageModelStreamPart::TextDelta(delta) if delta.delta == "Hello")
+        }));
+        assert!(result.stream.iter().any(|part| {
+            matches!(part, LanguageModelStreamPart::Finish(finish) if finish.finish_reason.unified == FinishReason::Stop)
+        }));
+        assert!(
+            result
+                .stream
+                .iter()
+                .all(|part| !matches!(part, LanguageModelStreamPart::Error(_)))
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_passes_provider_routing_order_for_generate() {
+        let (request_body, _) = gateway_language_generate_request_body(
+            LanguageModelCallOptions::new(gateway_language_test_prompt()).with_provider_options(
+                GatewayProviderOptions::new()
+                    .with_order(["bedrock", "anthropic"])
+                    .into_provider_options(),
+            ),
+        );
+
+        assert_eq!(
+            request_body.get("providerOptions"),
+            Some(&json!({
+                "gateway": {
+                    "order": ["bedrock", "anthropic"]
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_passes_single_provider_in_order_array() {
+        let (request_body, _) = gateway_language_generate_request_body(
+            LanguageModelCallOptions::new(gateway_language_test_prompt()).with_provider_options(
+                GatewayProviderOptions::new()
+                    .with_order(["openai"])
+                    .into_provider_options(),
+            ),
+        );
+
+        assert_eq!(
+            request_body.get("providerOptions"),
+            Some(&json!({
+                "gateway": {
+                    "order": ["openai"]
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_works_without_provider_options() {
+        let (request_body, result) = gateway_language_generate_request_body(
+            LanguageModelCallOptions::new(gateway_language_test_prompt()),
+        );
+
+        assert!(request_body.get("providerOptions").is_none());
+        assert_eq!(
+            result.content.first().and_then(|content| match content {
+                LanguageModelContent::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            }),
+            Some("Test response")
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_passes_provider_routing_order_for_stream() {
+        let (request_body, stream) = gateway_language_stream_request_body(
+            LanguageModelCallOptions::new(gateway_language_test_prompt()).with_provider_options(
+                GatewayProviderOptions::new()
+                    .with_order(["groq", "openai"])
+                    .into_provider_options(),
+            ),
+        );
+
+        assert!(matches!(
+            stream.last(),
+            Some(LanguageModelStreamPart::Finish(_))
+        ));
+        assert_eq!(
+            request_body.get("providerOptions"),
+            Some(&json!({
+                "gateway": {
+                    "order": ["groq", "openai"]
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_validates_provider_options_against_schema() {
+        let options = GatewayProviderOptions::new().with_order(["anthropic", "bedrock", "openai"]);
+        options.validate().expect("provider options are valid");
+
+        let (request_body, _) = gateway_language_generate_request_body(
+            LanguageModelCallOptions::new(gateway_language_test_prompt())
+                .with_provider_options(options.into_provider_options()),
+        );
+
+        assert_eq!(
+            request_body.get("providerOptions"),
+            Some(&json!({
+                "gateway": {
+                    "order": ["anthropic", "bedrock", "openai"]
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_passes_provider_timeouts_for_generate() {
+        let (request_body, _) = gateway_language_generate_request_body(
+            LanguageModelCallOptions::new(gateway_language_test_prompt()).with_provider_options(
+                GatewayProviderOptions::new()
+                    .with_provider_timeouts(
+                        GatewayProviderTimeouts::new()
+                            .with_byok_timeout("openai", 5000)
+                            .with_byok_timeout("anthropic", 2000),
+                    )
+                    .into_provider_options(),
+            ),
+        );
+
+        assert_eq!(
+            request_body.get("providerOptions"),
+            Some(&json!({
+                "gateway": {
+                    "providerTimeouts": {
+                        "byok": {
+                            "anthropic": 2000,
+                            "openai": 5000
+                        }
+                    }
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_passes_provider_timeouts_for_stream() {
+        let (request_body, stream) = gateway_language_stream_request_body(
+            LanguageModelCallOptions::new(gateway_language_test_prompt()).with_provider_options(
+                GatewayProviderOptions::new()
+                    .with_provider_timeouts(
+                        GatewayProviderTimeouts::new().with_byok_timeout("anthropic", 3000),
+                    )
+                    .into_provider_options(),
+            ),
+        );
+
+        assert!(matches!(
+            stream.last(),
+            Some(LanguageModelStreamPart::Finish(_))
+        ));
+        assert_eq!(
+            request_body.get("providerOptions"),
+            Some(&json!({
+                "gateway": {
+                    "providerTimeouts": {
+                        "byok": {
+                            "anthropic": 3000
+                        }
+                    }
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_passes_zero_data_retention_option() {
+        let (request_body, _) = gateway_language_generate_request_body(
+            LanguageModelCallOptions::new(gateway_language_test_prompt()).with_provider_options(
+                GatewayProviderOptions::new()
+                    .with_zero_data_retention(true)
+                    .into_provider_options(),
+            ),
+        );
+
+        assert_eq!(
+            request_body.get("providerOptions"),
+            Some(&json!({
+                "gateway": {
+                    "zeroDataRetention": true
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_passes_disallow_prompt_training_option() {
+        let (request_body, _) = gateway_language_generate_request_body(
+            LanguageModelCallOptions::new(gateway_language_test_prompt()).with_provider_options(
+                GatewayProviderOptions::new()
+                    .with_disallow_prompt_training(true)
+                    .into_provider_options(),
+            ),
+        );
+
+        assert_eq!(
+            request_body.get("providerOptions"),
+            Some(&json!({
+                "gateway": {
+                    "disallowPromptTraining": true
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_passes_hipaa_compliant_option() {
+        let (request_body, _) = gateway_language_generate_request_body(
+            LanguageModelCallOptions::new(gateway_language_test_prompt()).with_provider_options(
+                GatewayProviderOptions::new()
+                    .with_hipaa_compliant(true)
+                    .into_provider_options(),
+            ),
+        );
+
+        assert_eq!(
+            request_body.get("providerOptions"),
+            Some(&json!({
+                "gateway": {
+                    "hipaaCompliant": true
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_passes_both_zero_data_retention_and_hipaa_compliant_options() {
+        let (request_body, _) = gateway_language_generate_request_body(
+            LanguageModelCallOptions::new(gateway_language_test_prompt()).with_provider_options(
+                GatewayProviderOptions::new()
+                    .with_zero_data_retention(true)
+                    .with_hipaa_compliant(true)
+                    .into_provider_options(),
+            ),
+        );
+
+        assert_eq!(
+            request_body.get("providerOptions"),
+            Some(&json!({
+                "gateway": {
+                    "zeroDataRetention": true,
+                    "hipaaCompliant": true
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_passes_quota_entity_id_option() {
+        let (request_body, _) = gateway_language_generate_request_body(
+            LanguageModelCallOptions::new(gateway_language_test_prompt()).with_provider_options(
+                GatewayProviderOptions::new()
+                    .with_quota_entity_id("entity-123")
+                    .into_provider_options(),
+            ),
+        );
+
+        assert_eq!(
+            request_body.get("providerOptions"),
+            Some(&json!({
+                "gateway": {
+                    "quotaEntityId": "entity-123"
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_passes_quota_entity_id_with_other_options() {
+        let (request_body, _) = gateway_language_generate_request_body(
+            LanguageModelCallOptions::new(gateway_language_test_prompt()).with_provider_options(
+                GatewayProviderOptions::new()
+                    .with_quota_entity_id("entity-123")
+                    .with_user("user-456")
+                    .into_provider_options(),
+            ),
+        );
+
+        assert_eq!(
+            request_body.get("providerOptions"),
+            Some(&json!({
+                "gateway": {
+                    "quotaEntityId": "entity-123",
+                    "user": "user-456"
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_maps_generate_transport_failure_to_gateway_response_error_metadata() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Err(FetchErrorInfo::new("Network connection failed"))))
+        });
+        let model = gateway_language_test_model(transport);
+
+        let result = poll_ready(
+            model.do_generate(LanguageModelCallOptions::new(gateway_language_test_prompt())),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Error);
+        assert_eq!(
+            gateway_language_error_metadata(&result, "errorType")
+                .and_then(|value| value.as_str().map(str::to_string)),
+            Some("response_error".to_string())
+        );
+        assert_eq!(
+            gateway_language_error_metadata(&result, "errorMessage")
+                .and_then(|value| value.as_str().map(str::to_string)),
+            Some(
+                "Invalid error response format: Gateway request failed: Network connection failed"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            gateway_language_error_metadata(&result, "causeMessage")
+                .and_then(|value| value.as_str().map(str::to_string)),
+            Some("Network connection failed".to_string())
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_maps_stream_transport_failure_to_gateway_response_error_part() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Err(FetchErrorInfo::new("Network connection failed"))))
+        });
+        let model = gateway_language_test_model(transport);
+
+        let result = poll_ready(
+            model.do_stream(LanguageModelCallOptions::new(gateway_language_test_prompt())),
+        );
+
+        assert_eq!(
+            gateway_language_stream_error_metadata(&result.stream, "type")
+                .and_then(|value| value.as_str().map(str::to_string)),
+            Some("response_error".to_string())
+        );
+        assert_eq!(
+            gateway_language_stream_error_metadata(&result.stream, "message")
+                .and_then(|value| value.as_str().map(str::to_string)),
+            Some(
+                "Invalid error response format: Gateway request failed: Network connection failed"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            gateway_language_stream_error_metadata(&result.stream, "causeMessage")
+                .and_then(|value| value.as_str().map(str::to_string)),
+            Some("Network connection failed".to_string())
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_preserves_error_cause_chain_as_gateway_metadata() {
+        let (transport, _) = capturing_language_transport(
+            401,
+            "Unauthorized",
+            json!({
+                "error": {
+                    "message": "Token expired",
+                    "type": "authentication_error"
+                }
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+
+        let result = poll_ready(
+            model.do_generate(LanguageModelCallOptions::new(gateway_language_test_prompt())),
+        );
+
+        assert_eq!(
+            gateway_language_error_metadata(&result, "errorType")
+                .and_then(|value| value.as_str().map(str::to_string)),
+            Some("authentication_error".to_string())
+        );
+        assert!(
+            gateway_language_error_metadata(&result, "causeMessage")
+                .and_then(|value| value.as_str().map(str::to_string))
+                .is_some_and(|message| message.contains("Token expired"))
         );
     }
 
