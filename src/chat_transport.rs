@@ -578,6 +578,9 @@ fn convert_assistant_tool_ui_part(
         if let Some(approved) = approval.approved {
             let mut approval_response =
                 LanguageModelToolApprovalResponsePart::new(&approval.id, approved);
+            if provider_executed {
+                approval_response = approval_response.with_provider_executed(true);
+            }
             if let Some(reason) = &approval.reason {
                 approval_response = approval_response.with_reason(reason.clone());
             }
@@ -2201,6 +2204,279 @@ mod tests {
                             }
                         }
                     ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_approved_static_tool_approval_response() {
+        let messages = convert_ui_messages_to_model_messages(&[
+            UiMessage::new("msg-1", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "What is the weather in Tokyo?" })),
+            UiMessage::new("msg-2", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({
+                    "type": "tool-weather",
+                    "state": "approval-responded",
+                    "toolCallId": "call-1",
+                    "input": { "city": "Tokyo" },
+                    "approval": {
+                        "id": "approval-1",
+                        "approved": true
+                    }
+                })),
+        ])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "What is the weather in Tokyo?" }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-1",
+                            "toolName": "weather",
+                            "input": { "city": "Tokyo" }
+                        },
+                        {
+                            "type": "tool-approval-request",
+                            "approvalId": "approval-1",
+                            "toolCallId": "call-1"
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-approval-response",
+                            "approvalId": "approval-1",
+                            "approved": true
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_approved_dynamic_tool_approval_response() {
+        let messages = convert_ui_messages_to_model_messages(&[
+            UiMessage::new("msg-1", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "What is the weather in Tokyo?" })),
+            UiMessage::new("msg-2", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({
+                    "type": "dynamic-tool",
+                    "toolName": "weather",
+                    "state": "approval-responded",
+                    "toolCallId": "call-1",
+                    "input": { "city": "Tokyo" },
+                    "approval": {
+                        "id": "approval-1",
+                        "approved": true
+                    }
+                })),
+        ])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "What is the weather in Tokyo?" }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-1",
+                            "toolName": "weather",
+                            "input": { "city": "Tokyo" }
+                        },
+                        {
+                            "type": "tool-approval-request",
+                            "approvalId": "approval-1",
+                            "toolCallId": "call-1"
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-approval-response",
+                            "approvalId": "approval-1",
+                            "approved": true
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_preserves_automatic_approval_metadata_for_tool_result() {
+        let messages = convert_ui_messages_to_model_messages(&[
+            UiMessage::new("msg-1", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "What is the weather in Tokyo?" })),
+            UiMessage::new("msg-2", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({
+                    "type": "tool-weather",
+                    "state": "output-available",
+                    "toolCallId": "call-1",
+                    "input": { "city": "Tokyo" },
+                    "output": { "weather": "Sunny" },
+                    "approval": {
+                        "id": "approval-1",
+                        "approved": true,
+                        "isAutomatic": true,
+                        "reason": "trusted internal tool"
+                    }
+                })),
+        ])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "What is the weather in Tokyo?" }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-1",
+                            "toolName": "weather",
+                            "input": { "city": "Tokyo" }
+                        },
+                        {
+                            "type": "tool-approval-request",
+                            "approvalId": "approval-1",
+                            "toolCallId": "call-1",
+                            "isAutomatic": true
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-approval-response",
+                            "approvalId": "approval-1",
+                            "approved": true,
+                            "reason": "trusted internal tool"
+                        },
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-1",
+                            "toolName": "weather",
+                            "output": {
+                                "type": "json",
+                                "value": { "weather": "Sunny" }
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_marks_provider_executed_denied_approval_response() {
+        let messages = convert_ui_messages_to_model_messages(&[
+            UiMessage::new("msg-1", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({
+                    "type": "dynamic-tool",
+                    "toolName": "screenshot",
+                    "state": "approval-responded",
+                    "toolCallId": "call-1",
+                    "input": { "value": "value-1" },
+                    "providerExecuted": true,
+                    "callProviderMetadata": {
+                        "test-provider": { "key-a": "test-value-1" }
+                    },
+                    "approval": {
+                        "id": "approval-1",
+                        "approved": false,
+                        "reason": "User denied the request"
+                    }
+                })),
+            UiMessage::new("msg-2", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Thanks!" })),
+        ])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-1",
+                            "toolName": "screenshot",
+                            "input": { "value": "value-1" },
+                            "providerExecuted": true,
+                            "providerOptions": {
+                                "test-provider": { "key-a": "test-value-1" }
+                            }
+                        },
+                        {
+                            "type": "tool-approval-request",
+                            "approvalId": "approval-1",
+                            "toolCallId": "call-1"
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-approval-response",
+                            "approvalId": "approval-1",
+                            "approved": false,
+                            "reason": "User denied the request",
+                            "providerExecuted": true
+                        },
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-1",
+                            "toolName": "screenshot",
+                            "output": {
+                                "type": "execution-denied",
+                                "reason": "User denied the request"
+                            },
+                            "providerOptions": {
+                                "test-provider": { "key-a": "test-value-1" }
+                            }
+                        }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "Thanks!" }]
                 }
             ])
         );
