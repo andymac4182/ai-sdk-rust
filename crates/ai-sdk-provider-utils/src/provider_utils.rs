@@ -21555,6 +21555,96 @@ mod tests {
     }
 
     #[test]
+    fn tool_needs_approval_function_accepts_input_schema_options() {
+        let tool = Tool::new("weather", object_schema()).with_needs_approval_function(
+            |input, options| async move {
+                input["number"] == json!(7) && options.tool_call_id == "call-input-only"
+            },
+        );
+
+        let needs_approval = poll_ready(
+            tool.resolve_needs_approval(
+                json!({ "number": 7 }),
+                ToolNeedsApprovalOptions::new("call-input-only", Vec::new()),
+            )
+            .expect("approval callback is configured"),
+        );
+
+        assert!(needs_approval);
+    }
+
+    #[test]
+    fn tool_needs_approval_function_accepts_execute_tool_options() {
+        let tool = Tool::new("weather", object_schema())
+            .with_execute(|input, _options| async move {
+                Ok(json!({
+                    "approvedInput": input
+                }))
+            })
+            .with_needs_approval_function(|input, options| async move {
+                input["number"] == json!(7)
+                    && options.tool_call_id == "call-execute"
+                    && options.context == Some(json!({ "approval": "required" }))
+            });
+
+        assert!(tool.is_executable());
+        let needs_approval = poll_ready(
+            tool.resolve_needs_approval(
+                json!({ "number": 7 }),
+                ToolNeedsApprovalOptions::new("call-execute", Vec::new())
+                    .with_context(json!({ "approval": "required" })),
+            )
+            .expect("approval callback is configured"),
+        );
+
+        assert!(needs_approval);
+    }
+
+    #[test]
+    fn tool_needs_approval_function_accepts_context_schema_context() {
+        let context_schema = Schema::new(
+            json!({
+                "type": "object",
+                "properties": {
+                    "sessionId": { "type": "string" },
+                    "userRole": {
+                        "type": "string",
+                        "enum": ["user", "admin"]
+                    }
+                },
+                "required": ["sessionId", "userRole"]
+            })
+            .as_object()
+            .expect("context schema is an object")
+            .clone(),
+        );
+        let tool = Tool::new("weather", object_schema())
+            .with_context_schema(context_schema)
+            .with_needs_approval_function(|input, options| async move {
+                input["number"] == json!(7)
+                    && options.context
+                        == Some(json!({
+                            "sessionId": "session-1",
+                            "userRole": "admin"
+                        }))
+            });
+
+        assert!(tool.context_schema().is_some());
+        let needs_approval = poll_ready(
+            tool.resolve_needs_approval(
+                json!({ "number": 7 }),
+                ToolNeedsApprovalOptions::new("call-context", Vec::new()).with_context(json!({
+                    "sessionId": "session-1",
+                    "userRole": "admin"
+                })),
+            )
+            .expect("approval callback is configured"),
+        );
+
+        assert!(needs_approval);
+    }
+
+    #[test]
     fn tool_dynamic_description_uses_context_and_sandbox_when_prepared() {
         let sandbox: Arc<dyn ExperimentalSandbox> =
             Arc::new(StaticSandbox::new("workspace sandbox"));
@@ -22245,6 +22335,123 @@ mod tests {
                 "city": "Brisbane",
                 "forecast": "sunny"
             }))
+        );
+    }
+
+    #[test]
+    fn tool_to_model_output_accepts_untyped_output_without_execute() {
+        let tool =
+            Tool::new("weather", object_schema()).with_to_model_output(|options| async move {
+                LanguageModelToolResultOutput::json(json!({
+                    "toolCallId": options.tool_call_id,
+                    "input": options.input,
+                    "output": options.output
+                }))
+            });
+
+        assert!(!tool.is_executable());
+        assert_eq!(tool.output_schema(), None);
+
+        let output = poll_ready(
+            tool.model_output(ToolModelOutputOptions::new(
+                "call-input-only",
+                json!({ "number": 7 }),
+                json!({ "raw": true }),
+            ))
+            .expect("callback is configured"),
+        );
+
+        assert_eq!(
+            output,
+            LanguageModelToolResultOutput::json(json!({
+                "toolCallId": "call-input-only",
+                "input": { "number": 7 },
+                "output": { "raw": true }
+            }))
+        );
+    }
+
+    #[test]
+    fn tool_to_model_output_accepts_execute_function_output() {
+        let tool = Tool::new("weather", object_schema())
+            .with_execute(|input, _options| async move {
+                Ok(json!({
+                    "number": input["number"],
+                    "status": "executed"
+                }))
+            })
+            .with_to_model_output(|options| async move {
+                LanguageModelToolResultOutput::json(json!({
+                    "toolCallId": options.tool_call_id,
+                    "input": options.input,
+                    "output": options.output
+                }))
+            });
+
+        assert!(tool.is_executable());
+        let executed = poll_ready(
+            tool.execute(
+                json!({ "number": 7 }),
+                ToolExecutionOptions::new("call-execute", Vec::new()),
+            )
+            .expect("execute callback is configured"),
+        )
+        .expect("execute succeeds");
+
+        let output = poll_ready(
+            tool.model_output(ToolModelOutputOptions::new(
+                "call-execute",
+                json!({ "number": 7 }),
+                executed,
+            ))
+            .expect("model output callback is configured"),
+        );
+
+        assert_eq!(
+            output,
+            LanguageModelToolResultOutput::json(json!({
+                "toolCallId": "call-execute",
+                "input": { "number": 7 },
+                "output": {
+                    "number": 7,
+                    "status": "executed"
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn tool_to_model_output_accepts_output_schema_result_output() {
+        let output_schema = json!({
+            "type": "string",
+            "enum": ["test"]
+        })
+        .as_object()
+        .expect("output schema is an object")
+        .clone();
+        let tool = Tool::new("weather", object_schema())
+            .with_output_schema(output_schema.clone())
+            .with_to_model_output(|options| async move {
+                LanguageModelToolResultOutput::text(format!(
+                    "{}:{}",
+                    options.tool_call_id, options.output
+                ))
+            });
+
+        assert_eq!(tool.output_schema(), Some(&output_schema));
+
+        let output = poll_ready(
+            tool.model_output(ToolModelOutputOptions::new(
+                "call-schema",
+                json!({ "number": 7 }),
+                json!("test"),
+            ))
+            .expect("model output callback is configured"),
+        );
+
+        assert_eq!(
+            output,
+            LanguageModelToolResultOutput::text(r#"call-schema:"test""#)
         );
     }
 
