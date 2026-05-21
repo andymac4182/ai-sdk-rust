@@ -21751,8 +21751,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn open_responses_provider_maps_pdf_input_file_fixture() {
+    fn pdf_input_file_generate_result_with_request_body() -> (LanguageModelGenerateResult, JsonValue)
+    {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
         let transport: OpenResponsesTransport =
@@ -21824,36 +21824,14 @@ mod tests {
                 )),
             ])),
         ])));
+        let request_body = captured_open_responses_request_body(&captured_request);
 
-        assert_eq!(
-            result
-                .content
-                .iter()
-                .filter_map(|part| match part {
-                    LanguageModelContent::Text(text) => Some(text.text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
-            vec!["Dummy PDF file"]
-        );
-        assert_eq!(result.usage.input_tokens.total, Some(44));
-        assert_eq!(result.usage.input_tokens.no_cache, Some(44));
-        assert_eq!(result.usage.input_tokens.cache_read, Some(0));
-        assert_eq!(result.usage.output_tokens.total, Some(4));
-        assert_eq!(result.usage.output_tokens.text, Some(4));
-        assert_eq!(result.usage.output_tokens.reasoning, Some(0));
+        (result, request_body)
+    }
 
-        let request = captured_request
-            .lock()
-            .expect("captured request mutex is not poisoned")
-            .clone()
-            .expect("request is captured");
-        let request_body = request
-            .body
-            .as_ref()
-            .and_then(ProviderApiRequestBody::as_text)
-            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
-            .expect("request body is JSON");
+    #[test]
+    fn open_responses_provider_sends_pdf_input_file_request_body() {
+        let (_, request_body) = pdf_input_file_generate_result_with_request_body();
 
         assert_eq!(
             request_body,
@@ -21876,6 +21854,36 @@ mod tests {
                 ]
             })
         );
+    }
+
+    #[test]
+    fn open_responses_provider_produces_pdf_input_file_content() {
+        let (result, _) = pdf_input_file_generate_result_with_request_body();
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(
+            result
+                .content
+                .iter()
+                .filter_map(|part| match part {
+                    LanguageModelContent::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["Dummy PDF file"]
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_extracts_pdf_input_file_usage() {
+        let (result, _) = pdf_input_file_generate_result_with_request_body();
+
+        assert_eq!(result.usage.input_tokens.total, Some(44));
+        assert_eq!(result.usage.input_tokens.no_cache, Some(44));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(result.usage.output_tokens.total, Some(4));
+        assert_eq!(result.usage.output_tokens.text, Some(4));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(0));
     }
 
     #[test]
