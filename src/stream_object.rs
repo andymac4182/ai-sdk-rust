@@ -1214,6 +1214,7 @@ fn stream_object_abort_error_from_signal(
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
     use std::future::{Future, Ready, ready};
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
@@ -1324,6 +1325,50 @@ mod tests {
                 finish_reason(),
             )),
         ]
+    }
+
+    #[derive(Default)]
+    struct ObjectTextStreamResponseSink {
+        status: Option<u16>,
+        status_text: Option<String>,
+        headers: Headers,
+        chunks: Vec<Vec<u8>>,
+        ended: bool,
+    }
+
+    impl ObjectTextStreamResponseSink {
+        fn decoded_chunks(&self) -> Vec<String> {
+            self.chunks
+                .iter()
+                .map(|chunk| String::from_utf8(chunk.clone()).expect("chunk decodes"))
+                .collect()
+        }
+    }
+
+    impl TextStreamResponseWriter for ObjectTextStreamResponseSink {
+        type Error = Infallible;
+
+        fn write_head(
+            &mut self,
+            status: u16,
+            status_text: Option<&str>,
+            headers: &Headers,
+        ) -> Result<(), Self::Error> {
+            self.status = Some(status);
+            self.status_text = status_text.map(ToString::to_string);
+            self.headers = headers.clone();
+            Ok(())
+        }
+
+        fn write_chunk(&mut self, chunk: &[u8]) -> Result<(), Self::Error> {
+            self.chunks.push(chunk.to_vec());
+            Ok(())
+        }
+
+        fn end(&mut self) -> Result<(), Self::Error> {
+            self.ended = true;
+            Ok(())
+        }
     }
 
     #[derive(Clone, Debug)]
@@ -1474,6 +1519,59 @@ mod tests {
             result.parts.last(),
             Some(ObjectStreamPart::Finish(_))
         ));
+    }
+
+    #[test]
+    fn stream_object_result_text_stream_and_response_match_upstream_object_chunks() {
+        let model = MockLanguageModel::new()
+            .with_stream_result(LanguageModelStreamResult::new(object_stream()));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
+
+        let expected_chunks = vec![
+            "{ ".to_string(),
+            "\"content\": \"Hello, ".to_string(),
+            "world".to_string(),
+            "!\"".to_string(),
+            " }".to_string(),
+        ];
+        assert_eq!(result.text_stream, expected_chunks);
+
+        let response = result.to_text_stream_response(TextStreamResponseInit::new());
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.headers.get("content-type").map(String::as_str),
+            Some(crate::text_stream_response::TEXT_STREAM_CONTENT_TYPE)
+        );
+        assert_eq!(
+            response.decoded_body().expect("response body decodes"),
+            expected_chunks
+        );
+    }
+
+    #[test]
+    fn stream_object_result_pipe_text_stream_to_response_writes_default_headers_chunks_and_end() {
+        let model = MockLanguageModel::new()
+            .with_stream_result(LanguageModelStreamResult::new(object_stream()));
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
+        let mut response = ObjectTextStreamResponseSink::default();
+
+        result
+            .pipe_text_stream_to_response(&mut response, TextStreamResponseInit::new())
+            .expect("response writer succeeds");
+
+        assert_eq!(response.status, Some(200));
+        assert_eq!(response.status_text, None);
+        assert_eq!(
+            response.headers.get("content-type").map(String::as_str),
+            Some(crate::text_stream_response::TEXT_STREAM_CONTENT_TYPE)
+        );
+        assert_eq!(response.decoded_chunks(), result.text_stream);
+        assert!(response.ended);
     }
 
     #[test]
