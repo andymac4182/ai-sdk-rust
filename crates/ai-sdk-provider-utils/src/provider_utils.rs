@@ -4115,8 +4115,8 @@ pub type SandboxRunCommandFuture = Pin<Box<dyn Future<Output = SandboxCommandRes
 
 /// Options passed to an experimental sandbox command runner.
 ///
-/// This mirrors upstream `Experimental_Sandbox.runCommand` options while
-/// intentionally omitting JavaScript-only `AbortSignal` cancellation.
+/// This mirrors upstream `Experimental_Sandbox.runCommand` options, mapping the
+/// JavaScript `AbortSignal` boundary to Rust's cloneable provider abort signal.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxCommandOptions {
@@ -4126,6 +4126,10 @@ pub struct SandboxCommandOptions {
     /// Working directory used for the command, when supplied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
+
+    /// Caller-controlled abort signal for cancelling the sandbox command.
+    #[serde(skip)]
+    pub abort_signal: Option<LanguageModelAbortSignal>,
 }
 
 impl SandboxCommandOptions {
@@ -4134,12 +4138,19 @@ impl SandboxCommandOptions {
         Self {
             command: command.into(),
             working_directory: None,
+            abort_signal: None,
         }
     }
 
     /// Sets the sandbox working directory for the command.
     pub fn with_working_directory(mut self, working_directory: impl Into<String>) -> Self {
         self.working_directory = Some(working_directory.into());
+        self
+    }
+
+    /// Sets the abort signal used to cancel the sandbox command.
+    pub fn with_abort_signal(mut self, abort_signal: LanguageModelAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
         self
     }
 }
@@ -4208,6 +4219,10 @@ pub struct ToolExecutionOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<JsonValue>,
 
+    /// Caller-controlled abort signal for cancelling the tool execution.
+    #[serde(skip)]
+    pub abort_signal: Option<LanguageModelAbortSignal>,
+
     /// Experimental sandbox environment available to the tool executor.
     #[serde(skip)]
     pub experimental_sandbox: Option<Arc<dyn ExperimentalSandbox>>,
@@ -4220,6 +4235,7 @@ impl ToolExecutionOptions {
             tool_call_id: tool_call_id.into(),
             messages,
             context: None,
+            abort_signal: None,
             experimental_sandbox: None,
         }
     }
@@ -4227,6 +4243,12 @@ impl ToolExecutionOptions {
     /// Sets the context for the executed tool.
     pub fn with_context(mut self, context: impl Into<JsonValue>) -> Self {
         self.context = Some(context.into());
+        self
+    }
+
+    /// Sets the abort signal used to cancel this tool execution.
+    pub fn with_abort_signal(mut self, abort_signal: LanguageModelAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
         self
     }
 
@@ -4242,6 +4264,7 @@ impl PartialEq for ToolExecutionOptions {
         self.tool_call_id == other.tool_call_id
             && self.messages == other.messages
             && self.context == other.context
+            && self.abort_signal == other.abort_signal
             && match (&self.experimental_sandbox, &other.experimental_sandbox) {
                 (None, None) => true,
                 (Some(left), Some(right)) => Arc::ptr_eq(left, right),
@@ -8116,11 +8139,11 @@ mod tests {
         StreamingToolCallDelta, StreamingToolCallDeltaFunction, StreamingToolCallTracker,
         StreamingToolCallTrackerOptions, StreamingToolCallTypeValidation, Tool,
         ToolApprovalRequest, ToolApprovalResponse, ToolCall, ToolDescriptionOptions,
-        ToolExecutionError, ToolExecutionOptions, ToolModelOutputOptions, ToolNeedsApprovalOptions,
-        ToolResult, ValidateTypesResult, ValidationResult,
-        add_additional_properties_to_json_schema, as_array, as_flexible_schema, as_schema,
-        combine_headers, convert_async_iterator_to_readable_stream, convert_base64_to_bytes,
-        convert_bytes_to_base64, convert_image_model_file_to_data_uri,
+        ToolExecuteFunction, ToolExecutionError, ToolExecutionOptions, ToolModelOutputOptions,
+        ToolNeedsApprovalFunction, ToolNeedsApprovalOptions, ToolResult, ValidateTypesResult,
+        ValidationResult, add_additional_properties_to_json_schema, as_array, as_flexible_schema,
+        as_schema, combine_headers, convert_async_iterator_to_readable_stream,
+        convert_base64_to_bytes, convert_bytes_to_base64, convert_image_model_file_to_data_uri,
         convert_inline_file_data_to_bytes, convert_to_base64, convert_to_form_data,
         create_binary_response_handler, create_event_source_response_handler, create_id_generator,
         create_json_error_response_handler, create_json_response_handler,
@@ -20988,6 +21011,48 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_command_options_include_abort_signal_without_serializing_it() {
+        let abort_controller = LanguageModelAbortController::new();
+        let options =
+            SandboxCommandOptions::new("pwd").with_abort_signal(abort_controller.signal());
+
+        assert!(
+            !options
+                .abort_signal
+                .as_ref()
+                .expect("abort signal is set")
+                .is_aborted()
+        );
+        abort_controller.abort_with_reason(json!("stop"));
+        assert!(
+            options
+                .abort_signal
+                .as_ref()
+                .expect("abort signal is set")
+                .is_aborted()
+        );
+        assert_eq!(
+            serde_json::to_value(&options).expect("command options serialize"),
+            json!({
+                "command": "pwd"
+            })
+        );
+
+        let round_tripped: SandboxCommandOptions = serde_json::from_value(json!({
+            "command": "pwd",
+            "workingDirectory": "/workspace"
+        }))
+        .expect("command options deserialize");
+
+        assert_eq!(round_tripped.command, "pwd");
+        assert_eq!(
+            round_tripped.working_directory,
+            Some("/workspace".to_string())
+        );
+        assert!(round_tripped.abort_signal.is_none());
+    }
+
+    #[test]
     fn tool_execution_options_carry_runtime_sandbox_without_serializing_it() {
         let sandbox: Arc<dyn ExperimentalSandbox> =
             Arc::new(StaticSandbox::new("workspace sandbox"));
@@ -21019,6 +21084,134 @@ mod tests {
                 "messages": []
             })
         );
+    }
+
+    #[test]
+    fn tool_execution_options_include_execution_metadata_context_abort_signal_and_sandbox() {
+        let abort_controller = LanguageModelAbortController::new();
+        let sandbox: Arc<dyn ExperimentalSandbox> =
+            Arc::new(StaticSandbox::new("workspace sandbox"));
+        let messages = vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![LanguageModelUserContentPart::Text(
+                LanguageModelTextPart::new("Weather?"),
+            )],
+        ))];
+        let options = ToolExecutionOptions::new("call-1", messages.clone())
+            .with_context(json!({ "requestId": "req-1" }))
+            .with_abort_signal(abort_controller.signal())
+            .with_experimental_sandbox(Arc::clone(&sandbox));
+
+        assert_eq!(options.tool_call_id, "call-1");
+        assert_eq!(options.messages, messages);
+        assert_eq!(options.context, Some(json!({ "requestId": "req-1" })));
+        assert!(
+            !options
+                .abort_signal
+                .as_ref()
+                .expect("abort signal is set")
+                .is_aborted()
+        );
+        abort_controller.abort();
+        assert!(
+            options
+                .abort_signal
+                .as_ref()
+                .expect("abort signal is set")
+                .is_aborted()
+        );
+        assert_eq!(
+            options
+                .experimental_sandbox
+                .as_ref()
+                .expect("sandbox is set")
+                .description(),
+            "workspace sandbox"
+        );
+        assert_eq!(
+            serde_json::to_value(&options).expect("execution options serialize"),
+            json!({
+                "toolCallId": "call-1",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Weather?"
+                            }
+                        ]
+                    }
+                ],
+                "context": {
+                    "requestId": "req-1"
+                }
+            })
+        );
+
+        let round_tripped: ToolExecutionOptions = serde_json::from_value(json!({
+            "toolCallId": "call-2",
+            "messages": [],
+            "context": {
+                "requestId": "req-2"
+            }
+        }))
+        .expect("execution options deserialize");
+
+        assert_eq!(round_tripped.tool_call_id, "call-2");
+        assert_eq!(round_tripped.context, Some(json!({ "requestId": "req-2" })));
+        assert!(round_tripped.abort_signal.is_none());
+        assert!(round_tripped.experimental_sandbox.is_none());
+    }
+
+    #[test]
+    fn tool_execute_function_accepts_input_output_and_execution_options() {
+        let execute: Arc<ToolExecuteFunction> = Arc::new(|input, options| {
+            Box::pin(ready(Ok(json!({
+                "city": input["city"],
+                "toolCallId": options.tool_call_id,
+                "context": options.context
+            }))))
+        });
+
+        let output = poll_ready(execute.as_ref()(
+            json!({
+                "city": "Brisbane"
+            }),
+            ToolExecutionOptions::new("call-1", Vec::new())
+                .with_context(json!({ "requestId": "req-1" })),
+        ))
+        .expect("tool execution succeeds");
+
+        assert_eq!(
+            output,
+            json!({
+                "city": "Brisbane",
+                "toolCallId": "call-1",
+                "context": {
+                    "requestId": "req-1"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn tool_needs_approval_function_accepts_input_options_and_returns_boolean() {
+        let needs_approval: Arc<ToolNeedsApprovalFunction> = Arc::new(|input, options| {
+            Box::pin(ready(
+                input["city"] == json!("Brisbane")
+                    && options.context == Some(json!({ "requestId": "req-1" })),
+            ))
+        });
+
+        let approved = poll_ready(needs_approval.as_ref()(
+            json!({
+                "city": "Brisbane"
+            }),
+            ToolNeedsApprovalOptions::new("call-1", Vec::new())
+                .with_context(json!({ "requestId": "req-1" })),
+        ));
+
+        assert!(approved);
     }
 
     #[test]
