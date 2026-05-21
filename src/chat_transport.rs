@@ -1914,6 +1914,256 @@ mod tests {
     }
 
     #[test]
+    fn convert_ui_messages_maps_system_provider_metadata() {
+        let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
+            "msg-1",
+            UiMessageRole::System,
+        )
+        .with_part(json!({
+            "type": "text",
+            "text": "System message with metadata",
+            "providerMetadata": {
+                "testProvider": { "systemSignature": "abc123" }
+            }
+        }))])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "system",
+                    "content": "System message with metadata",
+                    "providerOptions": {
+                        "testProvider": { "systemSignature": "abc123" }
+                    }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_merges_system_provider_metadata_from_text_parts() {
+        let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
+            "msg-1",
+            UiMessageRole::System,
+        )
+        .with_part(json!({
+            "type": "text",
+            "text": "Part 1",
+            "providerMetadata": {
+                "provider1": { "key1": "value1" }
+            }
+        }))
+        .with_part(json!({
+            "type": "text",
+            "text": " Part 2",
+            "providerMetadata": {
+                "provider2": { "key2": "value2" }
+            }
+        }))])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "system",
+                    "content": "Part 1 Part 2",
+                    "providerOptions": {
+                        "provider1": { "key1": "value1" },
+                        "provider2": { "key2": "value2" }
+                    }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_system_anthropic_cache_control_metadata() {
+        let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
+            "system",
+            UiMessageRole::System,
+        )
+        .with_part(json!({
+            "type": "text",
+            "text": "You are a helpful assistant.",
+            "providerMetadata": {
+                "anthropic": {
+                    "cacheControl": { "type": "ephemeral" }
+                }
+            }
+        }))])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant.",
+                    "providerOptions": {
+                        "anthropic": {
+                            "cacheControl": { "type": "ephemeral" }
+                        }
+                    }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_user_text_provider_metadata() {
+        let messages =
+            convert_ui_messages_to_model_messages(&[UiMessage::new("msg-1", UiMessageRole::User)
+                .with_part(json!({
+                    "type": "text",
+                    "text": "Hello, AI!",
+                    "providerMetadata": {
+                        "testProvider": { "signature": "1234567890" }
+                    }
+                }))])
+            .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Hello, AI!",
+                            "providerOptions": {
+                                "testProvider": { "signature": "1234567890" }
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_user_file_provider_metadata() {
+        let messages =
+            convert_ui_messages_to_model_messages(&[UiMessage::new("msg-1", UiMessageRole::User)
+                .with_part(json!({
+                    "type": "file",
+                    "mediaType": "image/jpeg",
+                    "url": "https://example.com/image.jpg",
+                    "providerMetadata": {
+                        "testProvider": { "signature": "1234567890" }
+                    }
+                }))
+                .with_part(json!({
+                    "type": "text",
+                    "text": "Check this image"
+                }))])
+            .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "file",
+                            "mediaType": "image/jpeg",
+                            "data": {
+                                "type": "url",
+                                "url": "https://example.com/image.jpg"
+                            },
+                            "providerOptions": {
+                                "testProvider": { "signature": "1234567890" }
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": "Check this image"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_assistant_text_provider_metadata() {
+        let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
+            "msg-1",
+            UiMessageRole::Assistant,
+        )
+        .with_part(json!({
+            "type": "text",
+            "text": "Hello, human!",
+            "state": "done",
+            "providerMetadata": {
+                "testProvider": { "signature": "1234567890" }
+            }
+        }))])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Hello, human!",
+                            "providerOptions": {
+                                "testProvider": { "signature": "1234567890" }
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_assistant_file_provider_metadata() {
+        let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
+            "msg-1",
+            UiMessageRole::Assistant,
+        )
+        .with_part(json!({
+            "type": "file",
+            "mediaType": "image/png",
+            "url": "data:image/png;base64,dGVzdA==",
+            "providerMetadata": {
+                "testProvider": { "signature": "test-signature" }
+            }
+        }))])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "file",
+                            "mediaType": "image/png",
+                            "data": {
+                                "type": "url",
+                                "url": "data:image/png;base64,dGVzdA=="
+                            },
+                            "providerOptions": {
+                                "testProvider": { "signature": "test-signature" }
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn convert_ui_messages_maps_static_tool_output_available_to_assistant_and_tool_messages() {
         let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
             "msg-1",
