@@ -70,6 +70,11 @@ TypeScript packages must exist as an equivalent Rust test in the matching 1:1
 crate. Rust may add more tests for stronger coverage, but it must never have
 fewer mapped original TypeScript tests, and one missing upstream portable test is
 a completion blocker.
+Treat this as inventory containment, not a best-effort coverage goal: enumerate
+the original TypeScript tests first, port every portable test/case into Rust,
+and only then add Rust-specific tests. The acceptable state is `original
+TypeScript tests <= mapped Rust tests`; potentially more Rust tests is good, but
+no less mapped original TypeScript coverage is allowed.
 
 Handoff note for future iterations: EVERY portable test/case from the original
 TypeScript package must exist as a Rust test in the matching crate before

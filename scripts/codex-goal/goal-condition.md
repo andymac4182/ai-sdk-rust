@@ -23,6 +23,12 @@ Non-negotiable test floor: EVERY portable original upstream TypeScript test/case
 must exist as an equivalent Rust test in the matching 1:1 crate. Rust may add
 more tests, but never fewer mapped original TypeScript tests; a package with even
 one missing portable upstream test/case is incomplete.
+This is not a sampled coverage target. It is a strict containment requirement:
+the original TypeScript test inventory must be listed first, every portable
+test/case must be mapped into Rust, and Rust may only add tests on top. The
+required relationship is `original TypeScript tests <= mapped Rust tests`;
+potentially more Rust tests is allowed, but no less mapped original TypeScript
+coverage can ever satisfy the goal.
 
 Future-iteration test note: EVERY portable test/case from the original
 TypeScript package must exist as a Rust test in the matching crate before
