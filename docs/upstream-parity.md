@@ -905,6 +905,16 @@ focused tests for each portable behavior before changing rows to `verified`.
   `src/stream_object.rs`, mapping upstream `options.onFinish` success and
   schema-mismatch cases with callback object/error, finish reason, usage,
   response id/model/timestamp, and finish provider metadata.
+- 2026-05-21: `streamObject` custom-schema and error-handling parity added
+  `stream_object_custom_schema_sends_object_deltas`,
+  `stream_object_error_handling_reports_no_object_when_schema_validation_fails`,
+  `stream_object_error_handling_reports_no_object_when_parsing_fails`, and
+  `stream_object_error_handling_reports_no_object_when_no_text_is_generated`
+  in `src/stream_object.rs`, mapping upstream custom `jsonSchema` object
+  deltas/response format plus NoObjectGenerated-style schema-validation,
+  parse-failure, and empty-text failures. The JS rejection assertions map to
+  Rust's explicit `object: None`, retained error state, response metadata,
+  usage, and finish reason.
 - 2026-05-20: `streamText` smooth stream chunking parity added
   `smooth_stream_combines_partial_words`,
   `smooth_stream_supports_line_and_pattern_chunking`,
