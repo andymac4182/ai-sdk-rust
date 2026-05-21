@@ -164,6 +164,10 @@ still open.
    counted only as extra coverage on top.
    Do not accept a slice that reports more Rust tests overall while any original
    portable TypeScript test/case remains unmapped or unported.
+   Future handoffs must show the named mapping from each original portable
+   TypeScript test/case to its Rust counterpart in the matching crate. Total
+   Rust test count is not proof of parity by itself, because Rust-only tests
+   cannot offset a missing original upstream case.
 5. For provider-backed behavior, require two layers of proof before marking a
    row `verified`: deterministic fake/mock/transport tests that run in normal
    validation, plus credential-gated live provider validation when a usable

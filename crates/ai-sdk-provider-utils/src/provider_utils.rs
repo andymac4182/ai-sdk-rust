@@ -7839,9 +7839,10 @@ mod tests {
         LanguageModelAbortController, LanguageModelAssistantContentPart,
         LanguageModelAssistantMessage, LanguageModelFilePart, LanguageModelFunctionTool,
         LanguageModelMessage, LanguageModelProviderTool, LanguageModelReasoningEffort,
-        LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelTool,
-        LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
-        LanguageModelToolResultOutput, LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelStreamPart, LanguageModelSystemMessage, LanguageModelTextPart,
+        LanguageModelTool, LanguageModelToolApprovalRequestPart,
+        LanguageModelToolApprovalResponsePart, LanguageModelToolResultOutput,
+        LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use ai_sdk_provider::{
         ApiCallError, FileData, FileDataContent, ImageModelFile, JsonObject, JsonSchema, JsonValue,
@@ -11907,6 +11908,651 @@ mod tests {
                 .expect("delta deserializes"),
             delta
         );
+    }
+
+    fn stream_parts_json(parts: Vec<LanguageModelStreamPart>) -> JsonValue {
+        serde_json::to_value(parts).expect("stream parts serialize")
+    }
+
+    #[test]
+    fn streaming_tool_call_tracker_upstream_should_handle_single_tool_call_accumulated_across_multiple_deltas()
+     {
+        let mut tracker = StreamingToolCallTracker::new();
+
+        let first_parts = tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_index(0)
+                    .with_id("call_1")
+                    .with_type("function")
+                    .with_function(
+                        StreamingToolCallDeltaFunction::new()
+                            .with_name("get_weather")
+                            .with_arguments(r#"{"ci"#),
+                    ),
+            )
+            .expect("first delta succeeds");
+
+        assert_eq!(
+            stream_parts_json(first_parts),
+            json!([
+                { "type": "tool-input-start", "id": "call_1", "toolName": "get_weather" },
+                { "type": "tool-input-delta", "id": "call_1", "delta": r#"{"ci"# }
+            ])
+        );
+
+        let second_parts = tracker
+            .process_delta(StreamingToolCallDelta::new().with_index(0).with_function(
+                StreamingToolCallDeltaFunction::new().with_arguments(r#"ty": "San"#),
+            ))
+            .expect("second delta succeeds");
+
+        assert_eq!(
+            stream_parts_json(second_parts),
+            json!([
+                { "type": "tool-input-delta", "id": "call_1", "delta": r#"ty": "San"# }
+            ])
+        );
+
+        let third_parts = tracker
+            .process_delta(StreamingToolCallDelta::new().with_index(0).with_function(
+                StreamingToolCallDeltaFunction::new().with_arguments(r#" Francisco"}"#),
+            ))
+            .expect("third delta succeeds");
+
+        assert_eq!(
+            stream_parts_json(third_parts),
+            json!([
+                { "type": "tool-input-delta", "id": "call_1", "delta": r#" Francisco"}"# },
+                { "type": "tool-input-end", "id": "call_1" },
+                {
+                    "type": "tool-call",
+                    "toolCallId": "call_1",
+                    "toolName": "get_weather",
+                    "input": r#"{"city": "San Francisco"}"#
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn streaming_tool_call_tracker_upstream_should_handle_full_tool_call_in_single_chunk() {
+        let mut tracker = StreamingToolCallTracker::new();
+
+        let parts = tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_index(0)
+                    .with_id("call_1")
+                    .with_type("function")
+                    .with_function(
+                        StreamingToolCallDeltaFunction::new()
+                            .with_name("get_weather")
+                            .with_arguments(r#"{"city": "London"}"#),
+                    ),
+            )
+            .expect("single-chunk delta succeeds");
+
+        assert_eq!(
+            stream_parts_json(parts),
+            json!([
+                { "type": "tool-input-start", "id": "call_1", "toolName": "get_weather" },
+                { "type": "tool-input-delta", "id": "call_1", "delta": r#"{"city": "London"}"# },
+                { "type": "tool-input-end", "id": "call_1" },
+                {
+                    "type": "tool-call",
+                    "toolCallId": "call_1",
+                    "toolName": "get_weather",
+                    "input": r#"{"city": "London"}"#
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn streaming_tool_call_tracker_upstream_should_handle_multiple_concurrent_tool_calls() {
+        let mut tracker = StreamingToolCallTracker::new();
+        let mut parts = Vec::new();
+
+        parts.extend(
+            tracker
+                .process_delta(
+                    StreamingToolCallDelta::new()
+                        .with_index(0)
+                        .with_id("call_1")
+                        .with_type("function")
+                        .with_function(
+                            StreamingToolCallDeltaFunction::new()
+                                .with_name("get_weather")
+                                .with_arguments(""),
+                        ),
+                )
+                .expect("first tool call starts"),
+        );
+        parts.extend(
+            tracker
+                .process_delta(
+                    StreamingToolCallDelta::new()
+                        .with_index(1)
+                        .with_id("call_2")
+                        .with_type("function")
+                        .with_function(
+                            StreamingToolCallDeltaFunction::new()
+                                .with_name("get_time")
+                                .with_arguments(""),
+                        ),
+                )
+                .expect("second tool call starts"),
+        );
+
+        assert_eq!(
+            stream_parts_json(parts),
+            json!([
+                { "type": "tool-input-start", "id": "call_1", "toolName": "get_weather" },
+                { "type": "tool-input-start", "id": "call_2", "toolName": "get_time" }
+            ])
+        );
+    }
+
+    #[test]
+    fn streaming_tool_call_tracker_upstream_should_skip_deltas_for_already_finished_tool_calls() {
+        let mut tracker = StreamingToolCallTracker::new();
+
+        tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_index(0)
+                    .with_id("call_1")
+                    .with_type("function")
+                    .with_function(
+                        StreamingToolCallDeltaFunction::new()
+                            .with_name("fn")
+                            .with_arguments("{}"),
+                    ),
+            )
+            .expect("tool call completes");
+
+        let parts = tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_index(0)
+                    .with_function(StreamingToolCallDeltaFunction::new().with_arguments("extra")),
+            )
+            .expect("late delta is ignored");
+
+        assert_eq!(parts, Vec::new());
+    }
+
+    #[test]
+    fn streaming_tool_call_tracker_upstream_should_skip_delta_emission_when_arguments_are_null() {
+        let mut tracker = StreamingToolCallTracker::new();
+
+        tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_index(0)
+                    .with_id("call_1")
+                    .with_type("function")
+                    .with_function(
+                        StreamingToolCallDeltaFunction::new()
+                            .with_name("fn")
+                            .with_arguments(""),
+                    ),
+            )
+            .expect("tool call starts");
+
+        let parts = tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_index(0)
+                    .with_function(StreamingToolCallDeltaFunction::new()),
+            )
+            .expect("null arguments are ignored");
+
+        assert_eq!(parts, Vec::new());
+    }
+
+    #[test]
+    fn streaming_tool_call_tracker_upstream_should_use_index_fallback_when_index_is_not_provided() {
+        let mut tracker = StreamingToolCallTracker::new();
+        let mut parts = Vec::new();
+
+        parts.extend(
+            tracker
+                .process_delta(
+                    StreamingToolCallDelta::new()
+                        .with_id("call_1")
+                        .with_type("function")
+                        .with_function(
+                            StreamingToolCallDeltaFunction::new()
+                                .with_name("fn1")
+                                .with_arguments("{}"),
+                        ),
+                )
+                .expect("first fallback-index tool call succeeds"),
+        );
+        parts.extend(
+            tracker
+                .process_delta(
+                    StreamingToolCallDelta::new()
+                        .with_id("call_2")
+                        .with_type("function")
+                        .with_function(
+                            StreamingToolCallDeltaFunction::new()
+                                .with_name("fn2")
+                                .with_arguments("{}"),
+                        ),
+                )
+                .expect("second fallback-index tool call succeeds"),
+        );
+
+        let start_parts: Vec<JsonValue> = stream_parts_json(parts)
+            .as_array()
+            .expect("parts are array")
+            .iter()
+            .filter(|part| part.get("type") == Some(&json!("tool-input-start")))
+            .cloned()
+            .collect();
+
+        assert_eq!(
+            start_parts,
+            vec![
+                json!({ "type": "tool-input-start", "id": "call_1", "toolName": "fn1" }),
+                json!({ "type": "tool-input-start", "id": "call_2", "toolName": "fn2" }),
+            ]
+        );
+    }
+
+    #[test]
+    fn streaming_tool_call_tracker_upstream_should_throw_when_id_is_missing() {
+        let mut tracker = StreamingToolCallTracker::new();
+
+        let error = tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_index(0)
+                    .with_type("function")
+                    .with_function(StreamingToolCallDeltaFunction::new().with_name("fn")),
+            )
+            .expect_err("missing id should fail");
+
+        assert_eq!(error.to_string(), "Expected 'id' to be a string.");
+    }
+
+    #[test]
+    fn streaming_tool_call_tracker_upstream_should_throw_when_function_name_is_missing() {
+        let mut tracker = StreamingToolCallTracker::new();
+
+        let error = tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_index(0)
+                    .with_id("call_1")
+                    .with_type("function")
+                    .with_function(StreamingToolCallDeltaFunction::new()),
+            )
+            .expect_err("missing function name should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "Expected 'function.name' to be a string."
+        );
+    }
+
+    #[test]
+    fn streaming_tool_call_tracker_upstream_should_not_validate_type_with_type_validation_none() {
+        let mut tracker = StreamingToolCallTracker::from_options(
+            StreamingToolCallTrackerOptions::new()
+                .with_type_validation(StreamingToolCallTypeValidation::None),
+        );
+
+        tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_index(0)
+                    .with_id("call_1")
+                    .with_type("custom")
+                    .with_function(
+                        StreamingToolCallDeltaFunction::new()
+                            .with_name("fn")
+                            .with_arguments(""),
+                    ),
+            )
+            .expect("custom type is accepted without validation");
+    }
+
+    #[test]
+    fn streaming_tool_call_tracker_upstream_should_validate_type_when_present_with_type_validation_if_present()
+     {
+        let mut tracker = StreamingToolCallTracker::from_options(
+            StreamingToolCallTrackerOptions::new()
+                .with_type_validation(StreamingToolCallTypeValidation::IfPresent),
+        );
+
+        let error = tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_index(0)
+                    .with_id("call_1")
+                    .with_type("custom")
+                    .with_function(
+                        StreamingToolCallDeltaFunction::new()
+                            .with_name("fn")
+                            .with_arguments(""),
+                    ),
+            )
+            .expect_err("custom type is rejected when type is present");
+        assert_eq!(error.to_string(), "Expected 'function' type.");
+
+        tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_index(0)
+                    .with_id("call_1")
+                    .with_function(
+                        StreamingToolCallDeltaFunction::new()
+                            .with_name("fn")
+                            .with_arguments(""),
+                    ),
+            )
+            .expect("missing type is accepted in if-present mode");
+    }
+
+    #[test]
+    fn streaming_tool_call_tracker_upstream_should_require_function_type_with_type_validation_required()
+     {
+        let mut tracker = StreamingToolCallTracker::from_options(
+            StreamingToolCallTrackerOptions::new()
+                .with_type_validation(StreamingToolCallTypeValidation::Required),
+        );
+
+        let error = tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_index(0)
+                    .with_id("call_1")
+                    .with_function(
+                        StreamingToolCallDeltaFunction::new()
+                            .with_name("fn")
+                            .with_arguments(""),
+                    ),
+            )
+            .expect_err("missing type is rejected when required");
+        assert_eq!(error.to_string(), "Expected 'function' type.");
+
+        tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_index(0)
+                    .with_id("call_1")
+                    .with_type("function")
+                    .with_function(
+                        StreamingToolCallDeltaFunction::new()
+                            .with_name("fn")
+                            .with_arguments(""),
+                    ),
+            )
+            .expect("function type is accepted when required");
+    }
+
+    #[test]
+    fn streaming_tool_call_tracker_upstream_should_finalize_unfinished_tool_calls_on_flush() {
+        let mut tracker = StreamingToolCallTracker::new();
+
+        tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_index(0)
+                    .with_id("call_1")
+                    .with_type("function")
+                    .with_function(
+                        StreamingToolCallDeltaFunction::new()
+                            .with_name("fn")
+                            .with_arguments(r#"{"key": "val"#),
+                    ),
+            )
+            .expect("unfinished tool call starts");
+
+        assert_eq!(
+            stream_parts_json(tracker.flush()),
+            json!([
+                { "type": "tool-input-end", "id": "call_1" },
+                {
+                    "type": "tool-call",
+                    "toolCallId": "call_1",
+                    "toolName": "fn",
+                    "input": r#"{"key": "val"#
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn streaming_tool_call_tracker_upstream_should_not_refinalize_already_finished_tool_calls() {
+        let mut tracker = StreamingToolCallTracker::new();
+
+        tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_index(0)
+                    .with_id("call_1")
+                    .with_type("function")
+                    .with_function(
+                        StreamingToolCallDeltaFunction::new()
+                            .with_name("fn")
+                            .with_arguments("{}"),
+                    ),
+            )
+            .expect("tool call completes");
+
+        assert!(tracker.flush().is_empty());
+    }
+
+    #[test]
+    fn streaming_tool_call_tracker_upstream_should_extract_and_include_provider_metadata_in_tool_call_events()
+     {
+        let mut tracker = StreamingToolCallTracker::new()
+            .with_extract_metadata(|delta| {
+                let signature = delta
+                    .extra
+                    .get("extra_content")?
+                    .get("google")?
+                    .get("thought_signature")?
+                    .as_str()?;
+
+                Some(ProviderMetadata::from([(
+                    "google".to_string(),
+                    json!({ "thoughtSignature": signature })
+                        .as_object()
+                        .expect("metadata is an object")
+                        .clone(),
+                )]))
+            })
+            .with_tool_call_provider_metadata(|metadata| metadata.cloned());
+
+        let parts = tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_index(0)
+                    .with_id("call_1")
+                    .with_type("function")
+                    .with_function(
+                        StreamingToolCallDeltaFunction::new()
+                            .with_name("fn")
+                            .with_arguments("{}"),
+                    )
+                    .with_extra_value(
+                        "extra_content",
+                        json!({ "google": { "thought_signature": "sig123" } }),
+                    ),
+            )
+            .expect("metadata delta succeeds");
+
+        let tool_call_event = stream_parts_json(parts)
+            .as_array()
+            .expect("parts are array")
+            .iter()
+            .find(|part| part.get("type") == Some(&json!("tool-call")))
+            .cloned();
+
+        assert_eq!(
+            tool_call_event,
+            Some(json!({
+                "type": "tool-call",
+                "toolCallId": "call_1",
+                "toolName": "fn",
+                "input": "{}",
+                "providerMetadata": {
+                    "google": { "thoughtSignature": "sig123" }
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn streaming_tool_call_tracker_upstream_should_include_provider_metadata_for_unfinished_tool_calls_finalized_in_flush()
+     {
+        let mut tracker = StreamingToolCallTracker::new()
+            .with_extract_metadata(|_| {
+                Some(ProviderMetadata::from([(
+                    "custom".to_string(),
+                    json!({ "key": "value" })
+                        .as_object()
+                        .expect("metadata is an object")
+                        .clone(),
+                )]))
+            })
+            .with_tool_call_provider_metadata(|metadata| {
+                metadata.map(|metadata| {
+                    ProviderMetadata::from([(
+                        "provider".to_string(),
+                        json!({ "custom": metadata.get("custom").expect("custom metadata") })
+                            .as_object()
+                            .expect("metadata is an object")
+                            .clone(),
+                    )])
+                })
+            });
+
+        tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_index(0)
+                    .with_id("call_1")
+                    .with_type("function")
+                    .with_function(
+                        StreamingToolCallDeltaFunction::new()
+                            .with_name("fn")
+                            .with_arguments(r#"{"incomplete"#),
+                    ),
+            )
+            .expect("unfinished metadata tool call starts");
+
+        let tool_call_event = stream_parts_json(tracker.flush())
+            .as_array()
+            .expect("parts are array")
+            .iter()
+            .find(|part| part.get("type") == Some(&json!("tool-call")))
+            .cloned();
+
+        assert_eq!(
+            tool_call_event,
+            Some(json!({
+                "type": "tool-call",
+                "toolCallId": "call_1",
+                "toolName": "fn",
+                "input": r#"{"incomplete"#,
+                "providerMetadata": {
+                    "provider": {
+                        "custom": { "key": "value" }
+                    }
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn streaming_tool_call_tracker_upstream_should_not_include_provider_metadata_when_builder_returns_none()
+     {
+        let mut tracker = StreamingToolCallTracker::new()
+            .with_extract_metadata(|_| None)
+            .with_tool_call_provider_metadata(|_| None);
+
+        let parts = tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_index(0)
+                    .with_id("call_1")
+                    .with_type("function")
+                    .with_function(
+                        StreamingToolCallDeltaFunction::new()
+                            .with_name("fn")
+                            .with_arguments("{}"),
+                    ),
+            )
+            .expect("metadata-free tool call succeeds");
+
+        let tool_call_event = stream_parts_json(parts)
+            .as_array()
+            .expect("parts are array")
+            .iter()
+            .find(|part| part.get("type") == Some(&json!("tool-call")))
+            .cloned()
+            .expect("tool-call event exists");
+
+        assert_eq!(
+            tool_call_event,
+            json!({
+                "type": "tool-call",
+                "toolCallId": "call_1",
+                "toolName": "fn",
+                "input": "{}"
+            })
+        );
+        assert!(tool_call_event.get("providerMetadata").is_none());
+    }
+
+    #[test]
+    fn streaming_tool_call_tracker_upstream_should_use_custom_generate_id_for_tool_call_ids_when_id_is_missing_in_fallback()
+     {
+        let generate_id_calls = Arc::new(AtomicUsize::new(0));
+        let generate_id_calls_for_tracker = Arc::clone(&generate_id_calls);
+        let mut tracker = StreamingToolCallTracker::new().with_generate_id(move || {
+            generate_id_calls_for_tracker.fetch_add(1, Ordering::SeqCst);
+            "custom-id".to_string()
+        });
+
+        tracker
+            .process_delta(
+                StreamingToolCallDelta::new()
+                    .with_index(0)
+                    .with_id("call_1")
+                    .with_type("function")
+                    .with_function(
+                        StreamingToolCallDeltaFunction::new()
+                            .with_name("fn")
+                            .with_arguments(r#"{"key": "val"#),
+                    ),
+            )
+            .expect("unfinished tool call starts");
+
+        let tool_call_event = stream_parts_json(tracker.flush())
+            .as_array()
+            .expect("parts are array")
+            .iter()
+            .find(|part| part.get("type") == Some(&json!("tool-call")))
+            .cloned();
+
+        assert_eq!(
+            tool_call_event,
+            Some(json!({
+                "type": "tool-call",
+                "toolCallId": "call_1",
+                "toolName": "fn",
+                "input": r#"{"key": "val"#
+            }))
+        );
+        assert_eq!(generate_id_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
