@@ -69,6 +69,46 @@ type OpenAICompatibleCreateStreamMetadataExtractorCallback =
 type OpenAICompatibleProcessStreamMetadataChunkCallback = dyn Fn(&JsonValue) + Send + Sync;
 type OpenAICompatibleBuildStreamMetadataCallback =
     dyn Fn() -> Option<ProviderMetadata> + Send + Sync;
+type OpenAICompatibleTransformRequestBodyCallback = dyn Fn(JsonValue) -> JsonValue + Send + Sync;
+
+/// Chat request body transformer for OpenAI-compatible proxy providers.
+#[derive(Clone)]
+pub struct OpenAICompatibleRequestBodyTransformer {
+    transform_request_body: Arc<OpenAICompatibleTransformRequestBodyCallback>,
+}
+
+impl OpenAICompatibleRequestBodyTransformer {
+    /// Creates a request body transformer from a callback.
+    pub fn new<F>(transform_request_body: F) -> Self
+    where
+        F: Fn(JsonValue) -> JsonValue + Send + Sync + 'static,
+    {
+        Self {
+            transform_request_body: Arc::new(transform_request_body),
+        }
+    }
+
+    /// Transforms the JSON request body before it is sent.
+    pub fn transform_request_body(&self, request_body: JsonValue) -> JsonValue {
+        (self.transform_request_body)(request_body)
+    }
+}
+
+impl fmt::Debug for OpenAICompatibleRequestBodyTransformer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpenAICompatibleRequestBodyTransformer")
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for OpenAICompatibleRequestBodyTransformer {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.transform_request_body, &other.transform_request_body)
+    }
+}
+
+impl Eq for OpenAICompatibleRequestBodyTransformer {}
 
 /// Arguments passed to a complete-response metadata extractor.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -252,6 +292,10 @@ pub struct OpenAICompatibleProviderSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent_suffix: Option<String>,
 
+    /// Chat-only request body transformer.
+    #[serde(skip)]
+    pub transform_request_body: Option<OpenAICompatibleRequestBodyTransformer>,
+
     /// Chat-only metadata extraction callbacks.
     #[serde(skip)]
     pub metadata_extractor: Option<OpenAICompatibleMetadataExtractor>,
@@ -271,6 +315,7 @@ impl OpenAICompatibleProviderSettings {
             supports_structured_outputs: None,
             supports_json_object_response_format: None,
             user_agent_suffix: None,
+            transform_request_body: None,
             metadata_extractor: None,
         }
     }
@@ -328,6 +373,17 @@ impl OpenAICompatibleProviderSettings {
     /// Sets the request user-agent suffix for wrappers built on this provider.
     pub fn with_user_agent_suffix(mut self, user_agent_suffix: impl Into<String>) -> Self {
         self.user_agent_suffix = Some(user_agent_suffix.into());
+        self
+    }
+
+    /// Sets a chat request body transformer for OpenAI-compatible proxy providers.
+    pub fn with_transform_request_body<F>(mut self, transform_request_body: F) -> Self
+    where
+        F: Fn(JsonValue) -> JsonValue + Send + Sync + 'static,
+    {
+        self.transform_request_body = Some(OpenAICompatibleRequestBodyTransformer::new(
+            transform_request_body,
+        ));
         self
     }
 
@@ -611,6 +667,7 @@ fn openai_compatible_model_config(
     if model_type != "chat" {
         model_settings.supports_structured_outputs = None;
         model_settings.supports_json_object_response_format = None;
+        model_settings.transform_request_body = None;
         model_settings.metadata_extractor = None;
     }
 
@@ -672,6 +729,7 @@ impl OpenAICompatibleChatLanguageModel {
                 );
             }
         };
+        let request_body = self.transform_request_body(request_body);
         let request_body_for_error = request_body.clone();
         let request_body_for_response = request_body.clone();
         let request_headers = self.request_headers(options.headers.as_ref());
@@ -746,6 +804,7 @@ impl OpenAICompatibleChatLanguageModel {
                 );
             }
         };
+        let request_body = self.transform_request_body(request_body);
         let request_body_for_error = request_body.clone();
         let request_body_for_response = request_body.clone();
         let request_headers = self.request_headers(options.headers.as_ref());
@@ -818,6 +877,13 @@ impl OpenAICompatibleChatLanguageModel {
             ),
             optional_headers(call_headers),
         ])
+    }
+
+    fn transform_request_body(&self, request_body: JsonValue) -> JsonValue {
+        match self.config.settings.transform_request_body.as_ref() {
+            Some(transformer) => transformer.transform_request_body(request_body),
+            None => request_body,
+        }
     }
 
     async fn generate_result_from_response(
@@ -7204,6 +7270,285 @@ mod tests {
                 "stream": true
             }))
         );
+    }
+
+    #[test]
+    fn openai_compatible_chat_transforms_request_body_in_do_generate_when_transform_request_body_is_provided()
+     {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transform_inputs = Arc::new(Mutex::new(Vec::<JsonValue>::new()));
+        let transform_inputs_for_callback = Arc::clone(&transform_inputs);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "chatcmpl-transform",
+                        "object": "chat.completion",
+                        "created": 1711115037,
+                        "model": "grok-3",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Hello!"
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 4,
+                            "completion_tokens": 30,
+                            "total_tokens": 34
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com")
+                .with_transform_request_body(move |body| {
+                    transform_inputs_for_callback
+                        .lock()
+                        .expect("transform input mutex is not poisoned")
+                        .push(body.clone());
+                    let mut transformed = body;
+                    if let Some(object) = transformed.as_object_mut() {
+                        object.insert("custom_field".to_string(), json!("added-by-transform"));
+                    }
+                    transformed
+                }),
+        )
+        .with_transport(transport)
+        .chat_model("grok-3");
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
+            ])),
+        ])));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        let transform_inputs = transform_inputs
+            .lock()
+            .expect("transform input mutex is not poisoned");
+        assert_eq!(transform_inputs.len(), 1);
+        assert_eq!(
+            transform_inputs[0],
+            json!({
+                "model": "grok-3",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ]
+            })
+        );
+
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .as_ref()
+            .map(openai_compatible_request_body_json)
+            .expect("request is captured");
+        assert_eq!(request_body["custom_field"], "added-by-transform");
+        assert_eq!(
+            result
+                .request
+                .as_ref()
+                .and_then(|request| request.body.clone())
+                .and_then(|body| body.get("custom_field").cloned()),
+            Some(json!("added-by-transform"))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_transforms_request_body_in_do_stream_when_transform_request_body_is_provided()
+     {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transform_inputs = Arc::new(Mutex::new(Vec::<JsonValue>::new()));
+        let transform_inputs_for_callback = Arc::clone(&transform_inputs);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    sse_body([
+                        json!({
+                            "id": "chatcmpl-transform",
+                            "object": "chat.completion.chunk",
+                            "created": 1711115037,
+                            "model": "grok-3",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "role": "assistant",
+                                        "content": "Hello"
+                                    },
+                                    "finish_reason": null
+                                }
+                            ]
+                        }),
+                        json!({
+                            "id": "chatcmpl-transform",
+                            "object": "chat.completion.chunk",
+                            "created": 1711115037,
+                            "model": "grok-3",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "content": "!"
+                                    },
+                                    "finish_reason": "stop"
+                                }
+                            ],
+                            "usage": {
+                                "prompt_tokens": 4,
+                                "completion_tokens": 2,
+                                "total_tokens": 6
+                            }
+                        }),
+                    ]),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com")
+                .with_transform_request_body(move |body| {
+                    transform_inputs_for_callback
+                        .lock()
+                        .expect("transform input mutex is not poisoned")
+                        .push(body.clone());
+                    let mut transformed = body;
+                    if let Some(object) = transformed.as_object_mut() {
+                        object.insert("custom_field".to_string(), json!("added-by-transform"));
+                    }
+                    transformed
+                }),
+        )
+        .with_transport(transport)
+        .chat_model("grok-3");
+
+        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
+            ])),
+        ])));
+
+        assert!(result.stream.iter().any(
+            |part| matches!(part, LanguageModelStreamPart::TextDelta(delta) if delta.delta == "!")
+        ));
+        let transform_inputs = transform_inputs
+            .lock()
+            .expect("transform input mutex is not poisoned");
+        assert_eq!(transform_inputs.len(), 1);
+        assert_eq!(
+            transform_inputs[0],
+            json!({
+                "model": "grok-3",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "stream": true
+            })
+        );
+
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .as_ref()
+            .map(openai_compatible_request_body_json)
+            .expect("request is captured");
+        assert_eq!(request_body["custom_field"], "added-by-transform");
+        assert_eq!(
+            result
+                .request
+                .as_ref()
+                .and_then(|request| request.body.clone())
+                .and_then(|body| body.get("custom_field").cloned()),
+            Some(json!("added-by-transform"))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_works_without_transform_request_body() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "chatcmpl-transform",
+                        "object": "chat.completion",
+                        "created": 1711115037,
+                        "model": "grok-3",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Hello!"
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 4,
+                            "completion_tokens": 30,
+                            "total_tokens": 34
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
+            "test-provider",
+            "https://api.example.com",
+        ))
+        .with_transport(transport)
+        .chat_model("grok-3");
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
+            ])),
+        ])));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        let request_body = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .as_ref()
+            .map(openai_compatible_request_body_json)
+            .expect("request is captured");
+        assert_eq!(request_body["model"], "grok-3");
+        assert!(request_body.get("custom_field").is_none());
     }
 
     #[test]
