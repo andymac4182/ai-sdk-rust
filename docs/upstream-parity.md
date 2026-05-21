@@ -881,6 +881,15 @@ focused tests for each portable behavior before changing rows to `verified`.
   mapping upstream `options.headers` and `options.providerOptions` cases by
   proving user headers and nested provider options reach the model call while
   preserving the Rust AI user-agent suffix behavior.
+- 2026-05-21: `streamObject` result metadata parity added
+  `stream_object_result_usage_resolves_with_token_usage`,
+  `stream_object_result_provider_metadata_resolves_with_provider_metadata`,
+  `stream_object_result_response_resolves_with_response_information`, and
+  `stream_object_result_request_contains_request_information` in
+  `src/stream_object.rs`, mapping upstream `result.usage`,
+  `result.providerMetadata`, `result.response`, and `result.request` cases with
+  provider usage details, finish provider metadata, response id/model/timestamp
+  plus headers, and provider request body propagation.
 - 2026-05-20: `streamText` smooth stream chunking parity added
   `smooth_stream_combines_partial_words`,
   `smooth_stream_supports_line_and_pattern_chunking`,

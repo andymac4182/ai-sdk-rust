@@ -1228,9 +1228,10 @@ mod tests {
         InputTokenUsage, LanguageModelContent, LanguageModelErrorStreamPart,
         LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelMessage,
         LanguageModelResponseFormat, LanguageModelStreamFinish,
-        LanguageModelStreamResponseMetadata, LanguageModelStreamResult, LanguageModelStreamStart,
-        LanguageModelSupportedUrls, LanguageModelTextDelta, LanguageModelTextPart,
-        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
+        LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
+        LanguageModelTextDelta, LanguageModelTextPart, LanguageModelUserContentPart,
+        LanguageModelUserMessage, OutputTokenUsage,
     };
     use crate::mock_models::MockLanguageModel;
     use crate::provider_utils::{Schema, ValidationResult, json_schema};
@@ -1623,6 +1624,139 @@ mod tests {
         );
         let calls = model.stream_calls();
         assert_eq!(calls[0].provider_options, Some(provider_options));
+    }
+
+    #[test]
+    fn stream_object_result_usage_resolves_with_token_usage() {
+        let expected_usage = LanguageModelUsage {
+            input_tokens: InputTokenUsage {
+                total: Some(3),
+                no_cache: Some(3),
+                cache_read: None,
+                cache_write: None,
+            },
+            output_tokens: OutputTokenUsage {
+                total: Some(10),
+                text: Some(10),
+                reasoning: None,
+            },
+            raw: None,
+        };
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "{ \"content\": \"Hello, world!\" }",
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    expected_usage.clone(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
+
+        assert_eq!(result.object, Some(json!({"content": "Hello, world!"})));
+        assert_eq!(result.usage, expected_usage);
+    }
+
+    #[test]
+    fn stream_object_result_provider_metadata_resolves_with_provider_metadata() {
+        let mut provider_metadata = ProviderMetadata::new();
+        let mut test_provider_metadata = serde_json::Map::new();
+        test_provider_metadata.insert("testKey".to_string(), json!("testValue"));
+        provider_metadata.insert("testProvider".to_string(), test_provider_metadata);
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "{ \"content\": \"Hello, world!\" }",
+                )),
+                LanguageModelStreamPart::Finish(
+                    LanguageModelStreamFinish::new(usage(), finish_reason())
+                        .with_provider_metadata(provider_metadata.clone()),
+                ),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
+
+        assert_eq!(result.object, Some(json!({"content": "Hello, world!"})));
+        assert_eq!(result.provider_metadata, Some(provider_metadata));
+    }
+
+    #[test]
+    fn stream_object_result_response_resolves_with_response_information() {
+        let mut response_headers = Headers::new();
+        response_headers.insert("call".to_string(), "2".to_string());
+        let model = MockLanguageModel::new().with_stream_result(
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ResponseMetadata(
+                    LanguageModelStreamResponseMetadata::new()
+                        .with_id("id-0")
+                        .with_model_id("mock-model-id")
+                        .with_timestamp(time::OffsetDateTime::UNIX_EPOCH),
+                ),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "{\"content\": \"Hello, world!\"}",
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ])
+            .with_response(LanguageModelStreamResultResponse {
+                headers: Some(response_headers.clone()),
+            }),
+        );
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
+
+        assert_eq!(result.object, Some(json!({"content": "Hello, world!"})));
+        assert_eq!(result.response.id.as_deref(), Some("id-0"));
+        assert_eq!(result.response.model_id.as_deref(), Some("mock-model-id"));
+        assert_eq!(
+            result.response.timestamp,
+            Some(time::OffsetDateTime::UNIX_EPOCH)
+        );
+        assert_eq!(result.response.headers, Some(response_headers));
+    }
+
+    #[test]
+    fn stream_object_result_request_contains_request_information() {
+        let request = LanguageModelRequest::new().with_body(json!("test body"));
+        let model = MockLanguageModel::new().with_stream_result(
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ResponseMetadata(
+                    LanguageModelStreamResponseMetadata::new()
+                        .with_id("id-0")
+                        .with_model_id("mock-model-id")
+                        .with_timestamp(time::OffsetDateTime::UNIX_EPOCH),
+                ),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "{\"content\": \"Hello, world!\"}",
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ])
+            .with_request(request.clone()),
+        );
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
+
+        assert_eq!(result.object, Some(json!({"content": "Hello, world!"})));
+        assert_eq!(result.request, Some(request));
     }
 
     #[test]
