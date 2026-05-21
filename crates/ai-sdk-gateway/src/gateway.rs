@@ -6434,6 +6434,99 @@ mod tests {
     }
 
     #[test]
+    fn gateway_provider_get_credits_includes_upstream_headers() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "balance": "150.50",
+                    "total_used": "75.25"
+                })
+                .to_string(),
+            ))))
+        });
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_api_key("test-key")
+                .with_header("custom-header", "custom-value"),
+        )
+        .with_transport(transport);
+
+        let credits = poll_ready(provider.get_credits()).expect("credits fetch succeeds");
+        assert_eq!(credits.balance, "150.50");
+        assert_eq!(credits.total_used, "75.25");
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-key")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-gateway-protocol-version")
+                .map(String::as_str),
+            Some("0.0.1")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-gateway-auth-method")
+                .map(String::as_str),
+            Some("api-key")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("custom-value")
+        );
+        assert!(
+            request
+                .headers
+                .get("user-agent")
+                .is_some_and(|value| value.starts_with("ai-sdk/gateway/"))
+        );
+    }
+
+    #[test]
+    fn gateway_provider_get_credits_surfaces_endpoint_errors() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Err(FetchErrorInfo::new(
+                "Credits service unavailable",
+            ))))
+        });
+        let provider =
+            GatewayProvider::from_settings(GatewayProviderSettings::new().with_api_key("test-key"))
+                .with_transport(transport);
+
+        let error = poll_ready(provider.get_credits()).expect_err("credits request fails");
+        let response_error = error
+            .as_response()
+            .expect("transport error maps to Gateway response error");
+
+        assert!(
+            response_error
+                .message()
+                .contains("Gateway request failed: Credits service unavailable")
+        );
+        assert_eq!(
+            response_error.cause_message(),
+            Some("Credits service unavailable")
+        );
+    }
+
+    #[test]
     fn gateway_provider_account_methods_use_default_gateway_urls() {
         let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
         let captured_requests_for_transport = Arc::clone(&captured_requests);
@@ -6829,6 +6922,36 @@ mod tests {
         for name in absent_params {
             assert!(!url.query_pairs().any(|(key, _)| key == name));
         }
+    }
+
+    #[test]
+    fn gateway_provider_get_spend_report_surfaces_endpoint_errors() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Err(FetchErrorInfo::new(
+                "Reporting service unavailable",
+            ))))
+        });
+        let provider =
+            GatewayProvider::from_settings(GatewayProviderSettings::new().with_api_key("test-key"))
+                .with_transport(transport);
+
+        let error = poll_ready(
+            provider.get_spend_report(GatewaySpendReportParams::new("2026-03-01", "2026-03-25")),
+        )
+        .expect_err("spend report request fails");
+        let response_error = error
+            .as_response()
+            .expect("transport error maps to Gateway response error");
+
+        assert!(
+            response_error
+                .message()
+                .contains("Gateway request failed: Reporting service unavailable")
+        );
+        assert_eq!(
+            response_error.cause_message(),
+            Some("Reporting service unavailable")
+        );
     }
 
     #[test]
