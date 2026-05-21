@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::future::{Future, Ready, ready};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -56,6 +57,159 @@ pub type OpenAICompatibleTransportFuture =
 pub type OpenAICompatibleTransport =
     Arc<dyn Fn(ProviderApiRequest) -> OpenAICompatibleTransportFuture + Send + Sync>;
 
+/// Future returned by an OpenAI-compatible metadata extractor.
+pub type OpenAICompatibleExtractMetadataFuture =
+    Pin<Box<dyn Future<Output = Option<ProviderMetadata>> + Send>>;
+
+type OpenAICompatibleExtractMetadataCallback = dyn Fn(OpenAICompatibleExtractMetadataArgs) -> OpenAICompatibleExtractMetadataFuture
+    + Send
+    + Sync;
+type OpenAICompatibleCreateStreamMetadataExtractorCallback =
+    dyn Fn() -> OpenAICompatibleStreamMetadataExtractor + Send + Sync;
+type OpenAICompatibleProcessStreamMetadataChunkCallback = dyn Fn(&JsonValue) + Send + Sync;
+type OpenAICompatibleBuildStreamMetadataCallback =
+    dyn Fn() -> Option<ProviderMetadata> + Send + Sync;
+
+/// Arguments passed to a complete-response metadata extractor.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAICompatibleExtractMetadataArgs {
+    /// Parsed provider response JSON body.
+    pub parsed_body: JsonValue,
+}
+
+impl OpenAICompatibleExtractMetadataArgs {
+    /// Creates metadata extraction arguments from a parsed response body.
+    pub fn new(parsed_body: JsonValue) -> Self {
+        Self { parsed_body }
+    }
+}
+
+/// Provider-specific metadata extraction callbacks for OpenAI-compatible chat models.
+#[derive(Clone)]
+pub struct OpenAICompatibleMetadataExtractor {
+    extract_metadata: Option<Arc<OpenAICompatibleExtractMetadataCallback>>,
+    create_stream_extractor: Option<Arc<OpenAICompatibleCreateStreamMetadataExtractorCallback>>,
+}
+
+impl OpenAICompatibleMetadataExtractor {
+    /// Creates an empty metadata extractor.
+    pub fn new() -> Self {
+        Self {
+            extract_metadata: None,
+            create_stream_extractor: None,
+        }
+    }
+
+    /// Sets the callback used to extract metadata from complete JSON responses.
+    pub fn with_extract_metadata<F, Fut>(mut self, extract_metadata: F) -> Self
+    where
+        F: Fn(OpenAICompatibleExtractMetadataArgs) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Option<ProviderMetadata>> + Send + 'static,
+    {
+        self.extract_metadata = Some(Arc::new(move |args| Box::pin(extract_metadata(args))));
+        self
+    }
+
+    /// Sets the callback used to create one extractor for each streaming response.
+    pub fn with_stream_extractor<F>(mut self, create_stream_extractor: F) -> Self
+    where
+        F: Fn() -> OpenAICompatibleStreamMetadataExtractor + Send + Sync + 'static,
+    {
+        self.create_stream_extractor = Some(Arc::new(create_stream_extractor));
+        self
+    }
+
+    async fn extract_metadata(&self, parsed_body: JsonValue) -> Option<ProviderMetadata> {
+        let extract_metadata = self.extract_metadata.as_ref()?;
+        extract_metadata(OpenAICompatibleExtractMetadataArgs::new(parsed_body)).await
+    }
+
+    fn create_stream_extractor(&self) -> Option<OpenAICompatibleStreamMetadataExtractor> {
+        self.create_stream_extractor
+            .as_ref()
+            .map(|create_stream_extractor| create_stream_extractor())
+    }
+}
+
+impl Default for OpenAICompatibleMetadataExtractor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for OpenAICompatibleMetadataExtractor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpenAICompatibleMetadataExtractor")
+            .field("extract_metadata", &self.extract_metadata.is_some())
+            .field(
+                "create_stream_extractor",
+                &self.create_stream_extractor.is_some(),
+            )
+            .finish()
+    }
+}
+
+impl PartialEq for OpenAICompatibleMetadataExtractor {
+    fn eq(&self, other: &Self) -> bool {
+        option_arc_ptr_eq(&self.extract_metadata, &other.extract_metadata)
+            && option_arc_ptr_eq(
+                &self.create_stream_extractor,
+                &other.create_stream_extractor,
+            )
+    }
+}
+
+impl Eq for OpenAICompatibleMetadataExtractor {}
+
+/// Stateful metadata extractor for one OpenAI-compatible chat stream.
+#[derive(Clone)]
+pub struct OpenAICompatibleStreamMetadataExtractor {
+    process_chunk: Arc<OpenAICompatibleProcessStreamMetadataChunkCallback>,
+    build_metadata: Arc<OpenAICompatibleBuildStreamMetadataCallback>,
+}
+
+impl OpenAICompatibleStreamMetadataExtractor {
+    /// Creates a stream metadata extractor from chunk and finalization callbacks.
+    pub fn new<P, B>(process_chunk: P, build_metadata: B) -> Self
+    where
+        P: Fn(&JsonValue) + Send + Sync + 'static,
+        B: Fn() -> Option<ProviderMetadata> + Send + Sync + 'static,
+    {
+        Self {
+            process_chunk: Arc::new(process_chunk),
+            build_metadata: Arc::new(build_metadata),
+        }
+    }
+
+    /// Processes a parsed stream chunk.
+    pub fn process_chunk(&self, parsed_chunk: &JsonValue) {
+        (self.process_chunk)(parsed_chunk);
+    }
+
+    /// Builds final provider metadata after all chunks have been processed.
+    pub fn build_metadata(&self) -> Option<ProviderMetadata> {
+        (self.build_metadata)()
+    }
+}
+
+impl fmt::Debug for OpenAICompatibleStreamMetadataExtractor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpenAICompatibleStreamMetadataExtractor")
+            .finish_non_exhaustive()
+    }
+}
+
+fn option_arc_ptr_eq<T: ?Sized>(left: &Option<Arc<T>>, right: &Option<Arc<T>>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 /// Settings for an OpenAI-compatible provider instance.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,6 +251,10 @@ pub struct OpenAICompatibleProviderSettings {
     /// User-agent suffix for wrappers built on the OpenAI-compatible transport.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent_suffix: Option<String>,
+
+    /// Chat-only metadata extraction callbacks.
+    #[serde(skip)]
+    pub metadata_extractor: Option<OpenAICompatibleMetadataExtractor>,
 }
 
 impl OpenAICompatibleProviderSettings {
@@ -113,6 +271,7 @@ impl OpenAICompatibleProviderSettings {
             supports_structured_outputs: None,
             supports_json_object_response_format: None,
             user_agent_suffix: None,
+            metadata_extractor: None,
         }
     }
 
@@ -169,6 +328,15 @@ impl OpenAICompatibleProviderSettings {
     /// Sets the request user-agent suffix for wrappers built on this provider.
     pub fn with_user_agent_suffix(mut self, user_agent_suffix: impl Into<String>) -> Self {
         self.user_agent_suffix = Some(user_agent_suffix.into());
+        self
+    }
+
+    /// Sets provider-specific metadata extraction callbacks for chat models.
+    pub fn with_metadata_extractor(
+        mut self,
+        metadata_extractor: OpenAICompatibleMetadataExtractor,
+    ) -> Self {
+        self.metadata_extractor = Some(metadata_extractor);
         self
     }
 }
@@ -443,6 +611,7 @@ fn openai_compatible_model_config(
     if model_type != "chat" {
         model_settings.supports_structured_outputs = None;
         model_settings.supports_json_object_response_format = None;
+        model_settings.metadata_extractor = None;
     }
 
     OpenAICompatibleModelConfig {
@@ -543,13 +712,16 @@ impl OpenAICompatibleChatLanguageModel {
         )
         .await
         {
-            Ok(response) => self.generate_result_from_response(
-                response.value,
-                response.raw_value,
-                response.response_headers,
-                request_body_for_response,
-                warnings,
-            ),
+            Ok(response) => {
+                self.generate_result_from_response(
+                    response.value,
+                    response.raw_value,
+                    response.response_headers,
+                    request_body_for_response,
+                    warnings,
+                )
+                .await
+            }
             Err(error) => self.generate_result_from_error(error, request_body_for_error),
         }
     }
@@ -622,6 +794,11 @@ impl OpenAICompatibleChatLanguageModel {
                 request_body_for_response,
                 warnings,
                 include_raw_chunks,
+                self.config
+                    .settings
+                    .metadata_extractor
+                    .as_ref()
+                    .and_then(OpenAICompatibleMetadataExtractor::create_stream_extractor),
             ),
             Err(error) => self.stream_result_from_error(error, request_body_for_error),
         }
@@ -643,7 +820,7 @@ impl OpenAICompatibleChatLanguageModel {
         ])
     }
 
-    fn generate_result_from_response(
+    async fn generate_result_from_response(
         &self,
         response: JsonValue,
         raw_response: Option<JsonValue>,
@@ -667,7 +844,7 @@ impl OpenAICompatibleChatLanguageModel {
 
         let mut result = LanguageModelGenerateResult::new(content, finish_reason, usage)
             .with_request(LanguageModelRequest::new().with_body(request_body));
-        let mut response_metadata = LanguageModelResponse::new().with_body(raw_body);
+        let mut response_metadata = LanguageModelResponse::new().with_body(raw_body.clone());
 
         if let Some(id) = json_string(response.get("id")) {
             response_metadata = response_metadata.with_id(id);
@@ -685,7 +862,12 @@ impl OpenAICompatibleChatLanguageModel {
             response_metadata = with_response_headers(response_metadata, headers);
         }
 
-        let metadata = openai_compatible_provider_metadata(&self.config.settings.name, &response);
+        let metadata = openai_compatible_provider_metadata(
+            &self.config.settings.name,
+            &raw_body,
+            self.config.settings.metadata_extractor.as_ref(),
+        )
+        .await;
         if !metadata.is_empty() {
             result = result.with_provider_metadata(metadata);
         }
@@ -3109,18 +3291,26 @@ fn openai_compatible_usage(value: Option<&JsonValue>) -> LanguageModelUsage {
     }
 }
 
-fn openai_compatible_provider_metadata(
+async fn openai_compatible_provider_metadata(
     provider_name: &str,
     response: &JsonValue,
+    metadata_extractor: Option<&OpenAICompatibleMetadataExtractor>,
 ) -> ProviderMetadata {
-    let mut metadata = ProviderMetadata::new();
-    let mut provider_metadata = JsonObject::new();
+    let mut metadata = if let Some(metadata_extractor) = metadata_extractor {
+        metadata_extractor
+            .extract_metadata(response.clone())
+            .await
+            .unwrap_or_default()
+    } else {
+        ProviderMetadata::new()
+    };
 
-    add_openai_compatible_prediction_metadata(&mut provider_metadata, response.get("usage"));
-
-    if !provider_metadata.is_empty() {
-        metadata.insert(provider_name.to_string(), provider_metadata);
-    }
+    add_openai_compatible_provider_prediction_metadata(
+        provider_name,
+        &mut metadata,
+        response.get("usage"),
+        false,
+    );
 
     metadata
 }
@@ -3242,6 +3432,7 @@ fn openai_compatible_stream_result_from_response(
     request_body: JsonValue,
     warnings: Vec<Warning>,
     include_raw_chunks: bool,
+    metadata_extractor: Option<OpenAICompatibleStreamMetadataExtractor>,
 ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
     let mut stream = vec![LanguageModelStreamPart::StreamStart(
         LanguageModelStreamStart::new(warnings),
@@ -3271,6 +3462,10 @@ fn openai_compatible_stream_result_from_response(
                     stream.push(LanguageModelStreamPart::Raw(
                         LanguageModelRawStreamPart::new(raw_value.clone()),
                     ));
+                }
+
+                if let Some(metadata_extractor) = metadata_extractor.as_ref() {
+                    metadata_extractor.process_chunk(&raw_value);
                 }
 
                 if value.get("error").is_some() {
@@ -3460,12 +3655,16 @@ fn openai_compatible_stream_result_from_response(
     }
 
     stream.extend(tool_call_tracker.flush());
+    let extracted_metadata = metadata_extractor
+        .as_ref()
+        .and_then(OpenAICompatibleStreamMetadataExtractor::build_metadata);
 
     stream.push(LanguageModelStreamPart::Finish(
         LanguageModelStreamFinish::new(openai_compatible_usage(usage.as_ref()), finish_reason)
             .with_provider_metadata(openai_compatible_stream_provider_metadata(
                 provider_name,
                 usage.as_ref(),
+                extracted_metadata,
             )),
     ));
 
@@ -3598,12 +3797,31 @@ fn openai_compatible_stream_response_metadata(
 fn openai_compatible_stream_provider_metadata(
     provider_name: &str,
     usage: Option<&JsonValue>,
+    extracted_metadata: Option<ProviderMetadata>,
 ) -> ProviderMetadata {
-    let mut metadata = ProviderMetadata::new();
-    let mut provider_metadata = JsonObject::new();
-    add_openai_compatible_prediction_metadata(&mut provider_metadata, usage);
-    metadata.insert(provider_name.to_string(), provider_metadata);
+    let mut metadata = extracted_metadata.unwrap_or_default();
+    add_openai_compatible_provider_prediction_metadata(provider_name, &mut metadata, usage, true);
     metadata
+}
+
+fn add_openai_compatible_provider_prediction_metadata(
+    provider_name: &str,
+    metadata: &mut ProviderMetadata,
+    usage: Option<&JsonValue>,
+    include_empty_provider: bool,
+) {
+    {
+        let provider_metadata = metadata.entry(provider_name.to_string()).or_default();
+        add_openai_compatible_prediction_metadata(provider_metadata, usage);
+    }
+
+    if !include_empty_provider
+        && metadata
+            .get(provider_name)
+            .is_some_and(|provider_metadata| provider_metadata.is_empty())
+    {
+        metadata.remove(provider_name);
+    }
 }
 
 fn add_openai_compatible_prediction_metadata(
@@ -4086,10 +4304,11 @@ fn provider_api_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        OpenAICompatibleProvider, OpenAICompatibleProviderSettings, OpenAICompatibleTransport,
-        OpenAICompatibleTransportFuture, create_openai_compatible, openai_compatible_prepare_tools,
-        resolve_openai_compatible_provider_options_key, to_openai_compatible_camel_case,
-        warn_if_deprecated_openai_compatible_provider_options_key,
+        OpenAICompatibleMetadataExtractor, OpenAICompatibleProvider,
+        OpenAICompatibleProviderSettings, OpenAICompatibleStreamMetadataExtractor,
+        OpenAICompatibleTransport, OpenAICompatibleTransportFuture, create_openai_compatible,
+        openai_compatible_prepare_tools, resolve_openai_compatible_provider_options_key,
+        to_openai_compatible_camel_case, warn_if_deprecated_openai_compatible_provider_options_key,
     };
     use ai_sdk_provider::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions};
     use ai_sdk_provider::file_data::{FileData, FileDataContent};
@@ -4107,7 +4326,7 @@ mod tests {
         LanguageModelToolMessage, LanguageModelToolResultOutput, LanguageModelToolResultPart,
         LanguageModelUserContentPart, LanguageModelUserMessage,
     };
-    use ai_sdk_provider::provider::ProviderOptions;
+    use ai_sdk_provider::provider::{ProviderMetadata, ProviderOptions};
     use ai_sdk_provider::warning::Warning;
     use ai_sdk_provider_utils::{
         ProviderApiRequest, ProviderApiRequestMethod, ProviderApiResponse,
@@ -4186,6 +4405,12 @@ mod tests {
             headers.get("user-agent").and_then(Option::as_deref),
             Some("ai-sdk/openai-compatible/0.1.0")
         );
+    }
+
+    fn openai_compatible_test_provider_metadata(value: impl Into<String>) -> ProviderMetadata {
+        let mut provider_metadata = JsonObject::new();
+        provider_metadata.insert("value".to_string(), json!(value.into()));
+        ProviderMetadata::from([("test-provider".to_string(), provider_metadata)])
     }
 
     fn openai_compatible_stream_request_bodies_for_include_usage(
@@ -6762,6 +6987,222 @@ mod tests {
         assert_eq!(
             image_model.config.settings.supports_structured_outputs,
             None
+        );
+    }
+
+    #[test]
+    fn openai_compatible_provider_passes_metadata_extractor_to_chat_model() {
+        let provider = create_openai_compatible(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com")
+                .with_metadata_extractor(OpenAICompatibleMetadataExtractor::new()),
+        );
+
+        assert!(
+            provider
+                .chat_model("chat-model")
+                .config
+                .settings
+                .metadata_extractor
+                .is_some()
+        );
+        assert!(
+            provider
+                .language_model("language-model")
+                .config
+                .settings
+                .metadata_extractor
+                .is_some()
+        );
+        assert!(
+            provider
+                .completion_model("completion-model")
+                .config
+                .settings
+                .metadata_extractor
+                .is_none()
+        );
+        assert!(
+            provider
+                .embedding_model("embedding-model")
+                .config
+                .settings
+                .metadata_extractor
+                .is_none()
+        );
+        assert!(
+            provider
+                .image_model("image-model")
+                .config
+                .settings
+                .metadata_extractor
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_processes_metadata_from_complete_response() {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(|_request| -> OpenAICompatibleTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "chatcmpl-123",
+                        "object": "chat.completion",
+                        "created": 1711115037,
+                        "model": "gpt-5",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant"
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "test_field": "test_value"
+                    })
+                    .to_string(),
+                ))))
+            });
+        let metadata_extractor =
+            OpenAICompatibleMetadataExtractor::new().with_extract_metadata(|args| {
+                ready(
+                    args.parsed_body
+                        .get("test_field")
+                        .and_then(JsonValue::as_str)
+                        .map(openai_compatible_test_provider_metadata),
+                )
+            });
+        let model = OpenAICompatibleProvider::from_settings(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com")
+                .with_metadata_extractor(metadata_extractor),
+        )
+        .with_transport(transport)
+        .chat_model("gpt-5");
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
+            ])),
+        ])));
+
+        assert_eq!(
+            result.provider_metadata,
+            Some(openai_compatible_test_provider_metadata("test_value"))
+        );
+        assert_eq!(
+            result
+                .request
+                .as_ref()
+                .and_then(|request| request.body.clone()),
+            Some(json!({
+                "model": "gpt-5",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ]
+            }))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_processes_metadata_from_streaming_response() {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(|_request| -> OpenAICompatibleTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    sse_body([
+                        json!({
+                            "choices": [
+                                {
+                                    "delta": {
+                                        "content": "Hello"
+                                    }
+                                }
+                            ]
+                        }),
+                        json!({
+                            "choices": [
+                                {
+                                    "finish_reason": "stop"
+                                }
+                            ],
+                            "test_field": "test_value"
+                        }),
+                    ]),
+                ))))
+            });
+        let metadata_extractor =
+            OpenAICompatibleMetadataExtractor::new().with_stream_extractor(|| {
+                let accumulated_value = Arc::new(Mutex::new(None::<String>));
+                let accumulated_value_for_process = Arc::clone(&accumulated_value);
+
+                OpenAICompatibleStreamMetadataExtractor::new(
+                    move |chunk| {
+                        let is_stop_chunk = chunk
+                            .get("choices")
+                            .and_then(JsonValue::as_array)
+                            .and_then(|choices| choices.first())
+                            .and_then(|choice| choice.get("finish_reason"))
+                            .and_then(JsonValue::as_str)
+                            == Some("stop");
+                        if is_stop_chunk
+                            && let Some(value) = chunk.get("test_field").and_then(JsonValue::as_str)
+                        {
+                            *accumulated_value_for_process
+                                .lock()
+                                .expect("metadata mutex is not poisoned") = Some(value.to_string());
+                        }
+                    },
+                    move || {
+                        accumulated_value
+                            .lock()
+                            .expect("metadata mutex is not poisoned")
+                            .clone()
+                            .map(openai_compatible_test_provider_metadata)
+                    },
+                )
+            });
+        let model = OpenAICompatibleProvider::from_settings(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com")
+                .with_metadata_extractor(metadata_extractor),
+        )
+        .with_transport(transport)
+        .chat_model("gpt-5");
+
+        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
+            ])),
+        ])));
+        let finish_metadata = result.stream.iter().find_map(|part| match part {
+            LanguageModelStreamPart::Finish(finish) => finish.provider_metadata.clone(),
+            _ => None,
+        });
+
+        assert_eq!(
+            finish_metadata,
+            Some(openai_compatible_test_provider_metadata("test_value"))
+        );
+        assert_eq!(
+            result
+                .request
+                .as_ref()
+                .and_then(|request| request.body.clone()),
+            Some(json!({
+                "model": "gpt-5",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "stream": true
+            }))
         );
     }
 
