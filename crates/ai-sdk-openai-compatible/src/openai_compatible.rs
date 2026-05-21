@@ -439,9 +439,15 @@ fn openai_compatible_model_config(
         .cloned()
         .unwrap_or_else(|| format!("{}.{}", settings.name, model_type));
 
+    let mut model_settings = settings.clone();
+    if model_type != "chat" {
+        model_settings.supports_structured_outputs = None;
+        model_settings.supports_json_object_response_format = None;
+    }
+
     OpenAICompatibleModelConfig {
         provider,
-        settings: settings.clone(),
+        settings: model_settings,
         transport: Arc::clone(transport),
     }
 }
@@ -4158,6 +4164,30 @@ mod tests {
         )
     }
 
+    fn openai_compatible_default_provider_settings() -> OpenAICompatibleProviderSettings {
+        OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com")
+            .with_api_key("test-api-key")
+            .with_header("custom-header", "value")
+            .with_query_param("Custom-Param", "value")
+    }
+
+    fn assert_openai_compatible_default_request_headers(
+        headers: &std::collections::BTreeMap<String, Option<String>>,
+    ) {
+        assert_eq!(
+            headers.get("authorization").and_then(Option::as_deref),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            headers.get("custom-header").and_then(Option::as_deref),
+            Some("value")
+        );
+        assert_eq!(
+            headers.get("user-agent").and_then(Option::as_deref),
+            Some("ai-sdk/openai-compatible/0.1.0")
+        );
+    }
+
     fn openai_compatible_stream_request_bodies_for_include_usage(
         include_usage: Option<bool>,
     ) -> Vec<JsonValue> {
@@ -6603,6 +6633,135 @@ mod tests {
                 .get("user-agent")
                 .and_then(Option::as_deref),
             Some("ai-sdk/openai-compatible/0.1.0")
+        );
+    }
+
+    #[test]
+    fn openai_compatible_provider_creates_provider_with_correct_configuration() {
+        let provider = create_openai_compatible(openai_compatible_default_provider_settings());
+        let model = provider.language_model("model-id");
+
+        assert_openai_compatible_default_request_headers(&model.request_headers(None));
+        assert_eq!(model.provider(), "test-provider.chat");
+        assert_eq!(
+            model.model_url("/v1/chat").expect("url is valid"),
+            "https://api.example.com/v1/chat?Custom-Param=value"
+        );
+    }
+
+    #[test]
+    fn openai_compatible_provider_creates_headers_without_authorization_when_no_api_key_provided() {
+        let provider = create_openai_compatible(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com")
+                .with_header("custom-header", "value"),
+        );
+        let model = provider.language_model("model-id");
+        let headers = model.request_headers(None);
+
+        assert_eq!(headers.get("authorization"), None);
+        assert_eq!(
+            headers.get("custom-header").and_then(Option::as_deref),
+            Some("value")
+        );
+        assert_eq!(
+            headers.get("user-agent").and_then(Option::as_deref),
+            Some("ai-sdk/openai-compatible/0.1.0")
+        );
+    }
+
+    #[test]
+    fn openai_compatible_provider_creates_chat_model_with_correct_configuration() {
+        let provider = create_openai_compatible(openai_compatible_default_provider_settings());
+        let model = provider.chat_model("chat-model");
+
+        assert_eq!(model.model_id(), "chat-model");
+        assert_openai_compatible_default_request_headers(&model.request_headers(None));
+        assert_eq!(model.provider(), "test-provider.chat");
+        assert_eq!(
+            model.model_url("/v1/chat").expect("url is valid"),
+            "https://api.example.com/v1/chat?Custom-Param=value"
+        );
+    }
+
+    #[test]
+    fn openai_compatible_provider_creates_completion_model_with_correct_configuration() {
+        let provider = create_openai_compatible(openai_compatible_default_provider_settings());
+        let model = provider.completion_model("completion-model");
+
+        assert_eq!(model.model_id(), "completion-model");
+        assert_openai_compatible_default_request_headers(&model.request_headers(None));
+        assert_eq!(model.provider(), "test-provider.completion");
+        assert_eq!(
+            model.model_url("/v1/completions").expect("url is valid"),
+            "https://api.example.com/v1/completions?Custom-Param=value"
+        );
+    }
+
+    #[test]
+    fn openai_compatible_provider_creates_embedding_model_with_correct_configuration() {
+        let provider = create_openai_compatible(openai_compatible_default_provider_settings());
+        let model = provider.embedding_model("embedding-model");
+
+        assert_eq!(model.model_id(), "embedding-model");
+        assert_openai_compatible_default_request_headers(&model.request_headers(None));
+        assert_eq!(model.provider(), "test-provider.embedding");
+        assert_eq!(
+            model.model_url("/v1/embeddings").expect("url is valid"),
+            "https://api.example.com/v1/embeddings?Custom-Param=value"
+        );
+    }
+
+    #[test]
+    fn openai_compatible_provider_uses_language_model_as_default_chat_model_alias() {
+        let provider = create_openai_compatible(openai_compatible_default_provider_settings());
+        let model = provider.language_model("model-id");
+
+        assert_eq!(model.model_id(), "model-id");
+        assert_eq!(model.provider(), "test-provider.chat");
+    }
+
+    #[test]
+    fn openai_compatible_provider_creates_url_without_query_parameters_when_unspecified() {
+        let provider = create_openai_compatible(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com")
+                .with_api_key("test-api-key"),
+        );
+        let model = provider.language_model("model-id");
+
+        assert_eq!(
+            model.model_url("/v1/chat").expect("url is valid"),
+            "https://api.example.com/v1/chat"
+        );
+    }
+
+    #[test]
+    fn openai_compatible_provider_passes_structured_outputs_to_chat_and_language_models_only() {
+        let provider = create_openai_compatible(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com")
+                .with_supports_structured_outputs(true),
+        );
+
+        let default_model = provider.language_model("model-id");
+        let chat_model = provider.chat_model("chat-model");
+        let language_model = provider.language_model("language-model");
+        let completion_model = provider.completion_model("completion-model");
+        let embedding_model = provider.embedding_model("embedding-model");
+        let image_model = provider.image_model("image-model");
+
+        assert!(default_model.supports_structured_outputs());
+        assert!(chat_model.supports_structured_outputs());
+        assert!(language_model.supports_structured_outputs());
+        assert_eq!(
+            completion_model.config.settings.supports_structured_outputs,
+            None
+        );
+        assert_eq!(
+            embedding_model.config.settings.supports_structured_outputs,
+            None
+        );
+        assert_eq!(
+            image_model.config.settings.supports_structured_outputs,
+            None
         );
     }
 
