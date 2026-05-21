@@ -3290,10 +3290,7 @@ fn openai_compatible_response_content(
         content.push(LanguageModelContent::Text(LanguageModelText::new(text)));
     }
 
-    if let Some(reasoning) = message
-        .get("reasoning_content")
-        .or_else(|| message.get("reasoning"))
-        .and_then(JsonValue::as_str)
+    if let Some(reasoning) = message.get("reasoning_content").and_then(JsonValue::as_str)
         && !reasoning.is_empty()
     {
         content.push(LanguageModelContent::Reasoning(
@@ -4759,6 +4756,16 @@ mod tests {
         OpenAICompatibleChatLanguageModel,
         Arc<Mutex<Option<ProviderApiRequest>>>,
     ) {
+        openai_compatible_chat_test_model_with_headers(response_body, Headers::new())
+    }
+
+    fn openai_compatible_chat_test_model_with_headers(
+        response_body: JsonValue,
+        headers: Headers,
+    ) -> (
+        OpenAICompatibleChatLanguageModel,
+        Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
         let transport: OpenAICompatibleTransport =
@@ -4772,12 +4779,14 @@ mod tests {
                     200,
                     "OK",
                     response_body.to_string(),
-                ))))
+                )
+                .with_headers(headers.clone()))))
             });
-        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
-            "test-provider",
-            "https://my.api.com/v1",
-        ))
+        let model = OpenAICompatibleProvider::from_settings(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://my.api.com/v1")
+                .with_api_key("test-api-key")
+                .with_header("Custom-Provider-Header", "provider-header-value"),
+        )
         .with_transport(transport)
         .chat_model("grok-3");
 
@@ -8377,6 +8386,460 @@ mod tests {
                 .filter(|warning| matches!(warning, Warning::Unsupported { .. }))
                 .count(),
             2
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_extracts_text_content() {
+        let (model, _captured_request) = openai_compatible_chat_test_model(
+            openai_compatible_chat_text_response_body("Hello, World!", json!({})),
+        );
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(
+            openai_compatible_chat_prompt_messages(),
+        )));
+
+        assert_eq!(result.content.len(), 1);
+        match &result.content[0] {
+            LanguageModelContent::Text(text) => assert_eq!(text.text, "Hello, World!"),
+            other => panic!("expected text content, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn openai_compatible_chat_extracts_tool_call_content() {
+        let (model, _captured_request) =
+            openai_compatible_chat_test_model(openai_compatible_chat_tool_response_body(
+                json!([
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "test_tool",
+                            "arguments": "{\"value\":\"ok\"}"
+                        }
+                    }
+                ]),
+                json!({}),
+            ));
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(
+            openai_compatible_chat_prompt_messages(),
+        )));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::ToolCalls);
+        assert_eq!(result.content.len(), 1);
+        match &result.content[0] {
+            LanguageModelContent::ToolCall(tool_call) => {
+                assert_eq!(tool_call.tool_call_id, "call_1");
+                assert_eq!(tool_call.tool_name, "test_tool");
+                assert_eq!(tool_call.input, "{\"value\":\"ok\"}");
+            }
+            other => panic!("expected tool call content, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn openai_compatible_chat_extracts_usage() {
+        let usage = json!({
+            "prompt_tokens": 12,
+            "completion_tokens": 2,
+            "total_tokens": 334,
+            "cost_in_usd_ticks": 1641500,
+            "num_sources_used": 0,
+            "prompt_tokens_details": {
+                "cached_tokens": 2
+            },
+            "completion_tokens_details": {
+                "reasoning_tokens": 320,
+                "accepted_prediction_tokens": 0,
+                "rejected_prediction_tokens": 0
+            }
+        });
+        let result = openai_compatible_chat_generate_result_with_usage(usage.clone());
+
+        assert_eq!(result.usage.input_tokens.total, Some(12));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(2));
+        assert_eq!(result.usage.input_tokens.no_cache, Some(10));
+        assert_eq!(result.usage.output_tokens.total, Some(2));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(320));
+        assert_eq!(result.usage.output_tokens.text, Some(0));
+        assert_eq!(result.usage.raw, usage.as_object().cloned());
+
+        let provider_metadata = openai_compatible_test_provider_metadata_entry(&result);
+        assert_eq!(
+            provider_metadata.get("acceptedPredictionTokens"),
+            Some(&json!(0))
+        );
+        assert_eq!(
+            provider_metadata.get("rejectedPredictionTokens"),
+            Some(&json!(0))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_sends_additional_response_information() {
+        let mut response_body =
+            openai_compatible_chat_text_response_body("Hello!", json!({ "prompt_tokens": 1 }));
+        response_body["id"] = json!("test-id");
+        response_body["created"] = json!(123);
+        response_body["model"] = json!("test-model");
+        let (model, _captured_request) = openai_compatible_chat_test_model(response_body.clone());
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(
+            openai_compatible_chat_prompt_messages(),
+        )));
+        let response = result.response.expect("response metadata is present");
+
+        assert_eq!(response.id.as_deref(), Some("test-id"));
+        assert_eq!(
+            response.timestamp,
+            Some(time::OffsetDateTime::from_unix_timestamp(123).expect("timestamp is valid"))
+        );
+        assert_eq!(response.model_id.as_deref(), Some("test-model"));
+        assert_eq!(response.body, Some(response_body));
+    }
+
+    #[test]
+    fn openai_compatible_chat_exposes_raw_response_headers() {
+        let (model, _captured_request) = openai_compatible_chat_test_model_with_headers(
+            openai_compatible_chat_text_response_body("Hello!", json!({})),
+            Headers::from([
+                ("content-length".to_string(), "2053".to_string()),
+                ("content-type".to_string(), "application/json".to_string()),
+                ("test-header".to_string(), "test-value".to_string()),
+            ]),
+        );
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(
+            openai_compatible_chat_prompt_messages(),
+        )));
+
+        assert_eq!(
+            result.response.and_then(|response| response.headers),
+            Some(Headers::from([
+                ("content-length".to_string(), "2053".to_string()),
+                ("content-type".to_string(), "application/json".to_string()),
+                ("test-header".to_string(), "test-value".to_string())
+            ]))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_does_not_apply_xai_user_setting_to_test_provider_request() {
+        let (model, captured_request) = openai_compatible_chat_test_model(
+            openai_compatible_chat_text_response_body("Hello, World!", json!({})),
+        );
+
+        let _result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_provider_options(test_provider_options(json!({
+                        "xai": {
+                            "user": "test-user-id"
+                        }
+                    }))),
+            ),
+        );
+
+        assert_eq!(
+            captured_openai_compatible_chat_request_body(&captured_request),
+            json!({
+                "model": "grok-3",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_ignores_reasoning_field_when_reasoning_content_is_not_provided() {
+        let (model, _captured_request) =
+            openai_compatible_chat_test_model(openai_compatible_chat_response_body(
+                json!({
+                    "role": "assistant",
+                    "content": "Hello, World!",
+                    "reasoning": "This is the reasoning from the reasoning field"
+                }),
+                json!({}),
+            ));
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(
+            openai_compatible_chat_prompt_messages(),
+        )));
+
+        assert_eq!(result.content.len(), 1);
+        assert!(matches!(
+            result.content.first(),
+            Some(LanguageModelContent::Text(text)) if text.text == "Hello, World!"
+        ));
+    }
+
+    #[test]
+    fn openai_compatible_chat_prefers_reasoning_content_over_reasoning_field() {
+        let (model, _captured_request) =
+            openai_compatible_chat_test_model(openai_compatible_chat_response_body(
+                json!({
+                    "role": "assistant",
+                    "content": "Hello, World!",
+                    "reasoning_content": "This is from reasoning_content",
+                    "reasoning": "This is from reasoning field"
+                }),
+                json!({}),
+            ));
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(
+            openai_compatible_chat_prompt_messages(),
+        )));
+
+        assert_eq!(result.content.len(), 2);
+        assert!(matches!(
+            result.content.first(),
+            Some(LanguageModelContent::Text(text)) if text.text == "Hello, World!"
+        ));
+        assert!(matches!(
+            result.content.get(1),
+            Some(LanguageModelContent::Reasoning(reasoning))
+                if reasoning.text == "This is from reasoning_content"
+        ));
+    }
+
+    #[test]
+    fn openai_compatible_chat_supports_partial_usage() {
+        let result = openai_compatible_chat_generate_result_with_usage(json!({
+            "prompt_tokens": 20,
+            "total_tokens": 20
+        }));
+
+        assert_eq!(result.usage.input_tokens.total, Some(20));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(result.usage.input_tokens.no_cache, Some(20));
+        assert_eq!(result.usage.output_tokens.total, Some(0));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(0));
+        assert_eq!(result.usage.output_tokens.text, Some(0));
+        assert_eq!(
+            result.usage.raw,
+            json!({
+                "prompt_tokens": 20,
+                "total_tokens": 20
+            })
+            .as_object()
+            .cloned()
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_supports_unknown_finish_reason() {
+        let mut response_body =
+            openai_compatible_chat_text_response_body("Hello!", json!({ "prompt_tokens": 1 }));
+        response_body["choices"][0]["finish_reason"] = json!("eos");
+        let (model, _captured_request) = openai_compatible_chat_test_model(response_body);
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(
+            openai_compatible_chat_prompt_messages(),
+        )));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Other);
+        assert_eq!(result.finish_reason.raw.as_deref(), Some("eos"));
+    }
+
+    #[test]
+    fn openai_compatible_chat_passes_model_and_messages() {
+        let (model, captured_request) = openai_compatible_chat_test_model(
+            openai_compatible_chat_text_response_body("", json!({})),
+        );
+
+        let _result = poll_ready(model.do_generate(LanguageModelCallOptions::new(
+            openai_compatible_chat_prompt_messages(),
+        )));
+
+        assert_eq!(
+            captured_openai_compatible_chat_request_body(&captured_request),
+            json!({
+                "model": "grok-3",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_passes_settings() {
+        let (model, captured_request) = openai_compatible_chat_test_model(
+            openai_compatible_chat_text_response_body("", json!({})),
+        );
+
+        let _result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_provider_options(test_provider_options(json!({
+                        "openaiCompatible": {
+                            "user": "test-user-id"
+                        }
+                    }))),
+            ),
+        );
+
+        assert_eq!(
+            captured_openai_compatible_chat_request_body(&captured_request),
+            json!({
+                "model": "grok-3",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "user": "test-user-id"
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_passes_settings_with_deprecated_key_and_emits_warning() {
+        let (model, captured_request) = openai_compatible_chat_test_model(
+            openai_compatible_chat_text_response_body("", json!({})),
+        );
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_provider_options(test_provider_options(json!({
+                        "openai-compatible": {
+                            "user": "test-user-id"
+                        }
+                    }))),
+            ),
+        );
+
+        assert_eq!(
+            captured_openai_compatible_chat_request_body(&captured_request),
+            json!({
+                "model": "grok-3",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "user": "test-user-id"
+            })
+        );
+        assert!(result.warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Deprecated { setting, message }
+                    if setting == "providerOptions key 'openai-compatible'"
+                        && message == "Use 'openaiCompatible' instead."
+            )
+        }));
+    }
+
+    #[test]
+    fn openai_compatible_chat_includes_provider_specific_options() {
+        let (model, captured_request) = openai_compatible_chat_test_model(
+            openai_compatible_chat_text_response_body("", json!({})),
+        );
+
+        let _result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_provider_options(test_provider_options(json!({
+                        "test-provider": {
+                            "someCustomOption": "test-value"
+                        }
+                    }))),
+            ),
+        );
+
+        assert_eq!(
+            captured_openai_compatible_chat_request_body(&captured_request),
+            json!({
+                "model": "grok-3",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "someCustomOption": "test-value"
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_does_not_include_provider_specific_options_for_different_provider() {
+        let (model, captured_request) = openai_compatible_chat_test_model(
+            openai_compatible_chat_text_response_body("", json!({})),
+        );
+
+        let _result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_provider_options(test_provider_options(json!({
+                        "notThisProviderName": {
+                            "someCustomOption": "test-value"
+                        }
+                    }))),
+            ),
+        );
+
+        assert_eq!(
+            captured_openai_compatible_chat_request_body(&captured_request),
+            json!({
+                "model": "grok-3",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_passes_headers() {
+        let (model, captured_request) = openai_compatible_chat_test_model(
+            openai_compatible_chat_text_response_body("", json!({})),
+        );
+
+        let _result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_header("Custom-Request-Header", "request-header-value"),
+            ),
+        );
+
+        let headers = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .headers;
+        assert_eq!(
+            headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            headers.get("custom-provider-header").map(String::as_str),
+            Some("provider-header-value")
+        );
+        assert_eq!(
+            headers.get("custom-request-header").map(String::as_str),
+            Some("request-header-value")
+        );
+        assert_eq!(
+            headers.get("content-type").map(String::as_str),
+            Some("application/json")
         );
     }
 
