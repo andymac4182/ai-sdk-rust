@@ -71,6 +71,12 @@ crate. Rust may add more tests for stronger coverage, but it must never have
 fewer mapped original TypeScript tests, and one missing upstream portable test is
 a completion blocker.
 
+Future-iteration test note: every portable test from the original TypeScript
+suite must exist in Rust in the matching crate. The Rust suite may include
+potentially more tests for Rust-specific proof, but never fewer mapped original
+TypeScript tests. A crate is incomplete until the original TypeScript test
+inventory is fully represented in Rust, test-for-test or case-for-case.
+
 ## Required Parity Ledger
 
 First action: create or update `docs/upstream-parity.md`.

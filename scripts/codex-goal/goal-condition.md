@@ -24,6 +24,12 @@ must exist as an equivalent Rust test in the matching 1:1 crate. Rust may add
 more tests, but never fewer mapped original TypeScript tests; a package with even
 one missing portable upstream test/case is incomplete.
 
+Future-iteration test note: EVERY portable test from the original TypeScript
+suite must exist in Rust in the matching crate. The Rust test suite may be
+larger and may add Rust-specific tests, but it must never contain fewer mapped
+original TypeScript tests. Potentially more Rust tests is acceptable; no less
+than the full original TypeScript test inventory is acceptable.
+
 Test parity is a hard completion gate. EVERY portable test from the original
 upstream TypeScript packages must exist as an equivalent Rust test in the
 matching 1:1 crate before that package can be marked verified. The inventory is

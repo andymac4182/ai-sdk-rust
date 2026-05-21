@@ -11,6 +11,12 @@ Rust-specific failures, but it must never have fewer mapped original TypeScript
 tests. A package with even one missing portable upstream test/case is not
 parity-complete.
 
+Future-iteration test note: EVERY portable test from the original TypeScript
+suite must exist in Rust in the matching crate. Rust may have potentially more
+tests for Rust-specific proof, but never fewer mapped original TypeScript tests.
+No package can be marked complete until the full original TypeScript test
+inventory is represented in Rust, test-for-test or case-for-case.
+
 ## Crate Boundary Gate
 
 Full parity requires a strict 1:1 mapping between upstream TypeScript packages
