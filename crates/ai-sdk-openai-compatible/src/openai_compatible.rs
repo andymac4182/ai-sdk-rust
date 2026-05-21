@@ -4582,6 +4582,10 @@ mod tests {
     use std::task::{Context, Poll, Wake, Waker};
     use url::Url;
 
+    const OPENAI_COMPATIBLE_XAI_TEXT_CHUNKS: &str = include_str!("fixtures/xai-text.chunks.txt");
+    const OPENAI_COMPATIBLE_XAI_TOOL_CALL_CHUNKS: &str =
+        include_str!("fixtures/xai-tool-call.chunks.txt");
+
     fn assert_request_tracks_abort_signal(
         request: &ProviderApiRequest,
         abort_controller: &LanguageModelAbortController,
@@ -4907,6 +4911,49 @@ mod tests {
         poll_ready(model.do_stream(LanguageModelCallOptions::new(
             openai_compatible_chat_prompt_messages(),
         )))
+    }
+
+    fn openai_compatible_chat_stream_result_from_chunk_fixture(
+        fixture: &str,
+    ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
+        let stream_body = fixture
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| format!("data: {line}\n\n"))
+            .chain(["data: [DONE]\n\n".to_string()])
+            .collect::<String>();
+        let (model, _captured_request) = openai_compatible_chat_stream_test_model(stream_body);
+
+        poll_ready(model.do_stream(LanguageModelCallOptions::new(
+            openai_compatible_chat_prompt_messages(),
+        )))
+    }
+
+    fn openai_compatible_chunk_fixture_line_count(fixture: &str) -> usize {
+        fixture
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count()
+    }
+
+    fn openai_compatible_chat_stream_reasoning_text(stream: &[LanguageModelStreamPart]) -> String {
+        stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ReasoningDelta(delta) => Some(delta.delta.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn openai_compatible_chat_stream_text(stream: &[LanguageModelStreamPart]) -> String {
+        stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) => Some(delta.delta.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn openai_compatible_chat_stream_finish(
@@ -8990,6 +9037,132 @@ mod tests {
             finish if finish.finish_reason.unified == FinishReason::Stop
                 && finish.usage.input_tokens.total == Some(18)
                 && finish.usage.output_tokens.total == Some(2)
+        ));
+    }
+
+    #[test]
+    fn openai_compatible_chat_streams_xai_text_fixture_content() {
+        let result = openai_compatible_chat_stream_result_from_chunk_fixture(
+            OPENAI_COMPATIBLE_XAI_TEXT_CHUNKS,
+        );
+        let reasoning_text = openai_compatible_chat_stream_reasoning_text(&result.stream);
+        let finish = openai_compatible_chat_stream_finish(&result.stream);
+
+        assert_eq!(
+            openai_compatible_chunk_fixture_line_count(OPENAI_COMPATIBLE_XAI_TEXT_CHUNKS),
+            344
+        );
+        assert!(
+            !result
+                .stream
+                .iter()
+                .any(|part| matches!(part, LanguageModelStreamPart::Raw(_)))
+        );
+        assert!(matches!(
+            result.stream.first(),
+            Some(LanguageModelStreamPart::StreamStart(start)) if start.warnings.is_empty()
+        ));
+        assert!(matches!(
+            result.stream.get(1),
+            Some(LanguageModelStreamPart::ResponseMetadata(metadata))
+                if metadata.id.as_deref() == Some("f0f0f217-c24d-1fee-5fe3-28fa1d3c8c94")
+                    && metadata.model_id.as_deref() == Some("grok-3-mini")
+                    && metadata.timestamp.map(|timestamp| timestamp.unix_timestamp())
+                        == Some(1_770_772_287)
+        ));
+        assert_eq!(
+            result
+                .stream
+                .iter()
+                .filter(|part| matches!(part, LanguageModelStreamPart::ReasoningDelta(_)))
+                .count(),
+            340
+        );
+        assert_eq!(openai_compatible_chat_stream_text(&result.stream), "Grok");
+        assert!(reasoning_text.starts_with("First, the user said: \"Say a single word.\""));
+        assert!(reasoning_text.ends_with("Response: Grok"));
+        assert!(matches!(
+            finish,
+            finish if finish.finish_reason.unified == FinishReason::Stop
+                && finish.usage.input_tokens.total == Some(12)
+                && finish.usage.output_tokens.total == Some(2)
+                && finish.usage.output_tokens.text == Some(0)
+                && finish.usage.output_tokens.reasoning == Some(340)
+                && finish
+                    .usage
+                    .raw
+                    .as_ref()
+                    .and_then(|raw| raw.get("cost_in_usd_ticks"))
+                    .and_then(JsonValue::as_u64)
+                    == Some(1_721_250)
+        ));
+    }
+
+    #[test]
+    fn openai_compatible_chat_streams_xai_tool_call_fixture_content() {
+        let result = openai_compatible_chat_stream_result_from_chunk_fixture(
+            OPENAI_COMPATIBLE_XAI_TOOL_CALL_CHUNKS,
+        );
+        let reasoning_text = openai_compatible_chat_stream_reasoning_text(&result.stream);
+        let tool_call = openai_compatible_chat_stream_tool_call(&result.stream, "call_79382389");
+        let finish = openai_compatible_chat_stream_finish(&result.stream);
+
+        assert_eq!(
+            openai_compatible_chunk_fixture_line_count(OPENAI_COMPATIBLE_XAI_TOOL_CALL_CHUNKS),
+            230
+        );
+        assert!(
+            !result
+                .stream
+                .iter()
+                .any(|part| matches!(part, LanguageModelStreamPart::Raw(_)))
+        );
+        assert!(matches!(
+            result.stream.first(),
+            Some(LanguageModelStreamPart::StreamStart(start)) if start.warnings.is_empty()
+        ));
+        assert!(matches!(
+            result.stream.get(1),
+            Some(LanguageModelStreamPart::ResponseMetadata(metadata))
+                if metadata.id.as_deref() == Some("7027d986-3c59-a37a-9a5f-50713e01c8a6")
+                    && metadata.model_id.as_deref() == Some("grok-3-mini")
+                    && metadata.timestamp.map(|timestamp| timestamp.unix_timestamp())
+                        == Some(1_770_772_293)
+        ));
+        assert_eq!(
+            result
+                .stream
+                .iter()
+                .filter(|part| matches!(part, LanguageModelStreamPart::ReasoningDelta(_)))
+                .count(),
+            227
+        );
+        assert_eq!(openai_compatible_chat_stream_text(&result.stream), "");
+        assert!(
+            reasoning_text
+                .starts_with("First, the user is asking about the weather in San Francisco.")
+        );
+        assert!(reasoning_text.ends_with("but for now, this is the logical next step."));
+        assert_eq!(
+            openai_compatible_chat_stream_tool_input_deltas(&result.stream, "call_79382389"),
+            vec!["{\"location\":\"San Francisco\"}"]
+        );
+        assert_eq!(tool_call.tool_name, "weather");
+        assert_eq!(tool_call.input, "{\"location\":\"San Francisco\"}");
+        assert!(matches!(
+            finish,
+            finish if finish.finish_reason.unified == FinishReason::ToolCalls
+                && finish.usage.input_tokens.total == Some(307)
+                && finish.usage.output_tokens.total == Some(26)
+                && finish.usage.output_tokens.text == Some(0)
+                && finish.usage.output_tokens.reasoning == Some(227)
+                && finish
+                    .usage
+                    .raw
+                    .as_ref()
+                    .and_then(|raw| raw.get("cost_in_usd_ticks"))
+                    .and_then(JsonValue::as_u64)
+                    == Some(1_497_500)
         ));
     }
 
