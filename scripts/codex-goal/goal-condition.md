@@ -19,6 +19,11 @@ inventory, every provider package, every core/helper/library package, public
 APIs, examples, tests, and feature status. Do not mark the goal complete while
 any ledger row is unported, unverified, or undocumented. Re-scan upstream often.
 
+Non-negotiable test floor: EVERY portable original upstream TypeScript test/case
+must exist as an equivalent Rust test in the matching 1:1 crate. Rust may add
+more tests, but never fewer mapped original TypeScript tests; a package with even
+one missing portable upstream test/case is incomplete.
+
 Test parity is a hard completion gate. EVERY portable test from the original
 upstream TypeScript packages must exist as an equivalent Rust test in the
 matching 1:1 crate before that package can be marked verified. The inventory is
