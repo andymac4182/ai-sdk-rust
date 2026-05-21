@@ -4566,9 +4566,9 @@ mod tests {
         LanguageModelReasoningEffort, LanguageModelReasoningPart, LanguageModelResponseFormat,
         LanguageModelStreamFinish, LanguageModelStreamPart, LanguageModelStreamResult,
         LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelTool,
-        LanguageModelToolCallPart, LanguageModelToolChoice, LanguageModelToolContentPart,
-        LanguageModelToolMessage, LanguageModelToolResultOutput, LanguageModelToolResultPart,
-        LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolChoice,
+        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultOutput,
+        LanguageModelToolResultPart, LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use ai_sdk_provider::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
     use ai_sdk_provider::warning::Warning;
@@ -4876,7 +4876,7 @@ mod tests {
     fn openai_compatible_chat_stream_result_with_usage(
         usage: JsonValue,
     ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
-        let (model, _captured_request) = openai_compatible_chat_stream_test_model(sse_body([
+        openai_compatible_chat_stream_result_from_chunks([
             json!({
                 "id": "chat-id",
                 "choices": [
@@ -4896,7 +4896,13 @@ mod tests {
                 ],
                 "usage": usage
             }),
-        ]));
+        ])
+    }
+
+    fn openai_compatible_chat_stream_result_from_chunks(
+        chunks: impl IntoIterator<Item = JsonValue>,
+    ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
+        let (model, _captured_request) = openai_compatible_chat_stream_test_model(sse_body(chunks));
 
         poll_ready(model.do_stream(LanguageModelCallOptions::new(
             openai_compatible_chat_prompt_messages(),
@@ -4913,6 +4919,43 @@ mod tests {
                 _ => None,
             })
             .expect("finish part is present")
+    }
+
+    fn openai_compatible_chat_stream_tool_input_deltas<'a>(
+        stream: &'a [LanguageModelStreamPart],
+        tool_call_id: &str,
+    ) -> Vec<&'a str> {
+        stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolInputDelta(delta) if delta.id == tool_call_id => {
+                    Some(delta.delta.as_str())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn openai_compatible_chat_stream_tool_calls(
+        stream: &[LanguageModelStreamPart],
+    ) -> Vec<&LanguageModelToolCall> {
+        stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn openai_compatible_chat_stream_tool_call<'a>(
+        stream: &'a [LanguageModelStreamPart],
+        tool_call_id: &str,
+    ) -> &'a LanguageModelToolCall {
+        openai_compatible_chat_stream_tool_calls(stream)
+            .into_iter()
+            .find(|tool_call| tool_call.tool_call_id == tool_call_id)
+            .expect("tool call part is present")
     }
 
     fn openai_compatible_test_provider_metadata_entry<'a>(
@@ -9398,6 +9441,1130 @@ mod tests {
                 ],
                 "stream": true
             })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_streams_tool_deltas() {
+        let call_id = "call_O17Uplv4lJvD6DVdIvFFeRMw";
+        let result = openai_compatible_chat_stream_result_from_chunks([
+            json!({
+                "id": "chatcmpl-tool-deltas",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": "test-tool",
+                                "arguments": ""
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-tool-deltas",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": "{\""
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-tool-deltas",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": "value"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-tool-deltas",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": "\":\""
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-tool-deltas",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": "Spark"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-tool-deltas",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": "le"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-tool-deltas",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": " Day"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-tool-deltas",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": "\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-tool-deltas",
+                "object": "chat.completion.chunk",
+                "created": 1729171479,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {
+                    "prompt_tokens": 18,
+                    "completion_tokens": 439,
+                    "total_tokens": 457
+                }
+            }),
+        ]);
+
+        assert!(result.stream.iter().any(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::ToolInputStart(start)
+                    if start.id == call_id && start.tool_name == "test-tool"
+            )
+        }));
+        assert_eq!(
+            openai_compatible_chat_stream_tool_input_deltas(&result.stream, call_id),
+            vec!["{\"", "value", "\":\"", "Spark", "le", " Day", "\"}"]
+        );
+        assert!(result.stream.iter().any(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::ToolInputEnd(end) if end.id == call_id
+            )
+        }));
+        let tool_call = openai_compatible_chat_stream_tool_call(&result.stream, call_id);
+        assert_eq!(tool_call.tool_name, "test-tool");
+        assert_eq!(tool_call.input, "{\"value\":\"Sparkle Day\"}");
+        let finish = openai_compatible_chat_stream_finish(&result.stream);
+        assert_eq!(finish.finish_reason.unified, FinishReason::ToolCalls);
+        assert_eq!(finish.finish_reason.raw.as_deref(), Some("tool_calls"));
+        assert_eq!(finish.usage.input_tokens.total, Some(18));
+        assert_eq!(finish.usage.output_tokens.total, Some(439));
+    }
+
+    #[test]
+    fn openai_compatible_chat_streams_tool_deltas_when_function_name_arrives_later() {
+        let result = openai_compatible_chat_stream_result_from_chunks([
+            json!({
+                "id": "chatcmpl-late-name",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": null
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-late-name",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_late",
+                            "type": "function",
+                            "function": {
+                                "arguments": ""
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-late-name",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_late",
+                            "type": "function",
+                            "function": {
+                                "name": "test-tool",
+                                "arguments": "{\""
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-late-name",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": "value"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-late-name",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": "\":\"hi\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-late-name",
+                "object": "chat.completion.chunk",
+                "created": 1729171479,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {
+                    "prompt_tokens": 18,
+                    "completion_tokens": 10,
+                    "total_tokens": 28
+                }
+            }),
+        ]);
+
+        assert_eq!(
+            openai_compatible_chat_stream_tool_input_deltas(&result.stream, "call_late"),
+            vec!["{\"", "value", "\":\"hi\"}"]
+        );
+        let tool_call = openai_compatible_chat_stream_tool_call(&result.stream, "call_late");
+        assert_eq!(tool_call.tool_name, "test-tool");
+        assert_eq!(tool_call.input, "{\"value\":\"hi\"}");
+        assert_eq!(
+            openai_compatible_chat_stream_finish(&result.stream)
+                .finish_reason
+                .unified,
+            FinishReason::ToolCalls
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_stream_errors_when_tool_call_never_receives_function_name() {
+        let result = openai_compatible_chat_stream_result_from_chunks([
+            json!({
+                "id": "chatcmpl-no-name",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": null
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-no-name",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_missing",
+                            "type": "function",
+                            "function": {
+                                "arguments": "{}"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-no-name",
+                "object": "chat.completion.chunk",
+                "created": 1729171479,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {
+                    "prompt_tokens": 18,
+                    "completion_tokens": 10,
+                    "total_tokens": 28
+                }
+            }),
+        ]);
+
+        assert!(openai_compatible_chat_stream_tool_calls(&result.stream).is_empty());
+        assert!(result.stream.iter().any(|part| {
+            matches!(
+                part,
+                LanguageModelStreamPart::Error(error)
+                    if error.error
+                        .get("message")
+                        .and_then(JsonValue::as_str)
+                        .is_some_and(|message| message.contains("Expected 'function.name' to be a string."))
+            )
+        }));
+        let finish = openai_compatible_chat_stream_finish(&result.stream);
+        assert_eq!(finish.finish_reason.unified, FinishReason::Error);
+        assert_eq!(
+            finish.finish_reason.raw.as_deref(),
+            Some("openai-compatible-tool-call-error")
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_streams_tool_call_with_thought_signature_from_extra_content() {
+        let result = openai_compatible_chat_stream_result_from_chunks([
+            json!({
+                "id": "chatcmpl-gemini-thought",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "gemini-3-pro",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "function-call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "check_flight",
+                                "arguments": ""
+                            },
+                            "extra_content": {
+                                "google": {
+                                    "thought_signature": "<Signature A>"
+                                }
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-gemini-thought",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "gemini-3-pro",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": "{\"flight\":"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-gemini-thought",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "gemini-3-pro",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": "\"AA100\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-gemini-thought",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "gemini-3-pro",
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 20,
+                    "total_tokens": 30
+                }
+            }),
+        ]);
+
+        let tool_call = openai_compatible_chat_stream_tool_call(&result.stream, "function-call-1");
+        assert_eq!(tool_call.tool_name, "check_flight");
+        assert_eq!(tool_call.input, "{\"flight\":\"AA100\"}");
+        assert_eq!(
+            tool_call
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("test-provider"))
+                .and_then(|metadata| metadata.get("thoughtSignature"))
+                .and_then(JsonValue::as_str),
+            Some("<Signature A>")
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_streams_parallel_tool_calls_with_signature_only_on_first_call() {
+        let result = openai_compatible_chat_stream_result_from_chunks([
+            json!({
+                "id": "chatcmpl-gemini-parallel",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "gemini-3-pro",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call-paris",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_weather",
+                                    "arguments": ""
+                                },
+                                "extra_content": {
+                                    "google": {
+                                        "thought_signature": "<Signature A>"
+                                    }
+                                }
+                            },
+                            {
+                                "index": 1,
+                                "id": "call-london",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_weather",
+                                    "arguments": ""
+                                }
+                            }
+                        ]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-gemini-parallel",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "gemini-3-pro",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": "{\"location\":\"Paris\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-gemini-parallel",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "gemini-3-pro",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 1,
+                            "function": {
+                                "arguments": "{\"location\":\"London\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-gemini-parallel",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "gemini-3-pro",
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 20,
+                    "total_tokens": 30
+                }
+            }),
+        ]);
+
+        let tool_calls = openai_compatible_chat_stream_tool_calls(&result.stream);
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(tool_calls[0].tool_call_id, "call-paris");
+        assert_eq!(tool_calls[0].tool_name, "get_weather");
+        assert_eq!(tool_calls[0].input, "{\"location\":\"Paris\"}");
+        assert_eq!(
+            tool_calls[0]
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("test-provider"))
+                .and_then(|metadata| metadata.get("thoughtSignature"))
+                .and_then(JsonValue::as_str),
+            Some("<Signature A>")
+        );
+        assert_eq!(tool_calls[1].tool_call_id, "call-london");
+        assert_eq!(tool_calls[1].tool_name, "get_weather");
+        assert_eq!(tool_calls[1].input, "{\"location\":\"London\"}");
+        assert!(tool_calls[1].provider_metadata.is_none());
+    }
+
+    #[test]
+    fn openai_compatible_chat_streams_tool_call_deltas_when_arguments_are_in_first_chunk() {
+        let call_id = "call_O17Uplv4lJvD6DVdIvFFeRMw";
+        let result = openai_compatible_chat_stream_result_from_chunks([
+            json!({
+                "id": "chatcmpl-tool-first-args",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": "test-tool",
+                                "arguments": "{\""
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-tool-first-args",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": "va"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-tool-first-args",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": "lue"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-tool-first-args",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": "\":\""
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-tool-first-args",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": "Spark"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-tool-first-args",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": "le"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-tool-first-args",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": " Day"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-tool-first-args",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": "\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-tool-first-args",
+                "object": "chat.completion.chunk",
+                "created": 1729171479,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {
+                    "prompt_tokens": 18,
+                    "completion_tokens": 439,
+                    "total_tokens": 457
+                }
+            }),
+        ]);
+
+        assert_eq!(
+            openai_compatible_chat_stream_tool_input_deltas(&result.stream, call_id),
+            vec!["{\"", "va", "lue", "\":\"", "Spark", "le", " Day", "\"}"]
+        );
+        let tool_call = openai_compatible_chat_stream_tool_call(&result.stream, call_id);
+        assert_eq!(tool_call.input, "{\"value\":\"Sparkle Day\"}");
+    }
+
+    #[test]
+    fn openai_compatible_chat_stream_does_not_duplicate_tool_calls_after_completed_empty_chunk() {
+        let call_id = "chatcmpl-tool-b3b307239370432d9910d4b79b4dbbaa";
+        let result = openai_compatible_chat_stream_result_from_chunks([
+            json!({
+                "id": "chat-2267f7e2910a4254bac0650ba74cfc1c",
+                "object": "chat.completion.chunk",
+                "created": 1733162241,
+                "model": "meta/llama-3.1-8b-instruct:fp8",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": ""
+                    },
+                    "finish_reason": null
+                }],
+                "usage": {
+                    "prompt_tokens": 226,
+                    "total_tokens": 226,
+                    "completion_tokens": 0
+                }
+            }),
+            json!({
+                "id": "chat-2267f7e2910a4254bac0650ba74cfc1c",
+                "object": "chat.completion.chunk",
+                "created": 1733162241,
+                "model": "meta/llama-3.1-8b-instruct:fp8",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": "searchGoogle"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }],
+                "usage": {
+                    "prompt_tokens": 226,
+                    "total_tokens": 233,
+                    "completion_tokens": 7
+                }
+            }),
+            json!({
+                "id": "chat-2267f7e2910a4254bac0650ba74cfc1c",
+                "object": "chat.completion.chunk",
+                "created": 1733162241,
+                "model": "meta/llama-3.1-8b-instruct:fp8",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": "{\"query\": \""
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }],
+                "usage": {
+                    "prompt_tokens": 226,
+                    "total_tokens": 241,
+                    "completion_tokens": 15
+                }
+            }),
+            json!({
+                "id": "chat-2267f7e2910a4254bac0650ba74cfc1c",
+                "object": "chat.completion.chunk",
+                "created": 1733162241,
+                "model": "meta/llama-3.1-8b-instruct:fp8",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": "latest"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }],
+                "usage": {
+                    "prompt_tokens": 226,
+                    "total_tokens": 242,
+                    "completion_tokens": 16
+                }
+            }),
+            json!({
+                "id": "chat-2267f7e2910a4254bac0650ba74cfc1c",
+                "object": "chat.completion.chunk",
+                "created": 1733162241,
+                "model": "meta/llama-3.1-8b-instruct:fp8",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": " news"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }],
+                "usage": {
+                    "prompt_tokens": 226,
+                    "total_tokens": 243,
+                    "completion_tokens": 17
+                }
+            }),
+            json!({
+                "id": "chat-2267f7e2910a4254bac0650ba74cfc1c",
+                "object": "chat.completion.chunk",
+                "created": 1733162241,
+                "model": "meta/llama-3.1-8b-instruct:fp8",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": " on"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }],
+                "usage": {
+                    "prompt_tokens": 226,
+                    "total_tokens": 244,
+                    "completion_tokens": 18
+                }
+            }),
+            json!({
+                "id": "chat-2267f7e2910a4254bac0650ba74cfc1c",
+                "object": "chat.completion.chunk",
+                "created": 1733162241,
+                "model": "meta/llama-3.1-8b-instruct:fp8",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": " ai\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }],
+                "usage": {
+                    "prompt_tokens": 226,
+                    "total_tokens": 245,
+                    "completion_tokens": 19
+                }
+            }),
+            json!({
+                "id": "chat-2267f7e2910a4254bac0650ba74cfc1c",
+                "object": "chat.completion.chunk",
+                "created": 1733162241,
+                "model": "meta/llama-3.1-8b-instruct:fp8",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": ""
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {
+                    "prompt_tokens": 226,
+                    "total_tokens": 246,
+                    "completion_tokens": 20
+                }
+            }),
+            json!({
+                "id": "chat-2267f7e2910a4254bac0650ba74cfc1c",
+                "object": "chat.completion.chunk",
+                "created": 1733162241,
+                "model": "meta/llama-3.1-8b-instruct:fp8",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 226,
+                    "total_tokens": 246,
+                    "completion_tokens": 20
+                }
+            }),
+        ]);
+
+        assert_eq!(
+            openai_compatible_chat_stream_tool_input_deltas(&result.stream, call_id),
+            vec!["{\"query\": \"", "latest", " news", " on", " ai\"}"]
+        );
+        let tool_calls = openai_compatible_chat_stream_tool_calls(&result.stream);
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].tool_call_id, call_id);
+        assert_eq!(tool_calls[0].tool_name, "searchGoogle");
+        assert_eq!(tool_calls[0].input, "{\"query\": \"latest news on ai\"}");
+        assert_eq!(
+            openai_compatible_chat_stream_finish(&result.stream)
+                .usage
+                .output_tokens
+                .total,
+            Some(20)
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_streams_tool_call_sent_in_one_chunk() {
+        let call_id = "call_O17Uplv4lJvD6DVdIvFFeRMw";
+        let result = openai_compatible_chat_stream_result_from_chunks([
+            json!({
+                "id": "chatcmpl-one-chunk",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": "test-tool",
+                                "arguments": "{\"value\":\"Sparkle Day\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-one-chunk",
+                "object": "chat.completion.chunk",
+                "created": 1729171479,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {
+                    "prompt_tokens": 18,
+                    "completion_tokens": 439,
+                    "total_tokens": 457
+                }
+            }),
+        ]);
+
+        assert_eq!(
+            openai_compatible_chat_stream_tool_input_deltas(&result.stream, call_id),
+            vec!["{\"value\":\"Sparkle Day\"}"]
+        );
+        let tool_call = openai_compatible_chat_stream_tool_call(&result.stream, call_id);
+        assert_eq!(tool_call.tool_name, "test-tool");
+        assert_eq!(tool_call.input, "{\"value\":\"Sparkle Day\"}");
+    }
+
+    #[test]
+    fn openai_compatible_chat_streams_empty_tool_call_sent_in_one_chunk() {
+        let call_id = "call_O17Uplv4lJvD6DVdIvFFeRMw";
+        let result = openai_compatible_chat_stream_result_from_chunks([
+            json!({
+                "id": "chatcmpl-empty-one-chunk",
+                "object": "chat.completion.chunk",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": "test-tool",
+                                "arguments": ""
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-empty-one-chunk",
+                "object": "chat.completion.chunk",
+                "created": 1729171479,
+                "model": "grok-3",
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {
+                    "prompt_tokens": 18,
+                    "completion_tokens": 439,
+                    "total_tokens": 457
+                }
+            }),
+        ]);
+
+        assert!(
+            openai_compatible_chat_stream_tool_input_deltas(&result.stream, call_id).is_empty()
+        );
+        let tool_call = openai_compatible_chat_stream_tool_call(&result.stream, call_id);
+        assert_eq!(tool_call.tool_name, "test-tool");
+        assert_eq!(tool_call.input, "");
+        assert_eq!(
+            openai_compatible_chat_stream_finish(&result.stream)
+                .finish_reason
+                .unified,
+            FinishReason::ToolCalls
         );
     }
 
