@@ -867,6 +867,14 @@ focused tests for each portable behavior before changing rows to `verified`.
   retryable pre-stream 500/429 failures, successful response streaming after
   retry, and preservation of standardized system/user prompts across retry
   attempts.
+- 2026-05-21: `streamObject` text response parity added
+  `stream_object_result_text_stream_and_response_match_upstream_object_chunks`
+  and
+  `stream_object_result_pipe_text_stream_to_response_writes_default_headers_chunks_and_end`
+  in `src/stream_object.rs`, mapping upstream `result.textStream`,
+  `result.toTextStreamResponse`, and `result.pipeTextStreamToResponse` object
+  output cases with default `200` status, `text/plain; charset=utf-8`, chunk
+  preservation, and response finalization.
 - 2026-05-20: `streamText` smooth stream chunking parity added
   `smooth_stream_combines_partial_words`,
   `smooth_stream_supports_line_and_pattern_chunking`,
