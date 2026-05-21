@@ -352,7 +352,7 @@ mod tests {
     };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
-    use crate::provider::{Provider, ProviderMetadata, ProviderOptions};
+    use crate::provider::{Provider, ProviderOptions};
     use crate::provider_utils::{
         ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     };
@@ -423,13 +423,12 @@ mod tests {
         assert_eq!(model.provider(), "openai.chat");
         assert_eq!(model.model_id(), "gpt-4o-mini");
         assert_eq!(result.text, "Hello from OpenAI");
-        assert_eq!(
+        assert!(
             result
                 .provider_metadata
                 .as_ref()
-                .unwrap_or(&ProviderMetadata::new())
-                .get("openai"),
-            None
+                .and_then(|metadata| metadata.get("openai"))
+                .is_some_and(|metadata| metadata.is_empty())
         );
 
         let request = captured_request

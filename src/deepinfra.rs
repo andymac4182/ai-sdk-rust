@@ -997,7 +997,7 @@ mod tests {
     };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
-    use crate::provider::{Provider, ProviderMetadata, ProviderOptions};
+    use crate::provider::{Provider, ProviderOptions};
     use crate::provider_utils::{
         FormDataValue, ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod,
         ProviderApiResponse,
@@ -1074,13 +1074,12 @@ mod tests {
                 .and_then(|response| response.id.as_deref()),
             Some("chatcmpl-deepinfra")
         );
-        assert_eq!(
+        assert!(
             result
                 .provider_metadata
                 .as_ref()
-                .unwrap_or(&ProviderMetadata::new())
-                .get("deepinfra"),
-            None
+                .and_then(|metadata| metadata.get("deepinfra"))
+                .is_some_and(|metadata| metadata.is_empty())
         );
 
         let request = captured_request

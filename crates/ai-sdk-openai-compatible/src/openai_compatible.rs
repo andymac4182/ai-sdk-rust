@@ -3380,7 +3380,7 @@ async fn openai_compatible_provider_metadata(
         provider_name,
         &mut metadata,
         response.get("usage"),
-        false,
+        true,
     );
 
     metadata
@@ -4391,12 +4391,12 @@ mod tests {
         FinishReason, LanguageModel, LanguageModelAbortController,
         LanguageModelAssistantContentPart, LanguageModelAssistantMessage, LanguageModelCallOptions,
         LanguageModelContent, LanguageModelFilePart, LanguageModelFunctionTool,
-        LanguageModelMessage, LanguageModelProviderTool, LanguageModelReasoningEffort,
-        LanguageModelReasoningPart, LanguageModelResponseFormat, LanguageModelStreamPart,
-        LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelTool,
-        LanguageModelToolCallPart, LanguageModelToolChoice, LanguageModelToolContentPart,
-        LanguageModelToolMessage, LanguageModelToolResultOutput, LanguageModelToolResultPart,
-        LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelGenerateResult, LanguageModelMessage, LanguageModelProviderTool,
+        LanguageModelReasoningEffort, LanguageModelReasoningPart, LanguageModelResponseFormat,
+        LanguageModelStreamPart, LanguageModelSystemMessage, LanguageModelTextPart,
+        LanguageModelTool, LanguageModelToolCallPart, LanguageModelToolChoice,
+        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultOutput,
+        LanguageModelToolResultPart, LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use ai_sdk_provider::provider::{ProviderMetadata, ProviderOptions};
     use ai_sdk_provider::warning::Warning;
@@ -4483,6 +4483,59 @@ mod tests {
         let mut provider_metadata = JsonObject::new();
         provider_metadata.insert("value".to_string(), json!(value.into()));
         ProviderMetadata::from([("test-provider".to_string(), provider_metadata)])
+    }
+
+    fn openai_compatible_chat_generate_result_with_usage(
+        usage: JsonValue,
+    ) -> LanguageModelGenerateResult {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |_request| -> OpenAICompatibleTransportFuture {
+                let usage = usage.clone();
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "chatcmpl-usage",
+                        "object": "chat.completion",
+                        "created": 1711115037,
+                        "model": "grok-3",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Hello!"
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": usage
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
+            "test-provider",
+            "https://api.example.com",
+        ))
+        .with_transport(transport)
+        .chat_model("grok-3");
+
+        poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
+            ])),
+        ])))
+    }
+
+    fn openai_compatible_test_provider_metadata_entry<'a>(
+        result: &'a LanguageModelGenerateResult,
+    ) -> &'a JsonObject {
+        result
+            .provider_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("test-provider"))
+            .expect("test-provider metadata is present")
     }
 
     fn openai_compatible_stream_request_bodies_for_include_usage(
@@ -5884,6 +5937,102 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn openai_compatible_chat_extracts_detailed_token_usage_when_available() {
+        let usage = json!({
+            "prompt_tokens": 20,
+            "completion_tokens": 30,
+            "total_tokens": 50,
+            "prompt_tokens_details": {
+                "cached_tokens": 5
+            },
+            "completion_tokens_details": {
+                "reasoning_tokens": 10,
+                "accepted_prediction_tokens": 15,
+                "rejected_prediction_tokens": 5
+            }
+        });
+        let result = openai_compatible_chat_generate_result_with_usage(usage.clone());
+
+        assert_eq!(result.usage.input_tokens.total, Some(20));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(5));
+        assert_eq!(result.usage.input_tokens.no_cache, Some(15));
+        assert_eq!(result.usage.input_tokens.cache_write, None);
+        assert_eq!(result.usage.output_tokens.total, Some(30));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(10));
+        assert_eq!(result.usage.output_tokens.text, Some(20));
+        assert_eq!(result.usage.raw, usage.as_object().cloned());
+
+        let provider_metadata = openai_compatible_test_provider_metadata_entry(&result);
+        assert_eq!(
+            provider_metadata.get("acceptedPredictionTokens"),
+            Some(&json!(15))
+        );
+        assert_eq!(
+            provider_metadata.get("rejectedPredictionTokens"),
+            Some(&json!(5))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_handles_missing_token_details() {
+        let result = openai_compatible_chat_generate_result_with_usage(json!({
+            "prompt_tokens": 20,
+            "completion_tokens": 30
+        }));
+
+        assert_eq!(result.usage.input_tokens.total, Some(20));
+        assert_eq!(result.usage.input_tokens.cache_read, None);
+        assert_eq!(result.usage.input_tokens.no_cache, None);
+        assert_eq!(result.usage.output_tokens.total, Some(30));
+        assert_eq!(result.usage.output_tokens.reasoning, None);
+        assert_eq!(result.usage.output_tokens.text, Some(30));
+        assert!(openai_compatible_test_provider_metadata_entry(&result).is_empty());
+    }
+
+    #[test]
+    fn openai_compatible_chat_handles_partial_token_details() {
+        let usage = json!({
+            "prompt_tokens": 20,
+            "completion_tokens": 30,
+            "total_tokens": 50,
+            "prompt_tokens_details": {
+                "cached_tokens": 5
+            },
+            "completion_tokens_details": {
+                "reasoning_tokens": 10
+            }
+        });
+        let result = openai_compatible_chat_generate_result_with_usage(usage.clone());
+
+        assert_eq!(result.usage.input_tokens.total, Some(20));
+        assert_eq!(result.usage.input_tokens.cache_read, Some(5));
+        assert_eq!(result.usage.input_tokens.no_cache, Some(15));
+        assert_eq!(result.usage.output_tokens.total, Some(30));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(10));
+        assert_eq!(result.usage.output_tokens.text, Some(20));
+        assert_eq!(result.usage.raw, usage.as_object().cloned());
+        assert!(openai_compatible_test_provider_metadata_entry(&result).is_empty());
+    }
+
+    #[test]
+    fn openai_compatible_chat_preserves_extra_usage_fields_from_provider_specific_responses() {
+        let usage = json!({
+            "prompt_tokens": 18,
+            "completion_tokens": 439,
+            "total_tokens": 457,
+            "queue_time": 0.061348671,
+            "prompt_time": 0.000211569,
+            "completion_time": 0.798181818,
+            "total_time": 0.798393387
+        });
+        let result = openai_compatible_chat_generate_result_with_usage(usage.clone());
+
+        assert_eq!(result.usage.input_tokens.total, Some(18));
+        assert_eq!(result.usage.output_tokens.total, Some(439));
+        assert_eq!(result.usage.raw, usage.as_object().cloned());
     }
 
     #[test]

@@ -228,7 +228,7 @@ mod tests {
     use crate::language_model::LanguageModelResponseFormat;
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
-    use crate::provider::{ModelType, Provider, ProviderMetadata};
+    use crate::provider::{ModelType, Provider};
     use crate::provider_utils::{
         ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
     };
@@ -305,13 +305,12 @@ mod tests {
         assert_eq!(model.model_id(), "llama3.1-8b");
         assert!(model.supports_structured_outputs());
         assert_eq!(result.text, "Hello from Cerebras");
-        assert_eq!(
+        assert!(
             result
                 .provider_metadata
                 .as_ref()
-                .unwrap_or(&ProviderMetadata::new())
-                .get("cerebras"),
-            None
+                .and_then(|metadata| metadata.get("cerebras"))
+                .is_some_and(|metadata| metadata.is_empty())
         );
 
         let request = captured_request
