@@ -14820,6 +14820,105 @@ mod tests {
     }
 
     #[test]
+    fn openai_compatible_provider_passes_include_usage_true_to_created_language_models() {
+        let provider = create_openai_compatible(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com")
+                .with_include_usage(true),
+        );
+
+        assert_eq!(
+            provider
+                .chat_model("chat-model")
+                .config
+                .settings
+                .include_usage,
+            Some(true)
+        );
+        assert_eq!(
+            provider
+                .completion_model("completion-model")
+                .config
+                .settings
+                .include_usage,
+            Some(true)
+        );
+        assert_eq!(
+            provider
+                .language_model("model-id")
+                .config
+                .settings
+                .include_usage,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn openai_compatible_provider_passes_include_usage_false_to_created_language_models() {
+        let provider = create_openai_compatible(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com")
+                .with_include_usage(false),
+        );
+
+        assert_eq!(
+            provider
+                .chat_model("chat-model")
+                .config
+                .settings
+                .include_usage,
+            Some(false)
+        );
+        assert_eq!(
+            provider
+                .completion_model("completion-model")
+                .config
+                .settings
+                .include_usage,
+            Some(false)
+        );
+        assert_eq!(
+            provider
+                .language_model("model-id")
+                .config
+                .settings
+                .include_usage,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn openai_compatible_provider_passes_unspecified_include_usage_to_created_language_models() {
+        let provider = create_openai_compatible(OpenAICompatibleProviderSettings::new(
+            "test-provider",
+            "https://api.example.com",
+        ));
+
+        assert_eq!(
+            provider
+                .chat_model("chat-model")
+                .config
+                .settings
+                .include_usage,
+            None
+        );
+        assert_eq!(
+            provider
+                .completion_model("completion-model")
+                .config
+                .settings
+                .include_usage,
+            None
+        );
+        assert_eq!(
+            provider
+                .language_model("model-id")
+                .config
+                .settings
+                .include_usage,
+            None
+        );
+    }
+
+    #[test]
     fn openai_compatible_provider_passes_structured_outputs_to_chat_and_language_models_only() {
         let provider = create_openai_compatible(
             OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com")
