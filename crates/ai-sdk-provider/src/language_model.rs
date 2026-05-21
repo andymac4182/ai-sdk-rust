@@ -2791,6 +2791,10 @@ pub struct LanguageModelToolApprovalResponsePart {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 
+    /// Whether the approval response is for a provider-executed tool call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_executed: Option<bool>,
+
     /// Provider-specific options for this content part.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_options: Option<ProviderOptions>,
@@ -2804,6 +2808,7 @@ impl LanguageModelToolApprovalResponsePart {
             approval_id: approval_id.into(),
             approved,
             reason: None,
+            provider_executed: None,
             provider_options: None,
         }
     }
@@ -2811,6 +2816,12 @@ impl LanguageModelToolApprovalResponsePart {
     /// Sets the approval or denial reason.
     pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
         self.reason = Some(reason.into());
+        self
+    }
+
+    /// Sets whether the approval response is for a provider-executed tool call.
+    pub fn with_provider_executed(mut self, provider_executed: bool) -> Self {
+        self.provider_executed = Some(provider_executed);
         self
     }
 
@@ -5128,7 +5139,8 @@ mod tests {
             )),
             LanguageModelToolContentPart::ToolApprovalResponse(
                 LanguageModelToolApprovalResponsePart::new("approval_123", false)
-                    .with_reason("User declined external access."),
+                    .with_reason("User declined external access.")
+                    .with_provider_executed(true),
             ),
         ]));
 
@@ -5163,7 +5175,8 @@ mod tests {
                         "type": "tool-approval-response",
                         "approvalId": "approval_123",
                         "approved": false,
-                        "reason": "User declined external access."
+                        "reason": "User declined external access.",
+                        "providerExecuted": true
                     }
                 ]
             })
