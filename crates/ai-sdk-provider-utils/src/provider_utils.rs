@@ -1241,10 +1241,97 @@ where
     LazySchema::new(create_schema)
 }
 
+type StandardSchemaCreateJsonSchema =
+    dyn Fn(StandardSchemaJsonSchemaOptions) -> JsonSchema + Send + Sync + 'static;
+
+/// Options passed when a Standard Schema produces provider-facing JSON Schema.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct StandardSchemaJsonSchemaOptions {
+    /// JSON Schema target draft requested by provider-utils.
+    pub target: Option<String>,
+}
+
+impl StandardSchemaJsonSchemaOptions {
+    /// Creates Standard Schema JSON Schema options.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the requested JSON Schema target draft.
+    pub fn with_target(mut self, target: impl Into<String>) -> Self {
+        self.target = Some(target.into());
+        self
+    }
+}
+
+/// Rust-native representation of upstream Standard Schema v1.
+#[derive(Clone)]
+pub struct StandardSchema<T = JsonValue> {
+    vendor: String,
+    create_json_schema: Arc<StandardSchemaCreateJsonSchema>,
+    validate: Arc<SchemaValidator<T>>,
+}
+
+impl<T> StandardSchema<T> {
+    /// Creates a Standard Schema from a static JSON Schema and validator.
+    pub fn new<F>(vendor: impl Into<String>, json_schema: JsonSchema, validate: F) -> Self
+    where
+        F: Fn(&JsonValue) -> ValidationResult<T> + Send + Sync + 'static,
+    {
+        Self::with_json_schema(vendor, move |_options| json_schema.clone(), validate)
+    }
+
+    /// Creates a Standard Schema from a JSON Schema callback and validator.
+    pub fn with_json_schema<F, V>(
+        vendor: impl Into<String>,
+        create_json_schema: F,
+        validate: V,
+    ) -> Self
+    where
+        F: Fn(StandardSchemaJsonSchemaOptions) -> JsonSchema + Send + Sync + 'static,
+        V: Fn(&JsonValue) -> ValidationResult<T> + Send + Sync + 'static,
+    {
+        Self {
+            vendor: vendor.into(),
+            create_json_schema: Arc::new(create_json_schema),
+            validate: Arc::new(validate),
+        }
+    }
+
+    /// Returns the Standard Schema vendor identifier.
+    pub fn vendor(&self) -> &str {
+        &self.vendor
+    }
+
+    fn into_schema(self) -> Schema<T>
+    where
+        T: 'static,
+    {
+        let create_json_schema = Arc::clone(&self.create_json_schema);
+        let validate = Arc::clone(&self.validate);
+
+        Schema::lazy_json_schema(move || {
+            add_additional_properties_to_json_schema(create_json_schema(
+                StandardSchemaJsonSchemaOptions::new().with_target("draft-07"),
+            ))
+        })
+        .with_validator(move |value| validate(value))
+    }
+}
+
+impl<T> fmt::Debug for StandardSchema<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StandardSchema")
+            .field("vendor", &self.vendor)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Rust-native subset of upstream provider-utils `FlexibleSchema`.
 ///
-/// JavaScript schema adapters such as Zod and Standard Schema are intentionally
-/// left to future slices, but concrete and lazy provider-utils schemas can
+/// JavaScript schema adapters such as Zod are intentionally left to future
+/// slices, but concrete, lazy, and Standard Schema provider-utils schemas can
 /// already share normalization behavior.
 #[derive(Clone)]
 pub enum FlexibleSchema<T = JsonValue> {
@@ -1253,6 +1340,9 @@ pub enum FlexibleSchema<T = JsonValue> {
 
     /// Lazily created provider-utils schema.
     Lazy(LazySchema<T>),
+
+    /// Standard Schema v1 wrapper converted through its JSON Schema input.
+    Standard(StandardSchema<T>),
 }
 
 impl<T> FlexibleSchema<T> {
@@ -1261,14 +1351,19 @@ impl<T> FlexibleSchema<T> {
         match self {
             Self::Schema(schema) => schema,
             Self::Lazy(schema) => schema.schema(),
+            Self::Standard(_) => panic!("standard schemas must be converted with into_schema"),
         }
     }
 
     /// Converts this flexible schema into a concrete schema.
-    pub fn into_schema(self) -> Schema<T> {
+    pub fn into_schema(self) -> Schema<T>
+    where
+        T: 'static,
+    {
         match self {
             Self::Schema(schema) => schema,
             Self::Lazy(schema) => schema.schema().clone(),
+            Self::Standard(schema) => schema.into_schema(),
         }
     }
 }
@@ -1278,6 +1373,7 @@ impl<T> fmt::Debug for FlexibleSchema<T> {
         match self {
             Self::Schema(schema) => formatter.debug_tuple("Schema").field(schema).finish(),
             Self::Lazy(schema) => formatter.debug_tuple("Lazy").field(schema).finish(),
+            Self::Standard(schema) => formatter.debug_tuple("Standard").field(schema).finish(),
         }
     }
 }
@@ -1294,6 +1390,24 @@ impl<T> From<LazySchema<T>> for FlexibleSchema<T> {
     }
 }
 
+impl<T> From<StandardSchema<T>> for FlexibleSchema<T> {
+    fn from(schema: StandardSchema<T>) -> Self {
+        Self::Standard(schema)
+    }
+}
+
+/// Creates a provider-utils Standard Schema wrapper.
+pub fn standard_schema<T, F>(
+    vendor: impl Into<String>,
+    json_schema: JsonSchema,
+    validate: F,
+) -> StandardSchema<T>
+where
+    F: Fn(&JsonValue) -> ValidationResult<T> + Send + Sync + 'static,
+{
+    StandardSchema::new(vendor, json_schema, validate)
+}
+
 /// Normalizes an optional schema, defaulting to an empty closed object schema.
 ///
 /// This mirrors the `undefined` branch of upstream `asSchema`.
@@ -1302,7 +1416,7 @@ pub fn as_schema(schema: Option<Schema>) -> Schema {
 }
 
 /// Normalizes an optional concrete or lazy schema.
-pub fn as_flexible_schema<T>(schema: Option<FlexibleSchema<T>>) -> Schema<T> {
+pub fn as_flexible_schema<T: 'static>(schema: Option<FlexibleSchema<T>>) -> Schema<T> {
     schema.map_or_else(default_schema, FlexibleSchema::into_schema)
 }
 
@@ -6002,7 +6116,7 @@ pub fn validate_types<T>(
     context: Option<TypeValidationContext>,
 ) -> Result<T, TypeValidationError>
 where
-    T: DeserializeOwned,
+    T: DeserializeOwned + 'static,
 {
     match safe_validate_types(value, schema, context) {
         ValidateTypesResult::Success { value, .. } => Ok(value),
@@ -6022,7 +6136,7 @@ pub fn safe_validate_types<T>(
     context: Option<TypeValidationContext>,
 ) -> ValidateTypesResult<T>
 where
-    T: DeserializeOwned,
+    T: DeserializeOwned + 'static,
 {
     let schema = schema.into().into_schema();
 
@@ -6110,7 +6224,7 @@ pub fn parse_json_with_schema<T>(
     schema: impl Into<FlexibleSchema<T>>,
 ) -> Result<T, ParseJsonError>
 where
-    T: DeserializeOwned,
+    T: DeserializeOwned + 'static,
 {
     match safe_parse_json_with_schema(text, schema) {
         ParseJsonResult::Success { value, .. } => Ok(value),
@@ -6142,7 +6256,7 @@ pub fn safe_parse_json_with_schema<T>(
     schema: impl Into<FlexibleSchema<T>>,
 ) -> ParseJsonResult<T>
 where
-    T: DeserializeOwned,
+    T: DeserializeOwned + 'static,
 {
     let raw_value = match parse_json(text) {
         Ok(value) => value,
@@ -7997,12 +8111,13 @@ mod tests {
         ProviderApiResponse, ProviderApiResponseBody, ProviderApiResponseHandlerError,
         ProviderDefinedToolFactory, ProviderExecutedToolFactory, ReasoningLevel, Resolvable,
         ResponseHandlerResult, RuntimeEnvironment, SandboxCommandOptions, SandboxCommandResult,
-        SandboxRunCommandFuture, Schema, SerializedModelOptions,
-        StatusCodeErrorResponseHandlerOptions, StreamingToolCallDelta,
-        StreamingToolCallDeltaFunction, StreamingToolCallTracker, StreamingToolCallTrackerOptions,
-        StreamingToolCallTypeValidation, Tool, ToolApprovalRequest, ToolApprovalResponse, ToolCall,
-        ToolDescriptionOptions, ToolExecutionError, ToolExecutionOptions, ToolModelOutputOptions,
-        ToolNeedsApprovalOptions, ToolResult, ValidateTypesResult, ValidationResult,
+        SandboxRunCommandFuture, Schema, SerializedModelOptions, StandardSchema,
+        StandardSchemaJsonSchemaOptions, StatusCodeErrorResponseHandlerOptions,
+        StreamingToolCallDelta, StreamingToolCallDeltaFunction, StreamingToolCallTracker,
+        StreamingToolCallTrackerOptions, StreamingToolCallTypeValidation, Tool,
+        ToolApprovalRequest, ToolApprovalResponse, ToolCall, ToolDescriptionOptions,
+        ToolExecutionError, ToolExecutionOptions, ToolModelOutputOptions, ToolNeedsApprovalOptions,
+        ToolResult, ValidateTypesResult, ValidationResult,
         add_additional_properties_to_json_schema, as_array, as_flexible_schema, as_schema,
         combine_headers, convert_async_iterator_to_readable_stream, convert_base64_to_bytes,
         convert_bytes_to_base64, convert_image_model_file_to_data_uri,
@@ -8029,9 +8144,9 @@ mod tests {
         prepare_post_to_api_request, prepare_tools, prepare_tools_with_context,
         read_response_with_size_limit, remove_undefined_entries, resolve, resolve_full_media_type,
         resolve_provider_reference, safe_parse_json, safe_parse_json_with_schema,
-        safe_validate_types, secure_json_parse, serialize_model_options, strip_file_extension,
-        tool, validate_download_url, validate_types, with_provider_utils_user_agent,
-        with_user_agent_suffix, without_trailing_slash,
+        safe_validate_types, secure_json_parse, serialize_model_options, standard_schema,
+        strip_file_extension, tool, validate_download_url, validate_types,
+        with_provider_utils_user_agent, with_user_agent_suffix, without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -9286,6 +9401,327 @@ mod tests {
 
         assert_eq!(default_schema.json_schema(), &expected_default);
         assert!(format!("{default_schema:?}").contains("has_validator: false"));
+    }
+
+    #[test]
+    fn as_schema_upstream_should_create_an_object_schema_when_no_schema_is_provided() {
+        assert_eq!(
+            as_schema(None).json_schema(),
+            &schema_object(json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }))
+        );
+    }
+
+    #[test]
+    fn standard_schema_upstream_should_return_the_json_schema_from_input() {
+        let schema = as_flexible_schema(Some(FlexibleSchema::from(standard_schema(
+            "custom",
+            schema_object(json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "age": { "type": "number" }
+                },
+                "required": ["name", "age"]
+            })),
+            |value| ValidationResult::success(value.clone()),
+        ))));
+
+        assert_eq!(
+            schema.json_schema(),
+            &schema_object(json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "name": { "type": "string" },
+                    "age": { "type": "number" }
+                },
+                "required": ["name", "age"]
+            }))
+        );
+    }
+
+    #[test]
+    fn standard_schema_upstream_should_pass_target_draft_07_to_json_schema_input() {
+        let captured_target = Arc::new(Mutex::new(None::<String>));
+        let schema = StandardSchema::with_json_schema(
+            "custom",
+            {
+                let captured_target = Arc::clone(&captured_target);
+                move |options: StandardSchemaJsonSchemaOptions| {
+                    *captured_target
+                        .lock()
+                        .expect("captured target lock is not poisoned") = options.target;
+                    schema_object(json!({
+                        "type": "object",
+                        "properties": {
+                            "text": { "type": "string" }
+                        }
+                    }))
+                }
+            },
+            |value| ValidationResult::success(value.clone()),
+        );
+
+        let schema = as_flexible_schema(Some(FlexibleSchema::from(schema)));
+        let json_schema = schema.json_schema().clone();
+
+        assert_eq!(
+            captured_target
+                .lock()
+                .expect("captured target lock is not poisoned")
+                .as_deref(),
+            Some("draft-07")
+        );
+        assert_eq!(
+            &json_schema,
+            &schema_object(json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "text": { "type": "string" }
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn standard_schema_upstream_should_support_nested_objects() {
+        let schema = as_flexible_schema(Some(FlexibleSchema::from(standard_schema(
+            "custom",
+            schema_object(json!({
+                "type": "object",
+                "properties": {
+                    "user": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "email": { "type": "string" }
+                        },
+                        "required": ["name", "email"]
+                    }
+                },
+                "required": ["user"]
+            })),
+            |value| ValidationResult::success(value.clone()),
+        ))));
+
+        assert_eq!(
+            schema.json_schema(),
+            &schema_object(json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "user": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "name": { "type": "string" },
+                            "email": { "type": "string" }
+                        },
+                        "required": ["name", "email"]
+                    }
+                },
+                "required": ["user"]
+            }))
+        );
+    }
+
+    #[test]
+    fn standard_schema_upstream_should_support_arrays() {
+        let schema = as_flexible_schema(Some(FlexibleSchema::from(standard_schema(
+            "custom",
+            schema_object(json!({
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    }
+                },
+                "required": ["items"]
+            })),
+            |value| ValidationResult::success(value.clone()),
+        ))));
+
+        assert_eq!(
+            schema.json_schema(),
+            &schema_object(json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    }
+                },
+                "required": ["items"]
+            }))
+        );
+    }
+
+    #[test]
+    fn standard_schema_upstream_should_validate_and_return_value_for_valid_input() {
+        let schema = as_flexible_schema(Some(FlexibleSchema::from(standard_schema(
+            "custom",
+            schema_object(json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "age": { "type": "number" }
+                }
+            })),
+            |value| {
+                if value.get("name").and_then(JsonValue::as_str).is_some()
+                    && value.get("age").and_then(JsonValue::as_i64).is_some()
+                {
+                    ValidationResult::success(value.clone())
+                } else {
+                    ValidationResult::failure("Type validation failed: Invalid input")
+                }
+            },
+        ))));
+
+        assert_eq!(
+            schema
+                .validate(&json!({
+                    "name": "John",
+                    "age": 30
+                }))
+                .expect("validator exists"),
+            ValidationResult::success(json!({
+                "name": "John",
+                "age": 30
+            }))
+        );
+    }
+
+    #[test]
+    fn standard_schema_upstream_should_return_error_for_invalid_input() {
+        let schema = as_flexible_schema(Some(FlexibleSchema::from(standard_schema(
+            "custom",
+            schema_object(json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "age": { "type": "number" }
+                }
+            })),
+            |value| {
+                if value.get("name").and_then(JsonValue::as_str).is_some()
+                    && value.get("age").and_then(JsonValue::as_i64).is_some()
+                {
+                    ValidationResult::success(value.clone())
+                } else {
+                    ValidationResult::failure("Type validation failed: Invalid input")
+                }
+            },
+        ))));
+
+        let result = schema
+            .validate(&json!({
+                "name": "John",
+                "age": "not a number"
+            }))
+            .expect("validator exists");
+
+        assert!(result.is_failure());
+        assert!(
+            result
+                .error()
+                .expect("validation error exists")
+                .contains("Type validation failed")
+        );
+    }
+
+    #[test]
+    fn standard_schema_upstream_should_support_transform_in_validation() {
+        let schema = as_flexible_schema(Some(FlexibleSchema::from(standard_schema(
+            "custom",
+            schema_object(json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "name": { "type": "string" }
+                }
+            })),
+            |value| {
+                let id = value
+                    .get("id")
+                    .and_then(JsonValue::as_str)
+                    .and_then(|id| id.parse::<i64>().ok())
+                    .unwrap_or_default();
+                ValidationResult::success(json!({
+                    "id": id,
+                    "name": value.get("name").cloned().unwrap_or(JsonValue::Null)
+                }))
+            },
+        ))));
+
+        assert_eq!(
+            schema
+                .validate(&json!({
+                    "id": "123",
+                    "name": "John"
+                }))
+                .expect("validator exists"),
+            ValidationResult::success(json!({
+                "id": 123,
+                "name": "John"
+            }))
+        );
+    }
+
+    #[test]
+    fn standard_schema_upstream_should_detect_non_zod_standard_schema_by_vendor() {
+        let standard = standard_schema(
+            "valibot",
+            schema_object(json!({
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string" }
+                }
+            })),
+            |value| ValidationResult::success(value.clone()),
+        );
+
+        assert_eq!(standard.vendor(), "valibot");
+
+        let schema = as_flexible_schema(Some(FlexibleSchema::from(standard)));
+        assert_eq!(
+            schema.json_schema(),
+            &schema_object(json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "text": { "type": "string" }
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn infer_schema_type_upstream_should_work_with_standard_schema() {
+        fn assert_standard_schema_value(schema: &StandardSchema<i64>, value: i64) -> i64 {
+            assert_eq!(schema.vendor(), "custom");
+            value
+        }
+
+        let schema = standard_schema(
+            "custom",
+            schema_object(json!({ "type": "number" })),
+            |value| {
+                value
+                    .as_i64()
+                    .map(ValidationResult::success)
+                    .unwrap_or_else(|| ValidationResult::failure("Invalid input"))
+            },
+        );
+
+        assert_eq!(assert_standard_schema_value(&schema, 123), 123);
     }
 
     #[test]
