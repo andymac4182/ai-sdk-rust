@@ -4158,6 +4158,111 @@ mod tests {
         )
     }
 
+    fn openai_compatible_stream_request_bodies_for_include_usage(
+        include_usage: Option<bool>,
+    ) -> Vec<JsonValue> {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let captured_requests_for_transport = Arc::clone(&captured_requests);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                captured_requests_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned")
+                    .push(request.clone());
+
+                let response_body = if request.url.contains("/chat/completions") {
+                    sse_body([json!({
+                        "id": "chatcmpl-include-usage",
+                        "created": 1711115037,
+                        "model": "chat-model",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {},
+                                "finish_reason": "stop"
+                            }
+                        ]
+                    })])
+                } else {
+                    sse_body([json!({
+                        "id": "cmpl-include-usage",
+                        "object": "text_completion",
+                        "created": 1711115037,
+                        "model": "completion-model",
+                        "choices": [
+                            {
+                                "text": "",
+                                "index": 0,
+                                "logprobs": null,
+                                "finish_reason": "stop"
+                            }
+                        ]
+                    })])
+                };
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    response_body,
+                ))))
+            });
+        let mut settings =
+            OpenAICompatibleProviderSettings::new("test-provider", "https://api.example.com");
+
+        if let Some(include_usage) = include_usage {
+            settings = settings.with_include_usage(include_usage);
+        }
+
+        let provider = OpenAICompatibleProvider::from_settings(settings).with_transport(transport);
+
+        let prompt = || {
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                    LanguageModelTextPart::new("Hello"),
+                )]),
+            )])
+        };
+
+        let _chat_result = poll_ready(provider.chat_model("chat-model").do_stream(prompt()));
+        let _language_result = poll_ready(
+            provider
+                .language_model("language-model")
+                .do_stream(prompt()),
+        );
+        let _completion_result = poll_ready(
+            provider
+                .completion_model("completion-model")
+                .do_stream(prompt()),
+        );
+
+        captured_requests
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .iter()
+            .map(openai_compatible_request_body_json)
+            .collect()
+    }
+
+    fn openai_compatible_request_body_json(request: &ProviderApiRequest) -> JsonValue {
+        request
+            .body
+            .clone()
+            .and_then(|body| body.as_text().map(str::to_string))
+            .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok())
+            .expect("request body is JSON")
+    }
+
+    fn assert_openai_compatible_include_usage(
+        request_bodies: &[JsonValue],
+        expected_stream_options: Option<JsonValue>,
+    ) {
+        assert_eq!(request_bodies.len(), 3);
+
+        for body in request_bodies {
+            assert_eq!(body.get("stream_options").cloned(), expected_stream_options);
+        }
+    }
+
     #[test]
     fn to_camel_case_upstream_should_convert_hyphenated_names_to_camel_case() {
         assert_eq!(
@@ -6499,6 +6604,33 @@ mod tests {
                 .and_then(Option::as_deref),
             Some("ai-sdk/openai-compatible/0.1.0")
         );
+    }
+
+    #[test]
+    fn openai_compatible_provider_passes_include_usage_true_to_all_language_model_streams() {
+        let request_bodies = openai_compatible_stream_request_bodies_for_include_usage(Some(true));
+
+        assert_openai_compatible_include_usage(
+            &request_bodies,
+            Some(json!({
+                "include_usage": true
+            })),
+        );
+    }
+
+    #[test]
+    fn openai_compatible_provider_omits_include_usage_false_from_all_language_model_streams() {
+        let request_bodies = openai_compatible_stream_request_bodies_for_include_usage(Some(false));
+
+        assert_openai_compatible_include_usage(&request_bodies, None);
+    }
+
+    #[test]
+    fn openai_compatible_provider_omits_unspecified_include_usage_from_all_language_model_streams()
+    {
+        let request_bodies = openai_compatible_stream_request_bodies_for_include_usage(None);
+
+        assert_openai_compatible_include_usage(&request_bodies, None);
     }
 
     fn sse_body(events: impl IntoIterator<Item = JsonValue>) -> String {
