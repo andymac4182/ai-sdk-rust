@@ -93,6 +93,11 @@ non-negotiable minimum for each matching Rust crate. The Rust crate must include
 every original portable upstream test/case and may include more Rust-specific
 tests, but never fewer. Extra Rust coverage is counted only after the full
 original TypeScript test inventory has a named Rust counterpart.
+Count parity from the original upstream TypeScript test list, not from the
+number of Rust tests. A Rust crate with extra Rust-specific tests but even one
+missing original portable upstream test/case remains incomplete. The only
+acceptable end state is every original portable TypeScript test/case existing in
+the matching Rust crate, with optional Rust-specific tests added on top.
 
 ## Required Work Order
 
