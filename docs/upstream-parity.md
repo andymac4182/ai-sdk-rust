@@ -890,6 +890,15 @@ focused tests for each portable behavior before changing rows to `verified`.
   `result.providerMetadata`, `result.response`, and `result.request` cases with
   provider usage details, finish provider metadata, response id/model/timestamp
   plus headers, and provider request body propagation.
+- 2026-05-21: `streamObject` object and finish-result parity added
+  `stream_object_result_object_resolves_with_typed_object`,
+  `stream_object_result_object_errors_when_streamed_object_does_not_match_schema`,
+  `stream_object_result_object_schema_error_is_observable_without_unhandled_rejection`,
+  and `stream_object_result_finish_reason_resolves_with_finish_reason` in
+  `src/stream_object.rs`, mapping upstream `result.object` success,
+  schema-validation rejection, no-unhandled-rejection schema-failure, and
+  `result.finishReason` cases. The two JS promise-rejection checks map to
+  Rust's explicit `object: None` plus retained error state.
 - 2026-05-20: `streamText` smooth stream chunking parity added
   `smooth_stream_combines_partial_words`,
   `smooth_stream_supports_line_and_pattern_chunking`,

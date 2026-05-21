@@ -1760,6 +1760,93 @@ mod tests {
     }
 
     #[test]
+    fn stream_object_result_object_resolves_with_typed_object() {
+        let model = MockLanguageModel::new()
+            .with_stream_result(LanguageModelStreamResult::new(object_stream()));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
+
+        assert_eq!(result.object, Some(json!({"content": "Hello, world!"})));
+        assert_eq!(result.error, None);
+    }
+
+    #[test]
+    fn stream_object_result_object_errors_when_streamed_object_does_not_match_schema() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "{ ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    r#""invalid": "#,
+                )),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", r#""Hello, "#)),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", r#"!""#)),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", " }")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
+
+        assert_eq!(result.object, None);
+        assert!(result.error.is_some());
+    }
+
+    #[test]
+    fn stream_object_result_object_schema_error_is_observable_without_unhandled_rejection() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "{ ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    r#""invalid": "#,
+                )),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", r#""Hello, "#)),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", r#"!""#)),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", " }")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
+
+        assert!(result.error.is_some());
+        assert_eq!(
+            result.partial_object_stream.last(),
+            Some(&json!({"invalid": "Hello, world!"}))
+        );
+        assert!(matches!(
+            result.parts.last(),
+            Some(ObjectStreamPart::Finish(_))
+        ));
+    }
+
+    #[test]
+    fn stream_object_result_finish_reason_resolves_with_finish_reason() {
+        let model = MockLanguageModel::new()
+            .with_stream_result(LanguageModelStreamResult::new(object_stream()));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
+
+        assert_eq!(result.object, Some(json!({"content": "Hello, world!"})));
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+    }
+
+    #[test]
     fn stream_object_array_output_unwraps_elements() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
