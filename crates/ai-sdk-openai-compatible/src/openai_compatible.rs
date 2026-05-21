@@ -4621,6 +4621,21 @@ mod tests {
         .expect("test schema deserializes")
     }
 
+    fn openai_compatible_response_format_test_schema() -> JsonObject {
+        serde_json::from_value(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": {
+                "value": {
+                    "type": "string"
+                }
+            },
+            "required": ["value"],
+            "additionalProperties": false
+        }))
+        .expect("test schema deserializes")
+    }
+
     fn openai_compatible_test_function_tool(
         name: impl Into<String>,
         description: impl Into<String>,
@@ -4796,6 +4811,53 @@ mod tests {
         .chat_model("grok-3");
 
         (model, captured_request)
+    }
+
+    fn openai_compatible_chat_test_model_with_settings(
+        settings: OpenAICompatibleProviderSettings,
+        model_id: impl Into<String>,
+        response_body: JsonValue,
+    ) -> (
+        OpenAICompatibleChatLanguageModel,
+        Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+                let response_body = response_body.clone();
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    response_body.to_string(),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(settings)
+            .with_transport(transport)
+            .chat_model(model_id);
+
+        (model, captured_request)
+    }
+
+    fn openai_compatible_chat_response_format_request(
+        settings: OpenAICompatibleProviderSettings,
+        model_id: &str,
+        options: LanguageModelCallOptions,
+    ) -> (LanguageModelGenerateResult, JsonValue) {
+        let (model, captured_request) = openai_compatible_chat_test_model_with_settings(
+            settings,
+            model_id,
+            openai_compatible_chat_text_response_body("{\"value\":\"Spark\"}", json!({})),
+        );
+
+        let result = poll_ready(model.do_generate(options));
+        let request_body = captured_openai_compatible_chat_request_body(&captured_request);
+
+        (result, request_body)
     }
 
     fn captured_openai_compatible_chat_request_body(
@@ -8489,6 +8551,386 @@ mod tests {
                 .filter(|warning| matches!(warning, Warning::Unsupported { .. }))
                 .count(),
             2
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_omits_response_format_when_response_format_is_text() {
+        let (_result, request_body) = openai_compatible_chat_response_format_request(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://my.api.com/v1")
+                .with_supports_structured_outputs(false),
+            "gpt-4o-2024-08-06",
+            LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                .with_response_format(LanguageModelResponseFormat::text()),
+        );
+
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-4o-2024-08-06",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_forwards_json_response_format_as_json_object_without_schema() {
+        let (_result, request_body) = openai_compatible_chat_response_format_request(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://my.api.com/v1"),
+            "gpt-4o-2024-08-06",
+            LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                .with_response_format(LanguageModelResponseFormat::json()),
+        );
+
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-4o-2024-08-06",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "response_format": {
+                    "type": "json_object"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_omits_json_schema_when_structured_outputs_disabled() {
+        let schema = openai_compatible_response_format_test_schema();
+        let (result, request_body) = openai_compatible_chat_response_format_request(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://my.api.com/v1")
+                .with_supports_structured_outputs(false),
+            "gpt-4o-2024-08-06",
+            LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                .with_response_format(LanguageModelResponseFormat::json().with_schema(schema)),
+        );
+
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-4o-2024-08-06",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "response_format": {
+                    "type": "json_object"
+                }
+            })
+        );
+        assert!(result.warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Unsupported { feature, details }
+                    if feature == "responseFormat"
+                        && details.as_deref()
+                            == Some("JSON response format schema is only supported with structuredOutputs")
+            )
+        }));
+    }
+
+    #[test]
+    fn openai_compatible_chat_includes_json_schema_when_structured_outputs_enabled() {
+        let schema = openai_compatible_response_format_test_schema();
+        let (result, request_body) = openai_compatible_chat_response_format_request(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://my.api.com/v1")
+                .with_supports_structured_outputs(true),
+            "gpt-4o-2024-08-06",
+            LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                .with_response_format(
+                    LanguageModelResponseFormat::json().with_schema(schema.clone()),
+                ),
+        );
+
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-4o-2024-08-06",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "response",
+                        "schema": schema,
+                        "strict": true
+                    }
+                }
+            })
+        );
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_compatible_chat_passes_reasoning_effort_from_provider_options() {
+        let (_result, request_body) = openai_compatible_chat_response_format_request(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://my.api.com/v1"),
+            "gpt-5",
+            LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                .with_provider_options(test_provider_options(json!({
+                    "test-provider": {
+                        "reasoningEffort": "high"
+                    }
+                }))),
+        );
+
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-5",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "reasoning_effort": "high"
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_does_not_duplicate_reasoning_effort_in_request_body() {
+        let (_result, request_body) = openai_compatible_chat_response_format_request(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://my.api.com/v1"),
+            "gpt-5",
+            LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                .with_provider_options(test_provider_options(json!({
+                    "test-provider": {
+                        "reasoningEffort": "high",
+                        "customOption": "should-be-included"
+                    }
+                }))),
+        );
+
+        assert_eq!(request_body["reasoning_effort"], "high");
+        assert!(request_body.get("reasoningEffort").is_none());
+        assert_eq!(request_body["customOption"], "should-be-included");
+    }
+
+    #[test]
+    fn openai_compatible_chat_passes_top_level_reasoning_as_reasoning_effort() {
+        let (_result, request_body) = openai_compatible_chat_response_format_request(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://my.api.com/v1"),
+            "gpt-4o-2024-08-06",
+            LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                .with_reasoning(LanguageModelReasoningEffort::Medium),
+        );
+
+        assert_eq!(request_body["reasoning_effort"], "medium");
+    }
+
+    #[test]
+    fn openai_compatible_chat_omits_top_level_reasoning_none_as_reasoning_effort() {
+        let (_result, request_body) = openai_compatible_chat_response_format_request(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://my.api.com/v1"),
+            "gpt-4o-2024-08-06",
+            LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                .with_reasoning(LanguageModelReasoningEffort::None),
+        );
+
+        assert!(request_body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn openai_compatible_chat_prefers_provider_options_reasoning_effort() {
+        let (_result, request_body) = openai_compatible_chat_response_format_request(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://my.api.com/v1"),
+            "gpt-5",
+            LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                .with_reasoning(LanguageModelReasoningEffort::Medium)
+                .with_provider_options(test_provider_options(json!({
+                    "test-provider": {
+                        "reasoningEffort": "high"
+                    }
+                }))),
+        );
+
+        assert_eq!(request_body["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn openai_compatible_chat_passes_text_verbosity_from_provider_options() {
+        let (_result, request_body) = openai_compatible_chat_response_format_request(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://my.api.com/v1"),
+            "gpt-5",
+            LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                .with_provider_options(test_provider_options(json!({
+                    "test-provider": {
+                        "textVerbosity": "low"
+                    }
+                }))),
+        );
+
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-5",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "verbosity": "low"
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_does_not_duplicate_text_verbosity_in_request_body() {
+        let (_result, request_body) = openai_compatible_chat_response_format_request(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://my.api.com/v1"),
+            "gpt-5",
+            LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                .with_provider_options(test_provider_options(json!({
+                    "test-provider": {
+                        "textVerbosity": "medium",
+                        "customOption": "should-be-included"
+                    }
+                }))),
+        );
+
+        assert_eq!(request_body["verbosity"], "medium");
+        assert!(request_body.get("textVerbosity").is_none());
+        assert_eq!(request_body["customOption"], "should-be-included");
+    }
+
+    #[test]
+    fn openai_compatible_chat_uses_json_schema_and_strict_for_structured_outputs() {
+        let schema = openai_compatible_response_format_test_schema();
+        let (_result, request_body) = openai_compatible_chat_response_format_request(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://my.api.com/v1")
+                .with_supports_structured_outputs(true),
+            "gpt-4o-2024-08-06",
+            LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                .with_response_format(
+                    LanguageModelResponseFormat::json().with_schema(schema.clone()),
+                ),
+        );
+
+        assert_eq!(
+            request_body["response_format"],
+            json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "response",
+                    "schema": schema,
+                    "strict": true
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_sets_json_schema_name_and_description() {
+        let schema = openai_compatible_response_format_test_schema();
+        let (_result, request_body) = openai_compatible_chat_response_format_request(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://my.api.com/v1")
+                .with_supports_structured_outputs(true),
+            "gpt-4o-2024-08-06",
+            LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                .with_response_format(
+                    LanguageModelResponseFormat::json()
+                        .with_name("test-name")
+                        .with_description("test description")
+                        .with_schema(schema.clone()),
+                ),
+        );
+
+        assert_eq!(
+            request_body["response_format"],
+            json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "description": "test description",
+                    "name": "test-name",
+                    "schema": schema,
+                    "strict": true
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_sends_strict_false_when_strict_json_schema_disabled() {
+        let schema = openai_compatible_response_format_test_schema();
+        let (_result, request_body) = openai_compatible_chat_response_format_request(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://my.api.com/v1")
+                .with_supports_structured_outputs(true),
+            "gpt-4o-2024-08-06",
+            LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                .with_response_format(
+                    LanguageModelResponseFormat::json()
+                        .with_name("test-name")
+                        .with_description("test description")
+                        .with_schema(schema.clone()),
+                )
+                .with_provider_options(test_provider_options(json!({
+                    "test-provider": {
+                        "strictJsonSchema": false
+                    }
+                }))),
+        );
+
+        assert_eq!(
+            request_body["response_format"],
+            json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "description": "test description",
+                    "name": "test-name",
+                    "schema": schema,
+                    "strict": false
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_allows_undefined_schema_with_structured_outputs() {
+        let (_result, request_body) = openai_compatible_chat_response_format_request(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://my.api.com/v1")
+                .with_supports_structured_outputs(true),
+            "gpt-4o-2024-08-06",
+            LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                .with_response_format(
+                    LanguageModelResponseFormat::json()
+                        .with_name("test-name")
+                        .with_description("test description"),
+                ),
+        );
+
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gpt-4o-2024-08-06",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "response_format": {
+                    "type": "json_object"
+                }
+            })
         );
     }
 
