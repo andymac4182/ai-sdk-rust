@@ -12454,6 +12454,98 @@ mod tests {
     }
 
     #[test]
+    fn gateway_provider_real_world_vercel_deployment_uses_oidc_authentication() {
+        let settings = GatewayProviderSettings::new();
+        let headers = try_gateway_provider_headers_with_env(
+            &settings,
+            env_lookup(&[("VERCEL_OIDC_TOKEN", "vercel-deployment-oidc-token")]),
+        )
+        .expect("Vercel deployment OIDC auth headers resolve");
+        let observability_headers = gateway_observability_headers_with_env(
+            &settings,
+            env_lookup(&[
+                ("VERCEL_DEPLOYMENT_ID", "dpl_12345"),
+                ("VERCEL_ENV", "production"),
+                ("VERCEL_REGION", "iad1"),
+            ]),
+        );
+
+        assert_eq!(
+            headers.get("authorization").and_then(Option::as_deref),
+            Some("Bearer vercel-deployment-oidc-token")
+        );
+        assert_eq!(
+            headers
+                .get("ai-gateway-auth-method")
+                .and_then(Option::as_deref),
+            Some("oidc")
+        );
+        assert_eq!(
+            observability_headers
+                .get("ai-o11y-deployment-id")
+                .map(String::as_str),
+            Some("dpl_12345")
+        );
+        assert_eq!(
+            observability_headers
+                .get("ai-o11y-environment")
+                .map(String::as_str),
+            Some("production")
+        );
+        assert_eq!(
+            observability_headers
+                .get("ai-o11y-region")
+                .map(String::as_str),
+            Some("iad1")
+        );
+    }
+
+    #[test]
+    fn gateway_provider_real_world_local_development_uses_api_key_authentication() {
+        let settings = GatewayProviderSettings::new();
+        let headers = try_gateway_provider_headers_with_env(
+            &settings,
+            env_lookup(&[("AI_GATEWAY_API_KEY", "local-dev-api-key")]),
+        )
+        .expect("local development API key auth headers resolve");
+
+        assert_eq!(
+            headers.get("authorization").and_then(Option::as_deref),
+            Some("Bearer local-dev-api-key")
+        );
+        assert_eq!(
+            headers
+                .get("ai-gateway-auth-method")
+                .and_then(Option::as_deref),
+            Some("api-key")
+        );
+    }
+
+    #[test]
+    fn gateway_provider_real_world_explicit_api_key_override_wins_over_environment() {
+        let settings = GatewayProviderSettings::new().with_api_key("explicit-user-api-key");
+        let headers = try_gateway_provider_headers_with_env(
+            &settings,
+            env_lookup(&[
+                ("VERCEL_OIDC_TOKEN", "should-not-be-used"),
+                ("AI_GATEWAY_API_KEY", "should-not-be-used-either"),
+            ]),
+        )
+        .expect("explicit API key auth headers resolve");
+
+        assert_eq!(
+            headers.get("authorization").and_then(Option::as_deref),
+            Some("Bearer explicit-user-api-key")
+        );
+        assert_eq!(
+            headers
+                .get("ai-gateway-auth-method")
+                .and_then(Option::as_deref),
+            Some("api-key")
+        );
+    }
+
+    #[test]
     fn create_gateway_authentication_handles_no_auth_at_all() {
         assert_provider_auth_headers_error(
             GatewayProviderSettings::new().with_base_url("https://test-gateway.example.com"),
