@@ -313,6 +313,26 @@ impl ConvertUiMessagesToModelMessagesOptions {
     }
 }
 
+/// A converted UI data part that can be inserted into user or assistant model content.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConvertedUiMessageDataPart {
+    Text(LanguageModelTextPart),
+    File(LanguageModelFilePart),
+}
+
+impl ConvertedUiMessageDataPart {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text(LanguageModelTextPart::new(text))
+    }
+
+    pub fn file(file: LanguageModelFilePart) -> Self {
+        Self::File(file)
+    }
+}
+
+type UiMessageDataPartConverter<'a> =
+    dyn Fn(&JsonValue) -> Result<Option<ConvertedUiMessageDataPart>, ChatTransportError> + 'a;
+
 /// Converts portable UI messages into model messages for in-process transports.
 pub fn convert_ui_messages_to_model_messages(
     messages: &[UiMessage],
@@ -328,10 +348,35 @@ pub fn convert_ui_messages_to_model_messages_with_options(
     messages: &[UiMessage],
     options: ConvertUiMessagesToModelMessagesOptions,
 ) -> Result<LanguageModelPrompt, ChatTransportError> {
+    convert_ui_messages_to_model_messages_internal(messages, options, None)
+}
+
+/// Converts portable UI messages into model messages with a UI data-part converter.
+pub fn convert_ui_messages_to_model_messages_with_data_part_converter<F>(
+    messages: &[UiMessage],
+    options: ConvertUiMessagesToModelMessagesOptions,
+    convert_data_part: F,
+) -> Result<LanguageModelPrompt, ChatTransportError>
+where
+    F: Fn(&JsonValue) -> Result<Option<ConvertedUiMessageDataPart>, ChatTransportError>,
+{
+    let convert_data_part: &UiMessageDataPartConverter<'_> = &convert_data_part;
+    convert_ui_messages_to_model_messages_internal(messages, options, Some(convert_data_part))
+}
+
+fn convert_ui_messages_to_model_messages_internal(
+    messages: &[UiMessage],
+    options: ConvertUiMessagesToModelMessagesOptions,
+    convert_data_part: Option<&UiMessageDataPartConverter<'_>>,
+) -> Result<LanguageModelPrompt, ChatTransportError> {
     let mut model_messages = Vec::new();
 
     for message in messages {
-        model_messages.extend(convert_ui_message_to_model_messages(message, options)?);
+        model_messages.extend(convert_ui_message_to_model_messages(
+            message,
+            options,
+            convert_data_part,
+        )?);
     }
 
     Ok(model_messages)
@@ -340,6 +385,7 @@ pub fn convert_ui_messages_to_model_messages_with_options(
 fn convert_ui_message_to_model_messages(
     message: &UiMessage,
     options: ConvertUiMessagesToModelMessagesOptions,
+    convert_data_part: Option<&UiMessageDataPartConverter<'_>>,
 ) -> Result<Vec<LanguageModelMessage>, ChatTransportError> {
     if message.id.is_empty() {
         return Err(ChatTransportError::InvalidMessage(
@@ -349,8 +395,12 @@ fn convert_ui_message_to_model_messages(
 
     match message.role {
         UiMessageRole::System => convert_system_ui_message(message).map(|message| vec![message]),
-        UiMessageRole::User => convert_user_ui_message(message).map(|message| vec![message]),
-        UiMessageRole::Assistant => convert_assistant_ui_message(message, options),
+        UiMessageRole::User => {
+            convert_user_ui_message(message, convert_data_part).map(|message| vec![message])
+        }
+        UiMessageRole::Assistant => {
+            convert_assistant_ui_message(message, options, convert_data_part)
+        }
     }
 }
 
@@ -383,6 +433,7 @@ fn convert_system_ui_message(
 
 fn convert_user_ui_message(
     message: &UiMessage,
+    convert_data_part: Option<&UiMessageDataPartConverter<'_>>,
 ) -> Result<LanguageModelMessage, ChatTransportError> {
     let mut content = Vec::new();
 
@@ -401,7 +452,11 @@ fn convert_user_ui_message(
                     part,
                 )?));
             }
-            kind if ui_message_part_is_data(kind) => {}
+            kind if ui_message_part_is_data(kind) => {
+                if let Some(converted) = convert_ui_message_data_part(part, convert_data_part)? {
+                    push_converted_user_data_part(&mut content, converted);
+                }
+            }
             _ => return Err(unsupported_part_error(message, kind)),
         }
     }
@@ -414,6 +469,7 @@ fn convert_user_ui_message(
 fn convert_assistant_ui_message(
     message: &UiMessage,
     options: ConvertUiMessagesToModelMessagesOptions,
+    convert_data_part: Option<&UiMessageDataPartConverter<'_>>,
 ) -> Result<Vec<LanguageModelMessage>, ChatTransportError> {
     let mut model_messages = Vec::new();
     let mut block = Vec::new();
@@ -421,14 +477,14 @@ fn convert_assistant_ui_message(
     for part in &message.parts {
         let kind = ui_message_part_type(part)?;
         if kind == "step-start" {
-            flush_assistant_ui_message_block(&mut model_messages, &mut block)?;
+            flush_assistant_ui_message_block(&mut model_messages, &mut block, convert_data_part)?;
         } else if should_ignore_incomplete_tool_part(part, kind, options)? {
             continue;
         } else {
             block.push(part);
         }
     }
-    flush_assistant_ui_message_block(&mut model_messages, &mut block)?;
+    flush_assistant_ui_message_block(&mut model_messages, &mut block, convert_data_part)?;
 
     Ok(model_messages)
 }
@@ -451,6 +507,7 @@ fn should_ignore_incomplete_tool_part(
 fn flush_assistant_ui_message_block(
     model_messages: &mut Vec<LanguageModelMessage>,
     block: &mut Vec<&JsonValue>,
+    convert_data_part: Option<&UiMessageDataPartConverter<'_>>,
 ) -> Result<(), ChatTransportError> {
     if block.is_empty() {
         return Ok(());
@@ -505,7 +562,11 @@ fn flush_assistant_ui_message_block(
             kind if kind == "dynamic-tool" || kind.starts_with("tool-") => {
                 convert_assistant_tool_ui_part(part, kind, &mut content, &mut tool_content)?;
             }
-            kind if ui_message_part_is_data(kind) => {}
+            kind if ui_message_part_is_data(kind) => {
+                if let Some(converted) = convert_ui_message_data_part(part, convert_data_part)? {
+                    push_converted_assistant_data_part(&mut content, converted);
+                }
+            }
             _ => {
                 return Err(ChatTransportError::InvalidMessage(format!(
                     "Unsupported UI message part type `{kind}` for assistant message."
@@ -526,6 +587,44 @@ fn flush_assistant_ui_message_block(
 
     block.clear();
     Ok(())
+}
+
+fn convert_ui_message_data_part(
+    part: &JsonValue,
+    convert_data_part: Option<&UiMessageDataPartConverter<'_>>,
+) -> Result<Option<ConvertedUiMessageDataPart>, ChatTransportError> {
+    match convert_data_part {
+        Some(convert_data_part) => convert_data_part(part),
+        None => Ok(None),
+    }
+}
+
+fn push_converted_user_data_part(
+    content: &mut Vec<LanguageModelUserContentPart>,
+    converted: ConvertedUiMessageDataPart,
+) {
+    match converted {
+        ConvertedUiMessageDataPart::Text(text) => {
+            content.push(LanguageModelUserContentPart::Text(text));
+        }
+        ConvertedUiMessageDataPart::File(file) => {
+            content.push(LanguageModelUserContentPart::File(file));
+        }
+    }
+}
+
+fn push_converted_assistant_data_part(
+    content: &mut Vec<LanguageModelAssistantContentPart>,
+    converted: ConvertedUiMessageDataPart,
+) {
+    match converted {
+        ConvertedUiMessageDataPart::Text(text) => {
+            content.push(LanguageModelAssistantContentPart::Text(text));
+        }
+        ConvertedUiMessageDataPart::File(file) => {
+            content.push(LanguageModelAssistantContentPart::File(file));
+        }
+    }
 }
 
 fn ui_message_file_part(part: &JsonValue) -> Result<LanguageModelFilePart, ChatTransportError> {
@@ -4855,6 +4954,216 @@ mod tests {
                 {
                     "role": "assistant",
                     "content": [{ "type": "text", "text": "Hi there" }]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_converts_user_data_parts_to_text_with_converter() {
+        let messages = convert_ui_messages_to_model_messages_with_data_part_converter(
+            &[UiMessage::new("msg-1", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "First" }))
+                .with_part(json!({ "type": "data-tag", "data": { "value": "tag1" } }))
+                .with_part(json!({ "type": "text", "text": "Second" }))
+                .with_part(json!({ "type": "data-tag", "data": { "value": "tag2" } }))
+                .with_part(json!({ "type": "text", "text": "Third" }))],
+            ConvertUiMessagesToModelMessagesOptions::default(),
+            |part| {
+                if ui_message_part_type(part)? == "data-tag" {
+                    let value = part["data"]["value"]
+                        .as_str()
+                        .expect("data tag value is a string");
+                    Ok(Some(ConvertedUiMessageDataPart::text(format!("[{value}]"))))
+                } else {
+                    Ok(None)
+                }
+            },
+        )
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "First" },
+                        { "type": "text", "text": "[tag1]" },
+                        { "type": "text", "text": "Second" },
+                        { "type": "text", "text": "[tag2]" },
+                        { "type": "text", "text": "Third" }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_converts_user_data_parts_to_file_with_converter() {
+        let messages = convert_ui_messages_to_model_messages_with_data_part_converter(
+            &[UiMessage::new("msg-1", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Check this file" }))
+                .with_part(json!({
+                    "type": "data-attachment",
+                    "data": {
+                        "mediaType": "application/pdf",
+                        "filename": "document.pdf",
+                        "data": "base64data"
+                    }
+                }))],
+            ConvertUiMessagesToModelMessagesOptions::default(),
+            |part| {
+                if ui_message_part_type(part)? == "data-attachment" {
+                    let data = &part["data"];
+                    let file = LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: crate::file_data::FileDataContent::Base64(
+                                data["data"]
+                                    .as_str()
+                                    .expect("attachment data is a string")
+                                    .to_string(),
+                            ),
+                        },
+                        data["mediaType"]
+                            .as_str()
+                            .expect("attachment media type is a string"),
+                    )
+                    .with_filename(
+                        data["filename"]
+                            .as_str()
+                            .expect("attachment filename is a string"),
+                    );
+                    Ok(Some(ConvertedUiMessageDataPart::file(file)))
+                } else {
+                    Ok(None)
+                }
+            },
+        )
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "Check this file" },
+                        {
+                            "type": "file",
+                            "filename": "document.pdf",
+                            "data": {
+                                "type": "data",
+                                "data": "base64data"
+                            },
+                            "mediaType": "application/pdf"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_converts_assistant_data_parts_to_text_with_converter() {
+        let messages = convert_ui_messages_to_model_messages_with_data_part_converter(
+            &[UiMessage::new("msg-1", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "text", "text": "First", "state": "done" }))
+                .with_part(json!({ "type": "data-tag", "data": { "value": "tag1" } }))
+                .with_part(json!({ "type": "text", "text": "Second", "state": "done" }))
+                .with_part(json!({ "type": "data-tag", "data": { "value": "tag2" } }))
+                .with_part(json!({ "type": "text", "text": "Third", "state": "done" }))],
+            ConvertUiMessagesToModelMessagesOptions::default(),
+            |part| {
+                if ui_message_part_type(part)? == "data-tag" {
+                    let value = part["data"]["value"]
+                        .as_str()
+                        .expect("data tag value is a string");
+                    Ok(Some(ConvertedUiMessageDataPart::text(format!("[{value}]"))))
+                } else {
+                    Ok(None)
+                }
+            },
+        )
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "First" },
+                        { "type": "text", "text": "[tag1]" },
+                        { "type": "text", "text": "Second" },
+                        { "type": "text", "text": "[tag2]" },
+                        { "type": "text", "text": "Third" }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_converts_assistant_data_parts_to_file_with_converter() {
+        let messages = convert_ui_messages_to_model_messages_with_data_part_converter(
+            &[UiMessage::new("msg-1", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "text", "text": "Check this file", "state": "done" }))
+                .with_part(json!({
+                    "type": "data-attachment",
+                    "data": {
+                        "mediaType": "application/pdf",
+                        "filename": "document.pdf",
+                        "data": "base64data"
+                    }
+                }))],
+            ConvertUiMessagesToModelMessagesOptions::default(),
+            |part| {
+                if ui_message_part_type(part)? == "data-attachment" {
+                    let data = &part["data"];
+                    let file = LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: crate::file_data::FileDataContent::Base64(
+                                data["data"]
+                                    .as_str()
+                                    .expect("attachment data is a string")
+                                    .to_string(),
+                            ),
+                        },
+                        data["mediaType"]
+                            .as_str()
+                            .expect("attachment media type is a string"),
+                    )
+                    .with_filename(
+                        data["filename"]
+                            .as_str()
+                            .expect("attachment filename is a string"),
+                    );
+                    Ok(Some(ConvertedUiMessageDataPart::file(file)))
+                } else {
+                    Ok(None)
+                }
+            },
+        )
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "Check this file" },
+                        {
+                            "type": "file",
+                            "filename": "document.pdf",
+                            "data": {
+                                "type": "data",
+                                "data": "base64data"
+                            },
+                            "mediaType": "application/pdf"
+                        }
+                    ]
                 }
             ])
         );
