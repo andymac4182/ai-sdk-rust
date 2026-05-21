@@ -922,11 +922,12 @@ pub fn create_gateway_error_from_api_call(
         error.message()
     };
 
-    create_gateway_error_from_response(
+    create_gateway_error_from_response_with_cause_message(
         extract_gateway_api_call_response(error),
         error.status_code().unwrap_or(500),
         default_message,
         auth_method,
+        Some(error.message().to_string()),
     )
 }
 

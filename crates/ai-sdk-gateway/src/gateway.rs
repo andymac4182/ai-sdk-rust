@@ -3664,6 +3664,107 @@ mod tests {
         .to_string()
     }
 
+    fn gateway_fetch_metadata_model_entry() -> JsonValue {
+        json!({
+            "id": "model-1",
+            "name": "Model One",
+            "description": "A test model",
+            "pricing": {
+                "input": "0.000001",
+                "output": "0.000002"
+            },
+            "specification": {
+                "specificationVersion": "v4",
+                "provider": "test-provider",
+                "modelId": "model-1"
+            }
+        })
+    }
+
+    fn gateway_fetch_metadata_model_without_pricing() -> JsonValue {
+        json!({
+            "id": "model-2",
+            "name": "Model Two",
+            "specification": {
+                "specificationVersion": "v4",
+                "provider": "test-provider",
+                "modelId": "model-2"
+            }
+        })
+    }
+
+    fn gateway_fetch_metadata_response_body(models: Vec<JsonValue>) -> String {
+        json!({ "models": models }).to_string()
+    }
+
+    fn gateway_fetch_metadata_error_body(message: &str, error_type: &str) -> String {
+        json!({
+            "error": {
+                "message": message,
+                "type": error_type
+            }
+        })
+        .to_string()
+    }
+
+    fn gateway_fetch_metadata_provider(transport: GatewayTransport) -> GatewayProvider {
+        gateway_fetch_metadata_provider_with_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+            transport,
+        )
+    }
+
+    fn gateway_fetch_metadata_provider_with_settings(
+        settings: GatewayProviderSettings,
+        transport: GatewayTransport,
+    ) -> GatewayProvider {
+        GatewayProvider::from_settings(settings).with_transport(transport)
+    }
+
+    fn capturing_gateway_fetch_metadata_transport(
+        status_code: u16,
+        status_text: impl Into<String>,
+        body: impl Into<String>,
+    ) -> (GatewayTransport, Arc<Mutex<Option<ProviderApiRequest>>>) {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let status_text = status_text.into();
+        let body = body.into();
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                status_code,
+                status_text.clone(),
+                body.clone(),
+            ))))
+        });
+
+        (transport, captured_request)
+    }
+
+    fn captured_gateway_fetch_metadata_request(
+        captured_request: &Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) -> ProviderApiRequest {
+        captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+    }
+
+    fn gateway_fetch_metadata_credits_response_body(balance: &str, total_used: &str) -> String {
+        json!({
+            "balance": balance,
+            "total_used": total_used
+        })
+        .to_string()
+    }
+
     fn counting_metadata_transport(request_count: Arc<Mutex<u32>>) -> GatewayTransport {
         Arc::new(move |_request| -> GatewayTransportFuture {
             let mut count = request_count
@@ -8168,6 +8269,669 @@ mod tests {
 
         assert!(tool.is_provider_executed());
         assert_eq!(tool.provider_tool_id(), Some("gateway.parallel_search"));
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_fetches_available_models_from_correct_endpoint() {
+        let (transport, captured_request) = capturing_gateway_fetch_metadata_transport(
+            200,
+            "OK",
+            gateway_fetch_metadata_response_body(vec![gateway_fetch_metadata_model_entry()]),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let result = poll_ready(provider.get_available_models()).expect("metadata fetch succeeds");
+
+        let request = captured_gateway_fetch_metadata_request(&captured_request);
+        assert_eq!(request.method, ProviderApiRequestMethod::Get);
+        assert_eq!(request.url, "https://api.example.com/config");
+        assert_eq!(result.models.len(), 1);
+        assert_eq!(result.models[0].id, "model-1");
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_handles_models_with_pricing_information() {
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            200,
+            "OK",
+            gateway_fetch_metadata_response_body(vec![gateway_fetch_metadata_model_entry()]),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let result = poll_ready(provider.get_available_models()).expect("metadata fetch succeeds");
+        let pricing = result.models[0].pricing.as_ref().expect("pricing exists");
+
+        assert_eq!(pricing.input, "0.000001");
+        assert_eq!(pricing.output, "0.000002");
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_maps_cache_pricing_fields_to_sdk_names() {
+        let mut model = gateway_fetch_metadata_model_entry();
+        model["pricing"] = json!({
+            "input": "0.000003",
+            "output": "0.000015",
+            "input_cache_read": "0.0000003",
+            "input_cache_write": "0.00000375"
+        });
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            200,
+            "OK",
+            gateway_fetch_metadata_response_body(vec![model]),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let result = poll_ready(provider.get_available_models()).expect("metadata fetch succeeds");
+        let pricing = result.models[0].pricing.as_ref().expect("pricing exists");
+
+        assert_eq!(pricing.input, "0.000003");
+        assert_eq!(pricing.output, "0.000015");
+        assert_eq!(pricing.cached_input_tokens.as_deref(), Some("0.0000003"));
+        assert_eq!(
+            pricing.cache_creation_input_tokens.as_deref(),
+            Some("0.00000375")
+        );
+        let serialized = serde_json::to_value(pricing).expect("pricing serializes");
+        assert!(serialized.get("input_cache_read").is_none());
+        assert!(serialized.get("input_cache_write").is_none());
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_handles_models_without_pricing_information() {
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            200,
+            "OK",
+            gateway_fetch_metadata_response_body(vec![
+                gateway_fetch_metadata_model_without_pricing(),
+            ]),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let result = poll_ready(provider.get_available_models()).expect("metadata fetch succeeds");
+
+        assert_eq!(result.models[0].id, "model-2");
+        assert!(result.models[0].pricing.is_none());
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_handles_mixed_models_with_and_without_pricing() {
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            200,
+            "OK",
+            gateway_fetch_metadata_response_body(vec![
+                gateway_fetch_metadata_model_entry(),
+                gateway_fetch_metadata_model_without_pricing(),
+            ]),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let result = poll_ready(provider.get_available_models()).expect("metadata fetch succeeds");
+
+        assert_eq!(result.models.len(), 2);
+        assert_eq!(
+            result.models[0]
+                .pricing
+                .as_ref()
+                .map(|pricing| pricing.input.as_str()),
+            Some("0.000001")
+        );
+        assert!(result.models[1].pricing.is_none());
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_handles_models_with_description() {
+        let mut model = gateway_fetch_metadata_model_entry();
+        model["description"] = json!("A powerful language model");
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            200,
+            "OK",
+            gateway_fetch_metadata_response_body(vec![model]),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let result = poll_ready(provider.get_available_models()).expect("metadata fetch succeeds");
+
+        assert_eq!(
+            result.models[0].description.as_deref(),
+            Some("A powerful language model")
+        );
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_accepts_top_level_model_type_when_present() {
+        let mut model = gateway_fetch_metadata_model_entry();
+        model["modelType"] = json!("language");
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            200,
+            "OK",
+            gateway_fetch_metadata_response_body(vec![model]),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let result = poll_ready(provider.get_available_models()).expect("metadata fetch succeeds");
+
+        assert_eq!(
+            result.models[0].model_type,
+            Some(GatewayModelType::Language)
+        );
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_filters_unknown_model_type_values() {
+        let mut model = gateway_fetch_metadata_model_without_pricing();
+        model["id"] = json!("model-unknown-type");
+        model["name"] = json!("Unknown Type Model");
+        model["modelType"] = json!("some-future-type");
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            200,
+            "OK",
+            gateway_fetch_metadata_response_body(vec![model]),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let result = poll_ready(provider.get_available_models()).expect("metadata fetch succeeds");
+
+        assert!(result.models.is_empty());
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_preserves_all_known_model_type_values() {
+        let known_types = [
+            ("model-embedding", "embedding", GatewayModelType::Embedding),
+            ("model-image", "image", GatewayModelType::Image),
+            ("model-language", "language", GatewayModelType::Language),
+            ("model-reranking", "reranking", GatewayModelType::Reranking),
+            ("model-video", "video", GatewayModelType::Video),
+        ];
+        let models = known_types
+            .iter()
+            .map(|(id, model_type, _)| {
+                let mut model = gateway_fetch_metadata_model_without_pricing();
+                model["id"] = json!(id);
+                model["name"] = json!(format!("Model {model_type}"));
+                model["specification"]["modelId"] = json!(id);
+                model["modelType"] = json!(model_type);
+                model
+            })
+            .collect();
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            200,
+            "OK",
+            gateway_fetch_metadata_response_body(models),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let result = poll_ready(provider.get_available_models()).expect("metadata fetch succeeds");
+
+        assert_eq!(result.models.len(), known_types.len());
+        assert_eq!(
+            result
+                .models
+                .iter()
+                .map(|model| model.model_type)
+                .collect::<Vec<_>>(),
+            known_types
+                .iter()
+                .map(|(_, _, model_type)| Some(*model_type))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_keeps_known_models_and_filters_unknown_from_mixed_response() {
+        let mut known = gateway_fetch_metadata_model_entry();
+        known["modelType"] = json!("language");
+        let mut unknown = gateway_fetch_metadata_model_without_pricing();
+        unknown["id"] = json!("model-future");
+        unknown["name"] = json!("Future Model");
+        unknown["specification"]["modelId"] = json!("model-future");
+        unknown["modelType"] = json!("hologram");
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            200,
+            "OK",
+            gateway_fetch_metadata_response_body(vec![known, unknown]),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let result = poll_ready(provider.get_available_models()).expect("metadata fetch succeeds");
+
+        assert_eq!(result.models.len(), 1);
+        assert_eq!(
+            result.models[0].model_type,
+            Some(GatewayModelType::Language)
+        );
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_passes_headers_correctly() {
+        let (transport, captured_request) = capturing_gateway_fetch_metadata_transport(
+            200,
+            "OK",
+            gateway_fetch_metadata_response_body(vec![gateway_fetch_metadata_model_entry()]),
+        );
+        let provider = gateway_fetch_metadata_provider_with_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("custom-token")
+                .with_header("Custom-Header", "custom-value"),
+            transport,
+        );
+        poll_ready(provider.get_available_models()).expect("metadata fetch succeeds");
+
+        let request = captured_gateway_fetch_metadata_request(&captured_request);
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer custom-token")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("custom-value")
+        );
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_handles_api_errors() {
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            401,
+            "Unauthorized",
+            gateway_fetch_metadata_error_body("Unauthorized", "authentication_error"),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let error = poll_ready(provider.get_available_models()).expect_err("request fails");
+        let auth_error = error
+            .as_authentication()
+            .expect("metadata API error maps to authentication error");
+
+        assert_eq!(auth_error.status_code(), 401);
+        assert_eq!(auth_error.error_type(), "authentication_error");
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_converts_api_call_errors_to_gateway_errors() {
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            403,
+            "Forbidden",
+            gateway_fetch_metadata_error_body("Forbidden access", "authentication_error"),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let error = poll_ready(provider.get_available_models()).expect_err("request fails");
+        let auth_error = error
+            .as_authentication()
+            .expect("metadata API error maps to authentication error");
+
+        assert_eq!(auth_error.status_code(), 403);
+        assert_eq!(auth_error.error_type(), "authentication_error");
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_handles_malformed_json_error_responses() {
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            500,
+            "Internal Server Error",
+            "{ invalid json",
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let error = poll_ready(provider.get_available_models()).expect_err("request fails");
+        let response_error = error
+            .as_response()
+            .expect("malformed error response maps to response error");
+
+        assert_eq!(response_error.status_code(), 500);
+        assert_eq!(response_error.error_type(), "response_error");
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_handles_malformed_response_data() {
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            200,
+            "OK",
+            json!({ "invalid": "response" }).to_string(),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let error = poll_ready(provider.get_available_models()).expect_err("metadata is rejected");
+        let response_error = error
+            .as_response()
+            .expect("malformed metadata maps to response error");
+
+        assert_eq!(response_error.status_code(), 200);
+        assert!(response_error.validation_error().is_some());
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_rejects_models_with_invalid_pricing_format() {
+        let mut model = gateway_fetch_metadata_model_entry();
+        model["pricing"] = json!({
+            "input": 123,
+            "output": "0.000002"
+        });
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            200,
+            "OK",
+            gateway_fetch_metadata_response_body(vec![model]),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let error = poll_ready(provider.get_available_models()).expect_err("metadata is rejected");
+        let response_error = error
+            .as_response()
+            .expect("invalid pricing maps to response error");
+
+        assert_eq!(response_error.status_code(), 200);
+        assert!(response_error.validation_error().is_some());
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_does_not_double_wrap_existing_gateway_errors() {
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            401,
+            "Unauthorized",
+            gateway_fetch_metadata_error_body("Already wrapped", "authentication_error"),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let error = poll_ready(provider.get_available_models()).expect_err("request fails");
+
+        assert!(error.as_authentication().is_some());
+        assert!(error.as_response().is_none());
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_handles_rate_limit_server_errors() {
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            429,
+            "Too Many Requests",
+            gateway_fetch_metadata_error_body("Rate limit exceeded", "rate_limit_exceeded"),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let error = poll_ready(provider.get_available_models()).expect_err("request fails");
+        let rate_limit_error = error
+            .as_rate_limit()
+            .expect("rate-limit response maps to rate-limit error");
+
+        assert_eq!(rate_limit_error.message(), "Rate limit exceeded");
+        assert_eq!(rate_limit_error.status_code(), 429);
+        assert_eq!(rate_limit_error.error_type(), "rate_limit_exceeded");
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_handles_internal_server_errors() {
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            500,
+            "Internal Server Error",
+            gateway_fetch_metadata_error_body(
+                "Database connection failed",
+                "internal_server_error",
+            ),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let error = poll_ready(provider.get_available_models()).expect_err("request fails");
+        let server_error = error
+            .as_internal_server()
+            .expect("internal server response maps to internal server error");
+
+        assert_eq!(server_error.message(), "Database connection failed");
+        assert_eq!(server_error.status_code(), 500);
+        assert_eq!(server_error.error_type(), "internal_server_error");
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_preserves_error_cause_chain() {
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            401,
+            "Unauthorized",
+            gateway_fetch_metadata_error_body("Token expired", "authentication_error"),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let error = poll_ready(provider.get_available_models()).expect_err("request fails");
+        let auth_error = error
+            .as_authentication()
+            .expect("metadata API error maps to authentication error");
+
+        assert!(auth_error.cause_message().is_some());
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_uses_custom_fetch_function_when_provided() {
+        let custom_model = json!({
+            "id": "custom-model-1",
+            "name": "Custom Model One",
+            "description": "Custom model description",
+            "pricing": {
+                "input": "0.000005",
+                "output": "0.000010"
+            },
+            "specification": {
+                "specificationVersion": "v4",
+                "provider": "custom-provider",
+                "modelId": "custom-model-1"
+            }
+        });
+        let (transport, captured_request) = capturing_gateway_fetch_metadata_transport(
+            200,
+            "OK",
+            gateway_fetch_metadata_response_body(vec![custom_model]),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let result = poll_ready(provider.get_available_models()).expect("metadata fetch succeeds");
+
+        let request = captured_gateway_fetch_metadata_request(&captured_request);
+        assert_eq!(request.url, "https://api.example.com/config");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-token")
+        );
+        assert_eq!(result.models[0].id, "custom-model-1");
+        assert_eq!(
+            result.models[0].description.as_deref(),
+            Some("Custom model description")
+        );
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_handles_empty_response() {
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            200,
+            "OK",
+            gateway_fetch_metadata_response_body(vec![]),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let result = poll_ready(provider.get_available_models()).expect("metadata fetch succeeds");
+
+        assert!(result.models.is_empty());
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_fetches_credits_from_correct_endpoint() {
+        let (transport, captured_request) = capturing_gateway_fetch_metadata_transport(
+            200,
+            "OK",
+            gateway_fetch_metadata_credits_response_body("150.50", "75.25"),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let result = poll_ready(provider.get_credits()).expect("credits fetch succeeds");
+
+        let request = captured_gateway_fetch_metadata_request(&captured_request);
+        assert_eq!(request.method, ProviderApiRequestMethod::Get);
+        assert_eq!(request.url, "https://api.example.com/v1/credits");
+        assert_eq!(result.balance, "150.50");
+        assert_eq!(result.total_used, "75.25");
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_passes_headers_correctly_to_credits_endpoint() {
+        let (transport, captured_request) = capturing_gateway_fetch_metadata_transport(
+            200,
+            "OK",
+            gateway_fetch_metadata_credits_response_body("100.00", "50.00"),
+        );
+        let provider = gateway_fetch_metadata_provider_with_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("custom-token")
+                .with_header("Custom-Header", "custom-value"),
+            transport,
+        );
+        let result = poll_ready(provider.get_credits()).expect("credits fetch succeeds");
+
+        let request = captured_gateway_fetch_metadata_request(&captured_request);
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer custom-token")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("custom-value")
+        );
+        assert_eq!(result.balance, "100.00");
+        assert_eq!(result.total_used, "50.00");
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_handles_api_errors_for_credits_endpoint() {
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            401,
+            "Unauthorized",
+            gateway_fetch_metadata_error_body("Invalid API key", "authentication_error"),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let error = poll_ready(provider.get_credits()).expect_err("credits request fails");
+
+        assert!(error.as_authentication().is_some());
+        assert_eq!(error.status_code(), 401);
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_handles_rate_limit_errors_for_credits_endpoint() {
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            429,
+            "Too Many Requests",
+            gateway_fetch_metadata_error_body("Rate limit exceeded", "rate_limit_exceeded"),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let error = poll_ready(provider.get_credits()).expect_err("credits request fails");
+        let rate_limit_error = error
+            .as_rate_limit()
+            .expect("credits rate-limit response maps to rate-limit error");
+
+        assert_eq!(rate_limit_error.message(), "Rate limit exceeded");
+        assert_eq!(rate_limit_error.status_code(), 429);
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_handles_internal_server_errors_for_credits_endpoint() {
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            500,
+            "Internal Server Error",
+            gateway_fetch_metadata_error_body("Database unavailable", "internal_server_error"),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let error = poll_ready(provider.get_credits()).expect_err("credits request fails");
+        let server_error = error
+            .as_internal_server()
+            .expect("credits internal error maps to internal server error");
+
+        assert_eq!(server_error.message(), "Database unavailable");
+        assert_eq!(server_error.status_code(), 500);
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_handles_malformed_credits_response() {
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            200,
+            "OK",
+            gateway_fetch_metadata_credits_response_body("not-a-number", "75.25"),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let result = poll_ready(provider.get_credits()).expect("credits fetch succeeds");
+
+        assert_eq!(result.balance, "not-a-number");
+        assert_eq!(result.total_used, "75.25");
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_uses_custom_fetch_function_for_credits() {
+        let (transport, captured_request) = capturing_gateway_fetch_metadata_transport(
+            200,
+            "OK",
+            gateway_fetch_metadata_credits_response_body("200.00", "100.50"),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let result = poll_ready(provider.get_credits()).expect("credits fetch succeeds");
+
+        let request = captured_gateway_fetch_metadata_request(&captured_request);
+        assert_eq!(request.url, "https://api.example.com/v1/credits");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-token")
+        );
+        assert_eq!(result.balance, "200.00");
+        assert_eq!(result.total_used, "100.50");
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_converts_credits_api_call_errors_to_gateway_errors() {
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            403,
+            "Forbidden",
+            gateway_fetch_metadata_error_body("Forbidden access", "authentication_error"),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let error = poll_ready(provider.get_credits()).expect_err("credits request fails");
+        let auth_error = error
+            .as_authentication()
+            .expect("credits API error maps to authentication error");
+
+        assert_eq!(auth_error.status_code(), 403);
+        assert_eq!(auth_error.error_type(), "authentication_error");
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_handles_credits_malformed_json_error_responses() {
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            500,
+            "Internal Server Error",
+            "{ invalid json",
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let error = poll_ready(provider.get_credits()).expect_err("credits request fails");
+        let response_error = error
+            .as_response()
+            .expect("malformed credits error maps to response error");
+
+        assert_eq!(response_error.status_code(), 500);
+        assert_eq!(response_error.error_type(), "response_error");
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_does_not_double_wrap_existing_credit_gateway_errors() {
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            401,
+            "Unauthorized",
+            gateway_fetch_metadata_error_body("Already wrapped", "authentication_error"),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let error = poll_ready(provider.get_credits()).expect_err("credits request fails");
+
+        assert!(error.as_authentication().is_some());
+        assert!(error.as_response().is_none());
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_preserves_credits_error_cause_chain() {
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            401,
+            "Unauthorized",
+            gateway_fetch_metadata_error_body("Token expired", "authentication_error"),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let error = poll_ready(provider.get_credits()).expect_err("credits request fails");
+        let auth_error = error
+            .as_authentication()
+            .expect("credits API error maps to authentication error");
+
+        assert!(auth_error.cause_message().is_some());
+    }
+
+    #[test]
+    fn gateway_fetch_metadata_handles_empty_credits_response() {
+        let (transport, _) = capturing_gateway_fetch_metadata_transport(
+            200,
+            "OK",
+            gateway_fetch_metadata_credits_response_body("0.00", "0.00"),
+        );
+        let provider = gateway_fetch_metadata_provider(transport);
+        let result = poll_ready(provider.get_credits()).expect("credits fetch succeeds");
+
+        assert_eq!(result.balance, "0.00");
+        assert_eq!(result.total_used, "0.00");
     }
 
     #[test]
