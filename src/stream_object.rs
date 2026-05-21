@@ -2683,7 +2683,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_object_repairs_parse_failures() {
+    fn stream_object_repair_text_repairs_json_parse_error() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
                 LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
@@ -2715,7 +2715,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_object_repairs_schema_validation_failures() {
+    fn stream_object_repair_text_repairs_type_validation_error() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
                 LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
@@ -2750,7 +2750,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_object_keeps_original_error_when_repair_returns_none() {
+    fn stream_object_repair_text_handles_repair_returning_none() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
                 LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
@@ -2782,7 +2782,47 @@ mod tests {
     }
 
     #[test]
-    fn stream_object_reports_repaired_text_error_when_repair_fails() {
+    fn stream_object_repair_text_repairs_json_wrapped_with_markdown_code_blocks() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "```json\n{ \"content\": \"test message\" }\n```",
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_experimental_repair_text(|options| async move {
+                    assert_eq!(
+                        options.text(),
+                        "```json\n{ \"content\": \"test message\" }\n```"
+                    );
+                    assert!(options.error().as_json_parse_error().is_some());
+
+                    Some(
+                        options
+                            .text()
+                            .trim_start_matches("```json")
+                            .trim_start()
+                            .trim_end_matches("```")
+                            .trim_end()
+                            .to_string(),
+                    )
+                }),
+        ));
+
+        assert_eq!(result.object, Some(json!({ "content": "test message" })));
+        assert_eq!(result.error, None);
+    }
+
+    #[test]
+    fn stream_object_repair_text_reports_no_object_when_parsing_still_fails() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
                 LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "{ bad")),
