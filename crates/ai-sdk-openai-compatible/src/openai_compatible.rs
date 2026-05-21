@@ -4375,12 +4375,12 @@ fn provider_api_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        OpenAICompatibleMetadataExtractor, OpenAICompatibleProvider,
-        OpenAICompatibleProviderSettings, OpenAICompatibleStreamMetadataExtractor,
-        OpenAICompatibleTransport, OpenAICompatibleTransportFuture, create_openai_compatible,
-        openai_compatible_prepare_tools, openai_compatible_provider_options_name,
-        resolve_openai_compatible_provider_options_key, to_openai_compatible_camel_case,
-        warn_if_deprecated_openai_compatible_provider_options_key,
+        OpenAICompatibleEmbeddingModel, OpenAICompatibleMetadataExtractor,
+        OpenAICompatibleProvider, OpenAICompatibleProviderSettings,
+        OpenAICompatibleStreamMetadataExtractor, OpenAICompatibleTransport,
+        OpenAICompatibleTransportFuture, create_openai_compatible, openai_compatible_prepare_tools,
+        openai_compatible_provider_options_name, resolve_openai_compatible_provider_options_key,
+        to_openai_compatible_camel_case, warn_if_deprecated_openai_compatible_provider_options_key,
     };
     use ai_sdk_provider::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions};
     use ai_sdk_provider::file_data::{FileData, FileDataContent};
@@ -4536,6 +4536,92 @@ mod tests {
             .as_ref()
             .and_then(|metadata| metadata.get("test-provider"))
             .expect("test-provider metadata is present")
+    }
+
+    fn openai_compatible_embedding_response_body(usage_prompt_tokens: u64) -> JsonValue {
+        json!({
+            "object": "list",
+            "data": [
+                {
+                    "object": "embedding",
+                    "index": 0,
+                    "embedding": [0.1, 0.2]
+                },
+                {
+                    "object": "embedding",
+                    "index": 1,
+                    "embedding": [0.3, 0.4]
+                }
+            ],
+            "model": "text-embedding-3-large",
+            "usage": {
+                "prompt_tokens": usage_prompt_tokens,
+                "total_tokens": usage_prompt_tokens
+            }
+        })
+    }
+
+    fn openai_compatible_embedding_test_model(
+        response_body: JsonValue,
+        response_headers: Headers,
+    ) -> (
+        OpenAICompatibleEmbeddingModel,
+        Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+                let response_body = response_body.clone();
+                let response_headers = response_headers.clone();
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    response_body.to_string(),
+                )
+                .with_headers(response_headers))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://my.api.com/v1/")
+                .with_api_key("test-api-key")
+                .with_header("Custom-Provider-Header", "provider-header-value"),
+        )
+        .with_transport(transport)
+        .embedding_model("text-embedding-3-large");
+
+        (model, captured_request)
+    }
+
+    fn openai_compatible_embedding_test_model_without_headers() -> (
+        OpenAICompatibleEmbeddingModel,
+        Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) {
+        openai_compatible_embedding_test_model(
+            openai_compatible_embedding_response_body(8),
+            Headers::new(),
+        )
+    }
+
+    fn captured_openai_compatible_embedding_request_body(
+        captured_request: &Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) -> JsonValue {
+        captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .and_then(|body| body.as_text().map(str::to_string))
+            .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok())
+            .expect("request body is JSON")
+    }
+
+    fn openai_compatible_embedding_test_values() -> Vec<String> {
+        vec!["sunny day".to_string(), "rainy night".to_string()]
     }
 
     fn openai_compatible_stream_request_bodies_for_include_usage(
@@ -5347,6 +5433,217 @@ mod tests {
         assert_eq!(
             request.headers.get("custom-header").map(String::as_str),
             Some("value")
+        );
+    }
+
+    #[test]
+    fn openai_compatible_embedding_extracts_embedding() {
+        let (model, _captured_request) = openai_compatible_embedding_test_model_without_headers();
+
+        let result = poll_ready(model.do_embed(EmbeddingModelCallOptions::new(
+            openai_compatible_embedding_test_values(),
+        )));
+
+        assert_eq!(result.embeddings, vec![vec![0.1, 0.2], vec![0.3, 0.4]]);
+    }
+
+    #[test]
+    fn openai_compatible_embedding_exposes_raw_response_headers() {
+        let (model, _captured_request) = openai_compatible_embedding_test_model(
+            openai_compatible_embedding_response_body(8),
+            Headers::from([
+                ("content-length".to_string(), "236".to_string()),
+                ("content-type".to_string(), "application/json".to_string()),
+                ("test-header".to_string(), "test-value".to_string()),
+            ]),
+        );
+
+        let result = poll_ready(model.do_embed(EmbeddingModelCallOptions::new(
+            openai_compatible_embedding_test_values(),
+        )));
+
+        assert_eq!(
+            result.response.and_then(|response| response.headers),
+            Some(Headers::from([
+                ("content-length".to_string(), "236".to_string()),
+                ("content-type".to_string(), "application/json".to_string()),
+                ("test-header".to_string(), "test-value".to_string())
+            ]))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_embedding_extracts_usage() {
+        let (model, _captured_request) = openai_compatible_embedding_test_model(
+            openai_compatible_embedding_response_body(20),
+            Headers::new(),
+        );
+
+        let result = poll_ready(model.do_embed(EmbeddingModelCallOptions::new(
+            openai_compatible_embedding_test_values(),
+        )));
+
+        assert_eq!(result.usage.map(|usage| usage.tokens), Some(20),);
+    }
+
+    #[test]
+    fn openai_compatible_embedding_passes_model_and_values() {
+        let (model, captured_request) = openai_compatible_embedding_test_model_without_headers();
+        let values = openai_compatible_embedding_test_values();
+
+        let _result = poll_ready(model.do_embed(EmbeddingModelCallOptions::new(values.clone())));
+
+        assert_eq!(
+            captured_openai_compatible_embedding_request_body(&captured_request),
+            json!({
+                "model": "text-embedding-3-large",
+                "input": values,
+                "encoding_format": "float"
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_embedding_passes_dimensions_setting() {
+        let (model, captured_request) = openai_compatible_embedding_test_model_without_headers();
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openaiCompatible": {
+                "dimensions": 64
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let _result = poll_ready(
+            model.do_embed(
+                EmbeddingModelCallOptions::new(openai_compatible_embedding_test_values())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(
+            captured_openai_compatible_embedding_request_body(&captured_request),
+            json!({
+                "model": "text-embedding-3-large",
+                "input": openai_compatible_embedding_test_values(),
+                "encoding_format": "float",
+                "dimensions": 64
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_embedding_passes_deprecated_openai_compatible_key_and_warns() {
+        let (model, captured_request) = openai_compatible_embedding_test_model_without_headers();
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai-compatible": {
+                "dimensions": 64
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_embed(
+                EmbeddingModelCallOptions::new(openai_compatible_embedding_test_values())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(
+            captured_openai_compatible_embedding_request_body(&captured_request),
+            json!({
+                "model": "text-embedding-3-large",
+                "input": openai_compatible_embedding_test_values(),
+                "encoding_format": "float",
+                "dimensions": 64
+            })
+        );
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Deprecated {
+                setting: "providerOptions key 'openai-compatible'".to_string(),
+                message: "Use 'openaiCompatible' instead.".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn openai_compatible_embedding_warns_when_raw_provider_name_key_is_used() {
+        let (model, _captured_request) = openai_compatible_embedding_test_model_without_headers();
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "dimensions": 64
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_embed(
+                EmbeddingModelCallOptions::new(openai_compatible_embedding_test_values())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Deprecated {
+                setting: "providerOptions key 'test-provider'".to_string(),
+                message: "Use 'testProvider' instead.".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn openai_compatible_embedding_does_not_warn_when_camel_case_provider_name_key_is_used() {
+        let (model, _captured_request) = openai_compatible_embedding_test_model_without_headers();
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "testProvider": {
+                "dimensions": 64
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_embed(
+                EmbeddingModelCallOptions::new(openai_compatible_embedding_test_values())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_compatible_embedding_passes_headers() {
+        let (model, captured_request) = openai_compatible_embedding_test_model_without_headers();
+
+        let _result = poll_ready(
+            model.do_embed(
+                EmbeddingModelCallOptions::new(openai_compatible_embedding_test_values())
+                    .with_header("Custom-Request-Header", "request-header-value"),
+            ),
+        );
+
+        let headers = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .headers;
+        assert_eq!(
+            headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            headers.get("custom-provider-header").map(String::as_str),
+            Some("provider-header-value")
+        );
+        assert_eq!(
+            headers.get("custom-request-header").map(String::as_str),
+            Some("request-header-value")
+        );
+        assert_eq!(
+            headers.get("content-type").map(String::as_str),
+            Some("application/json")
         );
     }
 
