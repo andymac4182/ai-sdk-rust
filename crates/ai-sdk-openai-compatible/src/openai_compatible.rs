@@ -1846,20 +1846,22 @@ fn openai_compatible_completion_provider_options(
 ) -> Vec<Warning> {
     let mut warnings = Vec::new();
     let provider_options_name = provider.split('.').next().unwrap_or(provider).trim();
-    let camel_provider_options_name = to_openai_compatible_camel_case(provider_options_name);
+    warn_if_deprecated_openai_compatible_provider_options_key(
+        provider_options_name,
+        Some(provider_options),
+        &mut warnings,
+    );
 
     if let Some(options) = provider_options.get(provider_options_name) {
-        if camel_provider_options_name != provider_options_name {
-            warnings.push(Warning::Deprecated {
-                setting: format!("providerOptions key '{provider_options_name}'"),
-                message: format!("Use '{camel_provider_options_name}' instead."),
-            });
-        }
         add_openai_compatible_completion_body_options(body, options);
     }
 
-    if camel_provider_options_name != provider_options_name
-        && let Some(options) = provider_options.get(&camel_provider_options_name)
+    let resolved_provider_options_name = resolve_openai_compatible_provider_options_key(
+        provider_options_name,
+        Some(provider_options),
+    );
+    if resolved_provider_options_name != provider_options_name
+        && let Some(options) = provider_options.get(&resolved_provider_options_name)
     {
         add_openai_compatible_completion_body_options(body, options);
     }
@@ -1917,21 +1919,23 @@ fn openai_compatible_image_provider_options(
     warnings: &mut Vec<Warning>,
 ) -> JsonObject {
     let provider_options_name = provider.split('.').next().unwrap_or(provider).trim();
-    let camel_provider_options_name = to_openai_compatible_camel_case(provider_options_name);
     let mut body_options = JsonObject::new();
+    warn_if_deprecated_openai_compatible_provider_options_key(
+        provider_options_name,
+        Some(provider_options),
+        warnings,
+    );
 
     if let Some(options) = provider_options.get(provider_options_name) {
-        if camel_provider_options_name != provider_options_name {
-            warnings.push(Warning::Deprecated {
-                setting: format!("providerOptions key '{provider_options_name}'"),
-                message: format!("Use '{camel_provider_options_name}' instead."),
-            });
-        }
         body_options.extend(options.clone());
     }
 
-    if camel_provider_options_name != provider_options_name
-        && let Some(options) = provider_options.get(&camel_provider_options_name)
+    let resolved_provider_options_name = resolve_openai_compatible_provider_options_key(
+        provider_options_name,
+        Some(provider_options),
+    );
+    if resolved_provider_options_name != provider_options_name
+        && let Some(options) = provider_options.get(&resolved_provider_options_name)
     {
         body_options.extend(options.clone());
     }
@@ -2122,20 +2126,22 @@ fn openai_compatible_embedding_provider_options(
     }
 
     let provider_options_name = provider.split('.').next().unwrap_or(provider);
-    let camel_provider_options_name = to_openai_compatible_camel_case(provider_options_name);
+    warn_if_deprecated_openai_compatible_provider_options_key(
+        provider_options_name,
+        Some(provider_options),
+        &mut warnings,
+    );
 
     if let Some(options) = provider_options.get(provider_options_name) {
-        if camel_provider_options_name != provider_options_name {
-            warnings.push(Warning::Deprecated {
-                setting: format!("providerOptions key '{provider_options_name}'"),
-                message: format!("Use '{camel_provider_options_name}' instead."),
-            });
-        }
         add_openai_compatible_embedding_body_options(body, options);
     }
 
-    if camel_provider_options_name != provider_options_name
-        && let Some(options) = provider_options.get(&camel_provider_options_name)
+    let resolved_provider_options_name = resolve_openai_compatible_provider_options_key(
+        provider_options_name,
+        Some(provider_options),
+    );
+    if resolved_provider_options_name != provider_options_name
+        && let Some(options) = provider_options.get(&resolved_provider_options_name)
     {
         add_openai_compatible_embedding_body_options(body, options);
     }
@@ -2176,6 +2182,42 @@ fn to_openai_compatible_camel_case(value: &str) -> String {
     output
 }
 
+fn resolve_openai_compatible_provider_options_key(
+    raw_name: &str,
+    provider_options: Option<&ProviderOptions>,
+) -> String {
+    let camel_name = to_openai_compatible_camel_case(raw_name);
+
+    if camel_name != raw_name
+        && provider_options
+            .and_then(|provider_options| provider_options.get(&camel_name))
+            .is_some()
+    {
+        camel_name
+    } else {
+        raw_name.to_string()
+    }
+}
+
+fn warn_if_deprecated_openai_compatible_provider_options_key(
+    raw_name: &str,
+    provider_options: Option<&ProviderOptions>,
+    warnings: &mut Vec<Warning>,
+) {
+    let camel_name = to_openai_compatible_camel_case(raw_name);
+
+    if camel_name != raw_name
+        && provider_options
+            .and_then(|provider_options| provider_options.get(raw_name))
+            .is_some()
+    {
+        warnings.push(Warning::Deprecated {
+            setting: format!("providerOptions key '{raw_name}'"),
+            message: format!("Use '{camel_name}' instead."),
+        });
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct OpenAICompatibleChatProviderOptions {
     user: Option<String>,
@@ -2213,15 +2255,13 @@ fn openai_compatible_chat_provider_options(
         .next()
         .unwrap_or(provider_name)
         .trim();
-    let camel_provider_options_name = to_openai_compatible_camel_case(provider_options_name);
+    warn_if_deprecated_openai_compatible_provider_options_key(
+        provider_options_name,
+        Some(provider_options),
+        warnings,
+    );
 
     if let Some(options) = provider_options.get(provider_options_name) {
-        if camel_provider_options_name != provider_options_name {
-            warnings.push(Warning::Deprecated {
-                setting: format!("providerOptions key '{provider_options_name}'"),
-                message: format!("Use '{camel_provider_options_name}' instead."),
-            });
-        }
         merge_openai_compatible_chat_known_options(&mut resolved, options);
         merge_openai_compatible_chat_additional_options(
             &mut resolved.additional_body_options,
@@ -2229,8 +2269,12 @@ fn openai_compatible_chat_provider_options(
         );
     }
 
-    if camel_provider_options_name != provider_options_name
-        && let Some(options) = provider_options.get(&camel_provider_options_name)
+    let resolved_provider_options_name = resolve_openai_compatible_provider_options_key(
+        provider_options_name,
+        Some(provider_options),
+    );
+    if resolved_provider_options_name != provider_options_name
+        && let Some(options) = provider_options.get(&resolved_provider_options_name)
     {
         merge_openai_compatible_chat_known_options(&mut resolved, options);
         merge_openai_compatible_chat_additional_options(
@@ -4038,6 +4082,8 @@ mod tests {
     use super::{
         OpenAICompatibleProvider, OpenAICompatibleProviderSettings, OpenAICompatibleTransport,
         OpenAICompatibleTransportFuture, create_openai_compatible,
+        resolve_openai_compatible_provider_options_key, to_openai_compatible_camel_case,
+        warn_if_deprecated_openai_compatible_provider_options_key,
     };
     use ai_sdk_provider::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions};
     use ai_sdk_provider::file_data::{FileData, FileDataContent};
@@ -4077,6 +4123,232 @@ mod tests {
         abort_controller.abort_with_reason("client-disconnected");
         assert!(request_signal.is_aborted());
         assert_eq!(request_signal.reason(), Some(json!("client-disconnected")));
+    }
+
+    fn test_provider_options(value: JsonValue) -> ProviderOptions {
+        serde_json::from_value(value).expect("provider options deserialize")
+    }
+
+    #[test]
+    fn to_camel_case_upstream_should_convert_hyphenated_names_to_camel_case() {
+        assert_eq!(
+            to_openai_compatible_camel_case("provider-name"),
+            "providerName"
+        );
+    }
+
+    #[test]
+    fn to_camel_case_upstream_should_convert_underscored_names_to_camel_case() {
+        assert_eq!(
+            to_openai_compatible_camel_case("provider_name"),
+            "providerName"
+        );
+    }
+
+    #[test]
+    fn to_camel_case_upstream_should_handle_multiple_separators() {
+        assert_eq!(
+            to_openai_compatible_camel_case("my-provider-name"),
+            "myProviderName"
+        );
+    }
+
+    #[test]
+    fn to_camel_case_upstream_should_return_same_string_when_already_camel_case() {
+        assert_eq!(
+            to_openai_compatible_camel_case("providerName"),
+            "providerName"
+        );
+    }
+
+    #[test]
+    fn to_camel_case_upstream_should_return_same_string_when_no_separators() {
+        assert_eq!(to_openai_compatible_camel_case("openai"), "openai");
+    }
+
+    #[test]
+    fn to_camel_case_upstream_should_handle_empty_string() {
+        assert_eq!(to_openai_compatible_camel_case(""), "");
+    }
+
+    #[test]
+    fn resolve_provider_options_key_upstream_should_return_camel_case_key_when_camel_case_options_present()
+     {
+        let provider_options = test_provider_options(json!({
+            "providerName": {
+                "someOption": "value"
+            }
+        }));
+
+        assert_eq!(
+            resolve_openai_compatible_provider_options_key(
+                "provider-name",
+                Some(&provider_options),
+            ),
+            "providerName"
+        );
+    }
+
+    #[test]
+    fn resolve_provider_options_key_upstream_should_return_raw_key_when_only_raw_options_present() {
+        let provider_options = test_provider_options(json!({
+            "provider-name": {
+                "someOption": "value"
+            }
+        }));
+
+        assert_eq!(
+            resolve_openai_compatible_provider_options_key(
+                "provider-name",
+                Some(&provider_options),
+            ),
+            "provider-name"
+        );
+    }
+
+    #[test]
+    fn resolve_provider_options_key_upstream_should_return_camel_case_key_when_both_are_present() {
+        let provider_options = test_provider_options(json!({
+            "provider-name": {
+                "a": 1
+            },
+            "providerName": {
+                "b": 2
+            }
+        }));
+
+        assert_eq!(
+            resolve_openai_compatible_provider_options_key(
+                "provider-name",
+                Some(&provider_options),
+            ),
+            "providerName"
+        );
+    }
+
+    #[test]
+    fn resolve_provider_options_key_upstream_should_return_raw_key_when_no_options_are_present() {
+        let provider_options = test_provider_options(json!({}));
+
+        assert_eq!(
+            resolve_openai_compatible_provider_options_key(
+                "provider-name",
+                Some(&provider_options),
+            ),
+            "provider-name"
+        );
+    }
+
+    #[test]
+    fn resolve_provider_options_key_upstream_should_return_raw_key_when_provider_options_is_undefined()
+     {
+        assert_eq!(
+            resolve_openai_compatible_provider_options_key("provider-name", None),
+            "provider-name"
+        );
+    }
+
+    #[test]
+    fn resolve_provider_options_key_upstream_should_return_raw_key_when_name_has_no_separators() {
+        let provider_options = test_provider_options(json!({
+            "openai": {
+                "a": 1
+            }
+        }));
+
+        assert_eq!(
+            resolve_openai_compatible_provider_options_key("openai", Some(&provider_options)),
+            "openai"
+        );
+    }
+
+    #[test]
+    fn deprecated_provider_options_key_upstream_should_push_warning_when_raw_key_is_used_and_differs()
+     {
+        let provider_options = test_provider_options(json!({
+            "black-forest-labs": {
+                "style": "hd"
+            }
+        }));
+        let mut warnings = Vec::new();
+
+        warn_if_deprecated_openai_compatible_provider_options_key(
+            "black-forest-labs",
+            Some(&provider_options),
+            &mut warnings,
+        );
+
+        assert!(matches!(
+            warnings.as_slice(),
+            [Warning::Deprecated { setting, message }]
+                if setting == "providerOptions key 'black-forest-labs'"
+                    && message == "Use 'blackForestLabs' instead."
+        ));
+    }
+
+    #[test]
+    fn deprecated_provider_options_key_upstream_should_not_warn_when_only_camel_case_key_is_used() {
+        let provider_options = test_provider_options(json!({
+            "blackForestLabs": {
+                "style": "hd"
+            }
+        }));
+        let mut warnings = Vec::new();
+
+        warn_if_deprecated_openai_compatible_provider_options_key(
+            "black-forest-labs",
+            Some(&provider_options),
+            &mut warnings,
+        );
+
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn deprecated_provider_options_key_upstream_should_not_warn_when_raw_name_is_already_camel_case()
+     {
+        let provider_options = test_provider_options(json!({
+            "openai": {
+                "user": "test"
+            }
+        }));
+        let mut warnings = Vec::new();
+
+        warn_if_deprecated_openai_compatible_provider_options_key(
+            "openai",
+            Some(&provider_options),
+            &mut warnings,
+        );
+
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn deprecated_provider_options_key_upstream_should_not_warn_when_raw_key_is_not_present() {
+        let provider_options = test_provider_options(json!({}));
+        let mut warnings = Vec::new();
+
+        warn_if_deprecated_openai_compatible_provider_options_key(
+            "black-forest-labs",
+            Some(&provider_options),
+            &mut warnings,
+        );
+
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn deprecated_provider_options_key_upstream_should_not_warn_when_provider_options_is_undefined()
+    {
+        let mut warnings = Vec::new();
+
+        warn_if_deprecated_openai_compatible_provider_options_key(
+            "black-forest-labs",
+            None,
+            &mut warnings,
+        );
+
+        assert!(warnings.is_empty());
     }
 
     #[test]

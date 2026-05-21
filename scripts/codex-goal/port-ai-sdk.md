@@ -71,9 +71,11 @@ crate. Rust may add more tests for stronger coverage, but it must never have
 fewer mapped original TypeScript tests, and one missing upstream portable test is
 a completion blocker.
 
-Handoff note for future iterations: EVERY test from the original TypeScript
-package must exist in Rust. Rust can have potentially more tests, but never
-less mapped original upstream test coverage.
+Handoff note for future iterations: EVERY portable test/case from the original
+TypeScript package must exist as a Rust test in the matching crate. Rust can and
+should add more tests where useful, but it must never have fewer mapped original
+TypeScript tests; one missing original portable upstream test/case is a parity
+failure.
 
 Future-iteration test note: the matching Rust crate must contain EVERY portable
 test/case from the original TypeScript package as a named Rust counterpart.
