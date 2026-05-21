@@ -907,7 +907,7 @@ impl OpenAICompatibleChatLanguageModel {
                 .and_then(|choice| choice.get("finish_reason"))
                 .or_else(|| choice.and_then(|choice| choice.get("finishReason"))),
         );
-        let usage = openai_compatible_usage(response.get("usage"));
+        let usage = openai_compatible_chat_usage(response.get("usage"));
         let raw_body = raw_response.unwrap_or_else(|| response.clone());
 
         let mut result = LanguageModelGenerateResult::new(content, finish_reason, usage)
@@ -1231,7 +1231,7 @@ impl OpenAICompatibleCompletionLanguageModel {
                 .and_then(|choice| choice.get("finish_reason"))
                 .or_else(|| choice.and_then(|choice| choice.get("finishReason"))),
         );
-        let usage = openai_compatible_usage(response.get("usage"));
+        let usage = openai_compatible_completion_usage(response.get("usage"));
         let raw_body = raw_response.unwrap_or_else(|| response.clone());
         let mut result = LanguageModelGenerateResult::new(content, finish_reason, usage)
             .with_request(LanguageModelRequest::new().with_body(request_body));
@@ -3306,7 +3306,7 @@ fn openai_compatible_finish_reason(value: Option<&JsonValue>) -> LanguageModelFi
     }
 }
 
-fn openai_compatible_usage(value: Option<&JsonValue>) -> LanguageModelUsage {
+fn openai_compatible_chat_usage(value: Option<&JsonValue>) -> LanguageModelUsage {
     let Some(value) = value else {
         return LanguageModelUsage::default();
     };
@@ -3317,19 +3317,22 @@ fn openai_compatible_usage(value: Option<&JsonValue>) -> LanguageModelUsage {
             .or_else(|| value.get("promptTokens"))
             .or_else(|| value.get("input_tokens"))
             .or_else(|| value.get("inputTokens")),
-    );
+    )
+    .unwrap_or_default();
     let output_total = json_u64(
         value
             .get("completion_tokens")
             .or_else(|| value.get("completionTokens"))
             .or_else(|| value.get("output_tokens"))
             .or_else(|| value.get("outputTokens")),
-    );
+    )
+    .unwrap_or_default();
     let cache_read = json_u64(value.get("prompt_tokens_details").and_then(|details| {
         details
             .get("cached_tokens")
             .or_else(|| details.get("cachedTokens"))
-    }));
+    }))
+    .unwrap_or_default();
     let reasoning_tokens = json_u64(
         value
             .get("completion_tokens_details")
@@ -3340,23 +3343,60 @@ fn openai_compatible_usage(value: Option<&JsonValue>) -> LanguageModelUsage {
             })
             .or_else(|| value.get("reasoning_tokens"))
             .or_else(|| value.get("reasoningTokens")),
-    );
+    )
+    .unwrap_or_default();
     let raw = value.as_object().cloned();
 
     LanguageModelUsage {
         input_tokens: InputTokenUsage {
-            total: input_total,
-            no_cache: input_total
-                .zip(cache_read)
-                .map(|(total, cached)| total.saturating_sub(cached)),
-            cache_read,
+            total: Some(input_total),
+            no_cache: Some(input_total.saturating_sub(cache_read)),
+            cache_read: Some(cache_read),
             cache_write: None,
         },
         output_tokens: OutputTokenUsage {
-            total: output_total,
-            text: output_total
-                .map(|total| total.saturating_sub(reasoning_tokens.unwrap_or_default())),
-            reasoning: reasoning_tokens,
+            total: Some(output_total),
+            text: Some(output_total.saturating_sub(reasoning_tokens)),
+            reasoning: Some(reasoning_tokens),
+        },
+        raw,
+    }
+}
+
+fn openai_compatible_completion_usage(value: Option<&JsonValue>) -> LanguageModelUsage {
+    let Some(value) = value else {
+        return LanguageModelUsage::default();
+    };
+
+    let input_total = json_u64(
+        value
+            .get("prompt_tokens")
+            .or_else(|| value.get("promptTokens"))
+            .or_else(|| value.get("input_tokens"))
+            .or_else(|| value.get("inputTokens")),
+    )
+    .unwrap_or_default();
+    let output_total = json_u64(
+        value
+            .get("completion_tokens")
+            .or_else(|| value.get("completionTokens"))
+            .or_else(|| value.get("output_tokens"))
+            .or_else(|| value.get("outputTokens")),
+    )
+    .unwrap_or_default();
+    let raw = value.as_object().cloned();
+
+    LanguageModelUsage {
+        input_tokens: InputTokenUsage {
+            total: Some(input_total),
+            no_cache: Some(input_total),
+            cache_read: None,
+            cache_write: None,
+        },
+        output_tokens: OutputTokenUsage {
+            total: Some(output_total),
+            text: Some(output_total),
+            reasoning: None,
         },
         raw,
     }
@@ -3480,7 +3520,10 @@ fn openai_compatible_completion_stream_result_from_response(
     }
 
     stream.push(LanguageModelStreamPart::Finish(
-        LanguageModelStreamFinish::new(openai_compatible_usage(usage.as_ref()), finish_reason),
+        LanguageModelStreamFinish::new(
+            openai_compatible_completion_usage(usage.as_ref()),
+            finish_reason,
+        ),
     ));
 
     let mut result = LanguageModelStreamResult::new(stream)
@@ -3731,7 +3774,7 @@ fn openai_compatible_stream_result_from_response(
         .and_then(OpenAICompatibleStreamMetadataExtractor::build_metadata);
 
     stream.push(LanguageModelStreamPart::Finish(
-        LanguageModelStreamFinish::new(openai_compatible_usage(usage.as_ref()), finish_reason)
+        LanguageModelStreamFinish::new(openai_compatible_chat_usage(usage.as_ref()), finish_reason)
             .with_provider_metadata(openai_compatible_stream_provider_metadata(
                 provider_name,
                 usage.as_ref(),
@@ -4375,12 +4418,13 @@ fn provider_api_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        OpenAICompatibleEmbeddingModel, OpenAICompatibleMetadataExtractor,
-        OpenAICompatibleProvider, OpenAICompatibleProviderSettings,
-        OpenAICompatibleStreamMetadataExtractor, OpenAICompatibleTransport,
-        OpenAICompatibleTransportFuture, create_openai_compatible, openai_compatible_prepare_tools,
-        openai_compatible_provider_options_name, resolve_openai_compatible_provider_options_key,
-        to_openai_compatible_camel_case, warn_if_deprecated_openai_compatible_provider_options_key,
+        OpenAICompatibleCompletionLanguageModel, OpenAICompatibleEmbeddingModel,
+        OpenAICompatibleMetadataExtractor, OpenAICompatibleProvider,
+        OpenAICompatibleProviderSettings, OpenAICompatibleStreamMetadataExtractor,
+        OpenAICompatibleTransport, OpenAICompatibleTransportFuture, create_openai_compatible,
+        openai_compatible_prepare_tools, openai_compatible_provider_options_name,
+        resolve_openai_compatible_provider_options_key, to_openai_compatible_camel_case,
+        warn_if_deprecated_openai_compatible_provider_options_key,
     };
     use ai_sdk_provider::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions};
     use ai_sdk_provider::file_data::{FileData, FileDataContent};
@@ -4536,6 +4580,116 @@ mod tests {
             .as_ref()
             .and_then(|metadata| metadata.get("test-provider"))
             .expect("test-provider metadata is present")
+    }
+
+    fn openai_compatible_completion_prompt_messages() -> Vec<LanguageModelMessage> {
+        vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![LanguageModelUserContentPart::Text(
+                LanguageModelTextPart::new("Hello"),
+            )],
+        ))]
+    }
+
+    fn openai_compatible_completion_prompt_text() -> &'static str {
+        "user:\nHello\n\nassistant:\n"
+    }
+
+    fn openai_compatible_completion_response_body(
+        content: &str,
+        usage: JsonValue,
+        finish_reason: &str,
+        id: &str,
+        created: i64,
+        model: &str,
+    ) -> JsonValue {
+        json!({
+            "id": id,
+            "object": "text_completion",
+            "created": created,
+            "model": model,
+            "choices": [
+                {
+                    "text": content,
+                    "index": 0,
+                    "finish_reason": finish_reason
+                }
+            ],
+            "usage": usage
+        })
+    }
+
+    fn openai_compatible_completion_default_response_body(content: &str) -> JsonValue {
+        openai_compatible_completion_response_body(
+            content,
+            json!({
+                "prompt_tokens": 4,
+                "total_tokens": 34,
+                "completion_tokens": 30
+            }),
+            "stop",
+            "cmpl-96cAM1v77r4jXa4qb2NSmRREV5oWB",
+            1711363706,
+            "gpt-3.5-turbo-instruct",
+        )
+    }
+
+    fn openai_compatible_completion_test_model(
+        response_body: JsonValue,
+        response_headers: Headers,
+    ) -> (
+        OpenAICompatibleCompletionLanguageModel,
+        Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+                let response_body = response_body.clone();
+                let response_headers = response_headers.clone();
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    response_body.to_string(),
+                )
+                .with_headers(response_headers))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://my.api.com/v1/")
+                .with_api_key("test-api-key")
+                .with_header("Custom-Provider-Header", "provider-header-value"),
+        )
+        .with_transport(transport)
+        .completion_model("gpt-3.5-turbo-instruct");
+
+        (model, captured_request)
+    }
+
+    fn openai_compatible_completion_test_model_without_headers() -> (
+        OpenAICompatibleCompletionLanguageModel,
+        Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) {
+        openai_compatible_completion_test_model(
+            openai_compatible_completion_default_response_body(""),
+            Headers::new(),
+        )
+    }
+
+    fn captured_openai_compatible_completion_request_body(
+        captured_request: &Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) -> JsonValue {
+        captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .and_then(|body| body.as_text().map(str::to_string))
+            .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok())
+            .expect("request body is JSON")
     }
 
     fn openai_compatible_embedding_response_body(usage_prompt_tokens: u64) -> JsonValue {
@@ -5648,6 +5802,439 @@ mod tests {
     }
 
     #[test]
+    fn openai_compatible_completion_config_extracts_base_name_from_provider_string() {
+        assert_eq!(
+            openai_compatible_provider_options_name("anthropic.beta"),
+            "anthropic"
+        );
+    }
+
+    #[test]
+    fn openai_compatible_completion_config_handles_provider_without_dot_notation() {
+        assert_eq!(openai_compatible_provider_options_name("openai"), "openai");
+    }
+
+    #[test]
+    fn openai_compatible_completion_config_returns_empty_for_empty_provider() {
+        assert_eq!(openai_compatible_provider_options_name(""), "");
+    }
+
+    #[test]
+    fn openai_compatible_completion_extracts_text_response() {
+        let (model, _captured_request) = openai_compatible_completion_test_model(
+            openai_compatible_completion_default_response_body("Hello, World!"),
+            Headers::new(),
+        );
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(
+            openai_compatible_completion_prompt_messages(),
+        )));
+
+        assert_eq!(result.content.len(), 1);
+        match &result.content[0] {
+            LanguageModelContent::Text(text) => assert_eq!(text.text, "Hello, World!"),
+            other => panic!("expected text content, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn openai_compatible_completion_extracts_usage() {
+        let (model, _captured_request) = openai_compatible_completion_test_model(
+            openai_compatible_completion_response_body(
+                "",
+                json!({
+                    "prompt_tokens": 20,
+                    "total_tokens": 25,
+                    "completion_tokens": 5
+                }),
+                "stop",
+                "cmpl-usage",
+                1711363706,
+                "gpt-3.5-turbo-instruct",
+            ),
+            Headers::new(),
+        );
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(
+            openai_compatible_completion_prompt_messages(),
+        )));
+
+        assert_eq!(result.usage.input_tokens.total, Some(20));
+        assert_eq!(result.usage.input_tokens.no_cache, Some(20));
+        assert_eq!(result.usage.output_tokens.total, Some(5));
+        assert_eq!(result.usage.output_tokens.text, Some(5));
+        assert_eq!(
+            result.usage.raw,
+            json!({
+                "prompt_tokens": 20,
+                "total_tokens": 25,
+                "completion_tokens": 5
+            })
+            .as_object()
+            .cloned()
+        );
+    }
+
+    #[test]
+    fn openai_compatible_completion_sends_request_body() {
+        let (model, _captured_request) = openai_compatible_completion_test_model_without_headers();
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(
+            openai_compatible_completion_prompt_messages(),
+        )));
+
+        assert_eq!(
+            result.request.and_then(|request| request.body),
+            Some(json!({
+                "model": "gpt-3.5-turbo-instruct",
+                "prompt": openai_compatible_completion_prompt_text(),
+                "stop": ["\nuser:"]
+            }))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_completion_sends_additional_response_information() {
+        let response_body = openai_compatible_completion_response_body(
+            "",
+            json!({
+                "prompt_tokens": 4,
+                "total_tokens": 34,
+                "completion_tokens": 30
+            }),
+            "stop",
+            "test-id",
+            123,
+            "test-model",
+        );
+        let (model, _captured_request) = openai_compatible_completion_test_model(
+            response_body.clone(),
+            Headers::from([
+                ("content-length".to_string(), "204".to_string()),
+                ("content-type".to_string(), "application/json".to_string()),
+            ]),
+        );
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(
+            openai_compatible_completion_prompt_messages(),
+        )));
+        let response = result.response.expect("response metadata is present");
+
+        assert_eq!(response.id.as_deref(), Some("test-id"));
+        assert_eq!(response.model_id.as_deref(), Some("test-model"));
+        assert_eq!(
+            response.timestamp,
+            Some(time::OffsetDateTime::from_unix_timestamp(123).expect("timestamp is valid"))
+        );
+        assert_eq!(response.body, Some(response_body));
+        assert_eq!(
+            response.headers,
+            Some(Headers::from([
+                ("content-length".to_string(), "204".to_string()),
+                ("content-type".to_string(), "application/json".to_string())
+            ]))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_completion_extracts_finish_reason() {
+        let (model, _captured_request) = openai_compatible_completion_test_model(
+            openai_compatible_completion_response_body(
+                "",
+                json!({
+                    "prompt_tokens": 4,
+                    "total_tokens": 34,
+                    "completion_tokens": 30
+                }),
+                "stop",
+                "cmpl-stop",
+                1711363706,
+                "gpt-3.5-turbo-instruct",
+            ),
+            Headers::new(),
+        );
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(
+            openai_compatible_completion_prompt_messages(),
+        )));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(result.finish_reason.raw.as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn openai_compatible_completion_supports_unknown_finish_reason() {
+        let (model, _captured_request) = openai_compatible_completion_test_model(
+            openai_compatible_completion_response_body(
+                "",
+                json!({
+                    "prompt_tokens": 4,
+                    "total_tokens": 34,
+                    "completion_tokens": 30
+                }),
+                "eos",
+                "cmpl-eos",
+                1711363706,
+                "gpt-3.5-turbo-instruct",
+            ),
+            Headers::new(),
+        );
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(
+            openai_compatible_completion_prompt_messages(),
+        )));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Other);
+        assert_eq!(result.finish_reason.raw.as_deref(), Some("eos"));
+    }
+
+    #[test]
+    fn openai_compatible_completion_exposes_raw_response_headers() {
+        let (model, _captured_request) = openai_compatible_completion_test_model(
+            openai_compatible_completion_default_response_body(""),
+            Headers::from([
+                ("content-length".to_string(), "250".to_string()),
+                ("content-type".to_string(), "application/json".to_string()),
+                ("test-header".to_string(), "test-value".to_string()),
+            ]),
+        );
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(
+            openai_compatible_completion_prompt_messages(),
+        )));
+
+        assert_eq!(
+            result.response.and_then(|response| response.headers),
+            Some(Headers::from([
+                ("content-length".to_string(), "250".to_string()),
+                ("content-type".to_string(), "application/json".to_string()),
+                ("test-header".to_string(), "test-value".to_string())
+            ]))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_completion_passes_model_and_prompt() {
+        let (model, captured_request) = openai_compatible_completion_test_model_without_headers();
+
+        let _result = poll_ready(model.do_generate(LanguageModelCallOptions::new(
+            openai_compatible_completion_prompt_messages(),
+        )));
+
+        assert_eq!(
+            captured_openai_compatible_completion_request_body(&captured_request),
+            json!({
+                "model": "gpt-3.5-turbo-instruct",
+                "prompt": openai_compatible_completion_prompt_text(),
+                "stop": ["\nuser:"]
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_completion_passes_headers() {
+        let (model, captured_request) = openai_compatible_completion_test_model_without_headers();
+
+        let _result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(openai_compatible_completion_prompt_messages())
+                    .with_header("Custom-Request-Header", "request-header-value"),
+            ),
+        );
+
+        let headers = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .headers;
+        assert_eq!(
+            headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            headers.get("custom-provider-header").map(String::as_str),
+            Some("provider-header-value")
+        );
+        assert_eq!(
+            headers.get("custom-request-header").map(String::as_str),
+            Some("request-header-value")
+        );
+        assert_eq!(
+            headers.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+    }
+
+    #[test]
+    fn openai_compatible_completion_includes_provider_specific_options() {
+        let (model, captured_request) = openai_compatible_completion_test_model_without_headers();
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "someCustomOption": "test-value"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(openai_compatible_completion_prompt_messages())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Deprecated { setting, .. }
+                    if setting == "providerOptions key 'test-provider'"
+            )
+        }));
+        assert_eq!(
+            captured_openai_compatible_completion_request_body(&captured_request),
+            json!({
+                "model": "gpt-3.5-turbo-instruct",
+                "prompt": openai_compatible_completion_prompt_text(),
+                "stop": ["\nuser:"],
+                "someCustomOption": "test-value"
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_completion_omits_provider_specific_options_for_different_provider() {
+        let (model, captured_request) = openai_compatible_completion_test_model_without_headers();
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "notThisProviderName": {
+                "someCustomOption": "test-value"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let _result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(openai_compatible_completion_prompt_messages())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(
+            captured_openai_compatible_completion_request_body(&captured_request),
+            json!({
+                "model": "gpt-3.5-turbo-instruct",
+                "prompt": openai_compatible_completion_prompt_text(),
+                "stop": ["\nuser:"]
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_completion_accepts_camel_case_provider_options_key_for_hyphenated_provider_name()
+     {
+        let (model, captured_request) = openai_compatible_completion_test_model_without_headers();
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "testProvider": {
+                "someCustomOption": "test-value"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(openai_compatible_completion_prompt_messages())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+        assert_eq!(
+            captured_openai_compatible_completion_request_body(&captured_request)
+                .get("someCustomOption"),
+            Some(&json!("test-value"))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_completion_prefers_camel_case_options_over_raw_name_options() {
+        let (model, captured_request) = openai_compatible_completion_test_model_without_headers();
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "someCustomOption": "raw-value"
+            },
+            "testProvider": {
+                "someCustomOption": "camel-value"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(openai_compatible_completion_prompt_messages())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                Warning::Deprecated { setting, .. }
+                    if setting == "providerOptions key 'test-provider'"
+            )
+        }));
+        assert_eq!(
+            captured_openai_compatible_completion_request_body(&captured_request)
+                .get("someCustomOption"),
+            Some(&json!("camel-value"))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_completion_warns_when_raw_provider_options_key_is_used() {
+        let (model, _captured_request) = openai_compatible_completion_test_model_without_headers();
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "test-provider": {
+                "someCustomOption": "test-value"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(openai_compatible_completion_prompt_messages())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Deprecated {
+                setting: "providerOptions key 'test-provider'".to_string(),
+                message: "Use 'testProvider' instead.".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn openai_compatible_completion_does_not_warn_when_camel_case_provider_options_key_is_used() {
+        let (model, _captured_request) = openai_compatible_completion_test_model_without_headers();
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "testProvider": {
+                "someCustomOption": "test-value"
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(openai_compatible_completion_prompt_messages())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
     fn openai_compatible_embedding_model_passes_options_and_errors() {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -6281,10 +6868,10 @@ mod tests {
         }));
 
         assert_eq!(result.usage.input_tokens.total, Some(20));
-        assert_eq!(result.usage.input_tokens.cache_read, None);
-        assert_eq!(result.usage.input_tokens.no_cache, None);
+        assert_eq!(result.usage.input_tokens.cache_read, Some(0));
+        assert_eq!(result.usage.input_tokens.no_cache, Some(20));
         assert_eq!(result.usage.output_tokens.total, Some(30));
-        assert_eq!(result.usage.output_tokens.reasoning, None);
+        assert_eq!(result.usage.output_tokens.reasoning, Some(0));
         assert_eq!(result.usage.output_tokens.text, Some(30));
         assert!(openai_compatible_test_provider_metadata_entry(&result).is_empty());
     }
