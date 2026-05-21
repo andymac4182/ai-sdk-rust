@@ -65,6 +65,7 @@ pub struct MockLanguageModel {
     provider: String,
     model_id: String,
     supported_urls: LanguageModelSupportedUrls,
+    supported_urls_calls: Rc<RefCell<usize>>,
     generate_script:
         Rc<RefCell<ScriptedCalls<LanguageModelCallOptions, LanguageModelGenerateResult>>>,
     stream_script: Rc<
@@ -84,6 +85,7 @@ impl MockLanguageModel {
             provider: DEFAULT_PROVIDER.to_string(),
             model_id: DEFAULT_MODEL_ID.to_string(),
             supported_urls: LanguageModelSupportedUrls::new(),
+            supported_urls_calls: Rc::new(RefCell::new(0)),
             generate_script: Rc::new(RefCell::new(ScriptedCalls::default())),
             stream_script: Rc::new(RefCell::new(ScriptedCalls::default())),
         }
@@ -163,10 +165,16 @@ impl MockLanguageModel {
         recorded_calls(&self.stream_script)
     }
 
+    /// Returns how many times supported URL patterns were requested.
+    pub fn supported_urls_calls(&self) -> usize {
+        *self.supported_urls_calls.borrow()
+    }
+
     /// Clears recorded calls without changing scripted results.
     pub fn clear_calls(&self) {
         clear_recorded_calls(&self.generate_script);
         clear_recorded_calls(&self.stream_script);
+        *self.supported_urls_calls.borrow_mut() = 0;
     }
 }
 
@@ -203,6 +211,7 @@ impl LanguageModel for MockLanguageModel {
     }
 
     fn supported_urls(&self) -> Self::SupportedUrlsFuture<'_> {
+        *self.supported_urls_calls.borrow_mut() += 1;
         ready(self.supported_urls.clone())
     }
 

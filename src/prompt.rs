@@ -4,7 +4,7 @@ use std::fmt;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::file_data::FileDataContent;
+use crate::file_data::{FileData, FileDataContent};
 use crate::headers::Headers;
 use crate::json::JsonValue;
 use crate::language_model::{
@@ -559,6 +559,18 @@ pub fn standardize_prompt(prompt: Prompt) -> Result<StandardizedPrompt, InvalidP
     }
 
     Ok(StandardizedPrompt::new(instructions, messages))
+}
+
+pub(crate) fn prompt_has_url_files(prompt: &LanguageModelPrompt) -> bool {
+    prompt.iter().any(|message| match message {
+        LanguageModelMessage::User(message) => message.content.iter().any(|part| match part {
+            LanguageModelUserContentPart::File(file) => matches!(file.data, FileData::Url { .. }),
+            LanguageModelUserContentPart::Text(_) => false,
+        }),
+        LanguageModelMessage::System(_)
+        | LanguageModelMessage::Assistant(_)
+        | LanguageModelMessage::Tool(_) => false,
+    })
 }
 
 /// Converts prompt data content to a base64-encoded string.
