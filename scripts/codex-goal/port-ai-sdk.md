@@ -221,6 +221,10 @@ still open.
    Read EVERY literally: enumerate the original TypeScript tests first, port
    each portable case into Rust, document any JavaScript-only exception, and
    only then count additional Rust tests as additive coverage.
+   Required inventory shape: original portable TypeScript tests must be less
+   than or equal to mapped Rust tests for the matching crate. Rust may be a
+   strict superset, but never a subset, sample, or behavior-only replacement
+   for the original upstream package's tests.
 5. For provider-backed behavior, require two layers of proof before marking a
    row `verified`: deterministic fake/mock/transport tests that run in normal
    validation, plus credential-gated live provider validation when a usable

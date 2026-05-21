@@ -65,6 +65,10 @@ portable case into Rust, document any JavaScript-only exception, and only then
 count additional Rust tests as additive coverage. The required end state is
 every portable original TypeScript test existing in Rust, with potentially more
 Rust tests on top, but never fewer mapped original tests.
+Required inventory shape: original portable TypeScript tests must be less than
+or equal to mapped Rust tests for the matching crate. Rust may be a strict
+superset, but never a subset, sample, or behavior-only replacement for the
+original upstream package's tests.
 
 Required order: finish ALL common/core SDK packages together with Vercel AI
 Gateway provider coverage before taking more unrelated standalone provider
