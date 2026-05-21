@@ -21971,8 +21971,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn open_responses_provider_maps_lmstudio_basic_response_fixture() {
+    fn lmstudio_basic_generate_result_with_request_body() -> (LanguageModelGenerateResult, JsonValue)
+    {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
         let transport: OpenResponsesTransport =
@@ -22040,15 +22040,40 @@ mod tests {
                 .with_api_key("test-api-key"),
         )
         .with_transport(transport);
-        let model = provider.language_model("mistralai/ministral-3-14b-reasoning");
+        let model = provider.language_model("gemma-7b-it");
 
-        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
-            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
-                LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
-                    "Write a short festival description.",
-                )),
-            ])),
-        ])));
+        let result = poll_ready(model.do_generate(lmstudio_hello_options()));
+        let request_body = captured_open_responses_request_body(&captured_request);
+
+        (result, request_body)
+    }
+
+    #[test]
+    fn open_responses_provider_sends_lmstudio_basic_request_body() {
+        let (_, request_body) = lmstudio_basic_generate_result_with_request_body();
+
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gemma-7b-it",
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_produces_lmstudio_basic_content() {
+        let (result, _) = lmstudio_basic_generate_result_with_request_body();
 
         assert_eq!(result.finish_reason.unified, FinishReason::Stop);
         assert_eq!(result.finish_reason.raw, None);
@@ -22068,6 +22093,12 @@ mod tests {
             &result.content[1],
             LanguageModelContent::Text(text) if text.text == "text content"
         ));
+    }
+
+    #[test]
+    fn open_responses_provider_extracts_lmstudio_basic_usage() {
+        let (result, _) = lmstudio_basic_generate_result_with_request_body();
+
         assert_eq!(result.usage.input_tokens.total, Some(136));
         assert_eq!(result.usage.input_tokens.no_cache, Some(136));
         assert_eq!(result.usage.input_tokens.cache_read, Some(0));
@@ -22081,35 +22112,6 @@ mod tests {
                 .as_ref()
                 .and_then(|raw| raw.get("total_tokens")),
             Some(&json!(3813))
-        );
-
-        let request_body = captured_request
-            .lock()
-            .expect("captured request mutex is not poisoned")
-            .clone()
-            .expect("request is captured")
-            .body
-            .as_ref()
-            .and_then(ProviderApiRequestBody::as_text)
-            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
-            .expect("request body is JSON");
-
-        assert_eq!(
-            request_body,
-            json!({
-                "model": "mistralai/ministral-3-14b-reasoning",
-                "input": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text": "Write a short festival description."
-                            }
-                        ]
-                    }
-                ]
-            })
         );
     }
 
