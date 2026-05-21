@@ -3678,6 +3678,67 @@ mod tests {
         })
     }
 
+    fn generation_info_data() -> JsonValue {
+        json!({
+            "id": "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "total_cost": 0.00123,
+            "upstream_inference_cost": 0.0011,
+            "usage": 0.00123,
+            "created_at": "2024-01-01T00:00:00.000Z",
+            "model": "gpt-4",
+            "is_byok": false,
+            "provider_name": "openai",
+            "streamed": true,
+            "finish_reason": "stop",
+            "latency": 200,
+            "generation_time": 1500,
+            "native_tokens_prompt": 100,
+            "native_tokens_completion": 50,
+            "native_tokens_reasoning": 0,
+            "native_tokens_cached": 0,
+            "native_tokens_cache_creation": 0,
+            "billable_web_search_calls": 0
+        })
+    }
+
+    fn generation_info_response_body(data: JsonValue) -> String {
+        json!({ "data": data }).to_string()
+    }
+
+    fn capturing_generation_info_transport(
+        status_code: u16,
+        status_text: impl Into<String>,
+        body: impl Into<String>,
+    ) -> (GatewayTransport, Arc<Mutex<Option<ProviderApiRequest>>>) {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let status_text = status_text.into();
+        let body = body.into();
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                status_code,
+                status_text.clone(),
+                body.clone(),
+            ))))
+        });
+
+        (transport, captured_request)
+    }
+
+    fn captured_generation_info_request(
+        captured_request: &Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) -> ProviderApiRequest {
+        captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+    }
+
     fn assert_auth_token_case(
         settings: GatewayProviderSettings,
         env_values: &[(&str, &str)],
@@ -8440,6 +8501,385 @@ mod tests {
             response_error.cause_message(),
             Some("Reporting service unavailable")
         );
+    }
+
+    #[test]
+    fn gateway_provider_generation_info_fetches_from_correct_endpoint_with_generation_id() {
+        let (transport, captured_request) = capturing_generation_info_transport(
+            200,
+            "OK",
+            generation_info_response_body(generation_info_data()),
+        );
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        poll_ready(
+            provider.get_generation_info(GatewayGenerationInfoParams::new(
+                "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            )),
+        )
+        .expect("generation info fetch succeeds");
+
+        let request = captured_generation_info_request(&captured_request);
+        let url = url::Url::parse(&request.url).expect("request URL is valid");
+
+        assert_eq!(request.method, ProviderApiRequestMethod::Get);
+        assert_eq!(url.path(), "/v1/generation");
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "id")
+                .map(|(_, value)| value.into_owned()),
+            Some("gen_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string())
+        );
+    }
+
+    #[test]
+    fn gateway_provider_generation_info_transforms_snake_case_response_fields_to_camel_case() {
+        let (transport, _captured_request) = capturing_generation_info_transport(
+            200,
+            "OK",
+            generation_info_response_body(generation_info_data()),
+        );
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        let result = poll_ready(
+            provider.get_generation_info(GatewayGenerationInfoParams::new(
+                "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            )),
+        )
+        .expect("generation info fetch succeeds");
+        let serialized = serde_json::to_value(&result).expect("generation info serializes");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "id": "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                "totalCost": 0.00123,
+                "upstreamInferenceCost": 0.0011,
+                "usage": 0.00123,
+                "createdAt": "2024-01-01T00:00:00.000Z",
+                "model": "gpt-4",
+                "isByok": false,
+                "providerName": "openai",
+                "streamed": true,
+                "finishReason": "stop",
+                "latency": 200,
+                "generationTime": 1500,
+                "promptTokens": 100,
+                "completionTokens": 50,
+                "reasoningTokens": 0,
+                "cachedTokens": 0,
+                "cacheCreationTokens": 0,
+                "billableWebSearchCalls": 0
+            })
+        );
+    }
+
+    #[test]
+    fn gateway_provider_generation_info_unwraps_data_envelope() {
+        let (transport, _captured_request) = capturing_generation_info_transport(
+            200,
+            "OK",
+            generation_info_response_body(generation_info_data()),
+        );
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        let result = poll_ready(
+            provider.get_generation_info(GatewayGenerationInfoParams::new(
+                "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            )),
+        )
+        .expect("generation info fetch succeeds");
+        let serialized = serde_json::to_value(&result).expect("generation info serializes");
+
+        assert!(serialized.get("data").is_none());
+        assert_eq!(
+            serialized.get("id").and_then(JsonValue::as_str),
+            Some("gen_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        );
+    }
+
+    #[test]
+    fn gateway_provider_generation_info_omits_snake_case_fields_from_serialized_result() {
+        let (transport, _captured_request) = capturing_generation_info_transport(
+            200,
+            "OK",
+            generation_info_response_body(generation_info_data()),
+        );
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        let result = poll_ready(
+            provider.get_generation_info(GatewayGenerationInfoParams::new(
+                "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            )),
+        )
+        .expect("generation info fetch succeeds");
+        let serialized = serde_json::to_value(&result).expect("generation info serializes");
+
+        for field in [
+            "total_cost",
+            "is_byok",
+            "provider_name",
+            "created_at",
+            "generation_time",
+            "finish_reason",
+        ] {
+            assert!(
+                serialized.get(field).is_none(),
+                "serialized generation info unexpectedly includes {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn gateway_provider_generation_info_passes_headers_correctly() {
+        let (transport, captured_request) = capturing_generation_info_transport(
+            200,
+            "OK",
+            generation_info_response_body(generation_info_data()),
+        );
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("custom-token")
+                .with_header("custom-header", "custom-value"),
+        )
+        .with_transport(transport);
+
+        poll_ready(
+            provider.get_generation_info(GatewayGenerationInfoParams::new(
+                "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            )),
+        )
+        .expect("generation info fetch succeeds");
+
+        let request = captured_generation_info_request(&captured_request);
+
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer custom-token")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("custom-value")
+        );
+    }
+
+    #[test]
+    fn gateway_provider_generation_info_handles_401_authentication_errors() {
+        let (transport, _captured_request) = capturing_generation_info_transport(
+            401,
+            "Unauthorized",
+            json!({
+                "error": {
+                    "message": "Unauthorized",
+                    "type": "authentication_error"
+                }
+            })
+            .to_string(),
+        );
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        let error = poll_ready(
+            provider.get_generation_info(GatewayGenerationInfoParams::new(
+                "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            )),
+        )
+        .expect_err("generation info authentication error is surfaced");
+        let auth_error = error
+            .as_authentication()
+            .expect("401 maps to GatewayAuthenticationError");
+
+        assert_eq!(auth_error.status_code(), 401);
+    }
+
+    #[test]
+    fn gateway_provider_generation_info_handles_500_internal_server_errors() {
+        let (transport, _captured_request) = capturing_generation_info_transport(
+            500,
+            "Internal Server Error",
+            json!({
+                "error": {
+                    "message": "Failed to retrieve usage data",
+                    "type": "internal_server_error"
+                }
+            })
+            .to_string(),
+        );
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        let error = poll_ready(
+            provider.get_generation_info(GatewayGenerationInfoParams::new(
+                "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            )),
+        )
+        .expect_err("generation info internal server error is surfaced");
+        let internal_error = error
+            .as_internal_server()
+            .expect("500 maps to GatewayInternalServerError");
+
+        assert_eq!(internal_error.status_code(), 500);
+        assert_eq!(internal_error.message(), "Failed to retrieve usage data");
+    }
+
+    #[test]
+    fn gateway_provider_generation_info_handles_malformed_json_error_responses() {
+        let (transport, _captured_request) =
+            capturing_generation_info_transport(500, "Internal Server Error", "{ invalid json");
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        let error = poll_ready(
+            provider.get_generation_info(GatewayGenerationInfoParams::new(
+                "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            )),
+        )
+        .expect_err("malformed generation info error body fails");
+        let response_error = error
+            .as_response()
+            .expect("malformed generation info error maps to response error");
+
+        assert_eq!(response_error.status_code(), 500);
+    }
+
+    #[test]
+    fn gateway_provider_generation_info_uses_custom_transport() {
+        let request_count = Arc::new(Mutex::new(0_u32));
+        let request_count_for_transport = Arc::clone(&request_count);
+        let transport: GatewayTransport = Arc::new(move |_request| -> GatewayTransportFuture {
+            let mut count = request_count_for_transport
+                .lock()
+                .expect("request count mutex is not poisoned");
+            *count += 1;
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                generation_info_response_body(generation_info_data()),
+            ))))
+        });
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        let result = poll_ready(
+            provider.get_generation_info(GatewayGenerationInfoParams::new(
+                "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            )),
+        )
+        .expect("generation info fetch succeeds");
+
+        assert_eq!(result.total_cost, 0.00123);
+        assert_eq!(result.model, "gpt-4");
+        assert_eq!(
+            *request_count
+                .lock()
+                .expect("request count mutex is not poisoned"),
+            1
+        );
+    }
+
+    #[test]
+    fn gateway_provider_generation_info_encodes_special_characters_in_generation_id() {
+        let (transport, captured_request) = capturing_generation_info_transport(
+            200,
+            "OK",
+            generation_info_response_body(generation_info_data()),
+        );
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        poll_ready(
+            provider
+                .get_generation_info(GatewayGenerationInfoParams::new("gen id/with?chars&tag=1")),
+        )
+        .expect("generation info fetch succeeds");
+
+        let request = captured_generation_info_request(&captured_request);
+        let url = url::Url::parse(&request.url).expect("request URL is valid");
+
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "id")
+                .map(|(_, value)| value.into_owned()),
+            Some("gen id/with?chars&tag=1".to_string())
+        );
+        assert!(
+            request.url.contains("id=gen+id%2Fwith%3Fchars%26tag%3D1"),
+            "generation id is form-url-encoded"
+        );
+    }
+
+    #[test]
+    fn gateway_provider_generation_info_handles_byok_generation_response() {
+        let mut data = generation_info_data();
+        let data_object = data
+            .as_object_mut()
+            .expect("generation info data is an object");
+        data_object.insert("is_byok".to_string(), JsonValue::Bool(true));
+        data_object.insert("upstream_inference_cost".to_string(), json!(0.0009));
+        data_object.insert("provider_name".to_string(), json!("anthropic"));
+        data_object.insert("model".to_string(), json!("claude-sonnet-4"));
+        let (transport, _captured_request) =
+            capturing_generation_info_transport(200, "OK", generation_info_response_body(data));
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        let result = poll_ready(
+            provider.get_generation_info(GatewayGenerationInfoParams::new(
+                "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            )),
+        )
+        .expect("generation info fetch succeeds");
+
+        assert!(result.is_byok);
+        assert_eq!(result.upstream_inference_cost, 0.0009);
+        assert_eq!(result.provider_name, "anthropic");
+        assert_eq!(result.model, "claude-sonnet-4");
     }
 
     #[test]
