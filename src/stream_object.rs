@@ -7,6 +7,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use crate::VERSION;
+use crate::file_data::FileData;
 use crate::generate_object::{
     GenerateObjectEndEvent, GenerateObjectOnFinish, GenerateObjectOnStart,
     GenerateObjectOnStepFinish, GenerateObjectOnStepStart, GenerateObjectOutputKind,
@@ -19,9 +20,9 @@ use crate::headers::Headers;
 use crate::json::{JsonSchema, JsonValue};
 use crate::language_model::{
     FinishReason, LanguageModel, LanguageModelAbortController, LanguageModelAbortSignal,
-    LanguageModelCallOptions, LanguageModelPrompt, LanguageModelRequest,
+    LanguageModelCallOptions, LanguageModelMessage, LanguageModelPrompt, LanguageModelRequest,
     LanguageModelResponseFormat, LanguageModelStreamPart, LanguageModelStreamResult,
-    LanguageModelUsage,
+    LanguageModelUsage, LanguageModelUserContentPart,
 };
 use crate::prompt::{Prompt, standardize_prompt};
 use crate::provider::{ApiCallError, InvalidPromptError, ProviderMetadata, ProviderOptions};
@@ -539,6 +540,9 @@ where
     call_options.response_format = Some(response_format);
     call_options.include_raw_chunks = Some(false);
     append_stream_object_user_agent(&mut call_options);
+    if stream_object_prompt_has_url_files(&call_options.prompt) {
+        let _ = model.supported_urls().await;
+    }
     let call_id = generate_object_call_id();
     let telemetry_dispatcher = create_telemetry_dispatcher(telemetry);
 
@@ -1212,6 +1216,18 @@ fn stream_object_abort_error_from_signal(
     Some(JsonValue::Object(error))
 }
 
+fn stream_object_prompt_has_url_files(prompt: &LanguageModelPrompt) -> bool {
+    prompt.iter().any(|message| match message {
+        LanguageModelMessage::User(message) => message.content.iter().any(|part| match part {
+            LanguageModelUserContentPart::File(file) => matches!(file.data, FileData::Url { .. }),
+            LanguageModelUserContentPart::Text(_) => false,
+        }),
+        LanguageModelMessage::System(_)
+        | LanguageModelMessage::Assistant(_)
+        | LanguageModelMessage::Tool(_) => false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
@@ -1223,9 +1239,10 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::file_data::FileData;
     use crate::json::JsonSchema;
     use crate::language_model::{
-        InputTokenUsage, LanguageModelContent, LanguageModelErrorStreamPart,
+        InputTokenUsage, LanguageModelContent, LanguageModelErrorStreamPart, LanguageModelFilePart,
         LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelMessage,
         LanguageModelResponseFormat, LanguageModelStreamFinish,
         LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
@@ -1238,6 +1255,7 @@ mod tests {
     use crate::telemetry::{
         TelemetryEvent, TelemetryEventKind, TelemetryIntegration, TelemetryOptions,
     };
+    use url::Url;
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
         let waker = Waker::noop();
@@ -1610,6 +1628,73 @@ mod tests {
                 .expect("recording events lock")
                 .push("doStream".to_string());
             ready(LanguageModelStreamResult::new(self.stream.clone()))
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct SupportedUrlsStreamModel {
+        supported_urls_called: Arc<Mutex<bool>>,
+    }
+
+    impl SupportedUrlsStreamModel {
+        fn new(supported_urls_called: Arc<Mutex<bool>>) -> Self {
+            Self {
+                supported_urls_called,
+            }
+        }
+    }
+
+    impl LanguageModel for SupportedUrlsStreamModel {
+        type SupportedUrlsFuture<'a>
+            = Ready<LanguageModelSupportedUrls>
+        where
+            Self: 'a;
+
+        type GenerateFuture<'a>
+            = Ready<LanguageModelGenerateResult>
+        where
+            Self: 'a;
+
+        type Stream = Vec<LanguageModelStreamPart>;
+
+        type StreamFuture<'a>
+            = Ready<LanguageModelStreamResult<Self::Stream>>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "test-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            "mock-model-id"
+        }
+
+        fn supported_urls(&self) -> Self::SupportedUrlsFuture<'_> {
+            *self
+                .supported_urls_called
+                .lock()
+                .expect("supported urls called lock") = self.model_id() == "mock-model-id";
+
+            ready(LanguageModelSupportedUrls::from([(
+                "image/*".to_string(),
+                vec![r"^https://.*$".to_string()],
+            )]))
+        }
+
+        fn do_generate(&self, _options: LanguageModelCallOptions) -> Self::GenerateFuture<'_> {
+            ready(LanguageModelGenerateResult::new(
+                Vec::<LanguageModelContent>::new(),
+                LanguageModelFinishReason {
+                    unified: FinishReason::Other,
+                    raw: None,
+                },
+                LanguageModelUsage::default(),
+            ))
+        }
+
+        fn do_stream(&self, _options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
+            ready(LanguageModelStreamResult::new(object_stream()))
         }
     }
 
@@ -2512,6 +2597,34 @@ mod tests {
         assert_eq!(
             calls[0].response_format,
             Some(LanguageModelResponseFormat::json())
+        );
+    }
+
+    #[test]
+    fn stream_object_messages_with_url_file_calls_model_supported_urls() {
+        let supported_urls_called = Arc::new(Mutex::new(false));
+        let model = SupportedUrlsStreamModel::new(Arc::clone(&supported_urls_called));
+        let prompt = vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![LanguageModelUserContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Url {
+                        url: Url::parse("https://example.com/test.jpg").expect("url parses"),
+                    },
+                    "image/jpeg",
+                ),
+            )],
+        ))];
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt).with_schema(answer_schema()),
+        ));
+
+        assert_eq!(result.text, r#"{ "content": "Hello, world!" }"#);
+        assert_eq!(result.object, Some(json!({ "content": "Hello, world!" })));
+        assert!(
+            *supported_urls_called
+                .lock()
+                .expect("supported urls called lock")
         );
     }
 
