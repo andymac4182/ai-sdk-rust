@@ -3823,7 +3823,7 @@ fn openai_compatible_stream_result_from_response(
             ParseJsonResult::Failure { error, raw_value } => {
                 finish_reason = LanguageModelFinishReason {
                     unified: FinishReason::Error,
-                    raw: Some("openai-compatible-parse-error".to_string()),
+                    raw: None,
                 };
                 stream.push(openai_compatible_stream_error(
                     error.to_string(),
@@ -9321,7 +9321,62 @@ mod tests {
     }
 
     #[test]
+    fn openai_compatible_chat_stream_handles_unparsable_stream_parts() {
+        let (model, _captured_request) =
+            openai_compatible_chat_stream_test_model("data: {unparsable}\n\ndata: [DONE]\n\n");
+
+        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(
+            openai_compatible_chat_prompt_messages(),
+        )));
+
+        assert!(matches!(
+            result.stream.first(),
+            Some(LanguageModelStreamPart::StreamStart(start)) if start.warnings.is_empty()
+        ));
+        assert!(matches!(
+            result.stream.get(1),
+            Some(LanguageModelStreamPart::Error(error))
+                if error
+                    .error
+                    .get("message")
+                    .and_then(JsonValue::as_str)
+                    .is_some_and(|message| message.contains("JSON parsing failed"))
+        ));
+        assert!(matches!(
+            result.stream.last(),
+            Some(LanguageModelStreamPart::Finish(finish))
+                if finish.finish_reason.unified == FinishReason::Error
+                    && finish.finish_reason.raw.is_none()
+                    && finish.usage == Default::default()
+        ));
+    }
+
+    #[test]
     fn openai_compatible_chat_stream_passes_messages_and_model() {
+        let (model, captured_request) =
+            openai_compatible_chat_stream_test_model(openai_compatible_chat_empty_stream_body());
+
+        let _result = poll_ready(model.do_stream(LanguageModelCallOptions::new(
+            openai_compatible_chat_prompt_messages(),
+        )));
+
+        assert_eq!(
+            captured_openai_compatible_chat_request_body(&captured_request),
+            json!({
+                "model": "grok-3",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "stream": true
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_stream_sends_request_body() {
         let (model, captured_request) =
             openai_compatible_chat_stream_test_model(openai_compatible_chat_empty_stream_body());
 
