@@ -601,6 +601,18 @@ impl GatewayError {
         }
     }
 
+    pub fn cause_message(&self) -> Option<&str> {
+        match self {
+            Self::Authentication(error) => error.cause_message(),
+            Self::InvalidRequest(error) => error.cause_message(),
+            Self::RateLimit(error) => error.cause_message(),
+            Self::ModelNotFound(error) => error.cause_message(),
+            Self::InternalServer(error) => error.cause_message(),
+            Self::Response(error) => error.cause_message(),
+            Self::Timeout(error) => error.cause_message(),
+        }
+    }
+
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Authentication(error) => error.is_retryable(),
