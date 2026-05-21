@@ -3644,6 +3644,8 @@ mod tests {
         value.as_object().cloned().expect("JSON value is an object")
     }
 
+    fn assert_future_output<T>(_future: impl Future<Output = T>) {}
+
     fn metadata_response_for_model(model_id: &str) -> String {
         json!({
             "models": [{
@@ -7581,6 +7583,131 @@ mod tests {
     }
 
     #[test]
+    fn gateway_provider_get_credits_fetches_successfully() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "balance": "150.50",
+                    "total_used": "75.25"
+                })
+                .to_string(),
+            ))))
+        });
+        let provider =
+            GatewayProvider::from_settings(GatewayProviderSettings::new().with_api_key("test-key"))
+                .with_transport(transport);
+        let credits = poll_ready(provider.get_credits()).expect("credits fetch succeeds");
+
+        assert_eq!(credits.balance, "150.50");
+        assert_eq!(credits.total_used, "75.25");
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+
+        assert_eq!(request.method, ProviderApiRequestMethod::Get);
+        assert_eq!(request.url, "https://ai-gateway.vercel.sh/v1/credits");
+    }
+
+    #[test]
+    fn gateway_provider_get_credits_handles_authentication_errors() {
+        let transport_called = Arc::new(Mutex::new(false));
+        let transport_called_for_transport = Arc::clone(&transport_called);
+        let transport: GatewayTransport = Arc::new(move |_request| -> GatewayTransportFuture {
+            *transport_called_for_transport
+                .lock()
+                .expect("transport flag mutex is not poisoned") = true;
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", "{}"))))
+        });
+        let provider = GatewayProvider::new().with_transport(transport);
+        let error = poll_ready(provider.get_credits()).expect_err("authentication is required");
+
+        assert!(error.as_authentication().is_some());
+        assert!(error.message().contains("No authentication provided"));
+        assert!(
+            !*transport_called
+                .lock()
+                .expect("transport flag mutex is not poisoned")
+        );
+    }
+
+    #[test]
+    fn gateway_provider_get_credits_uses_custom_base_url() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "balance": "100.00",
+                    "total_used": "50.00"
+                })
+                .to_string(),
+            ))))
+        });
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://custom-gateway.example.com/v4/ai")
+                .with_api_key("test-key"),
+        )
+        .with_transport(transport);
+
+        let credits = poll_ready(provider.get_credits()).expect("credits fetch succeeds");
+        assert_eq!(credits.balance, "100.00");
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+
+        assert_eq!(request.url, "https://custom-gateway.example.com/v1/credits");
+    }
+
+    #[test]
+    fn gateway_provider_get_credits_uses_oidc_authentication_headers() {
+        let headers = try_gateway_provider_headers_with_env(
+            &GatewayProviderSettings::new(),
+            env_lookup(&[("VERCEL_OIDC_TOKEN", "oidc-token")]),
+        )
+        .expect("OIDC provider headers resolve");
+
+        assert_eq!(
+            headers.get("authorization").and_then(Option::as_deref),
+            Some("Bearer oidc-token")
+        );
+        assert_eq!(
+            headers
+                .get("ai-gateway-auth-method")
+                .and_then(Option::as_deref),
+            Some("oidc")
+        );
+    }
+
+    #[test]
+    fn gateway_provider_get_credits_is_available_on_provider_interface() {
+        let provider = GatewayProvider::new();
+
+        assert_future_output(provider.get_credits());
+    }
+
+    #[test]
     fn gateway_provider_account_methods_use_default_gateway_urls() {
         let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
         let captured_requests_for_transport = Arc::clone(&captured_requests);
@@ -7904,6 +8031,205 @@ mod tests {
                 .find(|(key, _)| key == "tags")
                 .map(|(_, value)| value.into_owned()),
             Some("production,api".to_string())
+        );
+    }
+
+    #[test]
+    fn gateway_provider_get_spend_report_fetches_successfully() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "results": [{
+                        "day": "2026-03-01",
+                        "totalCost": 10.5,
+                        "requestCount": 25
+                    }]
+                })
+                .to_string(),
+            ))))
+        });
+        let provider =
+            GatewayProvider::from_settings(GatewayProviderSettings::new().with_api_key("test-key"))
+                .with_transport(transport);
+
+        let report = poll_ready(
+            provider.get_spend_report(GatewaySpendReportParams::new("2026-03-01", "2026-03-25")),
+        )
+        .expect("spend report fetch succeeds");
+
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(report.results[0].day.as_deref(), Some("2026-03-01"));
+        assert_eq!(report.results[0].total_cost, 10.5);
+        assert_eq!(report.results[0].request_count, Some(25));
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let url = url::Url::parse(&request.url).expect("request URL is valid");
+
+        assert_eq!(
+            url.as_str().split('?').next(),
+            Some("https://ai-gateway.vercel.sh/v1/report")
+        );
+    }
+
+    #[test]
+    fn gateway_provider_get_spend_report_passes_params_through() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({ "results": [] }).to_string(),
+            ))))
+        });
+        let provider =
+            GatewayProvider::from_settings(GatewayProviderSettings::new().with_api_key("test-key"))
+                .with_transport(transport);
+
+        let report = poll_ready(
+            provider.get_spend_report(
+                GatewaySpendReportParams::new("2026-03-01", "2026-03-25")
+                    .with_group_by(GatewaySpendReportGroupBy::Model)
+                    .with_date_part(GatewaySpendReportDatePart::Day)
+                    .with_user_id("user-123")
+                    .with_model("anthropic/claude-sonnet-4.6")
+                    .with_tags(["production", "api"]),
+            ),
+        )
+        .expect("spend report fetch succeeds");
+
+        assert!(report.results.is_empty());
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let url = url::Url::parse(&request.url).expect("request URL is valid");
+
+        let expected = [
+            ("start_date", "2026-03-01"),
+            ("end_date", "2026-03-25"),
+            ("group_by", "model"),
+            ("date_part", "day"),
+            ("user_id", "user-123"),
+            ("model", "anthropic/claude-sonnet-4.6"),
+            ("tags", "production,api"),
+        ];
+
+        for (name, value) in expected {
+            assert_eq!(
+                url.query_pairs()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.into_owned()),
+                Some(value.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn gateway_provider_get_spend_report_uses_custom_base_url() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({ "results": [] }).to_string(),
+            ))))
+        });
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://custom-gateway.example.com/v4/ai")
+                .with_api_key("test-key"),
+        )
+        .with_transport(transport);
+
+        let report = poll_ready(
+            provider.get_spend_report(GatewaySpendReportParams::new("2026-03-01", "2026-03-25")),
+        )
+        .expect("spend report fetch succeeds");
+
+        assert!(report.results.is_empty());
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let url = url::Url::parse(&request.url).expect("request URL is valid");
+
+        assert_eq!(
+            url.as_str().split('?').next(),
+            Some("https://custom-gateway.example.com/v1/report")
+        );
+    }
+
+    #[test]
+    fn gateway_provider_get_spend_report_uses_custom_transport() {
+        let request_count = Arc::new(Mutex::new(0_u32));
+        let request_count_for_transport = Arc::clone(&request_count);
+        let transport: GatewayTransport = Arc::new(move |_request| -> GatewayTransportFuture {
+            *request_count_for_transport
+                .lock()
+                .expect("request count mutex is not poisoned") += 1;
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({ "results": [] }).to_string(),
+            ))))
+        });
+        let provider =
+            GatewayProvider::from_settings(GatewayProviderSettings::new().with_api_key("test-key"))
+                .with_transport(transport);
+
+        let report = poll_ready(
+            provider.get_spend_report(GatewaySpendReportParams::new("2026-03-01", "2026-03-25")),
+        )
+        .expect("spend report fetch succeeds");
+
+        assert!(report.results.is_empty());
+        assert_eq!(
+            *request_count
+                .lock()
+                .expect("request count mutex is not poisoned"),
+            1
+        );
+    }
+
+    #[test]
+    fn gateway_provider_get_spend_report_is_available_on_provider_interface() {
+        let provider = GatewayProvider::new();
+
+        assert_future_output(
+            provider.get_spend_report(GatewaySpendReportParams::new("2026-03-01", "2026-03-25")),
+        );
+    }
+
+    #[test]
+    fn default_gateway_export_get_spend_report_is_available() {
+        let gateway = GatewayProvider::new();
+        assert_future_output(
+            gateway.get_spend_report(GatewaySpendReportParams::new("2026-03-01", "2026-03-25")),
         );
     }
 
