@@ -168,6 +168,11 @@ still open.
    TypeScript test/case to its Rust counterpart in the matching crate. Total
    Rust test count is not proof of parity by itself, because Rust-only tests
    cannot offset a missing original upstream case.
+   Explicit no-less-tests rule: for each portable upstream TypeScript package,
+   the matching Rust crate must contain every original upstream portable
+   test/case before any extra Rust tests are counted. The acceptable end state
+   is the full original TypeScript test inventory recreated in Rust, plus
+   optional additional Rust tests; anything less is incomplete.
 5. For provider-backed behavior, require two layers of proof before marking a
    row `verified`: deterministic fake/mock/transport tests that run in normal
    validation, plus credential-gated live provider validation when a usable
@@ -411,6 +416,9 @@ You are done only when:
    sampled, reduced, file-level, or feature-level Rust suite.
    More Rust tests are allowed and encouraged; fewer mapped tests than the
    original TypeScript package is a completion blocker.
+   No package passes completion by having "enough" Rust-native coverage. It
+   passes only when every original portable TypeScript test/case exists in the
+   matching Rust crate, with any additional Rust tests counted strictly on top.
 5. The Rust workspace has a strict 1:1 crate mapping for every portable
    upstream TypeScript package: one matching Rust crate per package, no Rust
    crate owning APIs from multiple upstream packages, and the root crate limited
