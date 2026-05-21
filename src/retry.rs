@@ -4,6 +4,7 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
+use crate::gateway_error::GatewayError;
 use crate::headers::Headers;
 use crate::provider::ApiCallError;
 use crate::provider::get_error_message;
@@ -192,6 +193,22 @@ pub enum RetryAttemptError {
         error: Box<ApiCallError>,
     },
 
+    /// A Vercel AI Gateway error failed.
+    Gateway {
+        /// Upstream Gateway error class name.
+        name: String,
+
+        /// Human-readable Gateway error message.
+        message: String,
+
+        /// Whether the Gateway error should be retried.
+        is_retryable: bool,
+
+        /// Retry headers from an underlying API-call cause, when available.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause_response_headers: Option<Headers>,
+    },
+
     /// A runtime or caller-defined error occurred.
     Runtime {
         /// Runtime-specific error name, when available.
@@ -208,6 +225,31 @@ impl RetryAttemptError {
     pub fn api_call(error: ApiCallError) -> Self {
         Self::ApiCall {
             error: Box::new(error),
+        }
+    }
+
+    /// Creates a Gateway retry attempt error.
+    pub fn gateway(error: impl Into<GatewayError>) -> Self {
+        Self::gateway_with_cause_response_headers_option(error.into(), None)
+    }
+
+    /// Creates a Gateway retry attempt error with response headers from an API-call cause.
+    pub fn gateway_with_cause_response_headers(
+        error: impl Into<GatewayError>,
+        cause_response_headers: Headers,
+    ) -> Self {
+        Self::gateway_with_cause_response_headers_option(error.into(), Some(cause_response_headers))
+    }
+
+    fn gateway_with_cause_response_headers_option(
+        error: GatewayError,
+        cause_response_headers: Option<Headers>,
+    ) -> Self {
+        Self::Gateway {
+            name: error.name().to_string(),
+            message: error.message().to_string(),
+            is_retryable: error.is_retryable(),
+            cause_response_headers,
         }
     }
 
@@ -236,14 +278,23 @@ impl RetryAttemptError {
     pub fn api_call_error(&self) -> Option<&ApiCallError> {
         match self {
             Self::ApiCall { error } => Some(error),
+            Self::Gateway { .. } | Self::Runtime { .. } => None,
+        }
+    }
+
+    /// Returns Gateway error name for this attempt, when available.
+    pub fn gateway_error_name(&self) -> Option<&str> {
+        match self {
+            Self::Gateway { name, .. } => Some(name),
             Self::Runtime { .. } => None,
+            Self::ApiCall { .. } => None,
         }
     }
 
     /// Returns the runtime error name, when available.
     pub fn runtime_name(&self) -> Option<&str> {
         match self {
-            Self::ApiCall { .. } => None,
+            Self::ApiCall { .. } | Self::Gateway { .. } => None,
             Self::Runtime { name, .. } => name.as_deref(),
         }
     }
@@ -255,8 +306,28 @@ impl RetryAttemptError {
 
     /// Returns whether this attempt should be retried.
     pub fn is_retryable(&self) -> bool {
-        self.api_call_error()
-            .is_some_and(ApiCallError::is_retryable)
+        match self {
+            Self::ApiCall { error } => error.is_retryable(),
+            Self::Gateway { is_retryable, .. } => *is_retryable,
+            Self::Runtime { .. } => false,
+        }
+    }
+
+    fn retry_delay_in_ms(&self, exponential_backoff_delay_ms: u64, now: OffsetDateTime) -> u64 {
+        match self {
+            Self::ApiCall { error } => {
+                get_retry_delay_in_ms(error, exponential_backoff_delay_ms, now)
+            }
+            Self::Gateway {
+                cause_response_headers,
+                ..
+            } => retry_delay_from_response_headers(
+                cause_response_headers.as_ref(),
+                exponential_backoff_delay_ms,
+                now,
+            ),
+            Self::Runtime { .. } => exponential_backoff_delay_ms,
+        }
     }
 }
 
@@ -266,10 +337,17 @@ impl From<ApiCallError> for RetryAttemptError {
     }
 }
 
+impl From<GatewayError> for RetryAttemptError {
+    fn from(error: GatewayError) -> Self {
+        Self::gateway(error)
+    }
+}
+
 impl fmt::Display for RetryAttemptError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ApiCall { error } => error.fmt(formatter),
+            Self::Gateway { message, .. } => formatter.write_str(message),
             Self::Runtime { message, .. } => formatter.write_str(message),
         }
     }
@@ -398,9 +476,8 @@ where
                     )));
                 }
 
-                if let Some(api_error) = error.api_call_error().filter(|error| error.is_retryable())
-                {
-                    let retry_delay_ms = get_retry_delay_in_ms(api_error, delay_in_ms, now());
+                if error.is_retryable() {
+                    let retry_delay_ms = error.retry_delay_in_ms(delay_in_ms, now());
                     sleep(retry_delay_ms).await;
                     delay_in_ms = delay_in_ms.saturating_mul(options.backoff_factor);
                     continue;
@@ -545,6 +622,9 @@ mod tests {
         RetryWithExponentialBackoffOptions, get_retry_delay_in_ms,
         retry_delay_from_response_headers, retry_with_exponential_backoff_respecting_retry_headers,
     };
+    use crate::gateway_error::{
+        GatewayAuthenticationError, GatewayInternalServerError, GatewayRateLimitError,
+    };
     use crate::headers::Headers;
     use crate::provider::ApiCallError;
     use serde_json::json;
@@ -570,6 +650,43 @@ mod tests {
 
     fn retryable_api_error(message: impl Into<String>) -> ApiCallError {
         ApiCallError::new(message, "https://api.example.com", json!({})).with_status_code(429)
+    }
+
+    fn retryable_api_error_with_headers(
+        message: impl Into<String>,
+        headers: Headers,
+    ) -> ApiCallError {
+        retryable_api_error(message).with_response_headers(headers)
+    }
+
+    fn retry_once_then_success(
+        error: RetryAttemptError,
+        options: RetryWithExponentialBackoffOptions,
+    ) -> (&'static str, usize, Vec<u64>) {
+        let attempts = Cell::new(0);
+        let sleeps = RefCell::new(Vec::new());
+
+        let result = poll_ready(retry_with_exponential_backoff_respecting_retry_headers(
+            || {
+                let attempt = attempts.get() + 1;
+                attempts.set(attempt);
+
+                if attempt == 1 {
+                    ready(Err(error.clone()))
+                } else {
+                    ready(Ok("success"))
+                }
+            },
+            options,
+            |delay| {
+                sleeps.borrow_mut().push(delay);
+                ready(())
+            },
+            now,
+        ))
+        .expect("retry eventually succeeds");
+
+        (result, attempts.get(), sleeps.into_inner())
     }
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -713,6 +830,14 @@ mod tests {
         assert!(!api_error.is_abort());
         assert!(api_error.api_call_error().is_some());
 
+        let gateway_error =
+            RetryAttemptError::gateway(GatewayRateLimitError::with_message("gateway rate limit"));
+        assert!(gateway_error.is_retryable());
+        assert_eq!(
+            gateway_error.gateway_error_name(),
+            Some("GatewayRateLimitError")
+        );
+
         let abort_error = RetryAttemptError::named_runtime("AbortError", "request aborted");
         assert!(abort_error.is_abort());
         assert_eq!(abort_error.runtime_name(), Some("AbortError"));
@@ -810,6 +935,316 @@ mod tests {
         assert_eq!(result, "done");
         assert_eq!(attempts.get(), 3);
         assert_eq!(&*sleeps.borrow(), &[3_000, 4_000]);
+    }
+
+    #[test]
+    fn retry_with_exponential_backoff_uses_rate_limit_header_delay_when_present_and_reasonable() {
+        let (result, attempts, sleeps) = retry_once_then_success(
+            RetryAttemptError::api_call(retryable_api_error_with_headers(
+                "Rate limited",
+                Headers::from([("retry-after-ms".to_string(), "3000".to_string())]),
+            )),
+            RetryWithExponentialBackoffOptions::new(),
+        );
+
+        assert_eq!(result, "success");
+        assert_eq!(attempts, 2);
+        assert_eq!(sleeps, vec![3_000]);
+    }
+
+    #[test]
+    fn retry_with_exponential_backoff_parses_retry_after_header_in_seconds() {
+        let (result, attempts, sleeps) = retry_once_then_success(
+            RetryAttemptError::api_call(retryable_api_error_with_headers(
+                "Rate limited",
+                Headers::from([("retry-after".to_string(), "5".to_string())]),
+            )),
+            RetryWithExponentialBackoffOptions::new(),
+        );
+
+        assert_eq!(result, "success");
+        assert_eq!(attempts, 2);
+        assert_eq!(sleeps, vec![5_000]);
+    }
+
+    #[test]
+    fn retry_with_exponential_backoff_uses_exponential_backoff_when_rate_limit_delay_is_too_long() {
+        let (result, attempts, sleeps) = retry_once_then_success(
+            RetryAttemptError::api_call(retryable_api_error_with_headers(
+                "Rate limited",
+                Headers::from([("retry-after-ms".to_string(), "70000".to_string())]),
+            )),
+            RetryWithExponentialBackoffOptions::new().with_initial_delay_in_ms(2_000),
+        );
+
+        assert_eq!(result, "success");
+        assert_eq!(attempts, 2);
+        assert_eq!(sleeps, vec![2_000]);
+    }
+
+    #[test]
+    fn retry_with_exponential_backoff_falls_back_to_exponential_backoff_when_no_rate_limit_headers()
+    {
+        let (result, attempts, sleeps) = retry_once_then_success(
+            RetryAttemptError::api_call(retryable_api_error_with_headers(
+                "Temporary error",
+                Headers::new(),
+            )),
+            RetryWithExponentialBackoffOptions::new().with_initial_delay_in_ms(2_000),
+        );
+
+        assert_eq!(result, "success");
+        assert_eq!(attempts, 2);
+        assert_eq!(sleeps, vec![2_000]);
+    }
+
+    #[test]
+    fn retry_with_exponential_backoff_handles_invalid_rate_limit_header_values() {
+        let (result, attempts, sleeps) = retry_once_then_success(
+            RetryAttemptError::api_call(retryable_api_error_with_headers(
+                "Rate limited",
+                Headers::from([
+                    ("retry-after-ms".to_string(), "invalid".to_string()),
+                    ("retry-after".to_string(), "not-a-number".to_string()),
+                ]),
+            )),
+            RetryWithExponentialBackoffOptions::new().with_initial_delay_in_ms(2_000),
+        );
+
+        assert_eq!(result, "success");
+        assert_eq!(attempts, 2);
+        assert_eq!(sleeps, vec![2_000]);
+    }
+
+    #[test]
+    fn retry_with_exponential_backoff_handles_anthropic_429_response_with_retry_after_ms_header() {
+        let (result, attempts, sleeps) = retry_once_then_success(
+            RetryAttemptError::api_call(
+                ApiCallError::new(
+                    "Rate limit exceeded",
+                    "https://api.anthropic.com/v1/messages",
+                    json!({}),
+                )
+                .with_status_code(429)
+                .with_data(json!({
+                    "error": {
+                        "type": "rate_limit_error",
+                        "message": "Rate limit exceeded"
+                    }
+                }))
+                .with_response_headers(Headers::from([
+                    ("retry-after-ms".to_string(), "5000".to_string()),
+                    ("x-request-id".to_string(), "req_123456".to_string()),
+                ])),
+            ),
+            RetryWithExponentialBackoffOptions::new(),
+        );
+
+        assert_eq!(result, "success");
+        assert_eq!(attempts, 2);
+        assert_eq!(sleeps, vec![5_000]);
+    }
+
+    #[test]
+    fn retry_with_exponential_backoff_handles_openai_429_response_with_retry_after_header() {
+        let (result, attempts, sleeps) = retry_once_then_success(
+            RetryAttemptError::api_call(
+                ApiCallError::new(
+                    "Rate limit reached for requests",
+                    "https://api.openai.com/v1/chat/completions",
+                    json!({}),
+                )
+                .with_status_code(429)
+                .with_data(json!({
+                    "error": {
+                        "message": "Rate limit reached for requests",
+                        "type": "requests",
+                        "param": null,
+                        "code": "rate_limit_exceeded"
+                    }
+                }))
+                .with_response_headers(Headers::from([
+                    ("retry-after".to_string(), "30".to_string()),
+                    ("x-request-id".to_string(), "req_abcdef123456".to_string()),
+                ])),
+            ),
+            RetryWithExponentialBackoffOptions::new(),
+        );
+
+        assert_eq!(result, "success");
+        assert_eq!(attempts, 2);
+        assert_eq!(sleeps, vec![30_000]);
+    }
+
+    #[test]
+    fn retry_with_exponential_backoff_handles_multiple_retries_with_exponential_backoff_progression()
+     {
+        let attempts = Cell::new(0);
+        let sleeps = RefCell::new(Vec::new());
+
+        let result = poll_ready(retry_with_exponential_backoff_respecting_retry_headers(
+            || {
+                let attempt = attempts.get() + 1;
+                attempts.set(attempt);
+
+                if attempt == 1 {
+                    ready(Err(RetryAttemptError::api_call(
+                        retryable_api_error_with_headers(
+                            "Rate limited",
+                            Headers::from([("retry-after-ms".to_string(), "5000".to_string())]),
+                        ),
+                    )))
+                } else if attempt == 2 {
+                    ready(Err(RetryAttemptError::api_call(
+                        retryable_api_error_with_headers(
+                            "Rate limited",
+                            Headers::from([("retry-after-ms".to_string(), "2000".to_string())]),
+                        ),
+                    )))
+                } else {
+                    ready(Ok("Success after retries!"))
+                }
+            },
+            RetryWithExponentialBackoffOptions::new().with_max_retries(3),
+            |delay| {
+                sleeps.borrow_mut().push(delay);
+                ready(())
+            },
+            now,
+        ))
+        .expect("retry eventually succeeds");
+
+        assert_eq!(result, "Success after retries!");
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(&*sleeps.borrow(), &[5_000, 2_000]);
+    }
+
+    #[test]
+    fn retry_with_exponential_backoff_prefers_retry_after_ms_over_retry_after_when_both_present() {
+        let (result, attempts, sleeps) = retry_once_then_success(
+            RetryAttemptError::api_call(retryable_api_error_with_headers(
+                "Rate limited",
+                Headers::from([
+                    ("retry-after-ms".to_string(), "3000".to_string()),
+                    ("retry-after".to_string(), "10".to_string()),
+                ]),
+            )),
+            RetryWithExponentialBackoffOptions::new(),
+        );
+
+        assert_eq!(result, "success");
+        assert_eq!(attempts, 2);
+        assert_eq!(sleeps, vec![3_000]);
+    }
+
+    #[test]
+    fn retry_with_exponential_backoff_handles_retry_after_header_with_http_date_format() {
+        let (result, attempts, sleeps) = retry_once_then_success(
+            RetryAttemptError::api_call(retryable_api_error_with_headers(
+                "Rate limit exceeded",
+                Headers::from([(
+                    "retry-after".to_string(),
+                    "Tue, 02 Jan 2024 03:04:10 GMT".to_string(),
+                )]),
+            )),
+            RetryWithExponentialBackoffOptions::new(),
+        );
+
+        assert_eq!(result, "success");
+        assert_eq!(attempts, 2);
+        assert_eq!(sleeps, vec![5_000]);
+    }
+
+    #[test]
+    fn retry_with_exponential_backoff_falls_back_to_exponential_backoff_when_rate_limit_delay_is_negative()
+     {
+        let (result, attempts, sleeps) = retry_once_then_success(
+            RetryAttemptError::api_call(retryable_api_error_with_headers(
+                "Rate limited",
+                Headers::from([("retry-after-ms".to_string(), "-1000".to_string())]),
+            )),
+            RetryWithExponentialBackoffOptions::new().with_initial_delay_in_ms(2_000),
+        );
+
+        assert_eq!(result, "success");
+        assert_eq!(attempts, 2);
+        assert_eq!(sleeps, vec![2_000]);
+    }
+
+    #[test]
+    fn retry_with_exponential_backoff_retries_on_gateway_internal_server_error() {
+        let (result, attempts, sleeps) = retry_once_then_success(
+            RetryAttemptError::gateway(
+                GatewayInternalServerError::with_message("Internal server error")
+                    .with_status_code(503),
+            ),
+            RetryWithExponentialBackoffOptions::new().with_initial_delay_in_ms(2_000),
+        );
+
+        assert_eq!(result, "success");
+        assert_eq!(attempts, 2);
+        assert_eq!(sleeps, vec![2_000]);
+    }
+
+    #[test]
+    fn retry_with_exponential_backoff_retries_on_gateway_rate_limit_error() {
+        let (result, attempts, sleeps) = retry_once_then_success(
+            RetryAttemptError::gateway(GatewayRateLimitError::with_message("Rate limit exceeded")),
+            RetryWithExponentialBackoffOptions::new().with_initial_delay_in_ms(2_000),
+        );
+
+        assert_eq!(result, "success");
+        assert_eq!(attempts, 2);
+        assert_eq!(sleeps, vec![2_000]);
+    }
+
+    #[test]
+    fn retry_with_exponential_backoff_does_not_retry_on_non_retryable_gateway_authentication_error()
+    {
+        let attempts = Cell::new(0);
+        let sleeps = RefCell::new(Vec::new());
+
+        let failure = poll_ready(retry_with_exponential_backoff_respecting_retry_headers(
+            || {
+                attempts.set(attempts.get() + 1);
+                ready(Err::<(), _>(RetryAttemptError::gateway(
+                    GatewayAuthenticationError::with_message("Invalid API key"),
+                )))
+            },
+            RetryWithExponentialBackoffOptions::new(),
+            |delay| {
+                sleeps.borrow_mut().push(delay);
+                ready(())
+            },
+            now,
+        ))
+        .expect_err("non-retryable Gateway auth error fails");
+
+        assert_eq!(attempts.get(), 1);
+        assert!(sleeps.borrow().is_empty());
+        assert_eq!(failure.to_string(), "Invalid API key");
+        assert_eq!(
+            failure
+                .attempt_error()
+                .and_then(RetryAttemptError::gateway_error_name),
+            Some("GatewayAuthenticationError")
+        );
+    }
+
+    #[test]
+    fn retry_with_exponential_backoff_uses_retry_after_headers_from_api_call_error_cause() {
+        let (result, attempts, sleeps) = retry_once_then_success(
+            RetryAttemptError::gateway_with_cause_response_headers(
+                GatewayInternalServerError::with_message("Internal server error")
+                    .with_status_code(503),
+                Headers::from([("retry-after-ms".to_string(), "3000".to_string())]),
+            ),
+            RetryWithExponentialBackoffOptions::new(),
+        );
+
+        assert_eq!(result, "success");
+        assert_eq!(attempts, 2);
+        assert_eq!(sleeps, vec![3_000]);
     }
 
     #[test]
