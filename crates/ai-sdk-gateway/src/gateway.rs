@@ -1030,6 +1030,7 @@ impl GatewayProvider {
     pub fn language_model(&self, model_id: impl Into<String>) -> GatewayLanguageModel {
         GatewayLanguageModel {
             model_id: model_id.into(),
+            provider_id: GATEWAY_PROVIDER_ID.to_string(),
             settings: self.settings.clone(),
             transport: Arc::clone(&self.transport),
         }
@@ -1289,6 +1290,7 @@ pub fn gateway(model_id: impl Into<String>) -> GatewayLanguageModel {
 #[derive(Clone)]
 pub struct GatewayLanguageModel {
     model_id: String,
+    provider_id: String,
     settings: GatewayProviderSettings,
     transport: GatewayTransport,
 }
@@ -1331,6 +1333,12 @@ impl GatewayLanguageModel {
     /// Returns a copy of this model that uses the supplied HTTP transport.
     pub fn with_transport(mut self, transport: GatewayTransport) -> Self {
         self.transport = transport;
+        self
+    }
+
+    /// Returns a copy of this model with an explicit provider identifier.
+    pub fn with_provider_id(mut self, provider_id: impl Into<String>) -> Self {
+        self.provider_id = provider_id.into();
         self
     }
 
@@ -1968,7 +1976,7 @@ impl LanguageModel for GatewayLanguageModel {
     }
 
     fn provider(&self) -> &str {
-        GATEWAY_PROVIDER_ID
+        &self.provider_id
     }
 
     fn model_id(&self) -> &str {
@@ -3613,13 +3621,14 @@ fn provider_api_response(
 mod tests {
     use super::{
         DEFAULT_GATEWAY_BASE_URL, GatewayAuthMethod, GatewayCredentialType, GatewayEmbeddingModel,
-        GatewayGenerationInfoParams, GatewayImageModel, GatewayModelType, GatewayProvider,
-        GatewayProviderOptions, GatewayProviderOptionsSort, GatewayProviderSettings,
-        GatewayProviderTimeouts, GatewayRerankingModel, GatewaySpendReportDatePart,
-        GatewaySpendReportGroupBy, GatewaySpendReportParams, GatewayTransport,
-        GatewayTransportFuture, GatewayVideoModel, create_gateway, gateway, gateway_base_url,
-        gateway_observability_headers_with_env, gateway_provider_headers_with_env,
-        gateway_provider_options, get_gateway_auth_token_with_env, metadata_cache_refresh_duration,
+        GatewayGenerationInfoParams, GatewayImageModel, GatewayLanguageModel, GatewayModelType,
+        GatewayProvider, GatewayProviderOptions, GatewayProviderOptionsSort,
+        GatewayProviderSettings, GatewayProviderTimeouts, GatewayRerankingModel,
+        GatewaySpendReportDatePart, GatewaySpendReportGroupBy, GatewaySpendReportParams,
+        GatewayTransport, GatewayTransportFuture, GatewayVideoModel, create_gateway, gateway,
+        gateway_base_url, gateway_observability_headers_with_env,
+        gateway_provider_headers_with_env, gateway_provider_options,
+        get_gateway_auth_token_with_env, metadata_cache_refresh_duration,
         try_gateway_provider_headers_with_env, try_gateway_provider_options,
     };
     use ai_sdk_provider::{
@@ -3627,10 +3636,10 @@ mod tests {
         FinishReason, Headers, ImageModel, ImageModelCallOptions, ImageModelFile,
         ImageModelProviderMetadata, JsonObject, JsonValue, LanguageModel,
         LanguageModelAbortController, LanguageModelCallOptions, LanguageModelContent,
-        LanguageModelFileData, LanguageModelFilePart, LanguageModelMessage, LanguageModelSource,
-        LanguageModelStreamPart, LanguageModelTextPart, LanguageModelUserContentPart,
-        LanguageModelUserMessage, Provider, ProviderMetadata, ProviderOptions,
-        ProviderWithRerankingModel, ProviderWithVideoModel, RerankingModel,
+        LanguageModelFileData, LanguageModelFilePart, LanguageModelGenerateResult,
+        LanguageModelMessage, LanguageModelSource, LanguageModelStreamPart, LanguageModelTextPart,
+        LanguageModelUserContentPart, LanguageModelUserMessage, Provider, ProviderMetadata,
+        ProviderOptions, ProviderWithRerankingModel, ProviderWithVideoModel, RerankingModel,
         RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
         SpecificationVersion, VideoModel, VideoModelCallOptions, VideoModelFile,
         VideoModelVideoData, Warning,
@@ -3665,6 +3674,101 @@ mod tests {
     }
 
     fn assert_future_output<T>(_future: impl Future<Output = T>) {}
+
+    const GATEWAY_LANGUAGE_TEST_MODEL_ID: &str = "test-model";
+
+    fn gateway_language_test_prompt() -> Vec<LanguageModelMessage> {
+        vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![LanguageModelUserContentPart::Text(
+                LanguageModelTextPart::new("Hello"),
+            )],
+        ))]
+    }
+
+    fn gateway_language_success_response_body(content: JsonValue) -> String {
+        json!({
+            "id": "test-id",
+            "created": 1711115037,
+            "model": GATEWAY_LANGUAGE_TEST_MODEL_ID,
+            "content": content,
+            "finish_reason": "stop",
+            "usage": {
+                "prompt_tokens": 4,
+                "completion_tokens": 30
+            }
+        })
+        .to_string()
+    }
+
+    fn capturing_language_transport(
+        status_code: u16,
+        status_text: impl Into<String>,
+        body: impl Into<String>,
+        headers: Option<Headers>,
+    ) -> (GatewayTransport, Arc<Mutex<Option<ProviderApiRequest>>>) {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let status_text = status_text.into();
+        let body = body.into();
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            let mut response =
+                ProviderApiResponse::text(status_code, status_text.clone(), body.clone());
+
+            if let Some(headers) = headers.clone() {
+                response = response.with_headers(headers);
+            }
+
+            Box::pin(ready(Ok(response)))
+        });
+
+        (transport, captured_request)
+    }
+
+    fn captured_language_request(
+        captured_request: &Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) -> ProviderApiRequest {
+        captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+    }
+
+    fn gateway_language_test_model(transport: GatewayTransport) -> GatewayLanguageModel {
+        GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .language_model(GATEWAY_LANGUAGE_TEST_MODEL_ID)
+        .with_provider_id("test-provider")
+    }
+
+    fn gateway_language_request_json(request: &ProviderApiRequest) -> JsonValue {
+        request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("language request body is JSON")
+    }
+
+    fn gateway_language_error_metadata(
+        result: &LanguageModelGenerateResult,
+        field: &str,
+    ) -> Option<JsonValue> {
+        result
+            .provider_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("gateway"))
+            .and_then(|metadata| metadata.get(field))
+            .cloned()
+    }
 
     fn metadata_response_for_model(model_id: &str) -> String {
         json!({
@@ -6487,6 +6591,726 @@ mod tests {
                 .get("isRetryable")
                 .and_then(JsonValue::as_bool),
             Some(true)
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_sets_basic_properties() {
+        let (transport, _) = capturing_language_transport(
+            200,
+            "OK",
+            gateway_language_success_response_body(json!({
+                "type": "text",
+                "text": ""
+            })),
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+
+        assert_eq!(model.model_id(), GATEWAY_LANGUAGE_TEST_MODEL_ID);
+        assert_eq!(model.provider(), "test-provider");
+        assert_eq!(model.specification_version(), SpecificationVersion::V4);
+    }
+
+    #[test]
+    fn gateway_language_model_passes_headers_correctly() {
+        let (transport, captured_request) = capturing_language_transport(
+            200,
+            "OK",
+            gateway_language_success_response_body(json!({
+                "type": "text",
+                "text": "Hello, World!"
+            })),
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(gateway_language_test_prompt())
+                    .with_header("Custom-Header", "test-value"),
+            ),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        let request = captured_language_request(&captured_request);
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-token")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("test-value")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-language-model-specification-version")
+                .map(String::as_str),
+            Some("4")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-language-model-id")
+                .map(String::as_str),
+            Some(GATEWAY_LANGUAGE_TEST_MODEL_ID)
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-language-model-streaming")
+                .map(String::as_str),
+            Some("false")
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_extracts_text_response() {
+        let (transport, _) = capturing_language_transport(
+            200,
+            "OK",
+            gateway_language_success_response_body(json!({
+                "type": "text",
+                "text": "Hello, World!"
+            })),
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+
+        let result = poll_ready(
+            model.do_generate(LanguageModelCallOptions::new(gateway_language_test_prompt())),
+        );
+
+        assert!(matches!(
+            result.content.as_slice(),
+            [LanguageModelContent::Text(text)] if text.text == "Hello, World!"
+        ));
+    }
+
+    #[test]
+    fn gateway_language_model_extracts_usage_information() {
+        let (transport, _) = capturing_language_transport(
+            200,
+            "OK",
+            json!({
+                "id": "test-id",
+                "created": 1711115037,
+                "model": GATEWAY_LANGUAGE_TEST_MODEL_ID,
+                "content": {
+                    "type": "text",
+                    "text": "Test"
+                },
+                "finish_reason": "stop",
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 20
+                }
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+
+        let result = poll_ready(
+            model.do_generate(LanguageModelCallOptions::new(gateway_language_test_prompt())),
+        );
+
+        assert_eq!(result.usage.input_tokens.total, Some(10));
+        assert_eq!(result.usage.output_tokens.total, Some(20));
+    }
+
+    #[test]
+    fn gateway_language_model_removes_abort_signal_from_request_body() {
+        let (transport, captured_request) = capturing_language_transport(
+            200,
+            "OK",
+            gateway_language_success_response_body(json!({
+                "type": "text",
+                "text": "Test response"
+            })),
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+        let abort_controller = LanguageModelAbortController::new();
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(gateway_language_test_prompt())
+                    .with_abort_signal(abort_controller.signal()),
+            ),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        let request = captured_language_request(&captured_request);
+        assert!(
+            gateway_language_request_json(&request)
+                .get("abortSignal")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_passes_abort_signal_to_fetch_when_provided() {
+        let (transport, captured_request) = capturing_language_transport(
+            200,
+            "OK",
+            gateway_language_success_response_body(json!({
+                "type": "text",
+                "text": "Test response"
+            })),
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+        let abort_controller = LanguageModelAbortController::new();
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(gateway_language_test_prompt())
+                    .with_abort_signal(abort_controller.signal()),
+            ),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        let request = captured_language_request(&captured_request);
+        assert_request_tracks_abort_signal(&request, &abort_controller);
+    }
+
+    #[test]
+    fn gateway_language_model_does_not_pass_abort_signal_to_fetch_when_not_provided() {
+        let (transport, captured_request) = capturing_language_transport(
+            200,
+            "OK",
+            gateway_language_success_response_body(json!({
+                "type": "text",
+                "text": "Test response"
+            })),
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+
+        let result = poll_ready(
+            model.do_generate(LanguageModelCallOptions::new(gateway_language_test_prompt())),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        let request = captured_language_request(&captured_request);
+        assert!(request.abort_signal.is_none());
+    }
+
+    #[test]
+    fn gateway_language_model_includes_o11y_headers_in_request() {
+        let (transport, captured_request) = capturing_language_transport(
+            200,
+            "OK",
+            gateway_language_success_response_body(json!({
+                "type": "text",
+                "text": "Hello, World!"
+            })),
+            None,
+        );
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token")
+                .with_vercel_request_id("test-deployment"),
+        )
+        .with_transport(transport)
+        .language_model(GATEWAY_LANGUAGE_TEST_MODEL_ID)
+        .with_provider_id("test-provider");
+
+        let result = poll_ready(
+            model.do_generate(LanguageModelCallOptions::new(gateway_language_test_prompt())),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        let request = captured_language_request(&captured_request);
+        assert_eq!(
+            request
+                .headers
+                .get("ai-o11y-request-id")
+                .map(String::as_str),
+            Some("test-deployment")
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_converts_api_call_errors_to_gateway_errors() {
+        let (transport, _) = capturing_language_transport(
+            401,
+            "Unauthorized",
+            json!({
+                "error": {
+                    "message": "Invalid API key provided",
+                    "type": "authentication_error"
+                }
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+
+        let result = poll_ready(
+            model.do_generate(LanguageModelCallOptions::new(gateway_language_test_prompt())),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Error);
+        assert_eq!(
+            gateway_language_error_metadata(&result, "errorType")
+                .and_then(|value| { value.as_str().map(str::to_string) }),
+            Some("authentication_error".to_string())
+        );
+        assert_eq!(
+            gateway_language_error_metadata(&result, "statusCode").and_then(|value| value.as_u64()),
+            Some(401)
+        );
+        assert!(
+            gateway_language_error_metadata(&result, "errorMessage")
+                .and_then(|value| value.as_str().map(str::to_string))
+                .is_some_and(|message| message.contains("Invalid API key"))
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_handles_malformed_error_responses() {
+        let (transport, _) =
+            capturing_language_transport(500, "Internal Server Error", "Not JSON", None);
+        let model = gateway_language_test_model(transport);
+
+        let result = poll_ready(
+            model.do_generate(LanguageModelCallOptions::new(gateway_language_test_prompt())),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Error);
+        assert_eq!(
+            gateway_language_error_metadata(&result, "errorType")
+                .and_then(|value| value.as_str().map(str::to_string)),
+            Some("response_error".to_string())
+        );
+        assert_eq!(
+            gateway_language_error_metadata(&result, "statusCode").and_then(|value| value.as_u64()),
+            Some(500)
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_handles_rate_limit_errors() {
+        let (transport, _) = capturing_language_transport(
+            429,
+            "Too Many Requests",
+            json!({
+                "error": {
+                    "message": "Rate limit exceeded. Try again later.",
+                    "type": "rate_limit_exceeded"
+                }
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+
+        let result = poll_ready(
+            model.do_generate(LanguageModelCallOptions::new(gateway_language_test_prompt())),
+        );
+
+        assert_eq!(
+            gateway_language_error_metadata(&result, "errorMessage")
+                .and_then(|value| value.as_str().map(str::to_string)),
+            Some("Rate limit exceeded. Try again later.".to_string())
+        );
+        assert_eq!(
+            gateway_language_error_metadata(&result, "errorType")
+                .and_then(|value| value.as_str().map(str::to_string)),
+            Some("rate_limit_exceeded".to_string())
+        );
+        assert_eq!(
+            gateway_language_error_metadata(&result, "statusCode").and_then(|value| value.as_u64()),
+            Some(429)
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_handles_invalid_request_errors() {
+        let (transport, _) = capturing_language_transport(
+            400,
+            "Bad Request",
+            json!({
+                "error": {
+                    "message": "Invalid prompt format",
+                    "type": "invalid_request_error"
+                }
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+
+        let result = poll_ready(
+            model.do_generate(LanguageModelCallOptions::new(gateway_language_test_prompt())),
+        );
+
+        assert_eq!(
+            gateway_language_error_metadata(&result, "errorMessage")
+                .and_then(|value| value.as_str().map(str::to_string)),
+            Some("Invalid prompt format".to_string())
+        );
+        assert_eq!(
+            gateway_language_error_metadata(&result, "errorType")
+                .and_then(|value| value.as_str().map(str::to_string)),
+            Some("invalid_request_error".to_string())
+        );
+        assert_eq!(
+            gateway_language_error_metadata(&result, "statusCode").and_then(|value| value.as_u64()),
+            Some(400)
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_does_not_modify_prompt_without_image_parts_for_generate() {
+        let (transport, captured_request) = capturing_language_transport(
+            200,
+            "OK",
+            gateway_language_success_response_body(json!({
+                "type": "text",
+                "text": "response"
+            })),
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+        let prompt = gateway_language_test_prompt();
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(prompt.clone())));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        let request = captured_language_request(&captured_request);
+        assert_eq!(
+            gateway_language_request_json(&request).get("prompt"),
+            Some(&serde_json::to_value(prompt).expect("prompt serializes"))
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_encodes_uint8_array_image_part_to_inline_base64_data_with_default_mime_type_for_generate()
+     {
+        let (transport, captured_request) = capturing_language_transport(
+            200,
+            "OK",
+            gateway_language_success_response_body(json!({
+                "type": "text",
+                "text": "response"
+            })),
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+        let prompt = vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
+                    "Describe this image:",
+                )),
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Bytes(vec![1, 2, 3, 4]),
+                    },
+                    "image/jpeg",
+                )),
+            ],
+        ))];
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(prompt)));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        let request = captured_language_request(&captured_request);
+        let request_body = gateway_language_request_json(&request);
+        assert_eq!(
+            request_body.pointer("/prompt/0/content/1"),
+            Some(&json!({
+                "type": "file",
+                "data": {
+                    "type": "data",
+                    "data": "AQIDBA=="
+                },
+                "mediaType": "image/jpeg"
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_encodes_uint8_array_image_part_to_inline_base64_data_with_specified_mime_type_for_generate()
+     {
+        let (transport, captured_request) = capturing_language_transport(
+            200,
+            "OK",
+            gateway_language_success_response_body(json!({
+                "type": "text",
+                "text": "response"
+            })),
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+        let prompt = vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![LanguageModelUserContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Bytes(vec![5, 6, 7, 8]),
+                    },
+                    "image/png",
+                ),
+            )],
+        ))];
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(prompt)));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        let request = captured_language_request(&captured_request);
+        assert_eq!(
+            gateway_language_request_json(&request).pointer("/prompt/0/content/0"),
+            Some(&json!({
+                "type": "file",
+                "data": {
+                    "type": "data",
+                    "data": "BQYHCA=="
+                },
+                "mediaType": "image/png"
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_does_not_modify_image_part_with_url_for_generate() {
+        let (transport, captured_request) = capturing_language_transport(
+            200,
+            "OK",
+            gateway_language_success_response_body(json!({
+                "type": "text",
+                "text": "response"
+            })),
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+        let image_url = Url::parse("https://example.com/image.jpg").expect("URL is valid");
+        let prompt = vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Image URL:")),
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Url {
+                        url: image_url.clone(),
+                    },
+                    "image/jpeg",
+                )),
+            ],
+        ))];
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(prompt)));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        let request = captured_language_request(&captured_request);
+        assert_eq!(
+            gateway_language_request_json(&request).pointer("/prompt/0/content/1"),
+            Some(&json!({
+                "type": "file",
+                "data": {
+                    "type": "url",
+                    "url": image_url.as_str()
+                },
+                "mediaType": "image/jpeg"
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_handles_mixed_content_types_correctly_for_generate() {
+        let (transport, captured_request) = capturing_language_transport(
+            200,
+            "OK",
+            gateway_language_success_response_body(json!({
+                "type": "text",
+                "text": "response"
+            })),
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+        let image_url = Url::parse("https://example.com/image2.png").expect("URL is valid");
+        let prompt = vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("First text.")),
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Bytes(vec![1, 2, 3, 4]),
+                    },
+                    "image/gif",
+                )),
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Second text.")),
+                LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                    FileData::Url {
+                        url: image_url.clone(),
+                    },
+                    "image/png",
+                )),
+            ],
+        ))];
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(prompt)));
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        let request = captured_language_request(&captured_request);
+        assert_eq!(
+            gateway_language_request_json(&request).pointer("/prompt/0/content"),
+            Some(&json!([
+                {
+                    "type": "text",
+                    "text": "First text."
+                },
+                {
+                    "type": "file",
+                    "data": {
+                        "type": "data",
+                        "data": "AQIDBA=="
+                    },
+                    "mediaType": "image/gif"
+                },
+                {
+                    "type": "text",
+                    "text": "Second text."
+                },
+                {
+                    "type": "file",
+                    "data": {
+                        "type": "url",
+                        "url": image_url.as_str()
+                    },
+                    "mediaType": "image/png"
+                }
+            ]))
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_handles_various_error_types_with_proper_conversion() {
+        for (status, status_text, body, expected_message, expected_type) in [
+            (
+                400,
+                "Bad Request",
+                json!({
+                    "error": {
+                        "message": "Invalid request format",
+                        "type": "invalid_request_error"
+                    }
+                }),
+                "Invalid request format",
+                "invalid_request_error",
+            ),
+            (
+                404,
+                "Not Found",
+                json!({
+                    "error": {
+                        "message": "Model xyz not found",
+                        "type": "model_not_found",
+                        "param": {
+                            "modelId": "xyz"
+                        }
+                    }
+                }),
+                "Model xyz not found",
+                "model_not_found",
+            ),
+            (
+                500,
+                "Internal Server Error",
+                json!({
+                    "error": {
+                        "message": "Database connection failed",
+                        "type": "internal_server_error"
+                    }
+                }),
+                "Database connection failed",
+                "internal_server_error",
+            ),
+        ] {
+            let (transport, _) =
+                capturing_language_transport(status, status_text, body.to_string(), None);
+            let model = gateway_language_test_model(transport);
+
+            let result = poll_ready(
+                model.do_generate(LanguageModelCallOptions::new(gateway_language_test_prompt())),
+            );
+
+            assert_eq!(result.finish_reason.unified, FinishReason::Error);
+            assert_eq!(
+                gateway_language_error_metadata(&result, "errorMessage")
+                    .and_then(|value| value.as_str().map(str::to_string)),
+                Some(expected_message.to_string())
+            );
+            assert_eq!(
+                gateway_language_error_metadata(&result, "errorType")
+                    .and_then(|value| value.as_str().map(str::to_string)),
+                Some(expected_type.to_string())
+            );
+            assert_eq!(
+                gateway_language_error_metadata(&result, "statusCode")
+                    .and_then(|value| value.as_u64()),
+                Some(u64::from(status))
+            );
+        }
+    }
+
+    #[test]
+    fn gateway_language_model_includes_actual_response_body_when_api_call_error_has_no_data() {
+        let malformed_response = json!({
+            "ferror": {
+                "message": "Model not found",
+                "type": "model_not_found"
+            }
+        });
+        let (transport, _) =
+            capturing_language_transport(404, "Not Found", malformed_response.to_string(), None);
+        let model = gateway_language_test_model(transport);
+
+        let result = poll_ready(
+            model.do_generate(LanguageModelCallOptions::new(gateway_language_test_prompt())),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Error);
+        assert_eq!(
+            result
+                .response
+                .as_ref()
+                .and_then(|response| response.body.as_ref()),
+            Some(&malformed_response)
+        );
+        assert_eq!(
+            gateway_language_error_metadata(&result, "errorType")
+                .and_then(|value| value.as_str().map(str::to_string)),
+            Some("response_error".to_string())
+        );
+    }
+
+    #[test]
+    fn gateway_language_model_uses_raw_response_body_when_json_parsing_fails() {
+        let (transport, _) = capturing_language_transport(
+            500,
+            "Internal Server Error",
+            "invalid json response",
+            None,
+        );
+        let model = gateway_language_test_model(transport);
+
+        let result = poll_ready(
+            model.do_generate(LanguageModelCallOptions::new(gateway_language_test_prompt())),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Error);
+        assert_eq!(
+            result
+                .response
+                .as_ref()
+                .and_then(|response| response.body.as_ref()),
+            Some(&JsonValue::String("invalid json response".to_string()))
+        );
+        assert_eq!(
+            gateway_language_error_metadata(&result, "errorType")
+                .and_then(|value| value.as_str().map(str::to_string)),
+            Some("response_error".to_string())
         );
     }
 
