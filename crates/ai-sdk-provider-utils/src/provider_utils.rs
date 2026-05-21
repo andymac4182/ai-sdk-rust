@@ -3988,6 +3988,14 @@ pub type ToolExecuteFuture =
 pub type ToolExecuteFunction =
     dyn Fn(JsonValue, ToolExecutionOptions) -> ToolExecuteFuture + Send + Sync + 'static;
 
+/// Future returned by a Rust tool execution function that emits stream records.
+pub type ToolExecuteOutputsFuture =
+    Pin<Box<dyn Future<Output = Result<Vec<ExecuteToolOutput>, ToolExecutionError>> + Send>>;
+
+/// Function used to execute a Rust tool call and emit upstream-shaped records.
+pub type ToolExecuteOutputsFunction =
+    dyn Fn(JsonValue, ToolExecutionOptions) -> ToolExecuteOutputsFuture + Send + Sync + 'static;
+
 /// Future returned by a sandbox command runner.
 pub type SandboxRunCommandFuture = Pin<Box<dyn Future<Output = SandboxCommandResult> + Send>>;
 
@@ -4179,9 +4187,9 @@ impl From<&str> for ToolExecutionError {
 ///
 /// Upstream provider-utils `executeTool` is an async generator that emits
 /// preliminary outputs for streaming executors and a final output when
-/// execution completes. Rust tools currently execute to a single JSON value,
-/// so the helper returns the final output shape while preserving the upstream
-/// tagged contract for future streaming support.
+/// execution completes. Rust preserves that tagged contract directly for
+/// streaming output executors and wraps single-value executors in one final
+/// record.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case", tag = "type")]
 pub enum ExecuteToolOutput {
@@ -4744,6 +4752,7 @@ pub struct Tool {
     needs_approval_resolver: Option<Arc<ToolNeedsApprovalFunction>>,
 
     execute: Option<Arc<ToolExecuteFunction>>,
+    execute_outputs: Option<Arc<ToolExecuteOutputsFunction>>,
     to_model_output: Option<Arc<ToolModelOutputFunction>>,
 }
 
@@ -4766,6 +4775,7 @@ impl Tool {
             needs_approval: None,
             needs_approval_resolver: None,
             execute: None,
+            execute_outputs: None,
             to_model_output: None,
         }
     }
@@ -4792,6 +4802,7 @@ impl Tool {
             needs_approval: None,
             needs_approval_resolver: None,
             execute: None,
+            execute_outputs: None,
             to_model_output: None,
         }
     }
@@ -4829,6 +4840,7 @@ impl Tool {
             needs_approval: None,
             needs_approval_resolver: None,
             execute: None,
+            execute_outputs: None,
             to_model_output: None,
         }
     }
@@ -4866,6 +4878,7 @@ impl Tool {
             needs_approval: None,
             needs_approval_resolver: None,
             execute: None,
+            execute_outputs: None,
             to_model_output: None,
         }
     }
@@ -4904,6 +4917,7 @@ impl Tool {
             needs_approval: None,
             needs_approval_resolver: None,
             execute: None,
+            execute_outputs: None,
             to_model_output: None,
         }
     }
@@ -5036,6 +5050,20 @@ impl Tool {
         self.execute = Some(Arc::new(move |input, options| {
             Box::pin(execute(input, options))
         }));
+        self.execute_outputs = None;
+        self
+    }
+
+    /// Sets a Rust executor that emits upstream-shaped preliminary/final records.
+    pub fn with_execute_outputs<F, Fut>(mut self, execute_outputs: F) -> Self
+    where
+        F: Fn(JsonValue, ToolExecutionOptions) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Vec<ExecuteToolOutput>, ToolExecutionError>> + Send + 'static,
+    {
+        self.execute = None;
+        self.execute_outputs = Some(Arc::new(move |input, options| {
+            Box::pin(execute_outputs(input, options))
+        }));
         self
     }
 
@@ -5055,7 +5083,7 @@ impl Tool {
 
     /// Returns whether this tool has an executor.
     pub fn is_executable(&self) -> bool {
-        self.execute.is_some()
+        self.execute.is_some() || self.execute_outputs.is_some()
     }
 
     /// Returns whether this tool is a provider tool.
@@ -5171,6 +5199,17 @@ impl Tool {
         options: ToolExecutionOptions,
     ) -> Option<ToolExecuteFuture> {
         self.execute.as_ref().map(|execute| execute(input, options))
+    }
+
+    /// Executes this tool as an upstream-shaped output stream when configured.
+    pub fn execute_outputs(
+        &self,
+        input: JsonValue,
+        options: ToolExecutionOptions,
+    ) -> Option<ToolExecuteOutputsFuture> {
+        self.execute_outputs
+            .as_ref()
+            .map(|execute_outputs| execute_outputs(input, options))
     }
 
     /// Converts raw tool output into model-facing output when a callback exists.
@@ -5332,6 +5371,10 @@ pub async fn execute_tool(
     input: JsonValue,
     options: ToolExecutionOptions,
 ) -> Result<Vec<ExecuteToolOutput>, ToolExecutionError> {
+    if let Some(execute_outputs) = tool.execute_outputs(input.clone(), options.clone()) {
+        return execute_outputs.await.map(normalize_execute_tool_outputs);
+    }
+
     let Some(execute) = tool.execute(input, options) else {
         return Err(ToolExecutionError::new("Tool is not executable."));
     };
@@ -5339,6 +5382,14 @@ pub async fn execute_tool(
     execute
         .await
         .map(|output| vec![ExecuteToolOutput::final_output(output)])
+}
+
+fn normalize_execute_tool_outputs(mut outputs: Vec<ExecuteToolOutput>) -> Vec<ExecuteToolOutput> {
+    if let Some(ExecuteToolOutput::Preliminary { output }) = outputs.last().cloned() {
+        outputs.push(ExecuteToolOutput::final_output(output));
+    }
+
+    outputs
 }
 
 /// Bidirectional mapping between caller-facing and provider-facing tool names.
@@ -20549,6 +20600,74 @@ mod tests {
     }
 
     #[test]
+    fn is_executable_tool_upstream_returns_true_for_tools_with_an_execute_function() {
+        let weather_tool = tool("weather", object_schema())
+            .with_execute(|_input, _options| ready(Ok(json!("sunny"))));
+
+        assert!(is_executable_tool(Some(&weather_tool)));
+    }
+
+    #[test]
+    fn is_executable_tool_upstream_returns_false_for_tools_without_an_execute_function() {
+        let weather_tool = tool("weather", object_schema());
+
+        assert!(!is_executable_tool(Some(&weather_tool)));
+    }
+
+    #[test]
+    fn is_executable_tool_upstream_returns_false_for_undefined() {
+        assert!(!is_executable_tool(None));
+    }
+
+    #[test]
+    fn is_executable_tool_upstream_allows_executable_tools_to_be_passed_to_execute_tool_after_narrowing()
+     {
+        let weather_tool = tool("weather", object_schema())
+            .with_context_schema(json_schema(
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "requestId": { "type": "string" }
+                    },
+                    "required": ["requestId"]
+                })
+                .as_object()
+                .expect("context schema is an object")
+                .clone(),
+            ))
+            .with_execute(|input, options| {
+                ready(Ok(json!({
+                    "city": input["city"],
+                    "requestId": options
+                        .context
+                        .as_ref()
+                        .and_then(|context| context.get("requestId"))
+                        .cloned()
+                        .unwrap_or(JsonValue::Null)
+                })))
+            });
+
+        assert!(is_executable_tool(Some(&weather_tool)));
+
+        let results = poll_ready(execute_tool(
+            &weather_tool,
+            json!({ "city": "Berlin" }),
+            ToolExecutionOptions::new("tool-call-1", Vec::new()).with_context(json!({
+                "requestId": "req-1"
+            })),
+        ))
+        .expect("tool execution succeeds");
+
+        assert_eq!(
+            results,
+            vec![ExecuteToolOutput::final_output(json!({
+                "city": "Berlin",
+                "requestId": "req-1"
+            }))]
+        );
+    }
+
+    #[test]
     fn execute_tool_output_round_trips_upstream_shape() {
         let final_output = ExecuteToolOutput::final_output(json!({
             "forecast": "sunny"
@@ -20600,6 +20719,111 @@ mod tests {
                 },
                 "toolCallId": "call-1"
             }))]
+        );
+    }
+
+    #[test]
+    fn execute_tool_upstream_yields_a_single_final_output_for_non_streaming_tools() {
+        let weather_tool = tool("weather", object_schema())
+            .with_context_schema(json_schema(
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "requestId": { "type": "string" }
+                    },
+                    "required": ["requestId"]
+                })
+                .as_object()
+                .expect("context schema is an object")
+                .clone(),
+            ))
+            .with_execute(|input, options| {
+                ready(Ok(json!({
+                    "city": input["city"],
+                    "requestId": options
+                        .context
+                        .as_ref()
+                        .and_then(|context| context.get("requestId"))
+                        .cloned()
+                        .unwrap_or(JsonValue::Null)
+                })))
+            });
+
+        let results = poll_ready(execute_tool(
+            &weather_tool,
+            json!({ "city": "Berlin" }),
+            ToolExecutionOptions::new("tool-call-1", Vec::new()).with_context(json!({
+                "requestId": "req-1"
+            })),
+        ))
+        .expect("tool execution succeeds");
+
+        assert_eq!(
+            results,
+            vec![ExecuteToolOutput::final_output(json!({
+                "city": "Berlin",
+                "requestId": "req-1"
+            }))]
+        );
+    }
+
+    #[test]
+    fn execute_tool_upstream_yields_streamed_values_as_preliminary_output_and_repeats_the_last_one_as_final()
+     {
+        let weather_tool = tool("weather", object_schema())
+            .with_context_schema(json_schema(
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "requestId": { "type": "string" }
+                    },
+                    "required": ["requestId"]
+                })
+                .as_object()
+                .expect("context schema is an object")
+                .clone(),
+            ))
+            .with_execute_outputs(|input, options| {
+                ready(Ok(vec![
+                    ExecuteToolOutput::preliminary(json!(format!(
+                        "{}:{}:1",
+                        input["city"].as_str().unwrap_or_default(),
+                        options
+                            .context
+                            .as_ref()
+                            .and_then(|context| context.get("requestId"))
+                            .and_then(JsonValue::as_str)
+                            .unwrap_or_default()
+                    ))),
+                    ExecuteToolOutput::preliminary(json!(format!(
+                        "{}:{}:2",
+                        input["city"].as_str().unwrap_or_default(),
+                        options
+                            .context
+                            .as_ref()
+                            .and_then(|context| context.get("requestId"))
+                            .and_then(JsonValue::as_str)
+                            .unwrap_or_default()
+                    ))),
+                ]))
+            });
+
+        let results = poll_ready(execute_tool(
+            &weather_tool,
+            json!({ "city": "Berlin" }),
+            ToolExecutionOptions::new("tool-call-2", Vec::new()).with_context(json!({
+                "requestId": "req-2"
+            })),
+        ))
+        .expect("tool execution succeeds");
+
+        assert_eq!(
+            results,
+            vec![
+                ExecuteToolOutput::preliminary(json!("Berlin:req-2:1")),
+                ExecuteToolOutput::preliminary(json!("Berlin:req-2:2")),
+                ExecuteToolOutput::final_output(json!("Berlin:req-2:2")),
+            ]
         );
     }
 
