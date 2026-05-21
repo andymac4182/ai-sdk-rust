@@ -4110,6 +4110,21 @@ pub type ToolExecuteOutputsFuture =
 pub type ToolExecuteOutputsFunction =
     dyn Fn(JsonValue, ToolExecutionOptions) -> ToolExecuteOutputsFuture + Send + Sync + 'static;
 
+/// Future returned by a tool input lifecycle callback.
+pub type ToolInputCallbackFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// Callback invoked when streaming tool input starts.
+pub type ToolInputStartFunction =
+    dyn Fn(ToolExecutionOptions) -> ToolInputCallbackFuture + Send + Sync + 'static;
+
+/// Callback invoked when a streamed tool input delta arrives.
+pub type ToolInputDeltaFunction =
+    dyn Fn(ToolInputDeltaOptions) -> ToolInputCallbackFuture + Send + Sync + 'static;
+
+/// Callback invoked when a complete tool input is available.
+pub type ToolInputAvailableFunction =
+    dyn Fn(ToolInputAvailableOptions) -> ToolInputCallbackFuture + Send + Sync + 'static;
+
 /// Future returned by a sandbox command runner.
 pub type SandboxRunCommandFuture = Pin<Box<dyn Future<Output = SandboxCommandResult> + Send>>;
 
@@ -4270,6 +4285,130 @@ impl PartialEq for ToolExecutionOptions {
                 (Some(left), Some(right)) => Arc::ptr_eq(left, right),
                 _ => false,
             }
+    }
+}
+
+/// Options passed to a streamed tool input delta callback.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolInputDeltaOptions {
+    /// Identifier of the model tool call whose input is streaming.
+    pub tool_call_id: String,
+
+    /// Prompt messages sent to the model for the step that produced the tool call.
+    pub messages: LanguageModelPrompt,
+
+    /// Streamed input text delta for this tool call.
+    pub input_text_delta: String,
+
+    /// Runtime context passed to the generation call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<JsonValue>,
+
+    /// Caller-controlled abort signal for cancelling the overall operation.
+    #[serde(skip)]
+    pub abort_signal: Option<LanguageModelAbortSignal>,
+
+    /// Experimental sandbox environment available to the tool callback.
+    #[serde(skip)]
+    pub experimental_sandbox: Option<Arc<dyn ExperimentalSandbox>>,
+}
+
+impl ToolInputDeltaOptions {
+    /// Creates streamed tool input delta options.
+    pub fn new(
+        tool_call_id: impl Into<String>,
+        messages: LanguageModelPrompt,
+        input_text_delta: impl Into<String>,
+    ) -> Self {
+        Self {
+            tool_call_id: tool_call_id.into(),
+            messages,
+            input_text_delta: input_text_delta.into(),
+            context: None,
+            abort_signal: None,
+            experimental_sandbox: None,
+        }
+    }
+
+    /// Sets the runtime context for this callback.
+    pub fn with_context(mut self, context: impl Into<JsonValue>) -> Self {
+        self.context = Some(context.into());
+        self
+    }
+
+    /// Sets the abort signal used to cancel the overall operation.
+    pub fn with_abort_signal(mut self, abort_signal: LanguageModelAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
+        self
+    }
+
+    /// Sets the experimental sandbox available to this callback.
+    pub fn with_experimental_sandbox(mut self, sandbox: Arc<dyn ExperimentalSandbox>) -> Self {
+        self.experimental_sandbox = Some(sandbox);
+        self
+    }
+}
+
+/// Options passed when a complete streamed tool input is available.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolInputAvailableOptions {
+    /// Identifier of the model tool call whose input is available.
+    pub tool_call_id: String,
+
+    /// Prompt messages sent to the model for the step that produced the tool call.
+    pub messages: LanguageModelPrompt,
+
+    /// Parsed tool input.
+    pub input: JsonValue,
+
+    /// Runtime context passed to the generation call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<JsonValue>,
+
+    /// Caller-controlled abort signal for cancelling the overall operation.
+    #[serde(skip)]
+    pub abort_signal: Option<LanguageModelAbortSignal>,
+
+    /// Experimental sandbox environment available to the tool callback.
+    #[serde(skip)]
+    pub experimental_sandbox: Option<Arc<dyn ExperimentalSandbox>>,
+}
+
+impl ToolInputAvailableOptions {
+    /// Creates complete tool input options.
+    pub fn new(
+        tool_call_id: impl Into<String>,
+        messages: LanguageModelPrompt,
+        input: JsonValue,
+    ) -> Self {
+        Self {
+            tool_call_id: tool_call_id.into(),
+            messages,
+            input,
+            context: None,
+            abort_signal: None,
+            experimental_sandbox: None,
+        }
+    }
+
+    /// Sets the runtime context for this callback.
+    pub fn with_context(mut self, context: impl Into<JsonValue>) -> Self {
+        self.context = Some(context.into());
+        self
+    }
+
+    /// Sets the abort signal used to cancel the overall operation.
+    pub fn with_abort_signal(mut self, abort_signal: LanguageModelAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
+        self
+    }
+
+    /// Sets the experimental sandbox available to this callback.
+    pub fn with_experimental_sandbox(mut self, sandbox: Arc<dyn ExperimentalSandbox>) -> Self {
+        self.experimental_sandbox = Some(sandbox);
+        self
     }
 }
 
@@ -5342,6 +5481,9 @@ pub struct Tool {
 
     execute: Option<Arc<ToolExecuteFunction>>,
     execute_outputs: Option<Arc<ToolExecuteOutputsFunction>>,
+    on_input_start: Option<Arc<ToolInputStartFunction>>,
+    on_input_delta: Option<Arc<ToolInputDeltaFunction>>,
+    on_input_available: Option<Arc<ToolInputAvailableFunction>>,
     to_model_output: Option<Arc<ToolModelOutputFunction>>,
 }
 
@@ -5365,6 +5507,9 @@ impl Tool {
             needs_approval_resolver: None,
             execute: None,
             execute_outputs: None,
+            on_input_start: None,
+            on_input_delta: None,
+            on_input_available: None,
             to_model_output: None,
         }
     }
@@ -5392,6 +5537,9 @@ impl Tool {
             needs_approval_resolver: None,
             execute: None,
             execute_outputs: None,
+            on_input_start: None,
+            on_input_delta: None,
+            on_input_available: None,
             to_model_output: None,
         }
     }
@@ -5430,6 +5578,9 @@ impl Tool {
             needs_approval_resolver: None,
             execute: None,
             execute_outputs: None,
+            on_input_start: None,
+            on_input_delta: None,
+            on_input_available: None,
             to_model_output: None,
         }
     }
@@ -5468,6 +5619,9 @@ impl Tool {
             needs_approval_resolver: None,
             execute: None,
             execute_outputs: None,
+            on_input_start: None,
+            on_input_delta: None,
+            on_input_available: None,
             to_model_output: None,
         }
     }
@@ -5507,6 +5661,9 @@ impl Tool {
             needs_approval_resolver: None,
             execute: None,
             execute_outputs: None,
+            on_input_start: None,
+            on_input_delta: None,
+            on_input_available: None,
             to_model_output: None,
         }
     }
@@ -5656,6 +5813,38 @@ impl Tool {
         self
     }
 
+    /// Sets the callback invoked when streamed tool input starts.
+    pub fn with_on_input_start<F, Fut>(mut self, on_input_start: F) -> Self
+    where
+        F: Fn(ToolExecutionOptions) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.on_input_start = Some(Arc::new(move |options| Box::pin(on_input_start(options))));
+        self
+    }
+
+    /// Sets the callback invoked for each streamed tool input text delta.
+    pub fn with_on_input_delta<F, Fut>(mut self, on_input_delta: F) -> Self
+    where
+        F: Fn(ToolInputDeltaOptions) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.on_input_delta = Some(Arc::new(move |options| Box::pin(on_input_delta(options))));
+        self
+    }
+
+    /// Sets the callback invoked when a complete tool input is available.
+    pub fn with_on_input_available<F, Fut>(mut self, on_input_available: F) -> Self
+    where
+        F: Fn(ToolInputAvailableOptions) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.on_input_available = Some(Arc::new(move |options| {
+            Box::pin(on_input_available(options))
+        }));
+        self
+    }
+
     /// Sets the conversion callback used to shape model-facing tool output.
     ///
     /// Upstream `toModelOutput` is invoked after successful local tool
@@ -5781,6 +5970,21 @@ impl Tool {
         self.to_model_output.is_some()
     }
 
+    /// Returns whether this tool has a streamed input-start callback.
+    pub fn has_on_input_start(&self) -> bool {
+        self.on_input_start.is_some()
+    }
+
+    /// Returns whether this tool has a streamed input-delta callback.
+    pub fn has_on_input_delta(&self) -> bool {
+        self.on_input_delta.is_some()
+    }
+
+    /// Returns whether this tool has a complete-input callback.
+    pub fn has_on_input_available(&self) -> bool {
+        self.on_input_available.is_some()
+    }
+
     /// Executes this tool when an executor is present.
     pub fn execute(
         &self,
@@ -5799,6 +6003,33 @@ impl Tool {
         self.execute_outputs
             .as_ref()
             .map(|execute_outputs| execute_outputs(input, options))
+    }
+
+    /// Invokes this tool's streamed input-start callback when configured.
+    pub fn on_input_start(&self, options: ToolExecutionOptions) -> Option<ToolInputCallbackFuture> {
+        self.on_input_start
+            .as_ref()
+            .map(|on_input_start| on_input_start(options))
+    }
+
+    /// Invokes this tool's streamed input-delta callback when configured.
+    pub fn on_input_delta(
+        &self,
+        options: ToolInputDeltaOptions,
+    ) -> Option<ToolInputCallbackFuture> {
+        self.on_input_delta
+            .as_ref()
+            .map(|on_input_delta| on_input_delta(options))
+    }
+
+    /// Invokes this tool's complete-input callback when configured.
+    pub fn on_input_available(
+        &self,
+        options: ToolInputAvailableOptions,
+    ) -> Option<ToolInputCallbackFuture> {
+        self.on_input_available
+            .as_ref()
+            .map(|on_input_available| on_input_available(options))
     }
 
     /// Converts raw tool output into model-facing output when a callback exists.
@@ -5892,6 +6123,9 @@ impl fmt::Debug for Tool {
                 "has_needs_approval_function",
                 &self.needs_approval_resolver.is_some(),
             )
+            .field("has_on_input_start", &self.on_input_start.is_some())
+            .field("has_on_input_delta", &self.on_input_delta.is_some())
+            .field("has_on_input_available", &self.on_input_available.is_some())
             .field("is_executable", &self.is_executable())
             .finish()
     }
@@ -8592,8 +8826,9 @@ mod tests {
         StreamingToolCallDeltaFunction, StreamingToolCallTracker, StreamingToolCallTrackerOptions,
         StreamingToolCallTypeValidation, Tool, ToolApprovalRequest, ToolApprovalResponse, ToolCall,
         ToolDescriptionOptions, ToolExecuteFunction, ToolExecutionError, ToolExecutionOptions,
-        ToolModelOutputOptions, ToolNeedsApprovalFunction, ToolNeedsApprovalOptions, ToolResult,
-        ToolResultContentPart, ToolResultOutput, ValidateTypesResult, ValidationResult,
+        ToolInputAvailableOptions, ToolInputDeltaOptions, ToolModelOutputOptions,
+        ToolNeedsApprovalFunction, ToolNeedsApprovalOptions, ToolResult, ToolResultContentPart,
+        ToolResultOutput, ValidateTypesResult, ValidationResult,
         add_additional_properties_to_json_schema, as_array, as_flexible_schema, as_schema,
         combine_headers, convert_async_iterator_to_readable_stream, convert_base64_to_bytes,
         convert_bytes_to_base64, convert_image_model_file_to_data_uri,
@@ -22207,6 +22442,168 @@ mod tests {
         assert_eq!(round_tripped.context, Some(json!({ "requestId": "req-2" })));
         assert!(round_tripped.abort_signal.is_none());
         assert!(round_tripped.experimental_sandbox.is_none());
+    }
+
+    #[test]
+    fn tool_input_lifecycle_callbacks_receive_upstream_execution_options() {
+        let recorded = Arc::new(Mutex::new(Vec::<JsonValue>::new()));
+        let start_recorded = Arc::clone(&recorded);
+        let delta_recorded = Arc::clone(&recorded);
+        let available_recorded = Arc::clone(&recorded);
+        let abort_controller = LanguageModelAbortController::new();
+        let sandbox: Arc<dyn ExperimentalSandbox> =
+            Arc::new(StaticSandbox::new("workspace sandbox"));
+        let messages = vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![LanguageModelUserContentPart::Text(
+                LanguageModelTextPart::new("Call the tool"),
+            )],
+        ))];
+
+        let tool = Tool::new("weather", object_schema())
+            .with_on_input_start(move |options| {
+                let recorded = Arc::clone(&start_recorded);
+                async move {
+                    recorded.lock().expect("recorded lock").push(json!({
+                        "type": "onInputStart",
+                        "toolCallId": options.tool_call_id,
+                        "context": options.context,
+                        "messages": options.messages,
+                        "abortSignalSet": options.abort_signal.is_some(),
+                        "sandbox": options
+                            .experimental_sandbox
+                            .as_ref()
+                            .map(|sandbox| sandbox.description().to_string())
+                    }));
+                }
+            })
+            .with_on_input_delta(move |options| {
+                let recorded = Arc::clone(&delta_recorded);
+                async move {
+                    recorded.lock().expect("recorded lock").push(json!({
+                        "type": "onInputDelta",
+                        "toolCallId": options.tool_call_id,
+                        "inputTextDelta": options.input_text_delta,
+                        "context": options.context,
+                        "messages": options.messages,
+                        "abortSignalSet": options.abort_signal.is_some(),
+                        "sandbox": options
+                            .experimental_sandbox
+                            .as_ref()
+                            .map(|sandbox| sandbox.description().to_string())
+                    }));
+                }
+            })
+            .with_on_input_available(move |options| {
+                let recorded = Arc::clone(&available_recorded);
+                async move {
+                    recorded.lock().expect("recorded lock").push(json!({
+                        "type": "onInputAvailable",
+                        "toolCallId": options.tool_call_id,
+                        "input": options.input,
+                        "context": options.context,
+                        "messages": options.messages,
+                        "abortSignalSet": options.abort_signal.is_some(),
+                        "sandbox": options
+                            .experimental_sandbox
+                            .as_ref()
+                            .map(|sandbox| sandbox.description().to_string())
+                    }));
+                }
+            });
+
+        assert!(tool.has_on_input_start());
+        assert!(tool.has_on_input_delta());
+        assert!(tool.has_on_input_available());
+
+        poll_ready(
+            tool.on_input_start(
+                ToolExecutionOptions::new("call-1", messages.clone())
+                    .with_context(json!({ "requestId": "req-1" }))
+                    .with_abort_signal(abort_controller.signal())
+                    .with_experimental_sandbox(Arc::clone(&sandbox)),
+            )
+            .expect("input start callback is configured"),
+        );
+        poll_ready(
+            tool.on_input_delta(
+                ToolInputDeltaOptions::new("call-1", messages.clone(), r#"{"city":""#)
+                    .with_context(json!({ "requestId": "req-1" }))
+                    .with_abort_signal(abort_controller.signal())
+                    .with_experimental_sandbox(Arc::clone(&sandbox)),
+            )
+            .expect("input delta callback is configured"),
+        );
+        poll_ready(
+            tool.on_input_available(
+                ToolInputAvailableOptions::new("call-1", messages, json!({ "city": "Brisbane" }))
+                    .with_context(json!({ "requestId": "req-1" }))
+                    .with_abort_signal(abort_controller.signal())
+                    .with_experimental_sandbox(sandbox),
+            )
+            .expect("input available callback is configured"),
+        );
+
+        assert_eq!(
+            recorded.lock().expect("recorded lock").as_slice(),
+            [
+                json!({
+                    "type": "onInputStart",
+                    "toolCallId": "call-1",
+                    "context": { "requestId": "req-1" },
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "Call the tool"
+                                }
+                            ]
+                        }
+                    ],
+                    "abortSignalSet": true,
+                    "sandbox": "workspace sandbox"
+                }),
+                json!({
+                    "type": "onInputDelta",
+                    "toolCallId": "call-1",
+                    "inputTextDelta": r#"{"city":""#,
+                    "context": { "requestId": "req-1" },
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "Call the tool"
+                                }
+                            ]
+                        }
+                    ],
+                    "abortSignalSet": true,
+                    "sandbox": "workspace sandbox"
+                }),
+                json!({
+                    "type": "onInputAvailable",
+                    "toolCallId": "call-1",
+                    "input": { "city": "Brisbane" },
+                    "context": { "requestId": "req-1" },
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "Call the tool"
+                                }
+                            ]
+                        }
+                    ],
+                    "abortSignalSet": true,
+                    "sandbox": "workspace sandbox"
+                })
+            ]
+        );
     }
 
     #[test]

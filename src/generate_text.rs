@@ -13,11 +13,11 @@ use crate::file_data::{FileData, FileDataContent};
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonSchema, JsonValue};
 use crate::language_model::{
-    FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
-    LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
-    LanguageModelCustomContent, LanguageModelCustomPart, LanguageModelFile, LanguageModelFileData,
-    LanguageModelFilePart, LanguageModelFinishReason, LanguageModelGenerateResult,
-    LanguageModelMessage, LanguageModelPrompt, LanguageModelReasoning,
+    FinishReason, InputTokenUsage, LanguageModel, LanguageModelAbortSignal,
+    LanguageModelAssistantContentPart, LanguageModelAssistantMessage, LanguageModelCallOptions,
+    LanguageModelContent, LanguageModelCustomContent, LanguageModelCustomPart, LanguageModelFile,
+    LanguageModelFileData, LanguageModelFilePart, LanguageModelFinishReason,
+    LanguageModelGenerateResult, LanguageModelMessage, LanguageModelPrompt, LanguageModelReasoning,
     LanguageModelReasoningEffort, LanguageModelReasoningFile, LanguageModelReasoningFilePart,
     LanguageModelReasoningPart, LanguageModelRequest, LanguageModelResponse,
     LanguageModelResponseFormat, LanguageModelSource, LanguageModelStreamPart, LanguageModelText,
@@ -36,8 +36,9 @@ use crate::provider::{
 use crate::provider::{ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{
     Base64DecodeError, ExperimentalSandbox, IdGeneratorOptions, Tool, ToolExecutionOptions,
-    ToolModelOutputOptions, ToolNeedsApprovalOptions, convert_base64_to_bytes,
-    convert_bytes_to_base64, create_id_generator, generate_id, prepare_tools_with_context,
+    ToolInputAvailableOptions, ToolInputDeltaOptions, ToolModelOutputOptions,
+    ToolNeedsApprovalOptions, convert_base64_to_bytes, convert_bytes_to_base64,
+    create_id_generator, generate_id, prepare_tools_with_context,
 };
 use crate::retry::DEFAULT_MAX_RETRIES;
 use crate::telemetry::{TelemetryDispatcher, TelemetryOptions, create_telemetry_dispatcher};
@@ -5366,6 +5367,16 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
             telemetry_dispatcher.on_language_model_call_end(&language_model_call_end_event);
         }
 
+        invoke_tool_input_available_callbacks_for_tool_calls(
+            &step.tool_calls,
+            &step_tools,
+            &step_prompt,
+            step_call_options.abort_signal.as_ref(),
+            step_experimental_sandbox.as_ref(),
+            &runtime_context,
+        )
+        .await;
+
         let tool_approvals = resolve_tool_approvals_for_step(
             &step.tool_calls,
             &step_tools,
@@ -6337,6 +6348,172 @@ fn validate_tool_execution_context(
         ),
     )
     .map(Some)
+}
+
+pub(crate) async fn invoke_tool_input_start_callback(
+    tool: Option<&Tool>,
+    tool_call_id: &str,
+    messages: &LanguageModelPrompt,
+    abort_signal: Option<&LanguageModelAbortSignal>,
+    experimental_sandbox: Option<&Arc<dyn ExperimentalSandbox>>,
+    runtime_context: &JsonObject,
+) {
+    let Some(tool) = tool else {
+        return;
+    };
+
+    let Some(callback) = tool.on_input_start(tool_callback_execution_options(
+        tool_call_id,
+        messages,
+        abort_signal,
+        experimental_sandbox,
+        runtime_context,
+    )) else {
+        return;
+    };
+
+    callback.await;
+}
+
+pub(crate) async fn invoke_tool_input_delta_callback(
+    tool: Option<&Tool>,
+    tool_call_id: &str,
+    input_text_delta: &str,
+    messages: &LanguageModelPrompt,
+    abort_signal: Option<&LanguageModelAbortSignal>,
+    experimental_sandbox: Option<&Arc<dyn ExperimentalSandbox>>,
+    runtime_context: &JsonObject,
+) {
+    let Some(tool) = tool else {
+        return;
+    };
+
+    let mut options =
+        ToolInputDeltaOptions::new(tool_call_id.to_string(), messages.clone(), input_text_delta);
+    options = attach_tool_input_delta_context(
+        options,
+        abort_signal,
+        experimental_sandbox,
+        runtime_context,
+    );
+
+    let Some(callback) = tool.on_input_delta(options) else {
+        return;
+    };
+
+    callback.await;
+}
+
+pub(crate) async fn invoke_tool_input_available_callback(
+    tool: Option<&Tool>,
+    tool_call_id: &str,
+    input: JsonValue,
+    messages: &LanguageModelPrompt,
+    abort_signal: Option<&LanguageModelAbortSignal>,
+    experimental_sandbox: Option<&Arc<dyn ExperimentalSandbox>>,
+    runtime_context: &JsonObject,
+) {
+    let Some(tool) = tool else {
+        return;
+    };
+
+    let mut options =
+        ToolInputAvailableOptions::new(tool_call_id.to_string(), messages.clone(), input);
+    options = attach_tool_input_available_context(
+        options,
+        abort_signal,
+        experimental_sandbox,
+        runtime_context,
+    );
+
+    let Some(callback) = tool.on_input_available(options) else {
+        return;
+    };
+
+    callback.await;
+}
+
+pub(crate) async fn invoke_tool_input_available_callbacks_for_tool_calls(
+    tool_calls: &[GenerateTextToolCall],
+    tools: &[Tool],
+    messages: &LanguageModelPrompt,
+    abort_signal: Option<&LanguageModelAbortSignal>,
+    experimental_sandbox: Option<&Arc<dyn ExperimentalSandbox>>,
+    runtime_context: &JsonObject,
+) {
+    for tool_call in tool_calls {
+        if tool_call.invalid == Some(true) {
+            continue;
+        }
+
+        let tool = tools.iter().find(|tool| tool.name == tool_call.tool_name);
+        invoke_tool_input_available_callback(
+            tool,
+            &tool_call.tool_call_id,
+            tool_call.input.clone(),
+            messages,
+            abort_signal,
+            experimental_sandbox,
+            runtime_context,
+        )
+        .await;
+    }
+}
+
+fn tool_callback_execution_options(
+    tool_call_id: &str,
+    messages: &LanguageModelPrompt,
+    abort_signal: Option<&LanguageModelAbortSignal>,
+    experimental_sandbox: Option<&Arc<dyn ExperimentalSandbox>>,
+    runtime_context: &JsonObject,
+) -> ToolExecutionOptions {
+    let mut options = ToolExecutionOptions::new(tool_call_id.to_string(), messages.clone())
+        .with_context(JsonValue::Object(runtime_context.clone()));
+
+    if let Some(abort_signal) = abort_signal {
+        options = options.with_abort_signal(abort_signal.clone());
+    }
+    if let Some(experimental_sandbox) = experimental_sandbox {
+        options = options.with_experimental_sandbox(Arc::clone(experimental_sandbox));
+    }
+
+    options
+}
+
+fn attach_tool_input_delta_context(
+    mut options: ToolInputDeltaOptions,
+    abort_signal: Option<&LanguageModelAbortSignal>,
+    experimental_sandbox: Option<&Arc<dyn ExperimentalSandbox>>,
+    runtime_context: &JsonObject,
+) -> ToolInputDeltaOptions {
+    options = options.with_context(JsonValue::Object(runtime_context.clone()));
+
+    if let Some(abort_signal) = abort_signal {
+        options = options.with_abort_signal(abort_signal.clone());
+    }
+    if let Some(experimental_sandbox) = experimental_sandbox {
+        options = options.with_experimental_sandbox(Arc::clone(experimental_sandbox));
+    }
+
+    options
+}
+
+fn attach_tool_input_available_context(
+    mut options: ToolInputAvailableOptions,
+    abort_signal: Option<&LanguageModelAbortSignal>,
+    experimental_sandbox: Option<&Arc<dyn ExperimentalSandbox>>,
+    runtime_context: &JsonObject,
+) -> ToolInputAvailableOptions {
+    options = options.with_context(JsonValue::Object(runtime_context.clone()));
+
+    if let Some(abort_signal) = abort_signal {
+        options = options.with_abort_signal(abort_signal.clone());
+    }
+    if let Some(experimental_sandbox) = experimental_sandbox {
+        options = options.with_experimental_sandbox(Arc::clone(experimental_sandbox));
+    }
+
+    options
 }
 
 pub(crate) fn should_continue_after_tool_results(
@@ -9767,6 +9944,68 @@ mod tests {
         assert!(end_events[0].tool_execution_ms <= result.steps[0].performance.step_time_ms);
         assert_eq!(end_events[0].tool_output, result.tool_results[0]);
         assert_eq!(end_events[0].tool_output.output["unit"], json!("celsius"));
+    }
+
+    #[test]
+    fn generate_text_invokes_tool_input_available_callback_for_tool_calls() {
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let runtime_context = JsonObject::from_iter([("requestId".to_string(), json!("req-1"))]);
+        let recorded = Arc::new(Mutex::new(Vec::<JsonValue>::new()));
+        let recorded_for_callback = Arc::clone(&recorded);
+        let model = FakeLanguageModel::new().with_content(vec![LanguageModelContent::ToolCall(
+            LanguageModelToolCall::new("call-1", "weather", r#"{"city":"Brisbane"}"#),
+        )]);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_runtime_context(runtime_context.clone())
+                .with_tool(Tool::new("weather", input_schema).with_on_input_available(
+                    move |options| {
+                        let recorded = Arc::clone(&recorded_for_callback);
+                        async move {
+                            recorded.lock().expect("recorded lock").push(json!({
+                                "toolCallId": options.tool_call_id,
+                                "input": options.input,
+                                "context": options.context,
+                                "messages": options.messages,
+                                "abortSignalSet": options.abort_signal.is_some()
+                            }));
+                        }
+                    },
+                )),
+        ));
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].input, json!({ "city": "Brisbane" }));
+        assert_eq!(
+            recorded.lock().expect("recorded lock").as_slice(),
+            [json!({
+                "toolCallId": "call-1",
+                "input": { "city": "Brisbane" },
+                "context": runtime_context,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Weather?"
+                            }
+                        ]
+                    }
+                ],
+                "abortSignalSet": false
+            })]
+        );
     }
 
     #[test]
