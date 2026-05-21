@@ -2142,6 +2142,242 @@ mod tests {
     }
 
     #[test]
+    fn convert_ui_messages_maps_provider_executed_tool_output_available() {
+        let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
+            "msg-1",
+            UiMessageRole::Assistant,
+        )
+        .with_part(json!({ "type": "step-start" }))
+        .with_part(json!({
+            "type": "text",
+            "text": "Let me calculate that for you.",
+            "state": "done"
+        }))
+        .with_part(json!({
+            "type": "tool-calculator",
+            "state": "output-available",
+            "toolCallId": "call1",
+            "input": { "operation": "add", "numbers": [1, 2] },
+            "output": "3",
+            "providerExecuted": true
+        }))])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Let me calculate that for you."
+                        },
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call1",
+                            "toolName": "calculator",
+                            "input": { "operation": "add", "numbers": [1, 2] },
+                            "providerExecuted": true
+                        },
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call1",
+                            "toolName": "calculator",
+                            "output": { "type": "text", "value": "3" }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_provider_executed_tool_output_error() {
+        let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
+            "msg-1",
+            UiMessageRole::Assistant,
+        )
+        .with_part(json!({ "type": "step-start" }))
+        .with_part(json!({
+            "type": "text",
+            "text": "Let me calculate that for you.",
+            "state": "done"
+        }))
+        .with_part(json!({
+            "type": "tool-calculator",
+            "state": "output-error",
+            "toolCallId": "call1",
+            "input": { "operation": "add", "numbers": [1, 2] },
+            "errorText": "Error: Invalid input",
+            "providerExecuted": true
+        }))])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Let me calculate that for you."
+                        },
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call1",
+                            "toolName": "calculator",
+                            "input": { "operation": "add", "numbers": [1, 2] },
+                            "providerExecuted": true
+                        },
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call1",
+                            "toolName": "calculator",
+                            "output": {
+                                "type": "error-json",
+                                "value": "Error: Invalid input"
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_propagates_provider_metadata_to_provider_executed_tool_result() {
+        let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
+            "msg-1",
+            UiMessageRole::Assistant,
+        )
+        .with_part(json!({ "type": "step-start" }))
+        .with_part(json!({
+            "type": "tool-calculator",
+            "state": "output-available",
+            "toolCallId": "call1",
+            "input": { "operation": "multiply", "numbers": [3, 4] },
+            "output": "12",
+            "providerExecuted": true,
+            "callProviderMetadata": {
+                "testProvider": {
+                    "executionTime": 75
+                }
+            }
+        }))])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call1",
+                            "toolName": "calculator",
+                            "input": {
+                                "operation": "multiply",
+                                "numbers": [3, 4]
+                            },
+                            "providerExecuted": true,
+                            "providerOptions": {
+                                "testProvider": {
+                                    "executionTime": 75
+                                }
+                            }
+                        },
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call1",
+                            "toolName": "calculator",
+                            "output": {
+                                "type": "text",
+                                "value": "12"
+                            },
+                            "providerOptions": {
+                                "testProvider": {
+                                    "executionTime": 75
+                                }
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_prefers_result_provider_metadata_for_provider_executed_tool_result() {
+        let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
+            "msg-1",
+            UiMessageRole::Assistant,
+        )
+        .with_part(json!({ "type": "step-start" }))
+        .with_part(json!({
+            "type": "tool-calculator",
+            "state": "output-available",
+            "toolCallId": "call1",
+            "input": { "operation": "multiply", "numbers": [3, 4] },
+            "output": "12",
+            "providerExecuted": true,
+            "callProviderMetadata": {
+                "testProvider": {
+                    "itemId": "call-item"
+                }
+            },
+            "resultProviderMetadata": {
+                "testProvider": {
+                    "itemId": "result-item"
+                }
+            }
+        }))])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call1",
+                            "toolName": "calculator",
+                            "input": {
+                                "operation": "multiply",
+                                "numbers": [3, 4]
+                            },
+                            "providerExecuted": true,
+                            "providerOptions": {
+                                "testProvider": {
+                                    "itemId": "call-item"
+                                }
+                            }
+                        },
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call1",
+                            "toolName": "calculator",
+                            "output": {
+                                "type": "text",
+                                "value": "12"
+                            },
+                            "providerOptions": {
+                                "testProvider": {
+                                    "itemId": "result-item"
+                                }
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn convert_ui_messages_maps_denied_approval_response_to_execution_denied_result() {
         let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
             "msg-1",
