@@ -128,6 +128,10 @@ still open.
    Rust before marking that package row `verified`. This is a hard minimum:
    Rust may add more tests for Rust-specific safety, typing, and failure modes,
    but it must never have fewer portable tests than upstream. Every
+   future iteration must prove that EVERY original portable TypeScript test
+   exists in Rust in the matching crate; extra Rust tests are allowed only on
+   top of that floor, never instead of it, and "more Rust tests overall" is not
+   acceptable when any original upstream test/case is missing. Every
    `*.test.ts`, `*.test.tsx`, `*.test-d.ts`, `*.test-d.tsx`, `*.spec.ts`, and
    `*.spec.tsx` case must have an equivalent Rust test in the matching 1:1
    crate, including table-driven cases, fixture/snapshot-equivalent cases,
