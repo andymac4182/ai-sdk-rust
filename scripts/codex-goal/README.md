@@ -45,6 +45,9 @@ one missing portable upstream test/case is incomplete.
 Future-iteration test note: EVERY portable test from the original TypeScript
 suite must exist in Rust in the matching crate. The Rust suite may include
 potentially more tests, but never fewer mapped original TypeScript tests.
+Every original TypeScript test is assumed required unless explicitly documented
+as JavaScript-only/non-portable. Potentially more Rust tests is acceptable, but
+no less mapped upstream coverage is acceptable.
 
 Future iterations must treat the original upstream TypeScript test inventory as
 the floor for every package. Every portable original TypeScript test/case must

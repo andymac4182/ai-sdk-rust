@@ -78,6 +78,9 @@ fewer mapped original TypeScript tests; extra Rust tests are additive only and
 do not offset or replace any missing upstream case. A crate is incomplete until
 the original TypeScript test inventory is fully represented in Rust,
 test-for-test or case-for-case, or explicitly documented as JavaScript-only.
+This is a named upstream-test inventory requirement, not a raw count
+comparison: every original TypeScript test is assumed required, every portable
+case must exist in Rust, and Rust may only add tests on top.
 
 ## Required Parity Ledger
 

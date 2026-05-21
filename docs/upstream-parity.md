@@ -116,6 +116,11 @@ TypeScript tests. Extra Rust tests are additive only. This is an
 inventory-containment rule, not a count-only rule: every original portable
 TypeScript test must exist in Rust, and then Rust may add more tests on top,
 but never less.
+Every original TypeScript test is assumed required until it is ported or
+explicitly documented as JavaScript-only/non-portable. The Rust suite must be a
+superset of the original portable TypeScript test inventory: potentially more
+Rust tests, but no missing original portable TypeScript tests and no smaller
+mapped upstream inventory.
 Read EVERY literally: future iterations must enumerate the original TypeScript
 tests first, port each portable case into Rust, document any JavaScript-only
 exception, and only then count extra Rust-specific tests as additive coverage.
