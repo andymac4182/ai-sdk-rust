@@ -3685,11 +3685,12 @@ fn openai_compatible_stream_result_from_response(
                 if value.get("error").is_some() {
                     finish_reason = LanguageModelFinishReason {
                         unified: FinishReason::Error,
-                        raw: Some("openai-compatible-error".to_string()),
+                        raw: None,
                     };
-                    stream.push(openai_compatible_stream_error(
-                        openai_compatible_error_message(&value),
-                        Some(&raw_value.to_string()),
+                    stream.push(LanguageModelStreamPart::Error(
+                        LanguageModelErrorStreamPart::new(JsonValue::String(
+                            openai_compatible_error_message(&value),
+                        )),
                     ));
                     continue;
                 }
@@ -4834,6 +4835,16 @@ mod tests {
         OpenAICompatibleChatLanguageModel,
         Arc<Mutex<Option<ProviderApiRequest>>>,
     ) {
+        openai_compatible_chat_stream_test_model_with_headers(response_body, Headers::new())
+    }
+
+    fn openai_compatible_chat_stream_test_model_with_headers(
+        response_body: impl Into<String>,
+        headers: Headers,
+    ) -> (
+        OpenAICompatibleChatLanguageModel,
+        Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) {
         let response_body = response_body.into();
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
@@ -4848,12 +4859,14 @@ mod tests {
                     200,
                     "OK",
                     response_body,
-                ))))
+                )
+                .with_headers(headers.clone()))))
             });
-        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
-            "test-provider",
-            "https://my.api.com/v1",
-        ))
+        let model = OpenAICompatibleProvider::from_settings(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://my.api.com/v1")
+                .with_api_key("test-api-key")
+                .with_header("Custom-Provider-Header", "provider-header-value"),
+        )
         .with_transport(transport)
         .chat_model("grok-3");
 
@@ -8840,6 +8853,551 @@ mod tests {
         assert_eq!(
             headers.get("content-type").map(String::as_str),
             Some("application/json")
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_stream_streams_text_content() {
+        let (model, _captured_request) = openai_compatible_chat_stream_test_model(sse_body([
+            json!({
+                "id": "chatcmpl-stream-test",
+                "object": "chat.completion.chunk",
+                "created": 1702657020,
+                "model": "grok-3",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": ""
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-stream-test",
+                "object": "chat.completion.chunk",
+                "created": 1702657020,
+                "model": "grok-3",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "content": "Hello"
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-stream-test",
+                "object": "chat.completion.chunk",
+                "created": 1702657020,
+                "model": "grok-3",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "content": ", World!"
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 18,
+                    "completion_tokens": 2
+                }
+            }),
+        ]));
+
+        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(
+            openai_compatible_chat_prompt_messages(),
+        )));
+
+        assert!(matches!(
+            result.stream.first(),
+            Some(LanguageModelStreamPart::StreamStart(start)) if start.warnings.is_empty()
+        ));
+        assert!(result.stream.iter().any(
+            |part| matches!(part, LanguageModelStreamPart::TextStart(start) if start.id == "txt-0")
+        ));
+        assert_eq!(
+            result
+                .stream
+                .iter()
+                .filter_map(|part| match part {
+                    LanguageModelStreamPart::TextDelta(delta) => Some(delta.delta.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["Hello", ", World!"]
+        );
+        assert!(matches!(
+            openai_compatible_chat_stream_finish(&result.stream),
+            finish if finish.finish_reason.unified == FinishReason::Stop
+                && finish.usage.input_tokens.total == Some(18)
+                && finish.usage.output_tokens.total == Some(2)
+        ));
+    }
+
+    #[test]
+    fn openai_compatible_chat_stream_exposes_raw_response_headers() {
+        let (model, _captured_request) = openai_compatible_chat_stream_test_model_with_headers(
+            openai_compatible_chat_empty_stream_body(),
+            Headers::from([
+                ("cache-control".to_string(), "no-cache".to_string()),
+                ("connection".to_string(), "keep-alive".to_string()),
+                ("content-type".to_string(), "text/event-stream".to_string()),
+                ("test-header".to_string(), "test-value".to_string()),
+            ]),
+        );
+
+        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(
+            openai_compatible_chat_prompt_messages(),
+        )));
+
+        assert_eq!(
+            result.response.and_then(|response| response.headers),
+            Some(Headers::from([
+                ("cache-control".to_string(), "no-cache".to_string()),
+                ("connection".to_string(), "keep-alive".to_string()),
+                ("content-type".to_string(), "text/event-stream".to_string()),
+                ("test-header".to_string(), "test-value".to_string())
+            ]))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_stream_respects_include_usage_option() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let response_body = openai_compatible_chat_empty_stream_body();
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+                let response_body = response_body.clone();
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    response_body,
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(
+            OpenAICompatibleProviderSettings::new("test-provider", "https://my.api.com/v1")
+                .with_include_usage(true),
+        )
+        .with_transport(transport)
+        .chat_model("grok-3");
+
+        let _result = poll_ready(model.do_stream(LanguageModelCallOptions::new(
+            openai_compatible_chat_prompt_messages(),
+        )));
+
+        let body = captured_openai_compatible_chat_request_body(&captured_request);
+        assert_eq!(body.get("stream"), Some(&json!(true)));
+        assert_eq!(
+            body.get("stream_options"),
+            Some(&json!({ "include_usage": true }))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_streams_reasoning_content_before_text_deltas() {
+        let (model, _captured_request) = openai_compatible_chat_stream_test_model(sse_body([
+            json!({
+                "id": "chatcmpl-reasoning",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": "Let me think"
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-reasoning",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "content": "",
+                            "reasoning_content": " about this"
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-reasoning",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "content": "Here's"
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 18,
+                    "completion_tokens": 439
+                }
+            }),
+        ]));
+
+        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(
+            openai_compatible_chat_prompt_messages(),
+        )));
+
+        assert_eq!(
+            result
+                .stream
+                .iter()
+                .filter_map(|part| match part {
+                    LanguageModelStreamPart::ReasoningDelta(delta) => Some(delta.delta.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["Let me think", " about this"]
+        );
+        let reasoning_end = result
+            .stream
+            .iter()
+            .position(|part| matches!(part, LanguageModelStreamPart::ReasoningEnd(_)))
+            .expect("reasoning end is emitted");
+        let text_start = result
+            .stream
+            .iter()
+            .position(|part| matches!(part, LanguageModelStreamPart::TextStart(_)))
+            .expect("text start is emitted");
+        assert!(reasoning_end < text_start);
+    }
+
+    #[test]
+    fn openai_compatible_chat_streams_reasoning_from_reasoning_field_when_reasoning_content_missing()
+     {
+        let (model, _captured_request) = openai_compatible_chat_stream_test_model(sse_body([
+            json!({
+                "id": "chatcmpl-reasoning",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning": "Let me consider"
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-reasoning",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "content": "My answer is"
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 18,
+                    "completion_tokens": 439
+                }
+            }),
+        ]));
+
+        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(
+            openai_compatible_chat_prompt_messages(),
+        )));
+
+        assert_eq!(
+            result
+                .stream
+                .iter()
+                .filter_map(|part| match part {
+                    LanguageModelStreamPart::ReasoningDelta(delta) => Some(delta.delta.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["Let me consider"]
+        );
+        assert_eq!(
+            result
+                .stream
+                .iter()
+                .filter_map(|part| match part {
+                    LanguageModelStreamPart::TextDelta(delta) => Some(delta.delta.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["My answer is"]
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_stream_prefers_reasoning_content_over_reasoning_field() {
+        let (model, _captured_request) = openai_compatible_chat_stream_test_model(sse_body([
+            json!({
+                "id": "chatcmpl-reasoning",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": "From reasoning_content",
+                            "reasoning": "From reasoning"
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-reasoning",
+                "created": 1711357598,
+                "model": "grok-3",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "content": "Final response"
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            }),
+            json!({
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 18,
+                    "completion_tokens": 439
+                }
+            }),
+        ]));
+
+        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(
+            openai_compatible_chat_prompt_messages(),
+        )));
+
+        assert_eq!(
+            result
+                .stream
+                .iter()
+                .filter_map(|part| match part {
+                    LanguageModelStreamPart::ReasoningDelta(delta) => Some(delta.delta.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["From reasoning_content"]
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_stream_handles_error_stream_parts() {
+        let (model, _captured_request) = openai_compatible_chat_stream_test_model(
+            "data: {\"error\":{\"message\":\"Incorrect API key provided: as***T7. You can obtain an API key from https://console.api.com.\",\"code\":\"Client specified an invalid argument\"}}\n\ndata: [DONE]\n\n",
+        );
+
+        let result = poll_ready(model.do_stream(LanguageModelCallOptions::new(
+            openai_compatible_chat_prompt_messages(),
+        )));
+
+        assert!(matches!(
+            result.stream.first(),
+            Some(LanguageModelStreamPart::StreamStart(start)) if start.warnings.is_empty()
+        ));
+        assert!(matches!(
+            result.stream.get(1),
+            Some(LanguageModelStreamPart::Error(error))
+                if error.error
+                    == json!("Incorrect API key provided: as***T7. You can obtain an API key from https://console.api.com.")
+        ));
+        assert!(matches!(
+            result.stream.last(),
+            Some(LanguageModelStreamPart::Finish(finish))
+                if finish.finish_reason.unified == FinishReason::Error
+                    && finish.finish_reason.raw.is_none()
+                    && finish.usage == Default::default()
+        ));
+    }
+
+    #[test]
+    fn openai_compatible_chat_stream_passes_messages_and_model() {
+        let (model, captured_request) =
+            openai_compatible_chat_stream_test_model(openai_compatible_chat_empty_stream_body());
+
+        let _result = poll_ready(model.do_stream(LanguageModelCallOptions::new(
+            openai_compatible_chat_prompt_messages(),
+        )));
+
+        assert_eq!(
+            captured_openai_compatible_chat_request_body(&captured_request),
+            json!({
+                "model": "grok-3",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "stream": true
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_stream_passes_headers() {
+        let (model, captured_request) =
+            openai_compatible_chat_stream_test_model(openai_compatible_chat_empty_stream_body());
+
+        let _result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_header("Custom-Request-Header", "request-header-value"),
+            ),
+        );
+
+        let headers = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .headers;
+        assert_eq!(
+            headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            headers.get("custom-provider-header").map(String::as_str),
+            Some("provider-header-value")
+        );
+        assert_eq!(
+            headers.get("custom-request-header").map(String::as_str),
+            Some("request-header-value")
+        );
+        assert_eq!(
+            headers.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_stream_includes_provider_specific_options() {
+        let (model, captured_request) =
+            openai_compatible_chat_stream_test_model(openai_compatible_chat_empty_stream_body());
+
+        let _result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_provider_options(test_provider_options(json!({
+                        "test-provider": {
+                            "someCustomOption": "test-value"
+                        }
+                    }))),
+            ),
+        );
+
+        assert_eq!(
+            captured_openai_compatible_chat_request_body(&captured_request),
+            json!({
+                "model": "grok-3",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "stream": true,
+                "someCustomOption": "test-value"
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_stream_does_not_include_provider_specific_options_for_different_provider()
+     {
+        let (model, captured_request) =
+            openai_compatible_chat_stream_test_model(openai_compatible_chat_empty_stream_body());
+
+        let _result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_provider_options(test_provider_options(json!({
+                        "notThisProviderName": {
+                            "someCustomOption": "test-value"
+                        }
+                    }))),
+            ),
+        );
+
+        assert_eq!(
+            captured_openai_compatible_chat_request_body(&captured_request),
+            json!({
+                "model": "grok-3",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ],
+                "stream": true
+            })
         );
     }
 
