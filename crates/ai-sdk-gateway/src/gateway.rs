@@ -1062,6 +1062,7 @@ impl GatewayProvider {
     /// Creates a Gateway image model.
     pub fn image_model(&self, model_id: impl Into<String>) -> GatewayImageModel {
         GatewayImageModel {
+            provider_id: GATEWAY_PROVIDER_ID.to_string(),
             model_id: model_id.into(),
             settings: self.settings.clone(),
             transport: Arc::clone(&self.transport),
@@ -1302,6 +1303,7 @@ pub struct GatewayEmbeddingModel {
 /// Native AI SDK Gateway image model.
 #[derive(Clone)]
 pub struct GatewayImageModel {
+    provider_id: String,
     model_id: String,
     settings: GatewayProviderSettings,
     transport: GatewayTransport,
@@ -1696,6 +1698,12 @@ impl GatewayImageModel {
         self
     }
 
+    /// Returns a copy of this model with an explicit provider identifier.
+    pub fn with_provider_id(mut self, provider_id: impl Into<String>) -> Self {
+        self.provider_id = provider_id.into();
+        self
+    }
+
     async fn do_generate_result(&self, options: ImageModelCallOptions) -> ImageModelResult {
         let request_body = gateway_image_request_body(&options);
         let request_headers = self.request_headers(options.headers.as_ref());
@@ -2032,7 +2040,7 @@ impl ImageModel for GatewayImageModel {
     }
 
     fn provider(&self) -> &str {
-        GATEWAY_PROVIDER_ID
+        &self.provider_id
     }
 
     fn model_id(&self) -> &str {
@@ -3597,23 +3605,24 @@ fn provider_api_response(
 mod tests {
     use super::{
         DEFAULT_GATEWAY_BASE_URL, GatewayAuthMethod, GatewayCredentialType, GatewayEmbeddingModel,
-        GatewayGenerationInfoParams, GatewayModelType, GatewayProvider, GatewayProviderOptions,
-        GatewayProviderOptionsSort, GatewayProviderSettings, GatewayProviderTimeouts,
-        GatewayRerankingModel, GatewaySpendReportDatePart, GatewaySpendReportGroupBy,
-        GatewaySpendReportParams, GatewayTransport, GatewayTransportFuture, create_gateway,
-        gateway, gateway_base_url, gateway_observability_headers_with_env,
-        gateway_provider_headers_with_env, gateway_provider_options,
-        get_gateway_auth_token_with_env, metadata_cache_refresh_duration,
+        GatewayGenerationInfoParams, GatewayImageModel, GatewayModelType, GatewayProvider,
+        GatewayProviderOptions, GatewayProviderOptionsSort, GatewayProviderSettings,
+        GatewayProviderTimeouts, GatewayRerankingModel, GatewaySpendReportDatePart,
+        GatewaySpendReportGroupBy, GatewaySpendReportParams, GatewayTransport,
+        GatewayTransportFuture, create_gateway, gateway, gateway_base_url,
+        gateway_observability_headers_with_env, gateway_provider_headers_with_env,
+        gateway_provider_options, get_gateway_auth_token_with_env, metadata_cache_refresh_duration,
         try_gateway_provider_headers_with_env, try_gateway_provider_options,
     };
     use ai_sdk_provider::{
         EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelUsage, FileData, FileDataContent,
-        FinishReason, Headers, ImageModel, ImageModelCallOptions, ImageModelFile, JsonObject,
-        JsonValue, LanguageModel, LanguageModelAbortController, LanguageModelCallOptions,
-        LanguageModelContent, LanguageModelFileData, LanguageModelFilePart, LanguageModelMessage,
-        LanguageModelSource, LanguageModelStreamPart, LanguageModelTextPart,
-        LanguageModelUserContentPart, LanguageModelUserMessage, Provider, ProviderMetadata,
-        ProviderOptions, ProviderWithRerankingModel, ProviderWithVideoModel, RerankingModel,
+        FinishReason, Headers, ImageModel, ImageModelCallOptions, ImageModelFile,
+        ImageModelProviderMetadata, JsonObject, JsonValue, LanguageModel,
+        LanguageModelAbortController, LanguageModelCallOptions, LanguageModelContent,
+        LanguageModelFileData, LanguageModelFilePart, LanguageModelMessage, LanguageModelSource,
+        LanguageModelStreamPart, LanguageModelTextPart, LanguageModelUserContentPart,
+        LanguageModelUserMessage, Provider, ProviderMetadata, ProviderOptions,
+        ProviderWithRerankingModel, ProviderWithVideoModel, RerankingModel,
         RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
         SpecificationVersion, VideoModel, VideoModelCallOptions, VideoModelFile, Warning,
     };
@@ -4035,6 +4044,75 @@ mod tests {
             .and_then(ProviderApiRequestBody::as_text)
             .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
             .expect("reranking request body is JSON")
+    }
+
+    const GATEWAY_IMAGE_TEST_MODEL_ID: &str = "google/imagen-4.0-generate";
+
+    fn capturing_image_transport(
+        status_code: u16,
+        status_text: impl Into<String>,
+        body: impl Into<String>,
+        headers: Option<Headers>,
+    ) -> (GatewayTransport, Arc<Mutex<Option<ProviderApiRequest>>>) {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let status_text = status_text.into();
+        let body = body.into();
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            let mut response =
+                ProviderApiResponse::text(status_code, status_text.clone(), body.clone());
+
+            if let Some(headers) = headers.clone() {
+                response = response.with_headers(headers);
+            }
+
+            Box::pin(ready(Ok(response)))
+        });
+
+        (transport, captured_request)
+    }
+
+    fn captured_image_request(
+        captured_request: &Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) -> ProviderApiRequest {
+        captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+    }
+
+    fn gateway_image_test_model(
+        transport: GatewayTransport,
+        model_id: impl Into<String>,
+    ) -> GatewayImageModel {
+        GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport)
+        .image_model(model_id)
+    }
+
+    fn gateway_image_request_json(request: &ProviderApiRequest) -> JsonValue {
+        request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("image request body is JSON")
+    }
+
+    fn gateway_image_success_response_body() -> String {
+        json!({
+            "images": ["base64-image-1"]
+        })
+        .to_string()
     }
 
     fn assert_auth_token_case(
@@ -6898,6 +6976,1089 @@ mod tests {
                     message: "Gateway routed request".to_string(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_creates_instance_with_correct_properties() {
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .image_model(GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        assert_eq!(model.model_id(), GATEWAY_IMAGE_TEST_MODEL_ID);
+        assert_eq!(model.provider(), "gateway");
+        assert_eq!(model.specification_version(), SpecificationVersion::V4);
+        assert_eq!(poll_ready(model.max_images_per_call()), Some(usize::MAX));
+    }
+
+    #[test]
+    fn gateway_image_model_avoids_client_side_splitting_even_for_bfl_models() {
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .image_model("bfl/flux-pro-1.1");
+
+        assert_eq!(poll_ready(model.max_images_per_call()), Some(usize::MAX));
+    }
+
+    #[test]
+    fn gateway_image_model_accepts_custom_provider_name() {
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+        )
+        .image_model(GATEWAY_IMAGE_TEST_MODEL_ID)
+        .with_provider_id("custom-gateway");
+
+        assert_eq!(model.provider(), "custom-gateway");
+    }
+
+    #[test]
+    fn gateway_image_model_sends_correct_request_headers() {
+        let (transport, captured_request) =
+            capturing_image_transport(200, "OK", gateway_image_success_response_body(), None);
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result = poll_ready(model.do_generate(
+            ImageModelCallOptions::new(1).with_prompt("A beautiful sunset over mountains"),
+        ));
+        assert_eq!(result.images.len(), 1);
+
+        let request = captured_image_request(&captured_request);
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-token")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-image-model-specification-version")
+                .map(String::as_str),
+            Some("4")
+        );
+        assert_eq!(
+            request.headers.get("ai-model-id").map(String::as_str),
+            Some(GATEWAY_IMAGE_TEST_MODEL_ID)
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_sends_correct_request_body_with_all_parameters() {
+        let (transport, captured_request) = capturing_image_transport(
+            200,
+            "OK",
+            json!({ "images": ["base64-1", "base64-2"] }).to_string(),
+            None,
+        );
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "vertex": { "safetySettings": "block_none" }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(2)
+                    .with_prompt("A cat playing piano")
+                    .with_size("1024x1024")
+                    .with_aspect_ratio("16:9")
+                    .with_seed(42)
+                    .with_provider_options(provider_options),
+            ),
+        );
+        assert_eq!(result.images.len(), 2);
+
+        let request = captured_image_request(&captured_request);
+        assert_eq!(
+            gateway_image_request_json(&request),
+            json!({
+                "prompt": "A cat playing piano",
+                "n": 2,
+                "size": "1024x1024",
+                "aspectRatio": "16:9",
+                "seed": 42,
+                "providerOptions": {
+                    "vertex": { "safetySettings": "block_none" }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_omits_optional_parameters_when_not_provided() {
+        let (transport, captured_request) =
+            capturing_image_transport(200, "OK", gateway_image_success_response_body(), None);
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result = poll_ready(
+            model.do_generate(ImageModelCallOptions::new(1).with_prompt("A simple prompt")),
+        );
+        assert_eq!(result.images.len(), 1);
+
+        let request = captured_image_request(&captured_request);
+        assert_eq!(
+            gateway_image_request_json(&request),
+            json!({
+                "prompt": "A simple prompt",
+                "n": 1,
+                "providerOptions": {}
+            })
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_returns_images_array_correctly() {
+        let (transport, _) = capturing_image_transport(
+            200,
+            "OK",
+            json!({ "images": ["base64-image-1", "base64-image-2"] }).to_string(),
+            None,
+        );
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(ImageModelCallOptions::new(2).with_prompt("Test prompt")));
+
+        assert_eq!(
+            result.images,
+            vec![
+                FileDataContent::Base64("base64-image-1".to_string()),
+                FileDataContent::Base64("base64-image-2".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_returns_provider_metadata_correctly() {
+        let (transport, _) = capturing_image_transport(
+            200,
+            "OK",
+            json!({
+                "images": ["base64-1", "base64-2"],
+                "providerMetadata": {
+                    "vertex": {
+                        "images": [
+                            { "revisedPrompt": "Revised prompt 1" },
+                            { "revisedPrompt": "Revised prompt 2" }
+                        ]
+                    },
+                    "gateway": {
+                        "routing": { "provider": "vertex" },
+                        "cost": "0.08"
+                    }
+                }
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(ImageModelCallOptions::new(2).with_prompt("Test prompt")));
+        let metadata = result.provider_metadata.expect("metadata is returned");
+
+        assert_eq!(
+            metadata
+                .get("vertex")
+                .and_then(|entry| entry.images.first())
+                .and_then(|image| image.get("revisedPrompt"))
+                .and_then(JsonValue::as_str),
+            Some("Revised prompt 1")
+        );
+        assert_eq!(
+            metadata
+                .get("gateway")
+                .and_then(|entry| entry.extra.get("routing"))
+                .and_then(|routing| routing.get("provider"))
+                .and_then(JsonValue::as_str),
+            Some("vertex")
+        );
+        assert_eq!(
+            metadata
+                .get("gateway")
+                .and_then(|entry| entry.extra.get("cost"))
+                .and_then(JsonValue::as_str),
+            Some("0.08")
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_handles_provider_metadata_without_images_field() {
+        let (transport, _) = capturing_image_transport(
+            200,
+            "OK",
+            json!({
+                "images": ["base64-1"],
+                "providerMetadata": {
+                    "gateway": {
+                        "routing": { "provider": "vertex" },
+                        "cost": "0.04"
+                    }
+                }
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(ImageModelCallOptions::new(1).with_prompt("Test prompt")));
+        let metadata = result.provider_metadata.expect("metadata is returned");
+        let gateway_metadata = metadata.get("gateway").expect("gateway metadata exists");
+
+        assert!(gateway_metadata.images.is_empty());
+        assert_eq!(
+            gateway_metadata
+                .extra
+                .get("routing")
+                .and_then(|routing| routing.get("provider"))
+                .and_then(JsonValue::as_str),
+            Some("vertex")
+        );
+        assert_eq!(
+            gateway_metadata
+                .extra
+                .get("cost")
+                .and_then(JsonValue::as_str),
+            Some("0.04")
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_handles_empty_provider_metadata() {
+        let (transport, _) = capturing_image_transport(
+            200,
+            "OK",
+            json!({
+                "images": ["base64-1"],
+                "providerMetadata": {}
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(ImageModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert_eq!(
+            result.provider_metadata.expect("metadata is returned"),
+            ImageModelProviderMetadata::new()
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_handles_undefined_provider_metadata() {
+        let (transport, _) = capturing_image_transport(
+            200,
+            "OK",
+            json!({ "images": ["base64-1"] }).to_string(),
+            None,
+        );
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(ImageModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert!(result.provider_metadata.is_none());
+    }
+
+    #[test]
+    fn gateway_image_model_returns_warnings_when_provided() {
+        let (transport, _) = capturing_image_transport(
+            200,
+            "OK",
+            json!({
+                "images": ["base64-1"],
+                "warnings": [{ "type": "other", "message": "Setting not supported" }]
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(ImageModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Other {
+                message: "Setting not supported".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_returns_unsupported_warnings_correctly() {
+        let (transport, _) = capturing_image_transport(
+            200,
+            "OK",
+            json!({
+                "images": ["base64-1"],
+                "warnings": [{
+                    "type": "unsupported",
+                    "feature": "size",
+                    "details": "This model does not support the `size` option. Use `aspectRatio` instead."
+                }]
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Test prompt")
+                    .with_size("1024x1024"),
+            ),
+        );
+
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Unsupported {
+                feature: "size".to_string(),
+                details: Some(
+                    "This model does not support the `size` option. Use `aspectRatio` instead."
+                        .to_string()
+                )
+            }]
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_returns_compatibility_warnings_correctly() {
+        let (transport, _) = capturing_image_transport(
+            200,
+            "OK",
+            json!({
+                "images": ["base64-1"],
+                "warnings": [{
+                    "type": "compatibility",
+                    "feature": "seed",
+                    "details": "Seed support is approximate for this model."
+                }]
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Test prompt")
+                    .with_seed(42),
+            ),
+        );
+
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Compatibility {
+                feature: "seed".to_string(),
+                details: Some("Seed support is approximate for this model.".to_string())
+            }]
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_handles_mixed_warning_types() {
+        let (transport, _) = capturing_image_transport(
+            200,
+            "OK",
+            json!({
+                "images": ["base64-1"],
+                "warnings": [
+                    { "type": "unsupported", "feature": "size" },
+                    {
+                        "type": "compatibility",
+                        "feature": "seed",
+                        "details": "Approximate seed support."
+                    },
+                    { "type": "other", "message": "Rate limit approaching." }
+                ]
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Test prompt")
+                    .with_size("1024x1024")
+                    .with_seed(42),
+            ),
+        );
+
+        assert_eq!(
+            result.warnings,
+            vec![
+                Warning::Unsupported {
+                    feature: "size".to_string(),
+                    details: None
+                },
+                Warning::Compatibility {
+                    feature: "seed".to_string(),
+                    details: Some("Approximate seed support.".to_string())
+                },
+                Warning::Other {
+                    message: "Rate limit approaching.".to_string()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_returns_empty_warnings_array_when_not_provided() {
+        let (transport, _) = capturing_image_transport(
+            200,
+            "OK",
+            json!({ "images": ["base64-1"] }).to_string(),
+            None,
+        );
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(ImageModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn gateway_image_model_includes_response_metadata() {
+        let (transport, _) = capturing_image_transport(
+            200,
+            "OK",
+            json!({ "images": ["base64-1"] }).to_string(),
+            Some(Headers::from([(
+                "x-request-id".to_string(),
+                "req_image_123".to_string(),
+            )])),
+        );
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(ImageModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert_eq!(result.response.model_id, GATEWAY_IMAGE_TEST_MODEL_ID);
+        assert!(result.response.timestamp <= time::OffsetDateTime::now_utc());
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("req_image_123")
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_returns_usage_when_provided() {
+        let (transport, _) = capturing_image_transport(
+            200,
+            "OK",
+            json!({
+                "images": ["base64-1"],
+                "usage": {
+                    "inputTokens": 27,
+                    "outputTokens": 6240,
+                    "totalTokens": 6267
+                }
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(ImageModelCallOptions::new(1).with_prompt("Test prompt")));
+        let usage = result.usage.expect("usage is returned");
+
+        assert_eq!(usage.input_tokens, Some(27));
+        assert_eq!(usage.output_tokens, Some(6240));
+        assert_eq!(usage.total_tokens, Some(6267));
+    }
+
+    #[test]
+    fn gateway_image_model_returns_usage_with_partial_token_counts() {
+        let (transport, _) = capturing_image_transport(
+            200,
+            "OK",
+            json!({
+                "images": ["base64-1"],
+                "usage": { "inputTokens": 10 }
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(ImageModelCallOptions::new(1).with_prompt("Test prompt")));
+        let usage = result.usage.expect("usage is returned");
+
+        assert_eq!(usage.input_tokens, Some(10));
+        assert_eq!(usage.output_tokens, None);
+        assert_eq!(usage.total_tokens, None);
+    }
+
+    #[test]
+    fn gateway_image_model_does_not_include_usage_when_not_provided() {
+        let (transport, _) = capturing_image_transport(
+            200,
+            "OK",
+            json!({ "images": ["base64-1"] }).to_string(),
+            None,
+        );
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(ImageModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert!(result.usage.is_none());
+    }
+
+    #[test]
+    fn gateway_image_model_merges_custom_headers_with_config_headers() {
+        let (transport, captured_request) =
+            capturing_image_transport(200, "OK", gateway_image_success_response_body(), None);
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token")
+                .with_header("x-provider-header", "provider-value"),
+        )
+        .with_transport(transport)
+        .image_model(GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Test prompt")
+                    .with_header("X-Custom-Header", "custom-value"),
+            ),
+        );
+        assert_eq!(result.images.len(), 1);
+
+        let request = captured_image_request(&captured_request);
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-token")
+        );
+        assert_eq!(
+            request.headers.get("x-provider-header").map(String::as_str),
+            Some("provider-value")
+        );
+        assert_eq!(
+            request.headers.get("x-custom-header").map(String::as_str),
+            Some("custom-value")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-image-model-specification-version")
+                .map(String::as_str),
+            Some("4")
+        );
+        assert_eq!(
+            request.headers.get("ai-model-id").map(String::as_str),
+            Some(GATEWAY_IMAGE_TEST_MODEL_ID)
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_includes_o11y_headers() {
+        let (transport, captured_request) =
+            capturing_image_transport(200, "OK", gateway_image_success_response_body(), None);
+        let model = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token")
+                .with_vercel_request_id("dpl_123"),
+        )
+        .with_transport(transport)
+        .image_model(GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(ImageModelCallOptions::new(1).with_prompt("Test prompt")));
+        assert_eq!(result.images.len(), 1);
+
+        let request = captured_image_request(&captured_request);
+        assert_eq!(
+            request
+                .headers
+                .get("ai-o11y-request-id")
+                .map(String::as_str),
+            Some("dpl_123")
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_passes_abort_signal_to_fetch() {
+        let (transport, captured_request) =
+            capturing_image_transport(200, "OK", gateway_image_success_response_body(), None);
+        let abort_controller = LanguageModelAbortController::new();
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Test prompt")
+                    .with_abort_signal(abort_controller.signal()),
+            ),
+        );
+        assert_eq!(result.images.len(), 1);
+
+        let request = captured_image_request(&captured_request);
+        assert_request_tracks_abort_signal(&request, &abort_controller);
+    }
+
+    #[test]
+    fn gateway_image_model_handles_api_errors_correctly() {
+        let (transport, _) = capturing_image_transport(
+            400,
+            "Bad Request",
+            json!({
+                "error": {
+                    "message": "Invalid request",
+                    "code": "invalid_request"
+                }
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(ImageModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert!(result.images.is_empty());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.extra.get("errorMessage"))
+                .and_then(JsonValue::as_str),
+            Some("Invalid request")
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.extra.get("statusCode"))
+                .and_then(JsonValue::as_u64),
+            Some(400)
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_handles_authentication_errors() {
+        let (transport, _) = capturing_image_transport(
+            401,
+            "Unauthorized",
+            json!({
+                "error": {
+                    "message": "Unauthorized",
+                    "code": "unauthorized"
+                }
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(ImageModelCallOptions::new(1).with_prompt("Test prompt")));
+
+        assert!(result.images.is_empty());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.extra.get("errorMessage"))
+                .and_then(JsonValue::as_str),
+            Some("Unauthorized")
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.extra.get("statusCode"))
+                .and_then(JsonValue::as_u64),
+            Some(401)
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_includes_provider_options_object_in_request_body() {
+        let (transport, captured_request) =
+            capturing_image_transport(200, "OK", gateway_image_success_response_body(), None);
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "vertex": { "safetySettings": "block_none" },
+            "openai": { "style": "vivid" }
+        }))
+        .expect("provider options deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Test prompt")
+                    .with_provider_options(provider_options),
+            ),
+        );
+        assert_eq!(result.images.len(), 1);
+
+        let request = captured_image_request(&captured_request);
+        assert_eq!(
+            gateway_image_request_json(&request),
+            json!({
+                "prompt": "Test prompt",
+                "n": 1,
+                "providerOptions": {
+                    "openai": { "style": "vivid" },
+                    "vertex": { "safetySettings": "block_none" }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_handles_empty_provider_options() {
+        let (transport, captured_request) =
+            capturing_image_transport(200, "OK", gateway_image_success_response_body(), None);
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(ImageModelCallOptions::new(1).with_prompt("Test prompt")));
+        assert_eq!(result.images.len(), 1);
+
+        let request = captured_image_request(&captured_request);
+        assert_eq!(
+            gateway_image_request_json(&request),
+            json!({
+                "prompt": "Test prompt",
+                "n": 1,
+                "providerOptions": {}
+            })
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_handles_different_model_ids() {
+        let (transport, captured_request) =
+            capturing_image_transport(200, "OK", gateway_image_success_response_body(), None);
+        let model = gateway_image_test_model(transport, "openai/dall-e-3");
+
+        let result =
+            poll_ready(model.do_generate(ImageModelCallOptions::new(1).with_prompt("Test prompt")));
+        assert_eq!(result.images.len(), 1);
+
+        let request = captured_image_request(&captured_request);
+        assert_eq!(
+            request.headers.get("ai-model-id").map(String::as_str),
+            Some("openai/dall-e-3")
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_handles_complex_provider_metadata_with_multiple_providers() {
+        let (transport, _) = capturing_image_transport(
+            200,
+            "OK",
+            json!({
+                "images": ["base64-1", "base64-2"],
+                "providerMetadata": {
+                    "vertex": {
+                        "images": [
+                            { "revisedPrompt": "Revised 1" },
+                            { "revisedPrompt": "Revised 2" }
+                        ],
+                        "usage": { "tokens": 150 }
+                    },
+                    "gateway": {
+                        "routing": {
+                            "provider": "vertex",
+                            "attempts": [
+                                { "provider": "openai", "success": false },
+                                { "provider": "vertex", "success": true }
+                            ]
+                        },
+                        "cost": "0.08",
+                        "marketCost": "0.12",
+                        "generationId": "gen-xyz-789"
+                    }
+                }
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result =
+            poll_ready(model.do_generate(ImageModelCallOptions::new(2).with_prompt("Test prompt")));
+        let metadata = result.provider_metadata.expect("metadata is returned");
+
+        assert_eq!(
+            metadata
+                .get("vertex")
+                .and_then(|entry| entry.images.first())
+                .and_then(|image| image.get("revisedPrompt"))
+                .and_then(JsonValue::as_str),
+            Some("Revised 1")
+        );
+        assert_eq!(
+            metadata
+                .get("vertex")
+                .and_then(|entry| entry.extra.get("usage"))
+                .and_then(|usage| usage.get("tokens"))
+                .and_then(JsonValue::as_u64),
+            Some(150)
+        );
+        assert_eq!(
+            metadata
+                .get("gateway")
+                .and_then(|entry| entry.extra.get("routing"))
+                .and_then(|routing| routing.get("attempts"))
+                .and_then(JsonValue::as_array)
+                .map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(
+            metadata
+                .get("gateway")
+                .and_then(|entry| entry.extra.get("generationId"))
+                .and_then(JsonValue::as_str),
+            Some("gen-xyz-789")
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_encodes_uint8_array_files_to_base64_strings() {
+        let (transport, captured_request) =
+            capturing_image_transport(200, "OK", gateway_image_success_response_body(), None);
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Edit this image")
+                    .with_files(vec![ImageModelFile::file(
+                        "image/png",
+                        FileDataContent::Bytes(b"Hello".to_vec()),
+                    )]),
+            ),
+        );
+        assert_eq!(result.images.len(), 1);
+
+        let request = captured_image_request(&captured_request);
+        assert_eq!(
+            gateway_image_request_json(&request).pointer("/files/0"),
+            Some(&json!({
+                "type": "file",
+                "mediaType": "image/png",
+                "data": "SGVsbG8="
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_passes_through_files_with_string_data_unchanged() {
+        let (transport, captured_request) =
+            capturing_image_transport(200, "OK", gateway_image_success_response_body(), None);
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Edit this image")
+                    .with_files(vec![ImageModelFile::file(
+                        "image/png",
+                        FileDataContent::Base64("already-base64-encoded".to_string()),
+                    )]),
+            ),
+        );
+        assert_eq!(result.images.len(), 1);
+
+        let request = captured_image_request(&captured_request);
+        assert_eq!(
+            gateway_image_request_json(&request).pointer("/files/0"),
+            Some(&json!({
+                "type": "file",
+                "mediaType": "image/png",
+                "data": "already-base64-encoded"
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_passes_through_url_type_files_unchanged() {
+        let (transport, captured_request) =
+            capturing_image_transport(200, "OK", gateway_image_success_response_body(), None);
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Edit this image")
+                    .with_files(vec![ImageModelFile::url(
+                        Url::parse("https://example.com/image.png").expect("URL is valid"),
+                    )]),
+            ),
+        );
+        assert_eq!(result.images.len(), 1);
+
+        let request = captured_image_request(&captured_request);
+        assert_eq!(
+            gateway_image_request_json(&request).pointer("/files/0"),
+            Some(&json!({
+                "type": "url",
+                "url": "https://example.com/image.png"
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_encodes_uint8_array_mask_to_base64_string() {
+        let (transport, captured_request) =
+            capturing_image_transport(200, "OK", gateway_image_success_response_body(), None);
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Inpaint this area")
+                    .with_mask(ImageModelFile::file(
+                        "image/png",
+                        FileDataContent::Bytes(vec![255, 0, 255, 0]),
+                    )),
+            ),
+        );
+        assert_eq!(result.images.len(), 1);
+
+        let request = captured_image_request(&captured_request);
+        assert_eq!(
+            gateway_image_request_json(&request).pointer("/mask"),
+            Some(&json!({
+                "type": "file",
+                "mediaType": "image/png",
+                "data": "/wD/AA=="
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_handles_mixed_file_types_with_encoding() {
+        let (transport, captured_request) =
+            capturing_image_transport(200, "OK", gateway_image_success_response_body(), None);
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Edit these images")
+                    .with_files(vec![
+                        ImageModelFile::file("image/png", FileDataContent::Bytes(vec![1, 2, 3])),
+                        ImageModelFile::file(
+                            "image/jpeg",
+                            FileDataContent::Base64("already-encoded".to_string()),
+                        ),
+                        ImageModelFile::url(
+                            Url::parse("https://example.com/image.png").expect("URL is valid"),
+                        ),
+                    ])
+                    .with_mask(ImageModelFile::file(
+                        "image/png",
+                        FileDataContent::Bytes(vec![4, 5, 6]),
+                    )),
+            ),
+        );
+        assert_eq!(result.images.len(), 1);
+
+        let request = captured_image_request(&captured_request);
+        let request_body = gateway_image_request_json(&request);
+        assert_eq!(
+            request_body.pointer("/files/0"),
+            Some(&json!({
+                "type": "file",
+                "mediaType": "image/png",
+                "data": "AQID"
+            }))
+        );
+        assert_eq!(
+            request_body.pointer("/files/1"),
+            Some(&json!({
+                "type": "file",
+                "mediaType": "image/jpeg",
+                "data": "already-encoded"
+            }))
+        );
+        assert_eq!(
+            request_body.pointer("/files/2"),
+            Some(&json!({
+                "type": "url",
+                "url": "https://example.com/image.png"
+            }))
+        );
+        assert_eq!(
+            request_body.pointer("/mask"),
+            Some(&json!({
+                "type": "file",
+                "mediaType": "image/png",
+                "data": "BAUG"
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_image_model_preserves_provider_options_on_files_during_encoding() {
+        let (transport, captured_request) =
+            capturing_image_transport(200, "OK", gateway_image_success_response_body(), None);
+        let model = gateway_image_test_model(transport, GATEWAY_IMAGE_TEST_MODEL_ID);
+        let file_options: ProviderMetadata = serde_json::from_value(json!({
+            "openai": { "quality": "hd" }
+        }))
+        .expect("provider metadata deserialize");
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Edit this image")
+                    .with_files(vec![
+                        ImageModelFile::file(
+                            "image/png",
+                            FileDataContent::Bytes(b"Hello".to_vec()),
+                        )
+                        .with_provider_options(file_options),
+                    ]),
+            ),
+        );
+        assert_eq!(result.images.len(), 1);
+
+        let request = captured_image_request(&captured_request);
+        assert_eq!(
+            gateway_image_request_json(&request).pointer("/files/0"),
+            Some(&json!({
+                "type": "file",
+                "mediaType": "image/png",
+                "data": "SGVsbG8=",
+                "providerOptions": {
+                    "openai": { "quality": "hd" }
+                }
+            }))
         );
     }
 
