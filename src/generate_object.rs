@@ -908,6 +908,11 @@ impl<'a, M: LanguageModel + ?Sized> GenerateObjectOptions<'a, M> {
         self
     }
 
+    /// Deprecated upstream alias for [`GenerateObjectOptions::with_telemetry`].
+    pub fn with_experimental_telemetry(self, telemetry: TelemetryOptions) -> Self {
+        self.with_telemetry(telemetry)
+    }
+
     /// Sets the maximum number of retries for failed provider requests.
     pub fn with_max_retries(mut self, max_retries: usize) -> Self {
         self.max_retries = max_retries;
@@ -2526,6 +2531,63 @@ mod tests {
         assert_eq!(events[0].event["provider"], json!("test-provider"));
         assert_eq!(events[2].event["objectText"], json!("{\"answer\":42}"));
         assert_eq!(events[3].event["object"], json!({ "answer": 42 }));
+    }
+
+    #[test]
+    fn generate_object_accepts_experimental_telemetry_alias() {
+        let result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"answer\":42}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        );
+        let model = StaticObjectModel::new(result);
+        let start_events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let telemetry_events = Arc::new(Mutex::new(Vec::<TelemetryEvent>::new()));
+        let start_events_for_callback = Arc::clone(&start_events);
+        let telemetry_events_for_callback = Arc::clone(&telemetry_events);
+        let integration =
+            TelemetryIntegration::new().with_callback(TelemetryEventKind::OnStart, move |event| {
+                telemetry_events_for_callback
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push(event);
+            });
+
+        let output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_experimental_telemetry(
+                    TelemetryOptions::new()
+                        .with_enabled(true)
+                        .with_function_id("deprecated-fn")
+                        .with_integration(integration),
+                )
+                .with_experimental_on_start(move |event| {
+                    start_events_for_callback
+                        .lock()
+                        .expect("start event lock")
+                        .push(serde_json::to_value(event).expect("event serializes"));
+                    ready(())
+                }),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(output.object, json!({ "answer": 42 }));
+        let start_events = start_events.lock().expect("start event lock");
+        assert_eq!(start_events.len(), 1);
+        assert!(start_events[0].get("isEnabled").is_none());
+        assert!(start_events[0].get("functionId").is_none());
+        let telemetry_events = telemetry_events.lock().expect("telemetry event lock");
+        assert_eq!(telemetry_events.len(), 1);
+        assert_eq!(
+            telemetry_events[0].function_id.as_deref(),
+            Some("deprecated-fn")
+        );
     }
 
     #[test]

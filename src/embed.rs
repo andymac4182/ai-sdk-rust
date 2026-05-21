@@ -364,6 +364,11 @@ impl<'a, M: EmbeddingModel + ?Sized> EmbedOptions<'a, M> {
         self.telemetry = Some(telemetry);
         self
     }
+
+    /// Deprecated upstream alias for [`EmbedOptions::with_telemetry`].
+    pub fn with_experimental_telemetry(self, telemetry: TelemetryOptions) -> Self {
+        self.with_telemetry(telemetry)
+    }
 }
 
 /// Options for a high-level `embedMany` call.
@@ -480,6 +485,11 @@ impl<'a, M: EmbeddingModel + ?Sized> EmbedManyOptions<'a, M> {
     pub fn with_telemetry(mut self, telemetry: TelemetryOptions) -> Self {
         self.telemetry = Some(telemetry);
         self
+    }
+
+    /// Deprecated upstream alias for [`EmbedManyOptions::with_telemetry`].
+    pub fn with_experimental_telemetry(self, telemetry: TelemetryOptions) -> Self {
+        self.with_telemetry(telemetry)
     }
 }
 
@@ -1614,6 +1624,66 @@ mod tests {
     }
 
     #[test]
+    fn embed_accepts_experimental_telemetry_alias() {
+        let model = RecordingEmbeddingModel::new(
+            None,
+            true,
+            vec![
+                EmbeddingModelResult::new(vec![vec![0.1, 0.2, 0.3]])
+                    .with_usage(EmbeddingModelUsage::new(7)),
+            ],
+        );
+        let start_events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let telemetry_events = Arc::new(Mutex::new(Vec::<TelemetryEvent>::new()));
+        let start_events_for_callback = Arc::clone(&start_events);
+        let telemetry_events_for_callback = Arc::clone(&telemetry_events);
+        let integration = TelemetryIntegration::new().with_callback(
+            TelemetryEventKind::OnEmbedStart,
+            move |event| {
+                telemetry_events_for_callback
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push(event);
+            },
+        );
+
+        let result = poll_ready(super::embed(
+            EmbedOptions::new(&model, "sunrise")
+                .with_experimental_telemetry(
+                    TelemetryOptions::new()
+                        .with_enabled(true)
+                        .with_record_inputs(false)
+                        .with_record_outputs(true)
+                        .with_function_id("embed-fn-deprecated")
+                        .with_integration(integration),
+                )
+                .with_experimental_on_start(move |event| {
+                    start_events_for_callback
+                        .lock()
+                        .expect("start event lock")
+                        .push(serde_json::to_value(event).expect("event serializes"));
+                    ready(())
+                }),
+        ));
+
+        assert_eq!(result.embedding, vec![0.1, 0.2, 0.3]);
+        let start_events = start_events.lock().expect("start event lock");
+        assert_eq!(start_events.len(), 1);
+        assert!(start_events[0].get("isEnabled").is_none());
+        assert!(start_events[0].get("recordInputs").is_none());
+        assert!(start_events[0].get("recordOutputs").is_none());
+        assert!(start_events[0].get("functionId").is_none());
+        let telemetry_events = telemetry_events.lock().expect("telemetry event lock");
+        assert_eq!(telemetry_events.len(), 1);
+        assert_eq!(
+            telemetry_events[0].function_id.as_deref(),
+            Some("embed-fn-deprecated")
+        );
+        assert_eq!(telemetry_events[0].record_inputs, Some(false));
+        assert_eq!(telemetry_events[0].record_outputs, Some(true));
+    }
+
+    #[test]
     fn embed_many_dispatches_telemetry_lifecycle_events() {
         let model = RecordingEmbeddingModel::new(
             None,
@@ -1663,6 +1733,66 @@ mod tests {
         assert_eq!(events[0].event["value"], json!(["alpha", "beta"]));
         assert_eq!(events[1].event["embedding"], json!([[0.1], [0.2]]));
         assert_eq!(events[1].event["usage"], json!({ "tokens": 11 }));
+    }
+
+    #[test]
+    fn embed_many_accepts_experimental_telemetry_alias() {
+        let model = RecordingEmbeddingModel::new(
+            None,
+            true,
+            vec![
+                EmbeddingModelResult::new(vec![vec![0.1], vec![0.2]])
+                    .with_usage(EmbeddingModelUsage::new(11)),
+            ],
+        );
+        let start_events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let telemetry_events = Arc::new(Mutex::new(Vec::<TelemetryEvent>::new()));
+        let start_events_for_callback = Arc::clone(&start_events);
+        let telemetry_events_for_callback = Arc::clone(&telemetry_events);
+        let integration = TelemetryIntegration::new().with_callback(
+            TelemetryEventKind::OnEmbedStart,
+            move |event| {
+                telemetry_events_for_callback
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push(event);
+            },
+        );
+
+        let result = poll_ready(super::embed_many(
+            EmbedManyOptions::new(&model, ["alpha", "beta"])
+                .with_experimental_telemetry(
+                    TelemetryOptions::new()
+                        .with_enabled(true)
+                        .with_record_inputs(false)
+                        .with_record_outputs(true)
+                        .with_function_id("embed-many-fn-deprecated")
+                        .with_integration(integration),
+                )
+                .with_experimental_on_start(move |event| {
+                    start_events_for_callback
+                        .lock()
+                        .expect("start event lock")
+                        .push(serde_json::to_value(event).expect("event serializes"));
+                    ready(())
+                }),
+        ));
+
+        assert_eq!(result.embeddings, vec![vec![0.1], vec![0.2]]);
+        let start_events = start_events.lock().expect("start event lock");
+        assert_eq!(start_events.len(), 1);
+        assert!(start_events[0].get("isEnabled").is_none());
+        assert!(start_events[0].get("recordInputs").is_none());
+        assert!(start_events[0].get("recordOutputs").is_none());
+        assert!(start_events[0].get("functionId").is_none());
+        let telemetry_events = telemetry_events.lock().expect("telemetry event lock");
+        assert_eq!(telemetry_events.len(), 1);
+        assert_eq!(
+            telemetry_events[0].function_id.as_deref(),
+            Some("embed-many-fn-deprecated")
+        );
+        assert_eq!(telemetry_events[0].record_inputs, Some(false));
+        assert_eq!(telemetry_events[0].record_outputs, Some(true));
     }
 
     #[test]

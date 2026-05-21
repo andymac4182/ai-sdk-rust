@@ -602,6 +602,11 @@ impl<'a, M: RerankingModel + ?Sized> RerankOptions<'a, M> {
         self.telemetry = Some(telemetry);
         self
     }
+
+    /// Deprecated upstream alias for [`RerankOptions::with_telemetry`].
+    pub fn with_experimental_telemetry(self, telemetry: TelemetryOptions) -> Self {
+        self.with_telemetry(telemetry)
+    }
 }
 
 /// Reranks documents using a reranking model.
@@ -1245,6 +1250,68 @@ mod tests {
             json!("rainy day")
         );
         assert_eq!(events[1].event["ranking"][0]["score"], json!(0.95));
+    }
+
+    #[test]
+    fn rerank_accepts_experimental_telemetry_alias() {
+        let model = RecordingRerankingModel::new(vec![RerankingModelResult::new(vec![
+            RerankingModelRanking::new(1, 0.95),
+        ])]);
+        let start_events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let telemetry_events = Arc::new(Mutex::new(Vec::<TelemetryEvent>::new()));
+        let start_events_for_callback = Arc::clone(&start_events);
+        let telemetry_events_for_callback = Arc::clone(&telemetry_events);
+        let integration = TelemetryIntegration::new().with_callback(
+            TelemetryEventKind::OnRerankStart,
+            move |event| {
+                telemetry_events_for_callback
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push(event);
+            },
+        );
+
+        let result = poll_ready(super::rerank(
+            RerankOptions::new(
+                &model,
+                RerankDocuments::text(["sunny day", "rainy day"]),
+                "rainy day",
+            )
+            .with_experimental_telemetry(
+                TelemetryOptions::new()
+                    .with_enabled(true)
+                    .with_record_inputs(false)
+                    .with_record_outputs(true)
+                    .with_function_id("rerank-fn-deprecated")
+                    .with_integration(integration),
+            )
+            .with_experimental_on_start(move |event| {
+                start_events_for_callback
+                    .lock()
+                    .expect("start event lock")
+                    .push(serde_json::to_value(event).expect("event serializes"));
+                ready(())
+            }),
+        ));
+
+        assert_eq!(
+            result.reranked_documents,
+            vec![RerankDocument::text("rainy day")]
+        );
+        let start_events = start_events.lock().expect("start event lock");
+        assert_eq!(start_events.len(), 1);
+        assert!(start_events[0].get("isEnabled").is_none());
+        assert!(start_events[0].get("recordInputs").is_none());
+        assert!(start_events[0].get("recordOutputs").is_none());
+        assert!(start_events[0].get("functionId").is_none());
+        let telemetry_events = telemetry_events.lock().expect("telemetry event lock");
+        assert_eq!(telemetry_events.len(), 1);
+        assert_eq!(
+            telemetry_events[0].function_id.as_deref(),
+            Some("rerank-fn-deprecated")
+        );
+        assert_eq!(telemetry_events[0].record_inputs, Some(false));
+        assert_eq!(telemetry_events[0].record_outputs, Some(true));
     }
 
     #[test]

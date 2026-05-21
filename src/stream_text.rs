@@ -1265,6 +1265,11 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
         self
     }
 
+    /// Deprecated upstream alias for [`StreamTextOptions::with_telemetry`].
+    pub fn with_experimental_telemetry(self, telemetry: TelemetryOptions) -> Self {
+        self.with_telemetry(telemetry)
+    }
+
     /// Sets the maximum number of retries for failed provider stream requests.
     pub fn with_max_retries(mut self, max_retries: usize) -> Self {
         self.max_retries = max_retries;
@@ -6791,6 +6796,62 @@ mod tests {
         assert_eq!(events[0].event["provider"], json!("mock-provider"));
         assert_eq!(events[0].event["maxRetries"], json!(DEFAULT_MAX_RETRIES));
         assert_eq!(events[5].event["text"], json!("Hello"));
+    }
+
+    #[test]
+    fn stream_text_accepts_experimental_telemetry_alias() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let start_events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let telemetry_events = Arc::new(Mutex::new(Vec::<TelemetryEvent>::new()));
+        let start_events_for_callback = Arc::clone(&start_events);
+        let telemetry_events_for_callback = Arc::clone(&telemetry_events);
+        let integration =
+            TelemetryIntegration::new().with_callback(TelemetryEventKind::OnStart, move |event| {
+                telemetry_events_for_callback
+                    .lock()
+                    .expect("telemetry event lock")
+                    .push(event);
+            });
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Say hello")])
+                .with_experimental_telemetry(
+                    TelemetryOptions::new()
+                        .with_enabled(true)
+                        .with_function_id("deprecated-fn")
+                        .with_integration(integration),
+                )
+                .with_on_start(move |event| {
+                    let start_events = Arc::clone(&start_events_for_callback);
+                    async move {
+                        start_events
+                            .lock()
+                            .expect("start event lock")
+                            .push(serde_json::to_value(event).expect("event serializes"));
+                    }
+                }),
+        ));
+
+        assert_eq!(result.text, "Hello");
+        let start_events = start_events.lock().expect("start event lock");
+        assert_eq!(start_events.len(), 1);
+        assert!(start_events[0].get("isEnabled").is_none());
+        assert!(start_events[0].get("functionId").is_none());
+        let telemetry_events = telemetry_events.lock().expect("telemetry event lock");
+        assert_eq!(telemetry_events.len(), 1);
+        assert_eq!(
+            telemetry_events[0].function_id.as_deref(),
+            Some("deprecated-fn")
+        );
     }
 
     #[test]
