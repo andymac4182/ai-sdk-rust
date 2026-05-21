@@ -21,11 +21,13 @@ use crate::generate_text::{
     ToolApprovalConfiguration, ToolCallRepair, ToolCallRepairOptions, ToolInputRefinement,
     ToolInputRefinementError, apply_generate_text_response_metadata, execute_tool_calls,
     filter_active_language_model_tools, generate_text_call_id,
-    generate_text_tool_result_from_language_model_tool_result, is_stop_condition_met,
-    mark_runtime_dynamic_tool_calls, mark_tool_call_metadata, mark_tool_call_titles,
-    mark_tool_result_metadata, mark_unavailable_tool_calls, refine_tool_inputs,
-    refresh_generate_text_content, refresh_tool_call_views, refresh_tool_result_views,
-    repair_tool_calls, resolve_tool_approvals_for_step, response_messages_for_step,
+    generate_text_tool_result_from_language_model_tool_result,
+    invoke_tool_input_available_callback, invoke_tool_input_delta_callback,
+    invoke_tool_input_start_callback, is_stop_condition_met, mark_runtime_dynamic_tool_calls,
+    mark_tool_call_metadata, mark_tool_call_titles, mark_tool_result_metadata,
+    mark_unavailable_tool_calls, refine_tool_inputs, refresh_generate_text_content,
+    refresh_tool_call_views, refresh_tool_result_views, repair_tool_calls,
+    resolve_tool_approvals_for_step, response_messages_for_step,
     should_continue_after_tool_results, sync_tool_result_inputs,
     update_pending_deferred_provider_tool_calls,
 };
@@ -2321,6 +2323,10 @@ where
                 on_chunk: on_chunk.as_ref(),
                 on_error: on_error.as_ref(),
                 abort_signal: abort_signal.as_ref(),
+                tools: &step_tools,
+                messages: &step_prompt,
+                runtime_context: &runtime_context,
+                experimental_sandbox: experimental_sandbox.as_ref(),
             },
         )
         .await;
@@ -2889,6 +2895,21 @@ struct StreamTextCollectionControls<'a, 'b> {
     on_chunk: Option<&'a StreamTextOnChunk<'b>>,
     on_error: Option<&'a StreamTextOnError<'b>>,
     abort_signal: Option<&'a StreamTextAbortSignal>,
+    tools: &'a [Tool],
+    messages: &'a LanguageModelPrompt,
+    runtime_context: &'a JsonObject,
+    experimental_sandbox: Option<&'a Arc<dyn ExperimentalSandbox>>,
+}
+
+#[derive(Clone, Copy)]
+struct StreamTextAttemptControls<'a, 'b> {
+    on_chunk: Option<&'a StreamTextOnChunk<'b>>,
+    on_error: Option<&'a StreamTextOnError<'b>>,
+    abort_signal: Option<&'a StreamTextAbortSignal>,
+    tools: &'a [Tool],
+    messages: &'a LanguageModelPrompt,
+    runtime_context: &'a JsonObject,
+    experimental_sandbox: Option<&'a Arc<dyn ExperimentalSandbox>>,
 }
 
 async fn collect_stream_text_step_with_retries<M>(
@@ -2912,9 +2933,15 @@ where
             call_options.clone(),
             include_raw_chunks,
             &mut attempt_parts,
-            None,
-            None,
-            controls.abort_signal,
+            StreamTextAttemptControls {
+                on_chunk: None,
+                on_error: None,
+                abort_signal: controls.abort_signal,
+                tools: controls.tools,
+                messages: controls.messages,
+                runtime_context: controls.runtime_context,
+                experimental_sandbox: controls.experimental_sandbox,
+            },
         )
         .await;
 
@@ -3042,17 +3069,15 @@ async fn collect_stream_text_step<M>(
     call_options: LanguageModelCallOptions,
     include_raw_chunks: bool,
     parts: &mut Vec<TextStreamPart>,
-    on_chunk: Option<&StreamTextOnChunk<'_>>,
-    on_error: Option<&StreamTextOnError<'_>>,
-    abort_signal: Option<&StreamTextAbortSignal>,
+    controls: StreamTextAttemptControls<'_, '_>,
 ) -> CollectedStreamTextStep
 where
     M: LanguageModel + ?Sized,
     M::Stream: IntoIterator<Item = LanguageModelStreamPart>,
 {
-    if let Some(abort_part) = stream_text_abort_part_from_signal(abort_signal) {
+    if let Some(abort_part) = stream_text_abort_part_from_signal(controls.abort_signal) {
         let abort_reason = abort_part.reason.clone();
-        push_text_stream_part(parts, TextStreamPart::Abort(abort_part), on_chunk).await;
+        push_text_stream_part(parts, TextStreamPart::Abort(abort_part), controls.on_chunk).await;
         return CollectedStreamTextStep::aborted(abort_reason);
     }
 
@@ -3085,13 +3110,15 @@ where
     let mut provider_content = Vec::new();
     let mut text_blocks = BTreeMap::<String, (String, Option<ProviderMetadata>)>::new();
     let mut reasoning_blocks = BTreeMap::<String, (String, Option<ProviderMetadata>)>::new();
+    let mut ongoing_tool_call_tool_names = BTreeMap::<String, String>::new();
     let mut aborted = false;
     let mut abort_reason = None;
 
     for part in stream_result.stream {
-        if let Some(abort_part) = stream_text_abort_part_from_signal(abort_signal) {
+        if let Some(abort_part) = stream_text_abort_part_from_signal(controls.abort_signal) {
             abort_reason = abort_part.reason.clone();
-            push_text_stream_part(parts, TextStreamPart::Abort(abort_part), on_chunk).await;
+            push_text_stream_part(parts, TextStreamPart::Abort(abort_part), controls.on_chunk)
+                .await;
             aborted = true;
             break;
         }
@@ -3140,7 +3167,7 @@ where
                             push_text_stream_part(
                                 parts,
                                 TextStreamPart::TextDelta(stream_part),
-                                on_chunk,
+                                controls.on_chunk,
                             )
                             .await;
                         }
@@ -3185,7 +3212,7 @@ where
                         push_text_stream_part(
                             parts,
                             TextStreamPart::ReasoningDelta(stream_part),
-                            on_chunk,
+                            controls.on_chunk,
                         )
                         .await;
                     }
@@ -3202,18 +3229,47 @@ where
                         parts.push(TextStreamPart::ReasoningEnd(part));
                     }
                     LanguageModelStreamPart::ToolInputStart(part) => {
+                        ongoing_tool_call_tool_names
+                            .insert(part.id.clone(), part.tool_name.clone());
+                        let tool = controls
+                            .tools
+                            .iter()
+                            .find(|tool| tool.name == part.tool_name);
                         push_text_stream_part(
                             parts,
-                            TextStreamPart::ToolInputStart(part),
-                            on_chunk,
+                            TextStreamPart::ToolInputStart(part.clone()),
+                            controls.on_chunk,
+                        )
+                        .await;
+                        invoke_tool_input_start_callback(
+                            tool,
+                            &part.id,
+                            controls.messages,
+                            controls.abort_signal,
+                            controls.experimental_sandbox,
+                            controls.runtime_context,
                         )
                         .await;
                     }
                     LanguageModelStreamPart::ToolInputDelta(part) => {
+                        let tool_name = ongoing_tool_call_tool_names.get(&part.id);
+                        let tool = tool_name.and_then(|tool_name| {
+                            controls.tools.iter().find(|tool| &tool.name == tool_name)
+                        });
                         push_text_stream_part(
                             parts,
-                            TextStreamPart::ToolInputDelta(part),
-                            on_chunk,
+                            TextStreamPart::ToolInputDelta(part.clone()),
+                            controls.on_chunk,
+                        )
+                        .await;
+                        invoke_tool_input_delta_callback(
+                            tool,
+                            &part.id,
+                            &part.delta,
+                            controls.messages,
+                            controls.abort_signal,
+                            controls.experimental_sandbox,
+                            controls.runtime_context,
                         )
                         .await;
                     }
@@ -3227,10 +3283,31 @@ where
                     }
                     LanguageModelStreamPart::ToolCall(part) => {
                         let tool_call = GenerateTextToolCall::from_language_model_tool_call(&part);
+                        let tool_name = ongoing_tool_call_tool_names
+                            .remove(&tool_call.tool_call_id)
+                            .unwrap_or_else(|| tool_call.tool_name.clone());
+                        let tool = controls.tools.iter().find(|tool| tool.name == tool_name);
                         tool_calls.push(tool_call.clone());
                         provider_content.push(LanguageModelContent::ToolCall(part));
-                        push_text_stream_part(parts, TextStreamPart::ToolCall(tool_call), on_chunk)
+                        push_text_stream_part(
+                            parts,
+                            TextStreamPart::ToolCall(tool_call),
+                            controls.on_chunk,
+                        )
+                        .await;
+                        let tool_call = tool_calls.last().expect("tool call was just pushed");
+                        if tool_call.invalid != Some(true) {
+                            invoke_tool_input_available_callback(
+                                tool,
+                                &tool_call.tool_call_id,
+                                tool_call.input.clone(),
+                                controls.messages,
+                                controls.abort_signal,
+                                controls.experimental_sandbox,
+                                controls.runtime_context,
+                            )
                             .await;
+                        }
                     }
                     LanguageModelStreamPart::ToolResult(part) => {
                         let tool_result = generate_text_tool_result_from_language_model_tool_result(
@@ -3242,14 +3319,19 @@ where
                         push_text_stream_part(
                             parts,
                             TextStreamPart::ToolResult(tool_result),
-                            on_chunk,
+                            controls.on_chunk,
                         )
                         .await;
                     }
                     LanguageModelStreamPart::Custom(part) => {
                         custom_parts.push(part.clone());
                         provider_content.push(LanguageModelContent::Custom(part.clone()));
-                        push_text_stream_part(parts, TextStreamPart::Custom(part), on_chunk).await;
+                        push_text_stream_part(
+                            parts,
+                            TextStreamPart::Custom(part),
+                            controls.on_chunk,
+                        )
+                        .await;
                     }
                     LanguageModelStreamPart::File(part) => {
                         files.push(part.clone());
@@ -3266,7 +3348,12 @@ where
                     LanguageModelStreamPart::Source(part) => {
                         sources.push(part.clone());
                         provider_content.push(LanguageModelContent::Source(part.clone()));
-                        push_text_stream_part(parts, TextStreamPart::Source(part), on_chunk).await;
+                        push_text_stream_part(
+                            parts,
+                            TextStreamPart::Source(part),
+                            controls.on_chunk,
+                        )
+                        .await;
                     }
                     LanguageModelStreamPart::ResponseMetadata(part) => {
                         response = response.with_response_metadata(part);
@@ -3282,13 +3369,18 @@ where
                     }
                     LanguageModelStreamPart::Raw(part) => {
                         if include_raw_chunks {
-                            push_text_stream_part(parts, TextStreamPart::Raw(part), on_chunk).await;
+                            push_text_stream_part(
+                                parts,
+                                TextStreamPart::Raw(part),
+                                controls.on_chunk,
+                            )
+                            .await;
                         }
                     }
                     LanguageModelStreamPart::Error(part) => {
                         finish_reason = FinishReason::Error;
                         errors.push(part.error.clone());
-                        if let Some(on_error) = on_error {
+                        if let Some(on_error) = controls.on_error {
                             on_error
                                 .error(StreamTextOnErrorEvent {
                                     error: part.error.clone(),
@@ -3302,9 +3394,10 @@ where
             }
         }
 
-        if let Some(abort_part) = stream_text_abort_part_from_signal(abort_signal) {
+        if let Some(abort_part) = stream_text_abort_part_from_signal(controls.abort_signal) {
             abort_reason = abort_part.reason.clone();
-            push_text_stream_part(parts, TextStreamPart::Abort(abort_part), on_chunk).await;
+            push_text_stream_part(parts, TextStreamPart::Abort(abort_part), controls.on_chunk)
+                .await;
             aborted = true;
             break;
         }
@@ -6186,6 +6279,177 @@ mod tests {
                 "output": "result:Sparkle Day",
                 "providerExecuted": true
             })
+        );
+    }
+
+    #[test]
+    fn stream_text_invokes_tool_input_lifecycle_callbacks_from_stream() {
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string" }
+            },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let runtime_context = JsonObject::from_iter([("requestId".to_string(), json!("req-1"))]);
+        let recorded = Arc::new(Mutex::new(Vec::<JsonValue>::new()));
+        let start_recorded = Arc::clone(&recorded);
+        let delta_recorded = Arc::clone(&recorded);
+        let available_recorded = Arc::clone(&recorded);
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolInputStart(LanguageModelToolInputStart::new(
+                    "call-1", "tool1",
+                )),
+                LanguageModelStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                    "call-1",
+                    r#"{"value":""#,
+                )),
+                LanguageModelStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                    "call-1",
+                    r#"Sparkle Day"}"#,
+                )),
+                LanguageModelStreamPart::ToolInputEnd(LanguageModelToolInputEnd::new("call-1")),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "tool1",
+                    r#"{"value":"Sparkle Day"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Call the tool")])
+                .with_runtime_context(runtime_context.clone())
+                .with_tool(
+                    Tool::new("tool1", input_schema)
+                        .with_on_input_start(move |options| {
+                            let recorded = Arc::clone(&start_recorded);
+                            async move {
+                                recorded.lock().expect("recorded lock").push(json!({
+                                    "type": "onInputStart",
+                                    "toolCallId": options.tool_call_id,
+                                    "context": options.context,
+                                    "messages": options.messages,
+                                    "abortSignalSet": options.abort_signal.is_some()
+                                }));
+                            }
+                        })
+                        .with_on_input_delta(move |options| {
+                            let recorded = Arc::clone(&delta_recorded);
+                            async move {
+                                recorded.lock().expect("recorded lock").push(json!({
+                                    "type": "onInputDelta",
+                                    "toolCallId": options.tool_call_id,
+                                    "inputTextDelta": options.input_text_delta,
+                                    "context": options.context,
+                                    "messages": options.messages,
+                                    "abortSignalSet": options.abort_signal.is_some()
+                                }));
+                            }
+                        })
+                        .with_on_input_available(move |options| {
+                            let recorded = Arc::clone(&available_recorded);
+                            async move {
+                                recorded.lock().expect("recorded lock").push(json!({
+                                    "type": "onInputAvailable",
+                                    "toolCallId": options.tool_call_id,
+                                    "input": options.input,
+                                    "context": options.context,
+                                    "messages": options.messages,
+                                    "abortSignalSet": options.abort_signal.is_some()
+                                }));
+                            }
+                        }),
+                ),
+        ));
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(
+            result.tool_calls[0].input,
+            json!({ "value": "Sparkle Day" })
+        );
+        assert_eq!(
+            recorded.lock().expect("recorded lock").as_slice(),
+            [
+                json!({
+                    "type": "onInputStart",
+                    "toolCallId": "call-1",
+                    "context": runtime_context,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "Call the tool"
+                                }
+                            ]
+                        }
+                    ],
+                    "abortSignalSet": false
+                }),
+                json!({
+                    "type": "onInputDelta",
+                    "toolCallId": "call-1",
+                    "inputTextDelta": r#"{"value":""#,
+                    "context": runtime_context,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "Call the tool"
+                                }
+                            ]
+                        }
+                    ],
+                    "abortSignalSet": false
+                }),
+                json!({
+                    "type": "onInputDelta",
+                    "toolCallId": "call-1",
+                    "inputTextDelta": r#"Sparkle Day"}"#,
+                    "context": runtime_context,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "Call the tool"
+                                }
+                            ]
+                        }
+                    ],
+                    "abortSignalSet": false
+                }),
+                json!({
+                    "type": "onInputAvailable",
+                    "toolCallId": "call-1",
+                    "input": { "value": "Sparkle Day" },
+                    "context": runtime_context,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "Call the tool"
+                                }
+                            ]
+                        }
+                    ],
+                    "abortSignalSet": false
+                })
+            ]
         );
     }
 
