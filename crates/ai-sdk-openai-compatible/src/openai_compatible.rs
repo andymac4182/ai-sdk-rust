@@ -717,6 +717,7 @@ impl OpenAICompatibleChatLanguageModel {
     ) -> LanguageModelGenerateResult {
         let (request_body, warnings) = match openai_compatible_chat_request_body(
             &self.model_id,
+            &self.config.provider,
             &self.config.settings,
             &options,
         ) {
@@ -791,6 +792,7 @@ impl OpenAICompatibleChatLanguageModel {
         let include_raw_chunks = options.include_raw_chunks.unwrap_or(false);
         let (request_body, warnings) = match openai_compatible_chat_stream_request_body(
             &self.model_id,
+            &self.config.provider,
             &self.config.settings,
             &options,
         ) {
@@ -1776,6 +1778,7 @@ fn optional_headers(headers: Option<&Headers>) -> Option<Vec<(String, Option<Str
 
 fn openai_compatible_chat_request_body(
     model_id: &str,
+    provider: &str,
     settings: &OpenAICompatibleProviderSettings,
     options: &LanguageModelCallOptions,
 ) -> Result<(JsonValue, Vec<Warning>), String> {
@@ -1787,7 +1790,7 @@ fn openai_compatible_chat_request_body(
         text_verbosity,
         strict_json_schema,
         additional_body_options,
-    } = openai_compatible_chat_provider_options(&settings.name, options, &mut warnings);
+    } = openai_compatible_chat_provider_options(provider, options, &mut warnings);
 
     body.insert("model".to_string(), JsonValue::String(model_id.to_string()));
 
@@ -1885,10 +1888,12 @@ fn openai_compatible_chat_request_body(
 
 fn openai_compatible_chat_stream_request_body(
     model_id: &str,
+    provider: &str,
     settings: &OpenAICompatibleProviderSettings,
     options: &LanguageModelCallOptions,
 ) -> Result<(JsonValue, Vec<Warning>), String> {
-    let (mut body, warnings) = openai_compatible_chat_request_body(model_id, settings, options)?;
+    let (mut body, warnings) =
+        openai_compatible_chat_request_body(model_id, provider, settings, options)?;
 
     if let Some(body) = body.as_object_mut() {
         body.insert("stream".to_string(), JsonValue::Bool(true));
@@ -2099,7 +2104,7 @@ fn openai_compatible_completion_provider_options(
     body: &mut JsonObject,
 ) -> Vec<Warning> {
     let mut warnings = Vec::new();
-    let provider_options_name = provider.split('.').next().unwrap_or(provider).trim();
+    let provider_options_name = openai_compatible_provider_options_name(provider);
     warn_if_deprecated_openai_compatible_provider_options_key(
         provider_options_name,
         Some(provider_options),
@@ -2172,7 +2177,7 @@ fn openai_compatible_image_provider_options(
     provider_options: &ProviderOptions,
     warnings: &mut Vec<Warning>,
 ) -> JsonObject {
-    let provider_options_name = provider.split('.').next().unwrap_or(provider).trim();
+    let provider_options_name = openai_compatible_provider_options_name(provider);
     let mut body_options = JsonObject::new();
     warn_if_deprecated_openai_compatible_provider_options_key(
         provider_options_name,
@@ -2379,7 +2384,7 @@ fn openai_compatible_embedding_provider_options(
         add_openai_compatible_embedding_body_options(body, options);
     }
 
-    let provider_options_name = provider.split('.').next().unwrap_or(provider);
+    let provider_options_name = openai_compatible_provider_options_name(provider);
     warn_if_deprecated_openai_compatible_provider_options_key(
         provider_options_name,
         Some(provider_options),
@@ -2434,6 +2439,10 @@ fn to_openai_compatible_camel_case(value: &str) -> String {
     }
 
     output
+}
+
+fn openai_compatible_provider_options_name(provider: &str) -> &str {
+    provider.split('.').next().unwrap_or(provider).trim()
 }
 
 fn resolve_openai_compatible_provider_options_key(
@@ -2504,11 +2513,7 @@ fn openai_compatible_chat_provider_options(
         merge_openai_compatible_chat_known_options(&mut resolved, options);
     }
 
-    let provider_options_name = provider_name
-        .split('.')
-        .next()
-        .unwrap_or(provider_name)
-        .trim();
+    let provider_options_name = openai_compatible_provider_options_name(provider_name);
     warn_if_deprecated_openai_compatible_provider_options_key(
         provider_options_name,
         Some(provider_options),
@@ -4373,8 +4378,9 @@ mod tests {
         OpenAICompatibleMetadataExtractor, OpenAICompatibleProvider,
         OpenAICompatibleProviderSettings, OpenAICompatibleStreamMetadataExtractor,
         OpenAICompatibleTransport, OpenAICompatibleTransportFuture, create_openai_compatible,
-        openai_compatible_prepare_tools, resolve_openai_compatible_provider_options_key,
-        to_openai_compatible_camel_case, warn_if_deprecated_openai_compatible_provider_options_key,
+        openai_compatible_prepare_tools, openai_compatible_provider_options_name,
+        resolve_openai_compatible_provider_options_key, to_openai_compatible_camel_case,
+        warn_if_deprecated_openai_compatible_provider_options_key,
     };
     use ai_sdk_provider::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions};
     use ai_sdk_provider::file_data::{FileData, FileDataContent};
@@ -4624,6 +4630,24 @@ mod tests {
     #[test]
     fn to_camel_case_upstream_should_handle_empty_string() {
         assert_eq!(to_openai_compatible_camel_case(""), "");
+    }
+
+    #[test]
+    fn openai_compatible_chat_config_extracts_base_name_from_provider_string() {
+        assert_eq!(
+            openai_compatible_provider_options_name("anthropic.beta"),
+            "anthropic"
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_config_handles_provider_without_dot_notation() {
+        assert_eq!(openai_compatible_provider_options_name("openai"), "openai");
+    }
+
+    #[test]
+    fn openai_compatible_chat_config_returns_empty_for_empty_provider() {
+        assert_eq!(openai_compatible_provider_options_name(""), "");
     }
 
     #[test]
