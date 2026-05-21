@@ -24,11 +24,11 @@ must exist as an equivalent Rust test in the matching 1:1 crate. Rust may add
 more tests, but never fewer mapped original TypeScript tests; a package with even
 one missing portable upstream test/case is incomplete.
 
-Future-iteration test note: EVERY portable test from the original TypeScript
-suite must exist in Rust in the matching crate. The Rust test suite may be
-larger and may add Rust-specific tests, but it must never contain fewer mapped
-original TypeScript tests. Potentially more Rust tests is acceptable; no less
-than the full original TypeScript test inventory is acceptable.
+Future-iteration test note: EVERY portable test/case from the original
+TypeScript package must exist as a Rust test in the matching crate. The Rust
+suite may and should add more tests where useful, but it must never contain
+fewer mapped original TypeScript tests; one missing original portable upstream
+test/case is a parity failure.
 Every original TypeScript test is assumed required unless it is explicitly
 documented as JavaScript-only/non-portable. This is a named upstream-test
 inventory requirement, not a raw count comparison: every portable upstream case
