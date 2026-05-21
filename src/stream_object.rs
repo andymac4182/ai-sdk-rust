@@ -2092,6 +2092,139 @@ mod tests {
     }
 
     #[test]
+    fn stream_object_custom_schema_sends_object_deltas() {
+        let schema = answer_schema();
+        let expected_schema = schema.json_schema().clone();
+        let model = MockLanguageModel::new()
+            .with_stream_result(LanguageModelStreamResult::new(object_stream()));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(schema),
+        ));
+
+        assert_eq!(
+            result.partial_object_stream,
+            vec![
+                json!({}),
+                json!({"content": "Hello, "}),
+                json!({"content": "Hello, world"}),
+                json!({"content": "Hello, world!"})
+            ]
+        );
+        let calls = model.stream_calls();
+        let Some(LanguageModelResponseFormat::Json {
+            schema,
+            name,
+            description,
+        }) = &calls[0].response_format
+        else {
+            panic!("expected JSON response format");
+        };
+        assert_eq!(schema.as_ref(), Some(&expected_schema));
+        assert_eq!(name, &None);
+        assert_eq!(description, &None);
+    }
+
+    #[test]
+    fn stream_object_error_handling_reports_no_object_when_schema_validation_fails() {
+        let timestamp = time::OffsetDateTime::UNIX_EPOCH + time::Duration::milliseconds(123);
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    r#"{ "content": 123 }"#,
+                )),
+                LanguageModelStreamPart::ResponseMetadata(
+                    LanguageModelStreamResponseMetadata::new()
+                        .with_id("id-1")
+                        .with_timestamp(timestamp)
+                        .with_model_id("model-1"),
+                ),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
+
+        assert_eq!(result.object, None);
+        assert!(result.error.is_some());
+        assert_eq!(result.response.id.as_deref(), Some("id-1"));
+        assert_eq!(result.response.timestamp, Some(timestamp));
+        assert_eq!(result.response.model_id.as_deref(), Some("model-1"));
+        assert_eq!(result.usage, usage());
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+    }
+
+    #[test]
+    fn stream_object_error_handling_reports_no_object_when_parsing_fails() {
+        let timestamp = time::OffsetDateTime::UNIX_EPOCH + time::Duration::milliseconds(123);
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "{ broken json",
+                )),
+                LanguageModelStreamPart::ResponseMetadata(
+                    LanguageModelStreamResponseMetadata::new()
+                        .with_id("id-1")
+                        .with_timestamp(timestamp)
+                        .with_model_id("model-1"),
+                ),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
+
+        assert_eq!(result.object, None);
+        assert!(result.error.is_some());
+        assert_eq!(result.response.id.as_deref(), Some("id-1"));
+        assert_eq!(result.response.timestamp, Some(timestamp));
+        assert_eq!(result.response.model_id.as_deref(), Some("model-1"));
+        assert_eq!(result.usage, usage());
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+    }
+
+    #[test]
+    fn stream_object_error_handling_reports_no_object_when_no_text_is_generated() {
+        let timestamp = time::OffsetDateTime::UNIX_EPOCH + time::Duration::milliseconds(123);
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ResponseMetadata(
+                    LanguageModelStreamResponseMetadata::new()
+                        .with_id("id-1")
+                        .with_timestamp(timestamp)
+                        .with_model_id("model-1"),
+                ),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
+
+        assert_eq!(result.text, "");
+        assert_eq!(result.object, None);
+        assert!(result.error.is_some());
+        assert_eq!(result.response.id.as_deref(), Some("id-1"));
+        assert_eq!(result.response.timestamp, Some(timestamp));
+        assert_eq!(result.response.model_id.as_deref(), Some("model-1"));
+        assert_eq!(result.usage, usage());
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+    }
+
+    #[test]
     fn stream_object_retains_error_parts() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
