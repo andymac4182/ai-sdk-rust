@@ -4173,6 +4173,33 @@ mod tests {
     }
 
     #[test]
+    fn mcp_client_exposes_initialized_server_info_and_instructions() {
+        let instructions = "Use search tools to resolve IDs - never ask the user. Always confirm destructive actions before executing.";
+        let client = create_mcp_client(McpClientConfig::new(
+            MockMcpTransport::new().with_initialize_result(InitializeResult {
+                protocol_version: LATEST_PROTOCOL_VERSION.to_string(),
+                capabilities: ServerCapabilities {
+                    tools: Some(JsonObject::new()),
+                    ..ServerCapabilities::default()
+                },
+                server_info: Configuration::new("server-with-instructions", "1.0.0"),
+                instructions: Some(instructions.to_string()),
+                meta: None,
+            }),
+        ))
+        .expect("client initializes");
+
+        assert_eq!(
+            client.server_info().expect("server info"),
+            Configuration::new("server-with-instructions", "1.0.0")
+        );
+        assert_eq!(
+            client.instructions().expect("server instructions"),
+            Some(instructions.to_string())
+        );
+    }
+
+    #[test]
     fn mcp_client_lists_calls_reads_resources_and_prompts() {
         let client = create_mcp_client(McpClientConfig::new(MockMcpTransport::new()))
             .expect("client initializes");
