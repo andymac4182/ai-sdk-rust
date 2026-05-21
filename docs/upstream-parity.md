@@ -284,6 +284,7 @@ inventory.
 | JSON values and schemas | verified | `crates/ai-sdk-provider/src/json.rs`, `crates/ai-sdk-provider-utils`, root facade shims in `src/json.rs` and `src/provider_utils.rs` | JSON/schema helper tests | Exact JavaScript validator library adapters remain js-only or unported. |
 | Error types and messages | in-progress | `crates/ai-sdk-provider/src/provider.rs`, `crates/ai-sdk-provider-utils`, `crates/ai-sdk-gateway/src/gateway_error.rs`, `src/generate_text.rs`, model modules | Existing error serialization/message tests; `gateway_error::*` tests | Many upstream errors exist, including Gateway-specific error classifications. Other provider-specific error types remain unported. |
 | Retry and exponential backoff utility | verified | `src/retry.rs` | `retry_with_exponential_backoff_*`; `retry_delay_*`; `retry_error_*`; `retry_executor_*` | Mirrors every portable upstream `retry-with-exponential-backoff.test.ts` case one-to-one for retry-after-ms, retry-after seconds and HTTP dates, unreasonable/invalid/negative header fallbacks, Anthropic/OpenAI 429 response headers, multiple retries, retry-after-ms precedence, Gateway internal-server and rate-limit retry, Gateway authentication no-retry, and retry headers carried by an API-call cause. Rust uses injected sleep recording instead of JavaScript fake timers, which proves the same delay selection without depending on a JS event loop. |
+| Partial JSON repair utility | verified | `src/util.rs` | `parse_partial_json_*`; `fix_json_upstream_*` | Mirrors every portable upstream `parse-partial-json.test.ts` case and every portable upstream `fix-json.test.ts` case one-to-one. Rust retains existing grouped regression tests as additive coverage, but the `fix_json_upstream_*` tests now map the original TypeScript cases individually for null/boolean/number/string repair, arrays, objects, nesting, and regression fixtures. |
 | `generateText` non-streaming | verified | `src/generate_text.rs` | `generate_text_*` tests in `src/generate_text.rs`; `examples/kitchen_sink.rs` | Covers deterministic model calls, retryable pre-content provider failures up to `maxRetries`, `maxRetries` start-event configuration, tool loops, result shaping, usage, warnings, metadata, and response messages. |
 | Tool calling, tool execution, tool approval, repair, refinement, active tools, pruning | verified | `src/generate_text.rs`, `crates/ai-sdk-provider-utils`, `crates/ai-sdk-gateway/src/gateway_tools.rs` | Tool loop, approval, repair, execution, pruning, provider-executed factory, Gateway tools, and mapping tests | Provider-executed deferred results and Gateway provider-executed tools are represented in Rust. Most concrete provider-specific tools remain unported. |
 | Open Responses basic text generated result | verified | `crates/ai-sdk-open-responses/src/open_responses.rs` | `open_responses_provider_generates_basic_text_response`; `open_responses_provider_extracts_basic_text_usage`; `open_responses_provider_extracts_basic_text_response_id_metadata` | Mirrors the upstream `OpenAIResponsesLanguageModel > doGenerate > basic text response` generated-result tests one-to-one for text content, text item id metadata, detailed usage conversion (`cacheRead`, `noCache`, reasoning/text output split, and raw provider usage), and top-level OpenAI `responseId` provider metadata. |
@@ -878,6 +879,13 @@ focused tests for each portable behavior before changing rows to `verified`.
   Rust records injected sleep durations instead of using JavaScript fake
   timers, and the retry attempt model now represents Gateway retryability plus
   cause response headers.
+- 2026-05-21: `packages/ai` partial JSON utility test parity added 46
+  `fix_json_upstream_*` Rust tests in `src/util.rs`, mapping every portable
+  upstream `util/fix-json.test.ts` case one-to-one for empty input, literals,
+  number and exponent prefixes, string escape repair, array/object repair,
+  nested structures, and regression fixtures. Existing grouped Rust fix-json
+  tests remain additive coverage only. The existing `parse_partial_json_*` tests
+  already cover every portable upstream `util/parse-partial-json.test.ts` case.
 - 2026-05-21: `streamObject` text response parity added
   `stream_object_result_text_stream_and_response_match_upstream_object_chunks`
   and
@@ -2077,8 +2085,10 @@ focused tests for each portable behavior before changing rows to `verified`.
    protected live MCP service validation.
 7. Continue `streamText` parity with true post-return `createUIMessageStream`
    delayed-merge behavior if a live stream abstraction is introduced.
-8. Continue `streamObject` parity with remaining partial-output strategy edge
-   cases after the Gateway text/stream/UI path is stronger.
+8. Continue `streamObject` parity with remaining output-strategy stream-result
+   and type-level edge cases after the Gateway text/stream/UI path is stronger.
+   The underlying `fixJson` and `parsePartialJson` partial-JSON utilities now
+   have named one-to-one Rust coverage for every portable upstream test case.
 9. Continue native Gateway provider test parity from upstream
    `gateway-provider.test.ts` and any remaining Gateway provider package tests
    before returning to unrelated providers. The portable
