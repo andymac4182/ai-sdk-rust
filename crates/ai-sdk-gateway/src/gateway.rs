@@ -3589,11 +3589,11 @@ fn provider_api_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        GatewayAuthMethod, GatewayCredentialType, GatewayGenerationInfoParams, GatewayModelType,
-        GatewayProvider, GatewayProviderOptions, GatewayProviderOptionsSort,
-        GatewayProviderSettings, GatewayProviderTimeouts, GatewaySpendReportDatePart,
-        GatewaySpendReportGroupBy, GatewaySpendReportParams, GatewayTransport,
-        GatewayTransportFuture, create_gateway, gateway, gateway_base_url,
+        DEFAULT_GATEWAY_BASE_URL, GatewayAuthMethod, GatewayCredentialType,
+        GatewayGenerationInfoParams, GatewayModelType, GatewayProvider, GatewayProviderOptions,
+        GatewayProviderOptionsSort, GatewayProviderSettings, GatewayProviderTimeouts,
+        GatewaySpendReportDatePart, GatewaySpendReportGroupBy, GatewaySpendReportParams,
+        GatewayTransport, GatewayTransportFuture, create_gateway, gateway, gateway_base_url,
         gateway_observability_headers_with_env, gateway_provider_headers_with_env,
         gateway_provider_options, get_gateway_auth_token_with_env, metadata_cache_refresh_duration,
         try_gateway_provider_options,
@@ -3619,6 +3619,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Waker};
+    use std::time::{Duration, Instant};
     use url::Url;
 
     fn env_lookup<'a>(
@@ -3634,6 +3635,38 @@ mod tests {
 
     fn json_object(value: JsonValue) -> JsonObject {
         value.as_object().cloned().expect("JSON value is an object")
+    }
+
+    fn metadata_response_for_model(model_id: &str) -> String {
+        json!({
+            "models": [{
+                "id": model_id,
+                "name": "Test Model",
+                "specification": {
+                    "specificationVersion": "v4",
+                    "provider": "gateway",
+                    "modelId": model_id
+                },
+                "modelType": "language"
+            }]
+        })
+        .to_string()
+    }
+
+    fn counting_metadata_transport(request_count: Arc<Mutex<u32>>) -> GatewayTransport {
+        Arc::new(move |_request| -> GatewayTransportFuture {
+            let mut count = request_count
+                .lock()
+                .expect("request count mutex is not poisoned");
+            *count += 1;
+            let model_id = format!("model-{}", *count);
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                metadata_response_for_model(&model_id),
+            ))))
+        })
     }
 
     fn assert_request_tracks_abort_signal(
@@ -6201,6 +6234,339 @@ mod tests {
         assert_eq!(model.provider(), "gateway");
         assert_eq!(model.model_id(), "cohere/rerank-v3.5");
         assert_eq!(gateway_base_url(&model.settings), "https://api.example.com");
+    }
+
+    #[test]
+    fn create_gateway_fetches_available_models_with_custom_base_url() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({ "models": [] }).to_string(),
+            ))))
+        });
+        let provider = create_gateway(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(transport);
+        let result = poll_ready(provider.get_available_models()).expect("metadata fetch succeeds");
+
+        assert!(result.models.is_empty());
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+
+        assert_eq!(request.method, ProviderApiRequestMethod::Get);
+        assert_eq!(request.url, "https://api.example.com/config");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert!(
+            request
+                .headers
+                .get("user-agent")
+                .is_some_and(|value| value.starts_with("ai-sdk/gateway/"))
+        );
+    }
+
+    #[test]
+    fn create_gateway_caches_metadata_for_configured_refresh_interval() {
+        let request_count = Arc::new(Mutex::new(0_u32));
+        let provider = create_gateway(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-api-key")
+                .with_metadata_cache_refresh_millis(10_000),
+        )
+        .with_transport(counting_metadata_transport(Arc::clone(&request_count)));
+
+        let first = poll_ready(provider.get_available_models()).expect("first fetch succeeds");
+        let second = poll_ready(provider.get_available_models()).expect("second fetch is cached");
+        {
+            let mut cache = provider
+                .metadata_cache
+                .lock()
+                .expect("gateway metadata cache mutex is not poisoned");
+            cache.fetched_at = Some(Instant::now() - Duration::from_millis(9_000));
+        }
+        let third =
+            poll_ready(provider.get_available_models()).expect("third fetch is still cached");
+        {
+            let mut cache = provider
+                .metadata_cache
+                .lock()
+                .expect("gateway metadata cache mutex is not poisoned");
+            cache.fetched_at = Some(Instant::now() - Duration::from_millis(11_000));
+        }
+        let fourth =
+            poll_ready(provider.get_available_models()).expect("fourth fetch refreshes cache");
+
+        assert_eq!(
+            *request_count
+                .lock()
+                .expect("request count mutex is not poisoned"),
+            2
+        );
+        assert_eq!(first.models[0].id, "model-1");
+        assert_eq!(second.models[0].id, "model-1");
+        assert_eq!(third.models[0].id, "model-1");
+        assert_eq!(fourth.models[0].id, "model-2");
+    }
+
+    #[test]
+    fn create_gateway_uses_default_five_minute_metadata_refresh_interval() {
+        let request_count = Arc::new(Mutex::new(0_u32));
+        let provider = create_gateway(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-api-key"),
+        )
+        .with_transport(counting_metadata_transport(Arc::clone(&request_count)));
+
+        let first = poll_ready(provider.get_available_models()).expect("first fetch succeeds");
+        {
+            let mut cache = provider
+                .metadata_cache
+                .lock()
+                .expect("gateway metadata cache mutex is not poisoned");
+            cache.fetched_at = Some(Instant::now() - Duration::from_secs(4 * 60));
+        }
+        let second = poll_ready(provider.get_available_models()).expect("second fetch is cached");
+        {
+            let mut cache = provider
+                .metadata_cache
+                .lock()
+                .expect("gateway metadata cache mutex is not poisoned");
+            cache.fetched_at = Some(Instant::now() - Duration::from_secs(6 * 60));
+        }
+        let third =
+            poll_ready(provider.get_available_models()).expect("third fetch refreshes cache");
+
+        assert_eq!(
+            *request_count
+                .lock()
+                .expect("request count mutex is not poisoned"),
+            2
+        );
+        assert_eq!(
+            metadata_cache_refresh_duration(&provider.settings),
+            Duration::from_secs(5 * 60)
+        );
+        assert_eq!(first.models[0].id, "model-1");
+        assert_eq!(second.models[0].id, "model-1");
+        assert_eq!(third.models[0].id, "model-2");
+    }
+
+    #[test]
+    fn create_gateway_language_model_passes_observability_headers_from_environment() {
+        let provider = create_gateway(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-api-key")
+                .with_vercel_request_id("test-request-id"),
+        );
+        let model = provider.language_model("test-model");
+        let observability_headers = gateway_observability_headers_with_env(
+            &model.settings,
+            env_lookup(&[
+                ("VERCEL_DEPLOYMENT_ID", "test-deployment"),
+                ("VERCEL_ENV", "test"),
+                ("VERCEL_REGION", "iad1"),
+                ("VERCEL_PROJECT_ID", "prj_test123"),
+            ]),
+        );
+
+        assert_eq!(model.provider(), "gateway");
+        assert_eq!(gateway_base_url(&model.settings), "https://api.example.com");
+        assert_eq!(
+            observability_headers
+                .get("ai-o11y-deployment-id")
+                .map(String::as_str),
+            Some("test-deployment")
+        );
+        assert_eq!(
+            observability_headers
+                .get("ai-o11y-environment")
+                .map(String::as_str),
+            Some("test")
+        );
+        assert_eq!(
+            observability_headers
+                .get("ai-o11y-region")
+                .map(String::as_str),
+            Some("iad1")
+        );
+        assert_eq!(
+            observability_headers
+                .get("ai-o11y-request-id")
+                .map(String::as_str),
+            Some("test-request-id")
+        );
+        assert_eq!(
+            observability_headers
+                .get("ai-o11y-project-id")
+                .map(String::as_str),
+            Some("prj_test123")
+        );
+    }
+
+    #[test]
+    fn create_gateway_language_model_omits_missing_observability_headers() {
+        let provider = create_gateway(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-api-key"),
+        );
+        let model = provider.language_model("test-model");
+        let observability_headers =
+            gateway_observability_headers_with_env(&model.settings, env_lookup(&[]));
+
+        assert_eq!(model.provider(), "gateway");
+        assert_eq!(gateway_base_url(&model.settings), "https://api.example.com");
+        assert!(observability_headers.is_empty());
+    }
+
+    #[test]
+    fn default_gateway_export_exposes_provider_instance() {
+        let provider = GatewayProvider::new();
+        let model = gateway("test-model");
+
+        assert_eq!(model.provider(), "gateway");
+        assert_eq!(model.model_id(), "test-model");
+        assert_eq!(provider.language_model("test-model").provider(), "gateway");
+    }
+
+    #[test]
+    fn create_gateway_uses_default_base_url_when_none_is_provided() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({ "models": [] }).to_string(),
+            ))))
+        });
+        let provider = create_gateway(GatewayProviderSettings::new().with_api_key("test-key"))
+            .with_transport(transport);
+        let result = poll_ready(provider.get_available_models()).expect("metadata fetch succeeds");
+
+        assert!(result.models.is_empty());
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+
+        assert_eq!(request.url, "https://ai-gateway.vercel.sh/v4/ai/config");
+    }
+
+    #[test]
+    fn create_gateway_accepts_empty_options() {
+        let provider = create_gateway(GatewayProviderSettings::new());
+        let model = provider.language_model("test-model");
+
+        assert_eq!(model.provider(), "gateway");
+        assert_eq!(model.model_id(), "test-model");
+        assert_eq!(
+            gateway_base_url(&provider.settings),
+            DEFAULT_GATEWAY_BASE_URL
+        );
+    }
+
+    #[test]
+    fn default_gateway_export_constructs_image_model() {
+        let provider = GatewayProvider::new();
+        let model = provider.image_model("google/imagen-4.0-generate");
+
+        assert_eq!(model.provider(), "gateway");
+        assert_eq!(model.model_id(), "google/imagen-4.0-generate");
+        assert_eq!(gateway_base_url(&model.settings), DEFAULT_GATEWAY_BASE_URL);
+    }
+
+    #[test]
+    fn default_gateway_export_constructs_video_model() {
+        let provider = GatewayProvider::new();
+        let model = provider.video_model("google/veo-2.0-generate-001");
+
+        assert_eq!(model.provider(), "gateway");
+        assert_eq!(model.model_id(), "google/veo-2.0-generate-001");
+        assert_eq!(gateway_base_url(&model.settings), DEFAULT_GATEWAY_BASE_URL);
+    }
+
+    #[test]
+    fn create_gateway_overrides_default_base_url_when_provided() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({ "models": [] }).to_string(),
+            ))))
+        });
+        let provider = create_gateway(
+            GatewayProviderSettings::new()
+                .with_base_url("https://custom-api.example.com")
+                .with_api_key("test-key"),
+        )
+        .with_transport(transport);
+        let result = poll_ready(provider.get_available_models()).expect("metadata fetch succeeds");
+
+        assert!(result.models.is_empty());
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+
+        assert_eq!(request.url, "https://custom-api.example.com/config");
+    }
+
+    #[test]
+    fn create_gateway_prefers_api_key_over_oidc_token() {
+        let provider =
+            create_gateway(GatewayProviderSettings::new().with_api_key("test-api-key-123"));
+        let headers = gateway_provider_headers_with_env(
+            &provider.settings,
+            env_lookup(&[("VERCEL_OIDC_TOKEN", "mock-oidc-token")]),
+        );
+
+        assert_eq!(
+            headers.get("authorization").and_then(Option::as_deref),
+            Some("Bearer test-api-key-123")
+        );
+        assert_eq!(
+            headers
+                .get("ai-gateway-auth-method")
+                .and_then(Option::as_deref),
+            Some("api-key")
+        );
+        assert!(
+            headers
+                .get("user-agent")
+                .and_then(Option::as_deref)
+                .is_some_and(|value| value.starts_with("ai-sdk/gateway/"))
+        );
     }
 
     #[test]
