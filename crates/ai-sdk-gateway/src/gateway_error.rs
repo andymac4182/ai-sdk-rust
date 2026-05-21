@@ -973,9 +973,9 @@ pub fn gateway_headers_from_auth_method(auth_method: GatewayAuthMethod) -> Heade
 #[cfg(test)]
 mod tests {
     use super::{
-        GatewayAuthMethod, GatewayAuthenticationError, GatewayError, GatewayInternalServerError,
-        GatewayInvalidRequestError, GatewayModelNotFoundError, GatewayRateLimitError,
-        GatewayResponseError, GatewayTimeoutError, as_gateway_error,
+        GATEWAY_AUTH_METHOD_HEADER, GatewayAuthMethod, GatewayAuthenticationError, GatewayError,
+        GatewayInternalServerError, GatewayInvalidRequestError, GatewayModelNotFoundError,
+        GatewayRateLimitError, GatewayResponseError, GatewayTimeoutError, as_gateway_error,
         create_gateway_error_from_api_call, create_gateway_error_from_response,
         create_gateway_error_from_response_with_cause_message, extract_gateway_api_call_response,
         gateway_headers_from_auth_method, parse_gateway_auth_method,
@@ -988,6 +988,13 @@ mod tests {
 
     fn gateway_response_error(error: &GatewayError) -> &GatewayResponseError {
         error.as_response().expect("expected GatewayResponseError")
+    }
+
+    fn headers_with_auth_method(value: Option<&str>) -> BTreeMap<String, Option<String>> {
+        BTreeMap::from([(
+            GATEWAY_AUTH_METHOD_HEADER.to_string(),
+            value.map(String::from),
+        )])
     }
 
     #[test]
@@ -1005,6 +1012,155 @@ mod tests {
         assert!(GatewayTimeoutError::new().is_retryable());
         assert!(GatewayResponseError::new().is_retryable());
         assert!(!GatewayModelNotFoundError::new().is_retryable());
+    }
+
+    #[test]
+    fn gateway_authentication_error_matches_default_and_custom_upstream_values() {
+        let default_error = GatewayAuthenticationError::new();
+        assert_eq!(default_error.name(), "GatewayAuthenticationError");
+        assert_eq!(default_error.error_type(), "authentication_error");
+        assert_eq!(default_error.message(), "Authentication failed");
+        assert_eq!(default_error.status_code(), 401);
+        assert_eq!(default_error.cause_message(), None);
+
+        let custom_error = GatewayAuthenticationError::with_message("Custom auth failed")
+            .with_status_code(403)
+            .with_cause_message("Original error");
+        assert_eq!(custom_error.message(), "Custom auth failed");
+        assert_eq!(custom_error.status_code(), 403);
+        assert_eq!(custom_error.cause_message(), Some("Original error"));
+
+        let gateway_error = GatewayError::from(default_error);
+        assert!(gateway_error.as_authentication().is_some());
+        assert!(gateway_error.as_invalid_request().is_none());
+    }
+
+    #[test]
+    fn gateway_authentication_contextual_error_matches_upstream_matrix() {
+        let api_key = GatewayAuthenticationError::create_contextual_error(true, false);
+        assert!(api_key.message().contains("Invalid API key"));
+        assert!(api_key.message().contains("vercel.com/d?to="));
+        assert_eq!(api_key.status_code(), 401);
+
+        let oidc = GatewayAuthenticationError::create_contextual_error(false, true);
+        assert!(oidc.message().contains("Invalid OIDC token"));
+        assert!(oidc.message().contains("npx vercel link"));
+        assert_eq!(oidc.status_code(), 401);
+
+        let missing = GatewayAuthenticationError::create_contextual_error(false, false);
+        assert!(missing.message().contains("No authentication provided"));
+        assert!(missing.message().contains("Option 1"));
+        assert!(missing.message().contains("Option 2"));
+        assert_eq!(missing.status_code(), 401);
+
+        let both = GatewayAuthenticationError::create_contextual_error(true, true);
+        assert!(both.message().contains("Invalid API key"));
+        assert!(both.message().contains("vercel.com/d?to="));
+        assert_eq!(both.status_code(), 401);
+    }
+
+    #[test]
+    fn gateway_invalid_request_error_matches_default_custom_and_variant_checks() {
+        let default_error = GatewayInvalidRequestError::new();
+        assert_eq!(default_error.name(), "GatewayInvalidRequestError");
+        assert_eq!(default_error.error_type(), "invalid_request_error");
+        assert_eq!(default_error.message(), "Invalid request");
+        assert_eq!(default_error.status_code(), 400);
+
+        let custom_error = GatewayInvalidRequestError::with_message("Missing required field")
+            .with_status_code(422);
+        assert_eq!(custom_error.message(), "Missing required field");
+        assert_eq!(custom_error.status_code(), 422);
+
+        let gateway_error = GatewayError::from(default_error);
+        assert!(gateway_error.as_invalid_request().is_some());
+        assert!(gateway_error.as_authentication().is_none());
+    }
+
+    #[test]
+    fn gateway_rate_limit_error_matches_default_and_variant_checks() {
+        let error = GatewayRateLimitError::new();
+        assert_eq!(error.name(), "GatewayRateLimitError");
+        assert_eq!(error.error_type(), "rate_limit_exceeded");
+        assert_eq!(error.message(), "Rate limit exceeded");
+        assert_eq!(error.status_code(), 429);
+
+        let gateway_error = GatewayError::from(error);
+        assert!(gateway_error.as_rate_limit().is_some());
+        assert!(gateway_error.as_internal_server().is_none());
+    }
+
+    #[test]
+    fn gateway_model_not_found_error_matches_default_custom_and_variant_checks() {
+        let default_error = GatewayModelNotFoundError::new();
+        assert_eq!(default_error.name(), "GatewayModelNotFoundError");
+        assert_eq!(default_error.error_type(), "model_not_found");
+        assert_eq!(default_error.message(), "Model not found");
+        assert_eq!(default_error.status_code(), 404);
+        assert_eq!(default_error.model_id(), None);
+
+        let custom_error =
+            GatewayModelNotFoundError::with_message("Model gpt-4 not found").with_model_id("gpt-4");
+        assert_eq!(custom_error.message(), "Model gpt-4 not found");
+        assert_eq!(custom_error.model_id(), Some("gpt-4"));
+
+        let gateway_error = GatewayError::from(default_error);
+        assert!(gateway_error.as_model_not_found().is_some());
+        assert!(gateway_error.as_rate_limit().is_none());
+    }
+
+    #[test]
+    fn gateway_internal_server_error_matches_default_and_variant_checks() {
+        let error = GatewayInternalServerError::new();
+        assert_eq!(error.name(), "GatewayInternalServerError");
+        assert_eq!(error.error_type(), "internal_server_error");
+        assert_eq!(error.message(), "Internal server error");
+        assert_eq!(error.status_code(), 500);
+
+        let gateway_error = GatewayError::from(error);
+        assert!(gateway_error.as_internal_server().is_some());
+        assert!(gateway_error.as_model_not_found().is_none());
+    }
+
+    #[test]
+    fn gateway_retryability_matches_upstream_status_matrix() {
+        assert!(GatewayInternalServerError::new().is_retryable());
+        assert!(GatewayRateLimitError::new().is_retryable());
+        assert!(GatewayTimeoutError::new().is_retryable());
+        assert!(
+            GatewayInternalServerError::with_message("Service unavailable")
+                .with_status_code(503)
+                .is_retryable()
+        );
+        assert!(!GatewayAuthenticationError::new().is_retryable());
+        assert!(!GatewayInvalidRequestError::new().is_retryable());
+        assert!(!GatewayModelNotFoundError::new().is_retryable());
+        assert!(GatewayResponseError::new().is_retryable());
+    }
+
+    #[test]
+    fn gateway_response_error_matches_default_custom_and_variant_checks() {
+        let default_error = GatewayResponseError::new();
+        assert_eq!(default_error.name(), "GatewayResponseError");
+        assert_eq!(default_error.error_type(), "response_error");
+        assert_eq!(default_error.message(), "Invalid response from Gateway");
+        assert_eq!(default_error.status_code(), 502);
+        assert_eq!(default_error.response(), None);
+        assert_eq!(default_error.validation_error(), None);
+
+        let response = json!({ "invalidField": "value" });
+        let custom_error = GatewayResponseError::with_message("Custom parsing error")
+            .with_status_code(422)
+            .with_response(response.clone())
+            .with_validation_error(r#"{"issues":[{"path":["error"],"message":"Required"}]}"#);
+        assert_eq!(custom_error.message(), "Custom parsing error");
+        assert_eq!(custom_error.status_code(), 422);
+        assert_eq!(custom_error.response(), Some(&response));
+        assert!(custom_error.validation_error().is_some());
+
+        let gateway_error = GatewayError::from(default_error);
+        assert!(gateway_error.as_response().is_some());
+        assert!(gateway_error.as_timeout().is_none());
     }
 
     #[test]
@@ -1687,6 +1843,77 @@ mod tests {
             Some(" API-KEY ".to_string()),
         )]);
         assert_eq!(parse_gateway_auth_method(&invalid), None);
+    }
+
+    #[test]
+    fn gateway_auth_method_header_matches_upstream_name() {
+        assert_eq!(GATEWAY_AUTH_METHOD_HEADER, "ai-gateway-auth-method");
+    }
+
+    #[test]
+    fn parse_gateway_auth_method_accepts_valid_values_and_extra_headers() {
+        assert_eq!(
+            parse_gateway_auth_method(&headers_with_auth_method(Some("api-key"))),
+            Some(GatewayAuthMethod::ApiKey)
+        );
+        assert_eq!(
+            parse_gateway_auth_method(&headers_with_auth_method(Some("oidc"))),
+            Some(GatewayAuthMethod::Oidc)
+        );
+
+        let headers = BTreeMap::from([
+            (
+                "authorization".to_string(),
+                Some("Bearer token".to_string()),
+            ),
+            (
+                "content-type".to_string(),
+                Some("application/json".to_string()),
+            ),
+            (
+                GATEWAY_AUTH_METHOD_HEADER.to_string(),
+                Some("api-key".to_string()),
+            ),
+            ("user-agent".to_string(), Some("test-agent".to_string())),
+        ]);
+        assert_eq!(
+            parse_gateway_auth_method(&headers),
+            Some(GatewayAuthMethod::ApiKey)
+        );
+    }
+
+    #[test]
+    fn parse_gateway_auth_method_rejects_invalid_values() {
+        for value in ["invalid-method", "", "123", "true", "API-KEY", "OIDC"] {
+            assert_eq!(
+                parse_gateway_auth_method(&headers_with_auth_method(Some(value))),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn parse_gateway_auth_method_returns_none_for_missing_or_nullish_headers() {
+        let missing = BTreeMap::from([(
+            "authorization".to_string(),
+            Some("Bearer token".to_string()),
+        )]);
+        assert_eq!(parse_gateway_auth_method(&missing), None);
+        assert_eq!(
+            parse_gateway_auth_method(&headers_with_auth_method(None)),
+            None
+        );
+        assert_eq!(parse_gateway_auth_method(&BTreeMap::new()), None);
+    }
+
+    #[test]
+    fn parse_gateway_auth_method_rejects_whitespace() {
+        for value in ["   ", " api-key "] {
+            assert_eq!(
+                parse_gateway_auth_method(&headers_with_auth_method(Some(value))),
+                None
+            );
+        }
     }
 
     #[test]
