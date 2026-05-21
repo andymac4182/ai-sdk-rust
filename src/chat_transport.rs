@@ -2654,6 +2654,75 @@ mod tests {
     }
 
     #[test]
+    fn convert_ui_messages_maps_tool_output_available_with_provider_metadata() {
+        let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
+            "msg-1",
+            UiMessageRole::Assistant,
+        )
+        .with_part(json!({ "type": "step-start" }))
+        .with_part(json!({
+            "type": "text",
+            "text": "Let me calculate that for you.",
+            "state": "done"
+        }))
+        .with_part(json!({
+            "type": "tool-calculator",
+            "state": "output-available",
+            "toolCallId": "call1",
+            "input": { "operation": "add", "numbers": [1, 2] },
+            "output": "3",
+            "callProviderMetadata": {
+                "testProvider": {
+                    "signature": "1234567890"
+                }
+            }
+        }))])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Let me calculate that for you."
+                        },
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call1",
+                            "toolName": "calculator",
+                            "input": { "operation": "add", "numbers": [1, 2] },
+                            "providerOptions": {
+                                "testProvider": {
+                                    "signature": "1234567890"
+                                }
+                            }
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call1",
+                            "toolName": "calculator",
+                            "output": { "type": "text", "value": "3" },
+                            "providerOptions": {
+                                "testProvider": {
+                                    "signature": "1234567890"
+                                }
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn convert_ui_messages_maps_tool_output_error_raw_input_to_error_text() {
         let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
             "msg-1",
@@ -2695,6 +2764,318 @@ mod tests {
                                 "type": "error-text",
                                 "value": "Error: Invalid input"
                             }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_tool_output_error_input_to_error_text() {
+        let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
+            "msg-1",
+            UiMessageRole::Assistant,
+        )
+        .with_part(json!({ "type": "step-start" }))
+        .with_part(json!({
+            "type": "text",
+            "text": "Let me calculate that for you.",
+            "state": "done"
+        }))
+        .with_part(json!({
+            "type": "tool-calculator",
+            "state": "output-error",
+            "toolCallId": "call1",
+            "input": { "operation": "add", "numbers": [1, 2] },
+            "errorText": "Error: Invalid input"
+        }))])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Let me calculate that for you."
+                        },
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call1",
+                            "toolName": "calculator",
+                            "input": { "operation": "add", "numbers": [1, 2] }
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call1",
+                            "toolName": "calculator",
+                            "output": {
+                                "type": "error-text",
+                                "value": "Error: Invalid input"
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_tool_invocation_multi_part_response() {
+        let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
+            "msg-1",
+            UiMessageRole::Assistant,
+        )
+        .with_part(json!({ "type": "step-start" }))
+        .with_part(json!({
+            "type": "text",
+            "text": "Let me calculate that for you.",
+            "state": "done"
+        }))
+        .with_part(json!({
+            "type": "tool-screenshot",
+            "state": "output-available",
+            "toolCallId": "call1",
+            "input": {},
+            "output": "imgbase64"
+        }))])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Let me calculate that for you."
+                        },
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call1",
+                            "toolName": "screenshot",
+                            "input": {}
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call1",
+                            "toolName": "screenshot",
+                            "output": {
+                                "type": "text",
+                                "value": "imgbase64"
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_empty_tool_invocation_conversation() {
+        let messages = convert_ui_messages_to_model_messages(&[
+            UiMessage::new("msg-1", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "text1" })),
+            UiMessage::new("msg-2", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "text", "text": "text2", "state": "done" })),
+        ])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "text1" }]
+                },
+                {
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "text2" }]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_multiple_messages_conversation() {
+        let messages = convert_ui_messages_to_model_messages(&[
+            UiMessage::new("msg-1", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "What's the weather like?" })),
+            UiMessage::new("msg-2", UiMessageRole::Assistant).with_part(
+                json!({ "type": "text", "text": "I'll check that for you.", "state": "done" }),
+            ),
+            UiMessage::new("msg-3", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Thanks!" })),
+        ])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "What's the weather like?"
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "I'll check that for you."
+                        }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Thanks!"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_multiple_tool_invocations_with_steps() {
+        let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
+            "msg-1",
+            UiMessageRole::Assistant,
+        )
+        .with_part(json!({ "type": "step-start" }))
+        .with_part(json!({ "type": "text", "text": "response", "state": "done" }))
+        .with_part(json!({
+            "type": "tool-screenshot",
+            "state": "output-available",
+            "toolCallId": "call-1",
+            "input": { "value": "value-1" },
+            "output": "result-1"
+        }))
+        .with_part(json!({ "type": "step-start" }))
+        .with_part(json!({
+            "type": "tool-screenshot",
+            "state": "output-available",
+            "toolCallId": "call-2",
+            "input": { "value": "value-2" },
+            "output": "result-2"
+        }))
+        .with_part(json!({
+            "type": "tool-screenshot",
+            "state": "output-available",
+            "toolCallId": "call-3",
+            "input": { "value": "value-3" },
+            "output": "result-3"
+        }))
+        .with_part(json!({ "type": "step-start" }))
+        .with_part(json!({
+            "type": "tool-screenshot",
+            "state": "output-available",
+            "toolCallId": "call-4",
+            "input": { "value": "value-4" },
+            "output": "result-4"
+        }))])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "response" },
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-1",
+                            "toolName": "screenshot",
+                            "input": { "value": "value-1" }
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-1",
+                            "toolName": "screenshot",
+                            "output": { "type": "text", "value": "result-1" }
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-2",
+                            "toolName": "screenshot",
+                            "input": { "value": "value-2" }
+                        },
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-3",
+                            "toolName": "screenshot",
+                            "input": { "value": "value-3" }
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-2",
+                            "toolName": "screenshot",
+                            "output": { "type": "text", "value": "result-2" }
+                        },
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-3",
+                            "toolName": "screenshot",
+                            "output": { "type": "text", "value": "result-3" }
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-4",
+                            "toolName": "screenshot",
+                            "input": { "value": "value-4" }
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-4",
+                            "toolName": "screenshot",
+                            "output": { "type": "text", "value": "result-4" }
                         }
                     ]
                 }
