@@ -6031,6 +6031,179 @@ mod tests {
     }
 
     #[test]
+    fn create_gateway_embedding_model_returns_gateway_embedding_model() {
+        let provider =
+            create_gateway(GatewayProviderSettings::new().with_base_url("https://api.example.com"));
+        let model = provider.embedding_model("openai/text-embedding-3-small");
+
+        assert_eq!(model.provider(), "gateway");
+        assert_eq!(model.model_id(), "openai/text-embedding-3-small");
+        assert_eq!(gateway_base_url(&model.settings), "https://api.example.com");
+    }
+
+    #[test]
+    fn create_gateway_image_model_uses_custom_base_url() {
+        let provider = create_gateway(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-api-key"),
+        );
+        let model = provider.image_model("google/imagen-4.0-generate");
+
+        assert_eq!(model.provider(), "gateway");
+        assert_eq!(model.model_id(), "google/imagen-4.0-generate");
+        assert_eq!(gateway_base_url(&model.settings), "https://api.example.com");
+    }
+
+    #[test]
+    fn create_gateway_image_model_reuses_headers_transport_and_observability() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", "{}"))))
+        });
+        let provider = create_gateway(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-api-key")
+                .with_header("custom-header", "value")
+                .with_vercel_request_id("mock-request-id"),
+        )
+        .with_transport(Arc::clone(&transport));
+        let model = provider.image_model("google/imagen-4.0-generate");
+        let headers = gateway_provider_headers_with_env(&model.settings, env_lookup(&[]));
+        let observability_headers =
+            gateway_observability_headers_with_env(&model.settings, env_lookup(&[]));
+
+        assert!(Arc::ptr_eq(&model.transport, &transport));
+        assert_eq!(
+            headers.get("authorization").and_then(Option::as_deref),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            headers.get("custom-header").and_then(Option::as_deref),
+            Some("value")
+        );
+        assert_eq!(
+            headers
+                .get("ai-gateway-protocol-version")
+                .and_then(Option::as_deref),
+            Some("0.0.1")
+        );
+        assert_eq!(
+            headers
+                .get("ai-gateway-auth-method")
+                .and_then(Option::as_deref),
+            Some("api-key")
+        );
+        assert!(
+            headers
+                .get("user-agent")
+                .and_then(Option::as_deref)
+                .is_some_and(|value| value.starts_with("ai-sdk/gateway/"))
+        );
+        assert_eq!(
+            observability_headers
+                .get("ai-o11y-request-id")
+                .map(String::as_str),
+            Some("mock-request-id")
+        );
+    }
+
+    #[test]
+    fn create_gateway_video_model_uses_custom_base_url() {
+        let provider = create_gateway(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-api-key"),
+        );
+        let model = provider.video_model("google/veo-2.0-generate-001");
+
+        assert_eq!(model.provider(), "gateway");
+        assert_eq!(model.model_id(), "google/veo-2.0-generate-001");
+        assert_eq!(gateway_base_url(&model.settings), "https://api.example.com");
+    }
+
+    #[test]
+    fn create_gateway_video_model_reuses_headers_transport_and_observability() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", "{}"))))
+        });
+        let provider = create_gateway(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-api-key")
+                .with_header("custom-header", "value")
+                .with_vercel_request_id("mock-request-id"),
+        )
+        .with_transport(Arc::clone(&transport));
+        let model = provider.video_model("google/veo-2.0-generate-001");
+        let headers = gateway_provider_headers_with_env(&model.settings, env_lookup(&[]));
+        let observability_headers =
+            gateway_observability_headers_with_env(&model.settings, env_lookup(&[]));
+
+        assert!(Arc::ptr_eq(&model.transport, &transport));
+        assert_eq!(
+            headers.get("authorization").and_then(Option::as_deref),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            headers.get("custom-header").and_then(Option::as_deref),
+            Some("value")
+        );
+        assert_eq!(
+            headers
+                .get("ai-gateway-protocol-version")
+                .and_then(Option::as_deref),
+            Some("0.0.1")
+        );
+        assert_eq!(
+            headers
+                .get("ai-gateway-auth-method")
+                .and_then(Option::as_deref),
+            Some("api-key")
+        );
+        assert!(
+            headers
+                .get("user-agent")
+                .and_then(Option::as_deref)
+                .is_some_and(|value| value.starts_with("ai-sdk/gateway/"))
+        );
+        assert_eq!(
+            observability_headers
+                .get("ai-o11y-request-id")
+                .map(String::as_str),
+            Some("mock-request-id")
+        );
+    }
+
+    #[test]
+    fn create_gateway_reranking_model_uses_custom_base_url() {
+        let provider = create_gateway(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-api-key"),
+        );
+        let model = provider.reranking_model("cohere/rerank-v3.5");
+
+        assert_eq!(model.provider(), "gateway");
+        assert_eq!(model.model_id(), "cohere/rerank-v3.5");
+        assert_eq!(gateway_base_url(&model.settings), "https://api.example.com");
+    }
+
+    #[test]
+    fn create_gateway_reranking_alias_returns_gateway_reranking_model() {
+        let provider = create_gateway(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-api-key"),
+        );
+        let model = provider.reranking("cohere/rerank-v3.5");
+
+        assert_eq!(model.provider(), "gateway");
+        assert_eq!(model.model_id(), "cohere/rerank-v3.5");
+        assert_eq!(gateway_base_url(&model.settings), "https://api.example.com");
+    }
+
+    #[test]
     fn gateway_provider_creates_embedding_model_aliases() {
         let provider = GatewayProvider::new();
 
