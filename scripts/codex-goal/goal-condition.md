@@ -25,10 +25,10 @@ more tests, but never fewer mapped original TypeScript tests; a package with eve
 one missing portable upstream test/case is incomplete.
 
 Future-iteration test note: EVERY portable test/case from the original
-TypeScript package must exist as a Rust test in the matching crate. The Rust
-suite may and should add more tests where useful, but it must never contain
-fewer mapped original TypeScript tests; one missing original portable upstream
-test/case is a parity failure.
+TypeScript package must exist as a Rust test in the matching crate before
+parity can be claimed. Rust may have potentially more tests, but no less:
+extra Rust tests are additive only and cannot offset one missing original
+portable TypeScript test/case.
 Every original TypeScript test is assumed required unless it is explicitly
 documented as JavaScript-only/non-portable. This is a named upstream-test
 inventory requirement, not a raw count comparison: every portable upstream case
