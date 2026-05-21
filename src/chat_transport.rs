@@ -3084,6 +3084,302 @@ mod tests {
     }
 
     #[test]
+    fn convert_ui_messages_maps_tool_invocations_mixed_with_text() {
+        let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
+            "msg-1",
+            UiMessageRole::Assistant,
+        )
+        .with_part(json!({ "type": "step-start" }))
+        .with_part(json!({
+            "type": "text",
+            "text": "i am gonna use tool1",
+            "state": "done"
+        }))
+        .with_part(json!({
+            "type": "tool-screenshot",
+            "state": "output-available",
+            "toolCallId": "call-1",
+            "input": { "value": "value-1" },
+            "output": "result-1"
+        }))
+        .with_part(json!({ "type": "step-start" }))
+        .with_part(json!({
+            "type": "text",
+            "text": "i am gonna use tool2 and tool3",
+            "state": "done"
+        }))
+        .with_part(json!({
+            "type": "tool-screenshot",
+            "state": "output-available",
+            "toolCallId": "call-2",
+            "input": { "value": "value-2" },
+            "output": "result-2"
+        }))
+        .with_part(json!({
+            "type": "tool-screenshot",
+            "state": "output-available",
+            "toolCallId": "call-3",
+            "input": { "value": "value-3" },
+            "output": "result-3"
+        }))
+        .with_part(json!({ "type": "step-start" }))
+        .with_part(json!({
+            "type": "tool-screenshot",
+            "state": "output-available",
+            "toolCallId": "call-4",
+            "input": { "value": "value-4" },
+            "output": "result-4"
+        }))
+        .with_part(json!({ "type": "step-start" }))
+        .with_part(json!({
+            "type": "text",
+            "text": "final response",
+            "state": "done"
+        }))])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "i am gonna use tool1"
+                        },
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-1",
+                            "toolName": "screenshot",
+                            "input": { "value": "value-1" }
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-1",
+                            "toolName": "screenshot",
+                            "output": { "type": "text", "value": "result-1" }
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "i am gonna use tool2 and tool3"
+                        },
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-2",
+                            "toolName": "screenshot",
+                            "input": { "value": "value-2" }
+                        },
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-3",
+                            "toolName": "screenshot",
+                            "input": { "value": "value-3" }
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-2",
+                            "toolName": "screenshot",
+                            "output": { "type": "text", "value": "result-2" }
+                        },
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-3",
+                            "toolName": "screenshot",
+                            "output": { "type": "text", "value": "result-3" }
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-4",
+                            "toolName": "screenshot",
+                            "input": { "value": "value-4" }
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-4",
+                            "toolName": "screenshot",
+                            "output": { "type": "text", "value": "result-4" }
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "final response"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_multiple_tool_invocations_with_trailing_user_message() {
+        let messages = convert_ui_messages_to_model_messages(&[
+            UiMessage::new("msg-1", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({
+                    "type": "tool-screenshot",
+                    "state": "output-available",
+                    "toolCallId": "call-1",
+                    "input": { "value": "value-1" },
+                    "output": "result-1"
+                }))
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({
+                    "type": "tool-screenshot",
+                    "state": "output-available",
+                    "toolCallId": "call-2",
+                    "input": { "value": "value-2" },
+                    "output": "result-2"
+                }))
+                .with_part(json!({
+                    "type": "tool-screenshot",
+                    "state": "output-available",
+                    "toolCallId": "call-3",
+                    "input": { "value": "value-3" },
+                    "output": "result-3"
+                }))
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({
+                    "type": "tool-screenshot",
+                    "state": "output-available",
+                    "toolCallId": "call-4",
+                    "input": { "value": "value-4" },
+                    "output": "result-4"
+                }))
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({ "type": "text", "text": "response", "state": "done" })),
+            UiMessage::new("msg-2", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Thanks!" })),
+        ])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-1",
+                            "toolName": "screenshot",
+                            "input": { "value": "value-1" }
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-1",
+                            "toolName": "screenshot",
+                            "output": { "type": "text", "value": "result-1" }
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-2",
+                            "toolName": "screenshot",
+                            "input": { "value": "value-2" }
+                        },
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-3",
+                            "toolName": "screenshot",
+                            "input": { "value": "value-3" }
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-2",
+                            "toolName": "screenshot",
+                            "output": { "type": "text", "value": "result-2" }
+                        },
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-3",
+                            "toolName": "screenshot",
+                            "output": { "type": "text", "value": "result-3" }
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-4",
+                            "toolName": "screenshot",
+                            "input": { "value": "value-4" }
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-4",
+                            "toolName": "screenshot",
+                            "output": { "type": "text", "value": "result-4" }
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "response" }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "Thanks!" }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn convert_ui_messages_maps_dynamic_tool_output_available_tool_name() {
         let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
             "msg-1",
