@@ -1914,6 +1914,185 @@ mod tests {
     }
 
     #[test]
+    fn convert_ui_messages_maps_simple_system_message() {
+        let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
+            "msg-1",
+            UiMessageRole::System,
+        )
+        .with_part(json!({
+            "type": "text",
+            "text": "System message"
+        }))])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "system",
+                    "content": "System message"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_simple_user_message() {
+        let messages =
+            convert_ui_messages_to_model_messages(&[UiMessage::new("msg-1", UiMessageRole::User)
+                .with_part(json!({
+                    "type": "text",
+                    "text": "Hello, AI!"
+                }))])
+            .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Hello, AI!"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_custom_assistant_part() {
+        let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
+            "msg-1",
+            UiMessageRole::Assistant,
+        )
+        .with_part(json!({
+            "type": "custom",
+            "kind": "test-provider.compaction",
+            "providerMetadata": {
+                "openai": {
+                    "itemId": "cmp_123"
+                }
+            }
+        }))])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "custom",
+                            "kind": "test-provider.compaction",
+                            "providerOptions": {
+                                "openai": {
+                                    "itemId": "cmp_123"
+                                }
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_simple_assistant_text_message() {
+        let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
+            "msg-1",
+            UiMessageRole::Assistant,
+        )
+        .with_part(json!({
+            "type": "text",
+            "text": "Hello, human!",
+            "state": "done"
+        }))])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Hello, human!"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_assistant_reasoning_parts() {
+        let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
+            "msg-1",
+            UiMessageRole::Assistant,
+        )
+        .with_part(json!({
+            "type": "reasoning",
+            "text": "Thinking...",
+            "providerMetadata": {
+                "testProvider": {
+                    "signature": "1234567890"
+                }
+            },
+            "state": "done"
+        }))
+        .with_part(json!({
+            "type": "reasoning",
+            "text": "redacted-data",
+            "providerMetadata": {
+                "testProvider": {
+                    "isRedacted": true
+                }
+            },
+            "state": "done"
+        }))
+        .with_part(json!({
+            "type": "text",
+            "text": "Hello, human!",
+            "state": "done"
+        }))])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "reasoning",
+                            "text": "Thinking...",
+                            "providerOptions": {
+                                "testProvider": { "signature": "1234567890" }
+                            }
+                        },
+                        {
+                            "type": "reasoning",
+                            "text": "redacted-data",
+                            "providerOptions": {
+                                "testProvider": { "isRedacted": true }
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": "Hello, human!"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn convert_ui_messages_maps_system_provider_metadata() {
         let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
             "msg-1",
