@@ -3593,7 +3593,7 @@ mod tests {
         GatewayProvider, GatewayProviderOptions, GatewayProviderOptionsSort,
         GatewayProviderSettings, GatewayProviderTimeouts, GatewaySpendReportDatePart,
         GatewaySpendReportGroupBy, GatewaySpendReportParams, GatewayTransport,
-        GatewayTransportFuture, gateway, gateway_observability_headers_with_env,
+        GatewayTransportFuture, create_gateway, gateway, gateway_observability_headers_with_env,
         gateway_provider_headers_with_env, gateway_provider_options,
         get_gateway_auth_token_with_env, metadata_cache_refresh_duration,
         try_gateway_provider_options,
@@ -5892,6 +5892,98 @@ mod tests {
 
         assert_eq!(model.provider(), "gateway");
         assert_eq!(model.model_id(), "openai/gpt-4.1-mini");
+    }
+
+    #[test]
+    fn create_gateway_language_model_uses_custom_configuration() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "id": "test-id",
+                    "created": 1711115037,
+                    "model": "test-model",
+                    "content": {
+                        "type": "text",
+                        "text": "ok"
+                    },
+                    "finish_reason": "stop",
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1
+                    }
+                })
+                .to_string(),
+            ))))
+        });
+        let provider = create_gateway(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-api-key")
+                .with_header("custom-header", "value"),
+        )
+        .with_transport(transport);
+        let model = provider.language_model("test-model");
+
+        assert_eq!(model.provider(), "gateway");
+        assert_eq!(model.model_id(), "test-model");
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(Vec::new())));
+        assert!(matches!(
+            result.content.first(),
+            Some(LanguageModelContent::Text(text)) if text.text == "ok"
+        ));
+
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://api.example.com/language-model");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-gateway-protocol-version")
+                .map(String::as_str),
+            Some("0.0.1")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-gateway-auth-method")
+                .map(String::as_str),
+            Some("api-key")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-language-model-id")
+                .map(String::as_str),
+            Some("test-model")
+        );
+        assert!(
+            request
+                .headers
+                .get("user-agent")
+                .is_some_and(|value| value.starts_with("ai-sdk/gateway/"))
+        );
     }
 
     #[test]
