@@ -15885,48 +15885,7 @@ mod tests {
     }
 
     #[test]
-    fn open_responses_provider_maps_request_parameters_and_json_schema_format() {
-        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
-        let captured_request_for_transport = Arc::clone(&captured_request);
-        let transport: OpenResponsesTransport =
-            Arc::new(move |request| -> OpenResponsesTransportFuture {
-                *captured_request_for_transport
-                    .lock()
-                    .expect("captured request mutex is not poisoned") = Some(request.clone());
-
-                Box::pin(ready(Ok(ProviderApiResponse::text(
-                    200,
-                    "OK",
-                    json!({
-                        "id": "resp_request_parameters",
-                        "created_at": 1711115037,
-                        "model": "gpt-4.1-mini",
-                        "output": [
-                            {
-                                "type": "message",
-                                "role": "assistant",
-                                "content": [
-                                    {
-                                        "type": "output_text",
-                                        "text": "{\"status\":\"ok\"}"
-                                    }
-                                ]
-                            }
-                        ],
-                        "usage": {
-                            "input_tokens": 5,
-                            "output_tokens": 3
-                        }
-                    })
-                    .to_string(),
-                ))))
-            });
-        let provider = create_open_responses(
-            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
-                .with_api_key("test-api-key"),
-        )
-        .with_transport(transport);
-        let model = provider.language_model("gpt-4.1-mini");
+    fn open_responses_provider_sends_lmstudio_request_parameters_body() {
         let schema: JsonObject = serde_json::from_value(json!({
             "type": "object",
             "properties": {
@@ -15938,39 +15897,26 @@ mod tests {
         }))
         .expect("schema deserializes");
 
-        let result = poll_ready(
-            model.do_generate(
-                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
-                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
-                        LanguageModelTextPart::new("Hello"),
-                    )]),
-                )])
+        let (warnings, request_body) = open_responses_lmstudio_request_body(
+            lmstudio_hello_options()
                 .with_max_output_tokens(100)
                 .with_temperature(0.5)
                 .with_top_p(0.9)
+                .with_presence_penalty(0.1)
+                .with_frequency_penalty(0.2)
                 .with_response_format(
                     LanguageModelResponseFormat::json()
                         .with_name("response")
                         .with_description("Example response schema")
                         .with_schema(schema.clone()),
                 ),
-            ),
         );
 
-        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
-        let request = captured_request
-            .lock()
-            .expect("captured request mutex is not poisoned")
-            .clone()
-            .expect("request is captured");
+        assert!(warnings.is_empty());
         assert_eq!(
-            request
-                .body
-                .as_ref()
-                .and_then(ProviderApiRequestBody::as_text)
-                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
-            Some(json!({
-                "model": "gpt-4.1-mini",
+            request_body,
+            json!({
+                "model": "gemma-7b-it",
                 "input": [
                     {
                         "role": "user",
@@ -15985,6 +15931,8 @@ mod tests {
                 "max_output_tokens": 100,
                 "temperature": 0.5,
                 "top_p": 0.9,
+                "presence_penalty": 0.1,
+                "frequency_penalty": 0.2,
                 "text": {
                     "format": {
                         "type": "json_schema",
@@ -16002,7 +15950,97 @@ mod tests {
                         "strict": true
                     }
                 }
-            }))
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_sends_lmstudio_tools_request_body() {
+        let (warnings, request_body) = open_responses_lmstudio_request_body(
+            lmstudio_hello_options()
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "get_weather",
+                        json_object(json!({
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "The city and state"
+                                }
+                            },
+                            "required": ["location"]
+                        })),
+                    )
+                    .with_description("Get the current weather for a location"),
+                ))
+                .with_tool(LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "search",
+                        json_object(json!({
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": ["query"]
+                        })),
+                    )
+                    .with_description("Search for information")
+                    .with_strict(true),
+                )),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "gemma-7b-it",
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "get_weather",
+                        "description": "Get the current weather for a location",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "location": {
+                                    "type": "string",
+                                    "description": "The city and state"
+                                }
+                            },
+                            "required": ["location"]
+                        }
+                    },
+                    {
+                        "type": "function",
+                        "name": "search",
+                        "description": "Search for information",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": ["query"]
+                        },
+                        "strict": true
+                    }
+                ]
+            })
         );
     }
 
