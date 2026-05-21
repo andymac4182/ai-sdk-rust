@@ -10,6 +10,12 @@ more tests for stronger typing, extra edge cases, live-provider proof, and
 Rust-specific failures, but it must never have fewer mapped original TypeScript
 tests. A package with even one missing portable upstream test/case is not
 parity-complete.
+This is a containment rule, not a coverage preference or raw count comparison:
+the complete original TypeScript test inventory must be enumerated and mapped
+into Rust first, and only then may Rust add extra tests on top. For every
+matching crate, the required relationship is `original TypeScript tests <=
+mapped Rust tests`; any missing original portable TypeScript test keeps the
+crate incomplete even if Rust has broader or more numerous Rust-only tests.
 
 Handoff note for future iterations: EVERY portable test/case from the original
 TypeScript package must exist as a Rust test in the matching crate before
