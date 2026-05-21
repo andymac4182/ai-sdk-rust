@@ -45,6 +45,9 @@ TypeScript test inventory for that package; Rust-specific tests are only extra
 coverage and never reduce or replace that floor.
 A crate may have more Rust tests overall, but it is still incomplete if even
 one original portable TypeScript test/case is not represented in Rust.
+Read EVERY literally: enumerate the original TypeScript tests first, port each
+portable case into Rust, document any JavaScript-only exception, and only then
+count additional Rust tests as additive coverage.
 
 Required order: finish ALL common/core SDK packages together with Vercel AI
 Gateway provider coverage before taking more unrelated standalone provider

@@ -193,6 +193,9 @@ still open.
    only acceptable comparison is: every original portable TypeScript test/case
    exists in the matching Rust crate, and Rust may then add more tests on top,
    but never fewer.
+   Read EVERY literally: enumerate the original TypeScript tests first, port
+   each portable case into Rust, document any JavaScript-only exception, and
+   only then count additional Rust tests as additive coverage.
 5. For provider-backed behavior, require two layers of proof before marking a
    row `verified`: deterministic fake/mock/transport tests that run in normal
    validation, plus credential-gated live provider validation when a usable

@@ -98,6 +98,9 @@ Rust may add more tests for stronger typing, extra edge cases, live-provider
 proof, or Rust-specific failures, but those tests are additive only. The Rust
 suite may be larger than the original TypeScript suite, but it must never have
 fewer mapped original tests.
+Read EVERY literally: future iterations must enumerate the original TypeScript
+tests first, port each portable case into Rust, document any JavaScript-only
+exception, and only then count extra Rust-specific tests as additive coverage.
 Count parity from the original upstream TypeScript test list, not from the
 number of Rust tests. A Rust crate with extra Rust-specific tests but even one
 missing original portable upstream test/case remains incomplete. The only
