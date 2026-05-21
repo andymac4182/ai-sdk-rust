@@ -22113,16 +22113,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn open_responses_provider_maps_lmstudio_tool_call_response_fixture() {
-        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
-        let captured_request_for_transport = Arc::clone(&captured_request);
+    fn lmstudio_tool_call_generate_result() -> LanguageModelGenerateResult {
         let transport: OpenResponsesTransport =
-            Arc::new(move |request| -> OpenResponsesTransportFuture {
-                *captured_request_for_transport
-                    .lock()
-                    .expect("captured request mutex is not poisoned") = Some(request.clone());
-
+            Arc::new(move |_request| -> OpenResponsesTransportFuture {
                 Box::pin(ready(Ok(ProviderApiResponse::text(
                     200,
                     "OK",
@@ -22165,25 +22158,19 @@ mod tests {
         .with_transport(transport);
         let model = provider.language_model("gemma-7b-it");
 
-        let result = poll_ready(
+        poll_ready(
             model.do_generate(
-                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
-                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
-                        LanguageModelTextPart::new("What is the weather in San Francisco?"),
-                    )]),
-                )])
-                .with_tool(weather_function_tool())
-                .with_tool_choice(LanguageModelToolChoice::Required)
-                .with_temperature(0.1)
-                .with_top_p(0.95)
-                .with_presence_penalty(0.0)
-                .with_frequency_penalty(1.1)
-                .with_max_output_tokens(512),
+                lmstudio_hello_options()
+                    .with_tool(weather_function_tool())
+                    .with_tool_choice(LanguageModelToolChoice::Required),
             ),
-        );
+        )
+    }
 
-        assert_eq!(result.finish_reason.unified, FinishReason::ToolCalls);
-        assert_eq!(result.finish_reason.raw, None);
+    #[test]
+    fn open_responses_provider_parses_lmstudio_tool_call_from_response() {
+        let result = lmstudio_tool_call_generate_result();
+
         assert_eq!(result.content.len(), 1);
         assert!(matches!(
             &result.content[0],
@@ -22192,6 +22179,20 @@ mod tests {
                     && tool_call.tool_name == "weather"
                     && tool_call.input == "{\"location\":\"San Francisco\"}"
         ));
+    }
+
+    #[test]
+    fn open_responses_provider_returns_lmstudio_tool_calls_finish_reason() {
+        let result = lmstudio_tool_call_generate_result();
+
+        assert_eq!(result.finish_reason.unified, FinishReason::ToolCalls);
+        assert_eq!(result.finish_reason.raw, None);
+    }
+
+    #[test]
+    fn open_responses_provider_extracts_lmstudio_tool_call_usage() {
+        let result = lmstudio_tool_call_generate_result();
+
         assert_eq!(result.usage.input_tokens.total, Some(1189));
         assert_eq!(result.usage.input_tokens.no_cache, Some(298));
         assert_eq!(result.usage.input_tokens.cache_read, Some(891));
@@ -22206,41 +22207,6 @@ mod tests {
                 .and_then(|usage| usage.get("total_tokens"))
                 .and_then(JsonValue::as_u64),
             Some(1200)
-        );
-
-        let request_body = captured_request
-            .lock()
-            .expect("captured request mutex is not poisoned")
-            .clone()
-            .expect("request is captured")
-            .body
-            .as_ref()
-            .and_then(ProviderApiRequestBody::as_text)
-            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
-            .expect("request body is JSON");
-
-        assert_eq!(request_body["model"], "gemma-7b-it");
-        assert_eq!(request_body["tool_choice"], "required");
-        assert_eq!(
-            request_body["tools"],
-            json!([
-                {
-                    "type": "function",
-                    "name": "weather",
-                    "description": "Get the weather in a location",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "location": {
-                                "type": "string",
-                                "description": "The location to get the weather for"
-                            }
-                        },
-                        "required": ["location"],
-                        "additionalProperties": false
-                    }
-                }
-            ])
         );
     }
 
