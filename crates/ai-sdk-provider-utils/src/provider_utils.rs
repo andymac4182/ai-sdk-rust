@@ -21452,7 +21452,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_helper_prepares_upstream_function_tool_shape() {
+    fn tool_constructor_prepares_upstream_function_tool_shape() {
         let tool = tool("weather", object_schema()).with_description("Look up weather.");
 
         assert!(!tool.is_dynamic());
@@ -21471,6 +21471,378 @@ mod tests {
                     "required": ["city"]
                 }
             })
+        );
+    }
+
+    #[test]
+    fn tool_constructor_input_type_upstream_should_infer_input_type_from_zod_input_schema() {
+        let input_schema = object_schema();
+        let tool = tool("weather", input_schema.clone());
+
+        assert!(!tool.is_executable());
+        assert!(!tool.is_dynamic());
+        assert!(!tool.is_provider_tool());
+        assert_eq!(tool.input_schema, input_schema);
+        assert_eq!(tool.output_schema(), None);
+        assert!(matches!(
+            tool.to_language_model_tool(),
+            LanguageModelTool::Function(_)
+        ));
+    }
+
+    #[test]
+    fn tool_constructor_input_type_upstream_should_preserve_input_type_from_flexible_schema() {
+        let schema = Schema::new(object_schema()).with_validator(|value| {
+            value
+                .get("city")
+                .and_then(JsonValue::as_str)
+                .map(|city| json!({ "city": city }))
+                .map(ValidationResult::success)
+                .unwrap_or_else(|| ValidationResult::failure("Expected city string"))
+        });
+        let flexible_schema = FlexibleSchema::from(schema.clone());
+
+        let normalized = as_flexible_schema(Some(flexible_schema));
+        let validated = normalized
+            .validate(&json!({ "city": "Brisbane" }))
+            .expect("schema validates");
+
+        assert_eq!(normalized.json_schema(), schema.json_schema());
+        assert_eq!(
+            validated,
+            ValidationResult::success(json!({ "city": "Brisbane" }))
+        );
+    }
+
+    #[test]
+    fn tool_constructor_input_type_upstream_should_infer_input_type_with_optional_default_examples()
+    {
+        let input_schema = schema_object(json!({
+            "type": "object",
+            "properties": {
+                "location": { "type": "string" },
+                "unit": {
+                    "type": "string",
+                    "enum": ["celsius", "fahrenheit"],
+                    "default": "celsius"
+                }
+            },
+            "required": ["location"]
+        }));
+        let input_example = json!({
+            "location": "San Francisco",
+            "unit": "celsius"
+        })
+        .as_object()
+        .expect("input example is an object")
+        .clone();
+        let tool = tool("weather", input_schema.clone())
+            .with_description("Get the weather for a location")
+            .with_input_example(input_example.clone())
+            .with_execute(|input, _options| {
+                ready(Ok(json!({
+                    "temperature": 20,
+                    "unit": input["unit"]
+                })))
+            });
+
+        let output = poll_ready(
+            tool.execute(
+                json!({
+                    "location": "San Francisco",
+                    "unit": "celsius"
+                }),
+                ToolExecutionOptions::new("call-optional-default", Vec::new()),
+            )
+            .expect("execute callback is configured"),
+        )
+        .expect("execute succeeds");
+
+        assert_eq!(tool.input_schema, input_schema);
+        assert_eq!(
+            tool.input_examples,
+            Some(vec![LanguageModelToolInputExample::new(input_example)])
+        );
+        assert_eq!(
+            output,
+            json!({
+                "temperature": 20,
+                "unit": "celsius"
+            })
+        );
+    }
+
+    #[test]
+    fn tool_constructor_input_type_upstream_should_infer_input_type_with_refined_schema_examples() {
+        let input_schema = schema_object(json!({
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 3
+                }
+            },
+            "required": ["code"]
+        }));
+        let input_example = json!({ "code": "ABC" })
+            .as_object()
+            .expect("input example is an object")
+            .clone();
+        let tool = tool("codeDetails", input_schema.clone())
+            .with_description("Get code details")
+            .with_input_example(input_example.clone())
+            .with_execute(|input, _options| {
+                ready(Ok(json!({
+                    "code": input["code"],
+                    "valid": input["code"].as_str().is_some_and(|code| code.len() == 3)
+                })))
+            });
+
+        let output = poll_ready(
+            tool.execute(
+                json!({
+                    "code": "ABC"
+                }),
+                ToolExecutionOptions::new("call-refined", Vec::new()),
+            )
+            .expect("execute callback is configured"),
+        )
+        .expect("execute succeeds");
+
+        assert_eq!(tool.input_schema, input_schema);
+        assert_eq!(
+            tool.input_examples,
+            Some(vec![LanguageModelToolInputExample::new(input_example)])
+        );
+        assert_eq!(
+            output,
+            json!({
+                "code": "ABC",
+                "valid": true
+            })
+        );
+    }
+
+    #[test]
+    fn tool_constructor_context_type_upstream_should_infer_context_type_from_context_schema_in_execute()
+     {
+        let context_schema = json_schema(
+            json!({
+                "type": "object",
+                "properties": {
+                    "userId": { "type": "string" },
+                    "isAdmin": { "type": "boolean" }
+                },
+                "required": ["userId", "isAdmin"]
+            })
+            .as_object()
+            .expect("context schema is an object")
+            .clone(),
+        );
+        let tool = tool("weather", object_schema())
+            .with_context_schema(context_schema.clone())
+            .with_execute(|input, options| {
+                ready(Ok(json!({
+                    "number": input["number"],
+                    "userId": options
+                        .context
+                        .as_ref()
+                        .and_then(|context| context.get("userId"))
+                        .cloned()
+                        .unwrap_or(JsonValue::Null),
+                    "isAdmin": options
+                        .context
+                        .as_ref()
+                        .and_then(|context| context.get("isAdmin"))
+                        .cloned()
+                        .unwrap_or(JsonValue::Null)
+                })))
+            });
+
+        let output = poll_ready(
+            tool.execute(
+                json!({ "number": 7 }),
+                ToolExecutionOptions::new("call-context", Vec::new()).with_context(json!({
+                    "userId": "user-1",
+                    "isAdmin": true
+                })),
+            )
+            .expect("execute callback is configured"),
+        )
+        .expect("execute succeeds");
+
+        assert!(tool.context_schema().is_some());
+        assert_eq!(
+            tool.context_schema()
+                .expect("context schema is present")
+                .as_schema()
+                .json_schema(),
+            context_schema.json_schema()
+        );
+        assert_eq!(
+            output,
+            json!({
+                "number": 7,
+                "userId": "user-1",
+                "isAdmin": true
+            })
+        );
+    }
+
+    #[test]
+    fn tool_constructor_context_type_upstream_should_infer_context_type_in_input_lifecycle_callbacks()
+     {
+        let context_schema = json_schema(
+            json!({
+                "type": "object",
+                "properties": {
+                    "requestId": { "type": "string" }
+                },
+                "required": ["requestId"]
+            })
+            .as_object()
+            .expect("context schema is an object")
+            .clone(),
+        );
+        let recorded = Arc::new(Mutex::new(Vec::<JsonValue>::new()));
+        let start_recorded = Arc::clone(&recorded);
+        let delta_recorded = Arc::clone(&recorded);
+        let available_recorded = Arc::clone(&recorded);
+        let tool = tool("weather", object_schema())
+            .with_context_schema(context_schema)
+            .with_on_input_start(move |options| {
+                let recorded = Arc::clone(&start_recorded);
+                async move {
+                    recorded.lock().expect("recorded lock").push(json!({
+                        "type": "start",
+                        "context": options.context
+                    }));
+                }
+            })
+            .with_on_input_delta(move |options| {
+                let recorded = Arc::clone(&delta_recorded);
+                async move {
+                    recorded.lock().expect("recorded lock").push(json!({
+                        "type": "delta",
+                        "inputTextDelta": options.input_text_delta,
+                        "context": options.context
+                    }));
+                }
+            })
+            .with_on_input_available(move |options| {
+                let recorded = Arc::clone(&available_recorded);
+                async move {
+                    recorded.lock().expect("recorded lock").push(json!({
+                        "type": "available",
+                        "input": options.input,
+                        "context": options.context
+                    }));
+                }
+            });
+
+        poll_ready(
+            tool.on_input_start(
+                ToolExecutionOptions::new("call-lifecycle", Vec::new()).with_context(json!({
+                    "requestId": "req-1"
+                })),
+            )
+            .expect("input start callback is configured"),
+        );
+        poll_ready(
+            tool.on_input_delta(
+                ToolInputDeltaOptions::new("call-lifecycle", Vec::new(), r#"{"number":7"#)
+                    .with_context(json!({
+                        "requestId": "req-1"
+                    })),
+            )
+            .expect("input delta callback is configured"),
+        );
+        poll_ready(
+            tool.on_input_available(
+                ToolInputAvailableOptions::new(
+                    "call-lifecycle",
+                    Vec::new(),
+                    json!({ "number": 7 }),
+                )
+                .with_context(json!({
+                    "requestId": "req-1"
+                })),
+            )
+            .expect("input available callback is configured"),
+        );
+
+        assert_eq!(
+            recorded.lock().expect("recorded lock").as_slice(),
+            [
+                json!({
+                    "type": "start",
+                    "context": { "requestId": "req-1" }
+                }),
+                json!({
+                    "type": "delta",
+                    "inputTextDelta": r#"{"number":7"#,
+                    "context": { "requestId": "req-1" }
+                }),
+                json!({
+                    "type": "available",
+                    "input": { "number": 7 },
+                    "context": { "requestId": "req-1" }
+                })
+            ]
+        );
+    }
+
+    #[test]
+    fn tool_constructor_output_type_upstream_should_infer_output_type_from_execute_function() {
+        let tool = tool("weather", object_schema()).with_execute(|input, _options| {
+            ready(Ok(json!({
+                "number": input["number"],
+                "status": "test"
+            })))
+        });
+
+        let output = poll_ready(
+            tool.execute(
+                json!({ "number": 7 }),
+                ToolExecutionOptions::new("call-output", Vec::new()),
+            )
+            .expect("execute callback is configured"),
+        )
+        .expect("execute succeeds");
+
+        assert!(tool.is_executable());
+        assert_eq!(tool.output_schema(), None);
+        assert_eq!(
+            output,
+            json!({
+                "number": 7,
+                "status": "test"
+            })
+        );
+    }
+
+    #[test]
+    fn tool_constructor_output_type_upstream_should_infer_output_type_from_async_generator_execute_function()
+     {
+        let tool = tool("weather", object_schema()).with_execute_outputs(|_input, _options| {
+            ready(Ok(vec![ExecuteToolOutput::preliminary(json!("test"))]))
+        });
+
+        let outputs = poll_ready(execute_tool(
+            &tool,
+            json!({ "number": 7 }),
+            ToolExecutionOptions::new("call-output-stream", Vec::new()),
+        ))
+        .expect("execute succeeds");
+
+        assert!(tool.is_executable());
+        assert_eq!(
+            outputs,
+            vec![
+                ExecuteToolOutput::preliminary(json!("test")),
+                ExecuteToolOutput::final_output(json!("test"))
+            ]
         );
     }
 
