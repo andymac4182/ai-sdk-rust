@@ -2153,7 +2153,14 @@ fn gateway_provider_headers(
 fn try_gateway_provider_headers(
     settings: &GatewayProviderSettings,
 ) -> Result<BTreeMap<String, Option<String>>, GatewayError> {
-    let auth = get_gateway_auth_token(settings)?;
+    try_gateway_provider_headers_with_env(settings, |name| env::var(name))
+}
+
+fn try_gateway_provider_headers_with_env(
+    settings: &GatewayProviderSettings,
+    load_env: impl FnMut(&str) -> Result<String, env::VarError>,
+) -> Result<BTreeMap<String, Option<String>>, GatewayError> {
+    let auth = get_gateway_auth_token_with_env(settings, load_env)?;
     Ok(gateway_provider_headers_with_auth(settings, Some(auth)))
 }
 
@@ -3596,7 +3603,7 @@ mod tests {
         GatewayTransport, GatewayTransportFuture, create_gateway, gateway, gateway_base_url,
         gateway_observability_headers_with_env, gateway_provider_headers_with_env,
         gateway_provider_options, get_gateway_auth_token_with_env, metadata_cache_refresh_duration,
-        try_gateway_provider_options,
+        try_gateway_provider_headers_with_env, try_gateway_provider_options,
     };
     use ai_sdk_provider::{
         EmbeddingModel, EmbeddingModelCallOptions, FileData, FileDataContent, FinishReason,
@@ -3667,6 +3674,66 @@ mod tests {
                 metadata_response_for_model(&model_id),
             ))))
         })
+    }
+
+    fn assert_auth_token_case(
+        settings: GatewayProviderSettings,
+        env_values: &[(&str, &str)],
+        expected_auth_method: GatewayAuthMethod,
+        expected_token: &str,
+    ) {
+        let token = get_gateway_auth_token_with_env(&settings, env_lookup(env_values))
+            .expect("auth token resolves");
+
+        assert_eq!(token.auth_method, expected_auth_method);
+        assert_eq!(token.token, expected_token);
+    }
+
+    fn assert_auth_token_error(settings: GatewayProviderSettings, env_values: &[(&str, &str)]) {
+        let error = get_gateway_auth_token_with_env(&settings, env_lookup(env_values))
+            .expect_err("auth token is rejected");
+
+        assert!(error.as_authentication().is_some());
+        assert!(error.message().contains("No authentication provided"));
+    }
+
+    fn assert_provider_auth_headers_case(
+        settings: GatewayProviderSettings,
+        env_values: &[(&str, &str)],
+        expected_auth_method: GatewayAuthMethod,
+        expected_token: &str,
+    ) {
+        let headers = try_gateway_provider_headers_with_env(&settings, env_lookup(env_values))
+            .expect("provider headers resolve");
+        let expected_authorization = format!("Bearer {expected_token}");
+
+        assert_eq!(
+            headers.get("authorization").and_then(Option::as_deref),
+            Some(expected_authorization.as_str())
+        );
+        assert_eq!(
+            headers
+                .get("ai-gateway-auth-method")
+                .and_then(Option::as_deref),
+            Some(expected_auth_method.as_str())
+        );
+        assert!(
+            headers
+                .get("user-agent")
+                .and_then(Option::as_deref)
+                .is_some_and(|value| value.starts_with("ai-sdk/gateway/"))
+        );
+    }
+
+    fn assert_provider_auth_headers_error(
+        settings: GatewayProviderSettings,
+        env_values: &[(&str, &str)],
+    ) {
+        let error = try_gateway_provider_headers_with_env(&settings, env_lookup(env_values))
+            .expect_err("provider headers are rejected");
+
+        assert!(error.as_authentication().is_some());
+        assert!(error.message().contains("No authentication provided"));
     }
 
     fn assert_request_tracks_abort_signal(
@@ -3742,6 +3809,164 @@ mod tests {
 
         assert_eq!(token.auth_method, GatewayAuthMethod::ApiKey);
         assert_eq!(token.token, "\t\n ");
+    }
+
+    #[test]
+    fn get_gateway_auth_token_handles_no_auth_at_all() {
+        assert_auth_token_error(GatewayProviderSettings::new(), &[]);
+    }
+
+    #[test]
+    fn get_gateway_auth_token_handles_valid_oidc_invalid_api_key() {
+        assert_auth_token_case(
+            GatewayProviderSettings::new().with_api_key("invalid-api-key"),
+            &[("VERCEL_OIDC_TOKEN", "valid-oidc-token-12345")],
+            GatewayAuthMethod::ApiKey,
+            "invalid-api-key",
+        );
+    }
+
+    #[test]
+    fn get_gateway_auth_token_handles_invalid_oidc_valid_api_key() {
+        assert_auth_token_case(
+            GatewayProviderSettings::new().with_api_key("gw_valid_api_key_12345"),
+            &[("VERCEL_OIDC_TOKEN", "invalid-oidc-token")],
+            GatewayAuthMethod::ApiKey,
+            "gw_valid_api_key_12345",
+        );
+    }
+
+    #[test]
+    fn get_gateway_auth_token_handles_no_oidc_invalid_api_key() {
+        assert_auth_token_case(
+            GatewayProviderSettings::new(),
+            &[("AI_GATEWAY_API_KEY", "invalid-api-key")],
+            GatewayAuthMethod::ApiKey,
+            "invalid-api-key",
+        );
+    }
+
+    #[test]
+    fn get_gateway_auth_token_handles_no_oidc_valid_api_key() {
+        assert_auth_token_case(
+            GatewayProviderSettings::new(),
+            &[("AI_GATEWAY_API_KEY", "gw_valid_api_key_12345")],
+            GatewayAuthMethod::ApiKey,
+            "gw_valid_api_key_12345",
+        );
+    }
+
+    #[test]
+    fn get_gateway_auth_token_handles_valid_oidc_no_api_key() {
+        assert_auth_token_case(
+            GatewayProviderSettings::new(),
+            &[("VERCEL_OIDC_TOKEN", "valid-oidc-token-12345")],
+            GatewayAuthMethod::Oidc,
+            "valid-oidc-token-12345",
+        );
+    }
+
+    #[test]
+    fn get_gateway_auth_token_handles_valid_oidc_valid_api_key() {
+        assert_auth_token_case(
+            GatewayProviderSettings::new(),
+            &[
+                ("VERCEL_OIDC_TOKEN", "valid-oidc-token-12345"),
+                ("AI_GATEWAY_API_KEY", "gw_valid_api_key_12345"),
+            ],
+            GatewayAuthMethod::ApiKey,
+            "gw_valid_api_key_12345",
+        );
+    }
+
+    #[test]
+    fn get_gateway_auth_token_handles_valid_oidc_valid_options_api_key() {
+        assert_auth_token_case(
+            GatewayProviderSettings::new().with_api_key("gw_valid_options_api_key_12345"),
+            &[("VERCEL_OIDC_TOKEN", "valid-oidc-token-12345")],
+            GatewayAuthMethod::ApiKey,
+            "gw_valid_options_api_key_12345",
+        );
+    }
+
+    #[test]
+    fn get_gateway_auth_token_handles_invalid_oidc_invalid_api_key() {
+        assert_auth_token_case(
+            GatewayProviderSettings::new(),
+            &[
+                ("VERCEL_OIDC_TOKEN", "invalid-oidc-token"),
+                ("AI_GATEWAY_API_KEY", "invalid-api-key"),
+            ],
+            GatewayAuthMethod::ApiKey,
+            "invalid-api-key",
+        );
+    }
+
+    #[test]
+    fn get_gateway_auth_token_treats_empty_environment_variables_as_missing() {
+        assert_auth_token_error(
+            GatewayProviderSettings::new(),
+            &[("VERCEL_OIDC_TOKEN", ""), ("AI_GATEWAY_API_KEY", "")],
+        );
+    }
+
+    #[test]
+    fn get_gateway_auth_token_uses_whitespace_environment_api_key() {
+        assert_auth_token_case(
+            GatewayProviderSettings::new(),
+            &[
+                ("VERCEL_OIDC_TOKEN", "   "),
+                ("AI_GATEWAY_API_KEY", "\t\n "),
+            ],
+            GatewayAuthMethod::ApiKey,
+            "\t\n ",
+        );
+    }
+
+    #[test]
+    fn get_gateway_auth_token_prioritizes_options_api_key_over_all_environment_variables() {
+        assert_auth_token_case(
+            GatewayProviderSettings::new().with_api_key("options-api-key"),
+            &[
+                ("VERCEL_OIDC_TOKEN", "env-oidc-token"),
+                ("AI_GATEWAY_API_KEY", "env-api-key"),
+            ],
+            GatewayAuthMethod::ApiKey,
+            "options-api-key",
+        );
+    }
+
+    #[test]
+    fn get_gateway_auth_token_prefers_options_api_key_over_ai_gateway_api_key() {
+        assert_auth_token_case(
+            GatewayProviderSettings::new().with_api_key("options-api-key"),
+            &[("AI_GATEWAY_API_KEY", "env-api-key")],
+            GatewayAuthMethod::ApiKey,
+            "options-api-key",
+        );
+    }
+
+    #[test]
+    fn get_gateway_auth_token_prefers_ai_gateway_api_key_over_oidc_token() {
+        assert_auth_token_case(
+            GatewayProviderSettings::new(),
+            &[
+                ("VERCEL_OIDC_TOKEN", "oidc-token"),
+                ("AI_GATEWAY_API_KEY", "env-api-key"),
+            ],
+            GatewayAuthMethod::ApiKey,
+            "env-api-key",
+        );
+    }
+
+    #[test]
+    fn get_gateway_auth_token_falls_back_to_oidc_when_no_api_keys_are_available() {
+        assert_auth_token_case(
+            GatewayProviderSettings::new(),
+            &[("VERCEL_OIDC_TOKEN", "oidc-token")],
+            GatewayAuthMethod::Oidc,
+            "oidc-token",
+        );
     }
 
     #[test]
@@ -6566,6 +6791,106 @@ mod tests {
                 .get("user-agent")
                 .and_then(Option::as_deref)
                 .is_some_and(|value| value.starts_with("ai-sdk/gateway/"))
+        );
+    }
+
+    #[test]
+    fn create_gateway_authentication_handles_no_auth_at_all() {
+        assert_provider_auth_headers_error(
+            GatewayProviderSettings::new().with_base_url("https://test-gateway.example.com"),
+            &[],
+        );
+    }
+
+    #[test]
+    fn create_gateway_authentication_handles_valid_oidc_invalid_api_key() {
+        assert_provider_auth_headers_case(
+            GatewayProviderSettings::new()
+                .with_base_url("https://test-gateway.example.com")
+                .with_api_key("invalid-api-key"),
+            &[("VERCEL_OIDC_TOKEN", "valid-oidc-token-12345")],
+            GatewayAuthMethod::ApiKey,
+            "invalid-api-key",
+        );
+    }
+
+    #[test]
+    fn create_gateway_authentication_handles_invalid_oidc_valid_api_key() {
+        assert_provider_auth_headers_case(
+            GatewayProviderSettings::new()
+                .with_base_url("https://test-gateway.example.com")
+                .with_api_key("gw_valid_api_key_12345"),
+            &[("VERCEL_OIDC_TOKEN", "invalid-oidc-token")],
+            GatewayAuthMethod::ApiKey,
+            "gw_valid_api_key_12345",
+        );
+    }
+
+    #[test]
+    fn create_gateway_authentication_handles_no_oidc_invalid_api_key() {
+        assert_provider_auth_headers_case(
+            GatewayProviderSettings::new().with_base_url("https://test-gateway.example.com"),
+            &[("AI_GATEWAY_API_KEY", "invalid-api-key")],
+            GatewayAuthMethod::ApiKey,
+            "invalid-api-key",
+        );
+    }
+
+    #[test]
+    fn create_gateway_authentication_handles_no_oidc_valid_api_key() {
+        assert_provider_auth_headers_case(
+            GatewayProviderSettings::new().with_base_url("https://test-gateway.example.com"),
+            &[("AI_GATEWAY_API_KEY", "gw_valid_api_key_12345")],
+            GatewayAuthMethod::ApiKey,
+            "gw_valid_api_key_12345",
+        );
+    }
+
+    #[test]
+    fn create_gateway_authentication_handles_valid_oidc_no_api_key() {
+        assert_provider_auth_headers_case(
+            GatewayProviderSettings::new().with_base_url("https://test-gateway.example.com"),
+            &[("VERCEL_OIDC_TOKEN", "valid-oidc-token-12345")],
+            GatewayAuthMethod::Oidc,
+            "valid-oidc-token-12345",
+        );
+    }
+
+    #[test]
+    fn create_gateway_authentication_handles_valid_oidc_valid_api_key() {
+        assert_provider_auth_headers_case(
+            GatewayProviderSettings::new().with_base_url("https://test-gateway.example.com"),
+            &[
+                ("VERCEL_OIDC_TOKEN", "valid-oidc-token-12345"),
+                ("AI_GATEWAY_API_KEY", "gw_valid_api_key_12345"),
+            ],
+            GatewayAuthMethod::ApiKey,
+            "gw_valid_api_key_12345",
+        );
+    }
+
+    #[test]
+    fn create_gateway_authentication_handles_valid_oidc_valid_options_api_key() {
+        assert_provider_auth_headers_case(
+            GatewayProviderSettings::new()
+                .with_base_url("https://test-gateway.example.com")
+                .with_api_key("gw_valid_options_api_key_12345"),
+            &[("VERCEL_OIDC_TOKEN", "valid-oidc-token-12345")],
+            GatewayAuthMethod::ApiKey,
+            "gw_valid_options_api_key_12345",
+        );
+    }
+
+    #[test]
+    fn create_gateway_authentication_handles_invalid_oidc_invalid_api_key() {
+        assert_provider_auth_headers_case(
+            GatewayProviderSettings::new().with_base_url("https://test-gateway.example.com"),
+            &[
+                ("VERCEL_OIDC_TOKEN", "invalid-oidc-token"),
+                ("AI_GATEWAY_API_KEY", "invalid-api-key"),
+            ],
+            GatewayAuthMethod::ApiKey,
+            "invalid-api-key",
         );
     }
 
