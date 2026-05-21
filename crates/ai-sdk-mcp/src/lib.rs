@@ -61,6 +61,9 @@ pub const MCP_APP_MIME_TYPE: &str = "text/html;profile=mcp-app";
 /// Deprecated flat metadata key for app resource URIs.
 pub const MCP_APP_LEGACY_RESOURCE_URI_META_KEY: &str = "ui/resourceUri";
 
+/// OpenAI Apps SDK metadata key for app output templates.
+pub const OPENAI_OUTPUT_TEMPLATE_META_KEY: &str = "openai/outputTemplate";
+
 /// JSON-RPC request id used by MCP transports.
 pub type JsonRpcId = JsonValue;
 
@@ -589,7 +592,7 @@ pub enum McpAppToolVisibility {
     App,
 }
 
-/// Normalized `_meta.ui` metadata from an MCP tool definition.
+/// Normalized MCP App metadata from an MCP tool definition.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct McpAppToolMeta {
     pub resource_uri: Option<String>,
@@ -2920,6 +2923,11 @@ pub fn get_mcp_app_tool_meta(tool: &McpTool) -> Result<Option<McpAppToolMeta>, M
             tool.meta
                 .as_ref()
                 .and_then(|meta| meta.get(MCP_APP_LEGACY_RESOURCE_URI_META_KEY))
+        })
+        .or_else(|| {
+            tool.meta
+                .as_ref()
+                .and_then(|meta| meta.get(OPENAI_OUTPUT_TEMPLATE_META_KEY))
         });
     let resource_uri = match resource_uri_value {
         Some(JsonValue::String(uri)) if uri.starts_with("ui://") => Some(uri.clone()),
@@ -4878,6 +4886,30 @@ mod tests {
     }
 
     #[test]
+    fn mcp_app_tool_meta_reads_openai_output_template_resource_uri() {
+        let mut openai_meta = JsonObject::new();
+        openai_meta.insert(
+            OPENAI_OUTPUT_TEMPLATE_META_KEY.to_string(),
+            json!("ui://widgets/weather.html"),
+        );
+        let tool = McpTool {
+            meta: Some(openai_meta),
+            ..McpTool::new("get-weather", object_schema())
+        };
+
+        let meta = get_mcp_app_tool_meta(&tool)
+            .expect("OpenAI output template URI is valid")
+            .expect("metadata is present");
+
+        assert_eq!(
+            meta.resource_uri.as_deref(),
+            Some("ui://widgets/weather.html")
+        );
+        assert!(meta.visibility.is_none());
+        assert!(meta.extra.is_empty());
+    }
+
+    #[test]
     fn mcp_app_tool_meta_rejects_invalid_resource_uri() {
         let mut meta = JsonObject::new();
         meta.insert(
@@ -5002,6 +5034,40 @@ mod tests {
         assert_eq!(metadata.get("clientName"), Some(&json!("MyMCPClient")));
         assert_eq!(metadata.get("toolName"), Some(&json!("showDashboard")));
         assert_eq!(metadata.get("title"), Some(&json!("Dashboard")));
+        assert_eq!(
+            metadata
+                .get("app")
+                .and_then(JsonValue::as_object)
+                .and_then(|app| app.get("mimeType")),
+            Some(&json!(MCP_APP_MIME_TYPE))
+        );
+    }
+
+    #[test]
+    fn mcp_provider_metadata_includes_openai_output_template_app_metadata() {
+        let mut openai_meta = JsonObject::new();
+        openai_meta.insert(
+            OPENAI_OUTPUT_TEMPLATE_META_KEY.to_string(),
+            json!("ui://widgets/weather.html"),
+        );
+        let tool = McpTool {
+            title: Some("Get Weather".to_string()),
+            meta: Some(openai_meta),
+            ..McpTool::new("get-weather", object_schema())
+        };
+
+        let metadata = mcp_provider_metadata("MyMCPClient", &tool).expect("metadata builds");
+
+        assert_eq!(metadata.get("clientName"), Some(&json!("MyMCPClient")));
+        assert_eq!(metadata.get("toolName"), Some(&json!("get-weather")));
+        assert_eq!(metadata.get("title"), Some(&json!("Get Weather")));
+        assert_eq!(
+            metadata
+                .get("app")
+                .and_then(JsonValue::as_object)
+                .and_then(|app| app.get("resourceUri")),
+            Some(&json!("ui://widgets/weather.html"))
+        );
         assert_eq!(
             metadata
                 .get("app")
