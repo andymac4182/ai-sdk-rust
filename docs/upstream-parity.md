@@ -449,7 +449,7 @@ inventory.
 | `examples/express` | not-started | none | none | Portable server example should map to a Rust HTTP framework once stream/chat APIs exist. |
 | `examples/fastify` | not-started | none | none | Portable server example should map to a Rust HTTP framework once stream/chat APIs exist. |
 | `examples/hono` | not-started | none | none | Portable server example should map to a Rust HTTP framework once stream/chat APIs exist. |
-| `examples/mcp` | in-progress | `crates/ai-sdk-mcp/examples/local_mcp_client.rs`, `crates/ai-sdk-mcp/examples/http_auth_typed_tools.rs`, `crates/ai-sdk-mcp/examples/stdio_typed_tools.rs`, `crates/ai-sdk-mcp/examples/sse_typed_tools.rs`, `crates/ai-sdk-mcp/examples/tool_meta.rs` | `cargo run -p ai-sdk-mcp --example local_mcp_client`; `cargo run -p ai-sdk-mcp --example http_auth_typed_tools`; `cargo run -p ai-sdk-mcp --example stdio_typed_tools`; `cargo run -p ai-sdk-mcp --example sse_typed_tools`; `cargo run -p ai-sdk-mcp --example tool_meta` | Rust package-owned MCP examples now mirror upstream `examples/mcp/src/tool-definitions`, `http`, `mcp-with-auth`, `output-schema`, `provider-metadata`, `tool-meta`, and `stdio` portable flows: deterministic in-process tools/resources/prompts/elicitation, a real local Streamable HTTP server with bearer auth, typed output-schema validation, raw MCP tool results, provider metadata printing, OpenAI Apps `openai/outputTemplate` metadata normalization, app resource reads, session cleanup, and request-count proof, plus a self-spawned stdio server over `StdioMcpTransport` and a bounded local SSE server over `SseMcpTransport` with the same typed-tool bridge. Broader upstream MCP examples for hosted auth remain. |
+| `examples/mcp` | in-progress | `crates/ai-sdk-mcp/examples/local_mcp_client.rs`, `crates/ai-sdk-mcp/examples/http_auth_typed_tools.rs`, `crates/ai-sdk-mcp/examples/stdio_typed_tools.rs`, `crates/ai-sdk-mcp/examples/sse_typed_tools.rs`, `crates/ai-sdk-mcp/examples/tool_meta.rs`, `crates/ai-sdk-mcp/examples/image_content.rs` | `cargo run -p ai-sdk-mcp --example local_mcp_client`; `cargo run -p ai-sdk-mcp --example http_auth_typed_tools`; `cargo run -p ai-sdk-mcp --example stdio_typed_tools`; `cargo run -p ai-sdk-mcp --example sse_typed_tools`; `cargo run -p ai-sdk-mcp --example tool_meta`; `cargo run -p ai-sdk-mcp --example image_content` | Rust package-owned MCP examples now mirror upstream `examples/mcp/src/tool-definitions`, `http`, `image-content`, `mcp-with-auth`, `output-schema`, `provider-metadata`, `tool-meta`, and `stdio` portable flows: deterministic in-process tools/resources/prompts/elicitation, a real local Streamable HTTP server with bearer auth, typed output-schema validation, raw MCP tool results, provider metadata printing, OpenAI Apps `openai/outputTemplate` metadata normalization, app resource reads, image content conversion from MCP `type: "image"` to AI SDK `file` model output, session cleanup, and request-count proof, plus a self-spawned stdio server over `StdioMcpTransport` and a bounded local SSE server over `SseMcpTransport` with the same typed-tool bridge. Broader upstream MCP examples for hosted auth remain. |
 | `examples/nest` | js-only-documented | none | This row | NestJS framework wiring is JavaScript-specific; portable server behavior is tracked separately. |
 | `examples/next` | js-only-documented | none | This row | Next.js framework wiring is JavaScript-specific; portable server behavior is tracked separately. |
 | `examples/next-agent` | js-only-documented | none | This row | Depends on Next.js and unported agent APIs. |
@@ -864,6 +864,13 @@ focused tests for each portable behavior before changing rows to `verified`.
   tools, prints app provider metadata, reads the referenced `ui://` widget
   resource, and verifies the portable tool metadata flow without hosted
   credentials.
+- 2026-05-21: MCP image-content example parity added
+  `mcp_dynamic_tool_model_output_converts_image_content` and
+  `cargo run -p ai-sdk-mcp --example image_content` cover upstream
+  `examples/mcp/src/image-content`: a self-spawned stdio MCP server returns
+  `type: "image"` content, the package-owned MCP client executes `get-image`,
+  and `toModelOutput` parity converts it to AI SDK `file` model output with the
+  original `image/png` media type.
 - 2026-05-20: `streamText` Rust-native abort handling added
   `stream_text_aborts_before_model_call_and_invokes_on_abort` and
   `stream_text_aborts_after_chunk_callback_and_suppresses_finish` cover a

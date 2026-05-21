@@ -4579,6 +4579,57 @@ mod tests {
     }
 
     #[test]
+    fn mcp_dynamic_tool_model_output_converts_image_content() {
+        let result = CallToolResult {
+            content: Some(vec![json!({
+                "type": "image",
+                "data": "base64png",
+                "mimeType": "image/png"
+            })]),
+            is_error: Some(false),
+            ..CallToolResult::default()
+        };
+        let transport = MockMcpTransport::new()
+            .with_tools([McpTool::new("get-image", object_schema())])
+            .with_tool_call_result("get-image", result);
+        let client =
+            create_mcp_client(McpClientConfig::new(transport)).expect("client initializes");
+
+        let tools = client.tools().expect("tools build");
+        let image_tool = tools.get("get-image").expect("image tool exists");
+        let output = block_on(
+            image_tool
+                .execute(
+                    json!({}),
+                    ToolExecutionOptions::new("image-call-1", Vec::new()),
+                )
+                .expect("image tool is executable"),
+        )
+        .expect("image tool returns raw MCP result");
+        let model_output = block_on(
+            image_tool
+                .model_output(ToolModelOutputOptions::new(
+                    "image-call-1",
+                    json!({}),
+                    output,
+                ))
+                .expect("image tool has a model-output converter"),
+        );
+
+        assert_eq!(
+            serde_json::to_value(model_output).expect("model output serializes"),
+            json!({
+                "type": "content",
+                "value": [{
+                    "type": "file",
+                    "data": { "type": "data", "data": "base64png" },
+                    "mediaType": "image/png"
+                }]
+            })
+        );
+    }
+
+    #[test]
     fn mcp_client_builds_schema_typed_tools_from_structured_content() {
         let schema = weather_output_schema();
         let output_json_schema = schema.json_schema().clone();
