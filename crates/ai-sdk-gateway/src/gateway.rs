@@ -3678,6 +3678,44 @@ mod tests {
         })
     }
 
+    fn spend_report_response_body(results: Vec<JsonValue>) -> String {
+        json!({ "results": results }).to_string()
+    }
+
+    fn capturing_spend_report_transport(
+        status_code: u16,
+        status_text: impl Into<String>,
+        body: impl Into<String>,
+    ) -> (GatewayTransport, Arc<Mutex<Option<ProviderApiRequest>>>) {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let status_text = status_text.into();
+        let body = body.into();
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                status_code,
+                status_text.clone(),
+                body.clone(),
+            ))))
+        });
+
+        (transport, captured_request)
+    }
+
+    fn captured_spend_report_request(
+        captured_request: &Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) -> ProviderApiRequest {
+        captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+    }
+
     fn generation_info_data() -> JsonValue {
         json!({
             "id": "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
@@ -8500,6 +8538,509 @@ mod tests {
         assert_eq!(
             response_error.cause_message(),
             Some("Reporting service unavailable")
+        );
+    }
+
+    #[test]
+    fn gateway_provider_spend_report_fetches_from_correct_endpoint_with_required_params() {
+        let (transport, captured_request) =
+            capturing_spend_report_transport(200, "OK", spend_report_response_body(vec![]));
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        poll_ready(
+            provider.get_spend_report(GatewaySpendReportParams::new("2026-03-01", "2026-03-25")),
+        )
+        .expect("spend report fetch succeeds");
+
+        let request = captured_spend_report_request(&captured_request);
+        let url = url::Url::parse(&request.url).expect("request URL is valid");
+
+        assert_eq!(request.method, ProviderApiRequestMethod::Get);
+        assert_eq!(url.path(), "/v1/report");
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "start_date")
+                .map(|(_, value)| value.into_owned()),
+            Some("2026-03-01".to_string())
+        );
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "end_date")
+                .map(|(_, value)| value.into_owned()),
+            Some("2026-03-25".to_string())
+        );
+    }
+
+    #[test]
+    fn gateway_provider_spend_report_serializes_all_optional_query_params() {
+        let (transport, captured_request) =
+            capturing_spend_report_transport(200, "OK", spend_report_response_body(vec![]));
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        poll_ready(
+            provider.get_spend_report(
+                GatewaySpendReportParams::new("2026-03-01", "2026-03-25")
+                    .with_group_by(GatewaySpendReportGroupBy::Model)
+                    .with_date_part(GatewaySpendReportDatePart::Hour)
+                    .with_user_id("user_123")
+                    .with_model("anthropic/claude-sonnet-4.5")
+                    .with_provider("anthropic")
+                    .with_credential_type(GatewayCredentialType::Byok)
+                    .with_tags(["production", "api"]),
+            ),
+        )
+        .expect("spend report fetch succeeds");
+
+        let request = captured_spend_report_request(&captured_request);
+        let url = url::Url::parse(&request.url).expect("request URL is valid");
+        let query_value = |name: &str| {
+            url.query_pairs()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.into_owned())
+        };
+
+        assert_eq!(query_value("group_by"), Some("model".to_string()));
+        assert_eq!(query_value("date_part"), Some("hour".to_string()));
+        assert_eq!(query_value("user_id"), Some("user_123".to_string()));
+        assert_eq!(
+            query_value("model"),
+            Some("anthropic/claude-sonnet-4.5".to_string())
+        );
+        assert_eq!(query_value("provider"), Some("anthropic".to_string()));
+        assert_eq!(query_value("credential_type"), Some("byok".to_string()));
+        assert_eq!(query_value("tags"), Some("production,api".to_string()));
+    }
+
+    #[test]
+    fn gateway_provider_spend_report_omits_optional_params_when_not_provided() {
+        let (transport, captured_request) =
+            capturing_spend_report_transport(200, "OK", spend_report_response_body(vec![]));
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        poll_ready(
+            provider.get_spend_report(GatewaySpendReportParams::new("2026-03-01", "2026-03-25")),
+        )
+        .expect("spend report fetch succeeds");
+
+        let request = captured_spend_report_request(&captured_request);
+        let url = url::Url::parse(&request.url).expect("request URL is valid");
+
+        for name in [
+            "group_by",
+            "date_part",
+            "user_id",
+            "model",
+            "provider",
+            "credential_type",
+            "tags",
+        ] {
+            assert!(!url.query_pairs().any(|(key, _)| key == name));
+        }
+    }
+
+    #[test]
+    fn gateway_provider_spend_report_omits_empty_tags_query_param() {
+        let (transport, captured_request) =
+            capturing_spend_report_transport(200, "OK", spend_report_response_body(vec![]));
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        poll_ready(
+            provider.get_spend_report(
+                GatewaySpendReportParams::new("2026-03-01", "2026-03-25")
+                    .with_tags(Vec::<String>::new()),
+            ),
+        )
+        .expect("spend report fetch succeeds");
+
+        let request = captured_spend_report_request(&captured_request);
+        let url = url::Url::parse(&request.url).expect("request URL is valid");
+
+        assert!(!url.query_pairs().any(|(key, _)| key == "tags"));
+    }
+
+    #[test]
+    fn gateway_provider_spend_report_transforms_snake_case_response_fields_to_camel_case() {
+        let (transport, _captured_request) = capturing_spend_report_transport(
+            200,
+            "OK",
+            spend_report_response_body(vec![json!({
+                "day": "2026-03-01",
+                "total_cost": 12.5,
+                "market_cost": 11.0,
+                "input_tokens": 50000,
+                "output_tokens": 10000,
+                "cached_input_tokens": 5000,
+                "cache_creation_input_tokens": 2000,
+                "reasoning_tokens": 1000,
+                "request_count": 42
+            })]),
+        );
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        let result = poll_ready(
+            provider.get_spend_report(GatewaySpendReportParams::new("2026-03-01", "2026-03-01")),
+        )
+        .expect("spend report fetch succeeds");
+        let serialized =
+            serde_json::to_value(&result.results[0]).expect("spend report row serializes");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "day": "2026-03-01",
+                "totalCost": 12.5,
+                "marketCost": 11.0,
+                "inputTokens": 50000,
+                "outputTokens": 10000,
+                "cachedInputTokens": 5000,
+                "cacheCreationInputTokens": 2000,
+                "reasoningTokens": 1000,
+                "requestCount": 42
+            })
+        );
+    }
+
+    #[test]
+    fn gateway_provider_spend_report_transforms_credential_type_response_field() {
+        let (transport, _captured_request) = capturing_spend_report_transport(
+            200,
+            "OK",
+            spend_report_response_body(vec![json!({
+                "credential_type": "byok",
+                "total_cost": 5.0
+            })]),
+        );
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        let result = poll_ready(
+            provider.get_spend_report(
+                GatewaySpendReportParams::new("2026-03-01", "2026-03-25")
+                    .with_group_by(GatewaySpendReportGroupBy::CredentialType),
+            ),
+        )
+        .expect("spend report fetch succeeds");
+        let row = &result.results[0];
+        let serialized = serde_json::to_value(row).expect("spend report row serializes");
+
+        assert_eq!(row.credential_type, Some(GatewayCredentialType::Byok));
+        assert_eq!(
+            serialized,
+            json!({
+                "credentialType": "byok",
+                "totalCost": 5.0
+            })
+        );
+        assert!(serialized.get("credential_type").is_none());
+    }
+
+    #[test]
+    fn gateway_provider_spend_report_handles_group_by_model_response() {
+        let (transport, _captured_request) = capturing_spend_report_transport(
+            200,
+            "OK",
+            spend_report_response_body(vec![
+                json!({
+                    "model": "anthropic/claude-sonnet-4.5",
+                    "total_cost": 10.0,
+                    "request_count": 100
+                }),
+                json!({
+                    "model": "openai/gpt-4o",
+                    "total_cost": 8.0,
+                    "request_count": 50
+                }),
+            ]),
+        );
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        let result = poll_ready(
+            provider.get_spend_report(
+                GatewaySpendReportParams::new("2026-03-01", "2026-03-25")
+                    .with_group_by(GatewaySpendReportGroupBy::Model),
+            ),
+        )
+        .expect("spend report fetch succeeds");
+
+        assert_eq!(result.results.len(), 2);
+        assert_eq!(
+            result.results[0].model.as_deref(),
+            Some("anthropic/claude-sonnet-4.5")
+        );
+        assert_eq!(result.results[1].model.as_deref(), Some("openai/gpt-4o"));
+    }
+
+    #[test]
+    fn gateway_provider_spend_report_handles_empty_results() {
+        let (transport, _captured_request) =
+            capturing_spend_report_transport(200, "OK", spend_report_response_body(vec![]));
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        let result = poll_ready(
+            provider.get_spend_report(GatewaySpendReportParams::new("2026-03-01", "2026-03-25")),
+        )
+        .expect("spend report fetch succeeds");
+
+        assert!(result.results.is_empty());
+    }
+
+    #[test]
+    fn gateway_provider_spend_report_omits_optional_metric_fields_when_not_present() {
+        let (transport, _captured_request) = capturing_spend_report_transport(
+            200,
+            "OK",
+            spend_report_response_body(vec![json!({
+                "day": "2026-03-01",
+                "total_cost": 1.5
+            })]),
+        );
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        let result = poll_ready(
+            provider.get_spend_report(GatewaySpendReportParams::new("2026-03-01", "2026-03-01")),
+        )
+        .expect("spend report fetch succeeds");
+        let serialized =
+            serde_json::to_value(&result.results[0]).expect("spend report row serializes");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "day": "2026-03-01",
+                "totalCost": 1.5
+            })
+        );
+        assert!(serialized.get("marketCost").is_none());
+        assert!(serialized.get("inputTokens").is_none());
+    }
+
+    #[test]
+    fn gateway_provider_spend_report_passes_headers_correctly() {
+        let (transport, captured_request) =
+            capturing_spend_report_transport(200, "OK", spend_report_response_body(vec![]));
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("custom-token")
+                .with_header("custom-header", "custom-value"),
+        )
+        .with_transport(transport);
+
+        poll_ready(
+            provider.get_spend_report(GatewaySpendReportParams::new("2026-03-01", "2026-03-25")),
+        )
+        .expect("spend report fetch succeeds");
+
+        let request = captured_spend_report_request(&captured_request);
+
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer custom-token")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("custom-value")
+        );
+    }
+
+    #[test]
+    fn gateway_provider_spend_report_handles_401_authentication_errors() {
+        let (transport, _captured_request) = capturing_spend_report_transport(
+            401,
+            "Unauthorized",
+            json!({
+                "error": {
+                    "message": "Unauthorized",
+                    "type": "authentication_error"
+                }
+            })
+            .to_string(),
+        );
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        let error = poll_ready(
+            provider.get_spend_report(GatewaySpendReportParams::new("2026-03-01", "2026-03-25")),
+        )
+        .expect_err("spend report authentication error is surfaced");
+        let auth_error = error
+            .as_authentication()
+            .expect("401 maps to GatewayAuthenticationError");
+
+        assert_eq!(auth_error.status_code(), 401);
+    }
+
+    #[test]
+    fn gateway_provider_spend_report_handles_429_rate_limit_errors() {
+        let (transport, _captured_request) = capturing_spend_report_transport(
+            429,
+            "Too Many Requests",
+            json!({
+                "error": {
+                    "message": "Rate limit exceeded",
+                    "type": "rate_limit_exceeded"
+                }
+            })
+            .to_string(),
+        );
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        let error = poll_ready(
+            provider.get_spend_report(GatewaySpendReportParams::new("2026-03-01", "2026-03-25")),
+        )
+        .expect_err("spend report rate-limit error is surfaced");
+        let rate_limit_error = error
+            .as_rate_limit()
+            .expect("429 maps to GatewayRateLimitError");
+
+        assert_eq!(rate_limit_error.status_code(), 429);
+        assert_eq!(rate_limit_error.message(), "Rate limit exceeded");
+    }
+
+    #[test]
+    fn gateway_provider_spend_report_handles_500_internal_server_errors() {
+        let (transport, _captured_request) = capturing_spend_report_transport(
+            500,
+            "Internal Server Error",
+            json!({
+                "error": {
+                    "message": "Internal server error",
+                    "type": "internal_server_error"
+                }
+            })
+            .to_string(),
+        );
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        let error = poll_ready(
+            provider.get_spend_report(GatewaySpendReportParams::new("2026-03-01", "2026-03-25")),
+        )
+        .expect_err("spend report internal server error is surfaced");
+        let internal_error = error
+            .as_internal_server()
+            .expect("500 maps to GatewayInternalServerError");
+
+        assert_eq!(internal_error.status_code(), 500);
+        assert_eq!(internal_error.message(), "Internal server error");
+    }
+
+    #[test]
+    fn gateway_provider_spend_report_handles_malformed_json_error_responses() {
+        let (transport, _captured_request) =
+            capturing_spend_report_transport(500, "Internal Server Error", "{ invalid json");
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        let error = poll_ready(
+            provider.get_spend_report(GatewaySpendReportParams::new("2026-03-01", "2026-03-25")),
+        )
+        .expect_err("malformed spend report error body fails");
+        let response_error = error
+            .as_response()
+            .expect("malformed spend report error maps to response error");
+
+        assert_eq!(response_error.status_code(), 500);
+    }
+
+    #[test]
+    fn gateway_provider_spend_report_uses_custom_transport() {
+        let request_count = Arc::new(Mutex::new(0_u32));
+        let request_count_for_transport = Arc::clone(&request_count);
+        let transport: GatewayTransport = Arc::new(move |_request| -> GatewayTransportFuture {
+            let mut count = request_count_for_transport
+                .lock()
+                .expect("request count mutex is not poisoned");
+            *count += 1;
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                spend_report_response_body(vec![json!({
+                    "day": "2026-03-01",
+                    "total_cost": 5.0
+                })]),
+            ))))
+        });
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-token"),
+        )
+        .with_transport(transport);
+
+        let result = poll_ready(
+            provider.get_spend_report(GatewaySpendReportParams::new("2026-03-01", "2026-03-01")),
+        )
+        .expect("spend report fetch succeeds");
+
+        assert_eq!(result.results[0].total_cost, 5.0);
+        assert_eq!(
+            *request_count
+                .lock()
+                .expect("request count mutex is not poisoned"),
+            1
         );
     }
 
