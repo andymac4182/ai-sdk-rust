@@ -739,6 +739,22 @@ pub fn create_gateway_error_from_response(
     default_message: impl Into<String>,
     auth_method: Option<GatewayAuthMethod>,
 ) -> GatewayError {
+    create_gateway_error_from_response_with_cause_message(
+        response,
+        status_code,
+        default_message,
+        auth_method,
+        None,
+    )
+}
+
+pub fn create_gateway_error_from_response_with_cause_message(
+    response: JsonValue,
+    status_code: u16,
+    default_message: impl Into<String>,
+    auth_method: Option<GatewayAuthMethod>,
+    cause_message: Option<String>,
+) -> GatewayError {
     let default_message = default_message.into();
     let raw_generation_id = response
         .get("generationId")
@@ -757,6 +773,9 @@ pub fn create_gateway_error_from_response(
 
             if let Some(generation_id) = raw_generation_id {
                 response_error = response_error.with_generation_id(generation_id);
+            }
+            if let Some(cause_message) = cause_message {
+                response_error = response_error.with_cause_message(cause_message);
             }
 
             return response_error.into();
@@ -780,16 +799,19 @@ pub fn create_gateway_error_from_response(
                 status_code,
                 generation_id,
             )
+            .with_optional_cause_message(cause_message)
             .into()
         }
-        Some("invalid_request_error") => error_with_generation_id(
+        Some("invalid_request_error") => error_with_details(
             GatewayInvalidRequestError::with_message(message).with_status_code(status_code),
             generation_id,
+            cause_message,
         )
         .into(),
-        Some("rate_limit_exceeded") => error_with_generation_id(
+        Some("rate_limit_exceeded") => error_with_details(
             GatewayRateLimitError::with_message(message).with_status_code(status_code),
             generation_id,
+            cause_message,
         )
         .into(),
         Some("model_not_found") => {
@@ -806,50 +828,76 @@ pub fn create_gateway_error_from_response(
                 error = error.with_model_id(model_id);
             }
 
-            error_with_generation_id(error, generation_id).into()
+            error_with_details(error, generation_id, cause_message).into()
         }
-        Some("internal_server_error") | None => error_with_generation_id(
+        Some("internal_server_error") | None => error_with_details(
             GatewayInternalServerError::with_message(message).with_status_code(status_code),
             generation_id,
+            cause_message,
         )
         .into(),
-        Some(_) => error_with_generation_id(
+        Some(_) => error_with_details(
             GatewayInternalServerError::with_message(message).with_status_code(status_code),
             generation_id,
+            cause_message,
         )
         .into(),
     }
 }
 
-fn error_with_generation_id<E>(error: E, generation_id: Option<String>) -> E
+fn error_with_details<E>(
+    error: E,
+    generation_id: Option<String>,
+    cause_message: Option<String>,
+) -> E
 where
-    E: GatewayErrorGenerationId,
+    E: GatewayErrorDetails,
 {
-    if let Some(generation_id) = generation_id {
-        error.with_gateway_generation_id(generation_id)
-    } else {
-        error
+    error
+        .with_optional_generation_id(generation_id)
+        .with_optional_cause_message(cause_message)
+}
+
+trait GatewayErrorDetails: Sized {
+    fn with_gateway_generation_id(self, generation_id: String) -> Self;
+    fn with_gateway_cause_message(self, cause_message: String) -> Self;
+
+    fn with_optional_generation_id(self, generation_id: Option<String>) -> Self {
+        if let Some(generation_id) = generation_id {
+            self.with_gateway_generation_id(generation_id)
+        } else {
+            self
+        }
+    }
+
+    fn with_optional_cause_message(self, cause_message: Option<String>) -> Self {
+        if let Some(cause_message) = cause_message {
+            self.with_gateway_cause_message(cause_message)
+        } else {
+            self
+        }
     }
 }
 
-trait GatewayErrorGenerationId: Sized {
-    fn with_gateway_generation_id(self, generation_id: String) -> Self;
-}
-
-macro_rules! impl_gateway_generation_id {
+macro_rules! impl_gateway_error_details {
     ($name:ident) => {
-        impl GatewayErrorGenerationId for $name {
+        impl GatewayErrorDetails for $name {
             fn with_gateway_generation_id(self, generation_id: String) -> Self {
                 self.with_generation_id(generation_id)
+            }
+
+            fn with_gateway_cause_message(self, cause_message: String) -> Self {
+                self.with_cause_message(cause_message)
             }
         }
     };
 }
 
-impl_gateway_generation_id!(GatewayInvalidRequestError);
-impl_gateway_generation_id!(GatewayRateLimitError);
-impl_gateway_generation_id!(GatewayModelNotFoundError);
-impl_gateway_generation_id!(GatewayInternalServerError);
+impl_gateway_error_details!(GatewayAuthenticationError);
+impl_gateway_error_details!(GatewayInvalidRequestError);
+impl_gateway_error_details!(GatewayRateLimitError);
+impl_gateway_error_details!(GatewayModelNotFoundError);
+impl_gateway_error_details!(GatewayInternalServerError);
 
 pub fn extract_gateway_api_call_response(error: &ApiCallError) -> JsonValue {
     if let Some(data) = error.data() {
@@ -889,14 +937,17 @@ pub fn as_gateway_error(
     match error {
         HandledFetchError::Original { error } => {
             if is_gateway_timeout_fetch_error(&error) {
-                return GatewayTimeoutError::create_timeout_error(error.message()).into();
+                return GatewayTimeoutError::create_timeout_error(error.message())
+                    .with_cause_message(error.message())
+                    .into();
             }
 
-            create_gateway_error_from_response(
+            create_gateway_error_from_response_with_cause_message(
                 JsonValue::Object(JsonObject::new()),
                 500,
                 format!("Gateway request failed: {}", error.message()),
                 auth_method,
+                Some(error.message().to_string()),
             )
         }
         HandledFetchError::ApiCall { error } => {
@@ -926,14 +977,18 @@ mod tests {
         GatewayInvalidRequestError, GatewayModelNotFoundError, GatewayRateLimitError,
         GatewayResponseError, GatewayTimeoutError, as_gateway_error,
         create_gateway_error_from_api_call, create_gateway_error_from_response,
-        extract_gateway_api_call_response, gateway_headers_from_auth_method,
-        parse_gateway_auth_method,
+        create_gateway_error_from_response_with_cause_message, extract_gateway_api_call_response,
+        gateway_headers_from_auth_method, parse_gateway_auth_method,
     };
     use ai_sdk_provider::headers::Headers;
     use ai_sdk_provider::provider::ApiCallError;
     use ai_sdk_provider_utils::{FetchErrorInfo, HandledFetchError};
     use serde_json::json;
     use std::collections::BTreeMap;
+
+    fn gateway_response_error(error: &GatewayError) -> &GatewayResponseError {
+        error.as_response().expect("expected GatewayResponseError")
+    }
 
     #[test]
     fn gateway_error_types_expose_upstream_names_status_and_retryability() {
@@ -1090,6 +1145,365 @@ mod tests {
     }
 
     #[test]
+    fn create_gateway_error_from_response_preserves_empty_auth_messages_with_context() {
+        let error = create_gateway_error_from_response(
+            json!({
+                "error": {
+                    "message": "",
+                    "type": "authentication_error"
+                }
+            }),
+            401,
+            "Custom default message",
+            None,
+        );
+
+        let auth = error
+            .as_authentication()
+            .expect("authentication_error maps to contextual auth error");
+        assert!(auth.message().contains("No authentication provided"));
+        assert_eq!(auth.status_code(), 401);
+        assert_eq!(auth.error_type(), "authentication_error");
+    }
+
+    #[test]
+    fn create_gateway_error_from_response_uses_default_message_for_null_message() {
+        let response = json!({
+            "error": {
+                "message": null,
+                "type": "authentication_error"
+            }
+        });
+        let error = create_gateway_error_from_response(
+            response.clone(),
+            401,
+            "Custom default message",
+            None,
+        );
+
+        let response_error = gateway_response_error(&error);
+        assert_eq!(
+            response_error.message(),
+            "Invalid error response format: Custom default message"
+        );
+        assert_eq!(response_error.status_code(), 401);
+        assert_eq!(response_error.response(), Some(&response));
+        assert!(response_error.validation_error().is_some());
+    }
+
+    #[test]
+    fn create_gateway_error_from_response_handles_null_error_type_as_internal() {
+        let error = create_gateway_error_from_response(
+            json!({
+                "error": {
+                    "message": "Some error",
+                    "type": null
+                }
+            }),
+            500,
+            "Gateway request failed",
+            None,
+        );
+
+        let internal = error
+            .as_internal_server()
+            .expect("null error type maps to internal server error");
+        assert_eq!(internal.message(), "Some error");
+        assert_eq!(internal.status_code(), 500);
+    }
+
+    #[test]
+    fn create_gateway_error_from_response_includes_cause_message() {
+        let error = create_gateway_error_from_response_with_cause_message(
+            json!({
+                "error": {
+                    "message": "Gateway timeout",
+                    "type": "internal_server_error"
+                }
+            }),
+            504,
+            "Gateway request failed",
+            None,
+            Some("Original network error".to_string()),
+        );
+
+        let internal = error
+            .as_internal_server()
+            .expect("internal_server_error maps to internal server error");
+        assert_eq!(internal.message(), "Gateway timeout");
+        assert_eq!(internal.status_code(), 504);
+        assert_eq!(internal.cause_message(), Some("Original network error"));
+    }
+
+    #[test]
+    fn create_gateway_error_from_response_maps_malformed_responses() {
+        let cases = [
+            (json!({ "invalidField": "value" }), "Gateway request failed"),
+            (json!({ "data": "some data" }), "Custom error message"),
+            (json!(null), "Gateway request failed"),
+            (json!("Error string"), "Gateway request failed"),
+            (json!(["error", "array"]), "Gateway request failed"),
+        ];
+
+        for (response, default_message) in cases {
+            let error =
+                create_gateway_error_from_response(response.clone(), 500, default_message, None);
+            let response_error = gateway_response_error(&error);
+
+            assert_eq!(
+                response_error.message(),
+                format!("Invalid error response format: {default_message}")
+            );
+            assert_eq!(response_error.status_code(), 500);
+            assert_eq!(response_error.response(), Some(&response));
+            assert!(response_error.validation_error().is_some());
+        }
+    }
+
+    #[test]
+    fn create_gateway_error_from_response_handles_model_not_found_param_edges() {
+        let invalid_param = create_gateway_error_from_response(
+            json!({
+                "error": {
+                    "message": "Model not available",
+                    "type": "model_not_found",
+                    "param": {
+                        "invalidField": "value"
+                    }
+                }
+            }),
+            404,
+            "Gateway request failed",
+            None,
+        );
+        let invalid_param_error = invalid_param
+            .as_model_not_found()
+            .expect("model_not_found maps with invalid param");
+        assert_eq!(invalid_param_error.model_id(), None);
+
+        let missing_param = create_gateway_error_from_response(
+            json!({
+                "error": {
+                    "message": "Model not found",
+                    "type": "model_not_found"
+                }
+            }),
+            404,
+            "Gateway request failed",
+            None,
+        );
+        let missing_param_error = missing_param
+            .as_model_not_found()
+            .expect("model_not_found maps without param");
+        assert_eq!(missing_param_error.model_id(), None);
+        assert_eq!(missing_param_error.message(), "Model not found");
+    }
+
+    #[test]
+    fn create_gateway_error_from_response_ignores_extra_fields() {
+        let error = create_gateway_error_from_response(
+            json!({
+                "error": {
+                    "message": "Test error",
+                    "type": "authentication_error",
+                    "code": "AUTH_FAILED",
+                    "param": null,
+                    "extraField": "should be ignored"
+                },
+                "metadata": "should be ignored"
+            }),
+            401,
+            "Gateway request failed",
+            None,
+        );
+
+        let auth = error
+            .as_authentication()
+            .expect("extra fields are ignored for authentication errors");
+        assert!(auth.message().contains("No authentication provided"));
+        assert_eq!(auth.status_code(), 401);
+    }
+
+    #[test]
+    fn create_gateway_error_from_response_preserves_error_properties() {
+        let error = create_gateway_error_from_response_with_cause_message(
+            json!({
+                "error": {
+                    "message": "Rate limit hit",
+                    "type": "rate_limit_exceeded"
+                }
+            }),
+            429,
+            "Fallback message",
+            None,
+            Some("Type error".to_string()),
+        );
+
+        let rate_limit = error
+            .as_rate_limit()
+            .expect("rate_limit_exceeded maps to rate-limit error");
+        assert_eq!(rate_limit.name(), "GatewayRateLimitError");
+        assert_eq!(rate_limit.error_type(), "rate_limit_exceeded");
+        assert_eq!(rate_limit.message(), "Rate limit hit");
+        assert_eq!(rate_limit.status_code(), 429);
+        assert_eq!(rate_limit.cause_message(), Some("Type error"));
+    }
+
+    #[test]
+    fn create_gateway_error_from_response_maps_generation_id_to_error_variants() {
+        let internal = create_gateway_error_from_response(
+            json!({
+                "error": {
+                    "message": "Internal server error",
+                    "type": "internal_server_error"
+                },
+                "generationId": "gen_01ABC123XYZ"
+            }),
+            500,
+            "Gateway request failed",
+            None,
+        );
+        assert!(internal.as_internal_server().is_some());
+        assert_eq!(internal.generation_id(), Some("gen_01ABC123XYZ"));
+
+        let auth = create_gateway_error_from_response(
+            json!({
+                "error": {
+                    "message": "Invalid API key",
+                    "type": "authentication_error"
+                },
+                "generationId": "gen_01AUTH456"
+            }),
+            401,
+            "Gateway request failed",
+            Some(GatewayAuthMethod::ApiKey),
+        );
+        assert!(auth.as_authentication().is_some());
+        assert_eq!(auth.generation_id(), Some("gen_01AUTH456"));
+
+        let rate_limit = create_gateway_error_from_response(
+            json!({
+                "error": {
+                    "message": "Rate limit exceeded",
+                    "type": "rate_limit_exceeded"
+                },
+                "generationId": "gen_01RATE789"
+            }),
+            429,
+            "Gateway request failed",
+            None,
+        );
+        assert!(rate_limit.as_rate_limit().is_some());
+        assert_eq!(rate_limit.generation_id(), Some("gen_01RATE789"));
+
+        let model_not_found = create_gateway_error_from_response(
+            json!({
+                "error": {
+                    "message": "Model not found",
+                    "type": "model_not_found",
+                    "param": {
+                        "modelId": "gpt-5"
+                    }
+                },
+                "generationId": "gen_01MODEL000"
+            }),
+            404,
+            "Gateway request failed",
+            None,
+        );
+        let model_error = model_not_found
+            .as_model_not_found()
+            .expect("model_not_found maps with generation id");
+        assert_eq!(model_error.model_id(), Some("gpt-5"));
+        assert_eq!(model_not_found.generation_id(), Some("gen_01MODEL000"));
+
+        let without_generation_id = create_gateway_error_from_response(
+            json!({
+                "error": {
+                    "message": "Some error",
+                    "type": "internal_server_error"
+                }
+            }),
+            500,
+            "Gateway request failed",
+            None,
+        );
+        assert_eq!(without_generation_id.generation_id(), None);
+
+        let malformed = create_gateway_error_from_response(
+            json!({
+                "invalidField": "value",
+                "generationId": "gen_01MALFORMED"
+            }),
+            500,
+            "Gateway request failed",
+            None,
+        );
+        assert!(malformed.as_response().is_some());
+        assert_eq!(malformed.generation_id(), Some("gen_01MALFORMED"));
+    }
+
+    #[test]
+    fn create_gateway_error_from_response_creates_contextual_auth_errors() {
+        let api_key = create_gateway_error_from_response(
+            json!({
+                "error": {
+                    "type": "authentication_error",
+                    "message": "Invalid API key"
+                }
+            }),
+            401,
+            "Gateway request failed",
+            Some(GatewayAuthMethod::ApiKey),
+        );
+        let api_key_error = api_key
+            .as_authentication()
+            .expect("api-key auth failure maps to authentication error");
+        assert!(api_key_error.message().contains("Invalid API key"));
+        assert!(api_key_error.message().contains("vercel.com/d?to="));
+        assert_eq!(api_key_error.status_code(), 401);
+
+        let oidc = create_gateway_error_from_response(
+            json!({
+                "error": {
+                    "type": "authentication_error",
+                    "message": "Invalid OIDC token"
+                }
+            }),
+            401,
+            "Gateway request failed",
+            Some(GatewayAuthMethod::Oidc),
+        );
+        let oidc_error = oidc
+            .as_authentication()
+            .expect("oidc auth failure maps to authentication error");
+        assert!(oidc_error.message().contains("Invalid OIDC token"));
+        assert!(oidc_error.message().contains("npx vercel link"));
+        assert_eq!(oidc_error.status_code(), 401);
+
+        let missing = create_gateway_error_from_response(
+            json!({
+                "error": {
+                    "type": "authentication_error",
+                    "message": "Authentication failed"
+                }
+            }),
+            401,
+            "Gateway request failed",
+            None,
+        );
+        let missing_error = missing
+            .as_authentication()
+            .expect("missing auth context maps to authentication error");
+        assert!(
+            missing_error
+                .message()
+                .contains("No authentication provided")
+        );
+        assert_eq!(missing_error.status_code(), 401);
+    }
+
+    #[test]
     fn extract_gateway_api_call_response_prefers_data_then_json_then_raw_body() {
         let data_error = ApiCallError::new("Request failed", "https://api.test", json!({}))
             .with_data(json!({
@@ -1121,6 +1535,93 @@ mod tests {
             extract_gateway_api_call_response(&raw_error),
             json!("not json")
         );
+    }
+
+    #[test]
+    fn extract_gateway_api_call_response_prefers_explicit_data_even_null_or_empty() {
+        let null_data = ApiCallError::new("Request failed", "http://test.url", json!({}))
+            .with_status_code(500)
+            .with_data(json!(null))
+            .with_response_body(r#"{"fallback":"data"}"#);
+        assert_eq!(extract_gateway_api_call_response(&null_data), json!(null));
+
+        let empty_data = ApiCallError::new("Request failed", "http://test.url", json!({}))
+            .with_status_code(400)
+            .with_data(json!({}))
+            .with_response_body(r#"{"fallback":"data"}"#);
+        assert_eq!(extract_gateway_api_call_response(&empty_data), json!({}));
+    }
+
+    #[test]
+    fn extract_gateway_api_call_response_parses_json_or_returns_raw_text() {
+        let complex_data = json!({
+            "error": {
+                "message": "Complex error",
+                "type": "validation_error",
+                "details": {
+                    "field": "prompt",
+                    "issues": [
+                        {
+                            "code": "too_long",
+                            "message": "Prompt exceeds maximum length"
+                        },
+                        {
+                            "code": "invalid_format",
+                            "message": "Contains invalid characters"
+                        }
+                    ]
+                }
+            },
+            "metadata": {
+                "requestId": "12345",
+                "timestamp": "2024-01-01T00:00:00Z"
+            }
+        });
+        let complex_error = ApiCallError::new("Request failed", "http://test.url", json!({}))
+            .with_status_code(400)
+            .with_response_body(complex_data.to_string());
+        assert_eq!(
+            extract_gateway_api_call_response(&complex_error),
+            complex_data
+        );
+
+        for raw_body in [
+            "This is not valid JSON",
+            "<html><body><h1>500 Internal Server Error</h1></body></html>",
+            "",
+            r#"{"incomplete": json"#,
+        ] {
+            let error = ApiCallError::new("Request failed", "http://test.url", json!({}))
+                .with_status_code(500)
+                .with_response_body(raw_body);
+            assert_eq!(extract_gateway_api_call_response(&error), json!(raw_body));
+        }
+    }
+
+    #[test]
+    fn extract_gateway_api_call_response_returns_empty_object_without_body() {
+        let error =
+            ApiCallError::new("Request failed", "http://test.url", json!({})).with_status_code(500);
+
+        assert_eq!(extract_gateway_api_call_response(&error), json!({}));
+    }
+
+    #[test]
+    fn extract_gateway_api_call_response_parses_scalar_and_array_bodies() {
+        for (body, expected) in [
+            ("404", json!(404)),
+            ("true", json!(true)),
+            (
+                r#"["error1","error2","error3"]"#,
+                json!(["error1", "error2", "error3"]),
+            ),
+        ] {
+            let error = ApiCallError::new("Request failed", "http://test.url", json!({}))
+                .with_status_code(500)
+                .with_response_body(body);
+
+            assert_eq!(extract_gateway_api_call_response(&error), expected);
+        }
     }
 
     #[test]
@@ -1216,6 +1717,56 @@ mod tests {
         );
         assert!(auth.as_authentication().is_some());
         assert!(auth.message().contains("Invalid API key"));
+    }
+
+    #[test]
+    fn as_gateway_error_detects_all_undici_timeout_codes() {
+        for (code, message) in [
+            ("UND_ERR_HEADERS_TIMEOUT", "Request timeout"),
+            ("UND_ERR_BODY_TIMEOUT", "Body timeout"),
+            ("UND_ERR_CONNECT_TIMEOUT", "Connect timeout"),
+        ] {
+            let result = as_gateway_error(
+                HandledFetchError::Original {
+                    error: FetchErrorInfo::new(message).with_code(code),
+                },
+                None,
+            );
+
+            let timeout = result
+                .as_timeout()
+                .expect("Undici timeout codes map to GatewayTimeoutError");
+            assert!(timeout.message().contains(message));
+            assert_eq!(timeout.status_code(), 408);
+            assert_eq!(timeout.error_type(), "timeout_error");
+            assert_eq!(timeout.cause_message(), Some(message));
+        }
+    }
+
+    #[test]
+    fn as_gateway_error_maps_non_timeout_original_errors_to_response_errors() {
+        let network = as_gateway_error(
+            HandledFetchError::Original {
+                error: FetchErrorInfo::new("Network error"),
+            },
+            None,
+        );
+        let network_error = gateway_response_error(&network);
+        assert!(
+            network_error
+                .message()
+                .contains("Gateway request failed: Network error")
+        );
+        assert_eq!(network_error.cause_message(), Some("Network error"));
+
+        let connection = as_gateway_error(
+            HandledFetchError::Original {
+                error: FetchErrorInfo::new("Connection refused").with_code("ECONNREFUSED"),
+            },
+            None,
+        );
+        assert!(connection.as_timeout().is_none());
+        assert!(connection.as_response().is_some());
     }
 
     #[test]
