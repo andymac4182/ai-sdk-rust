@@ -860,6 +860,13 @@ focused tests for each portable behavior before changing rows to `verified`.
   in `src/stream_text.rs`, covering original-message continuation id reuse,
   generated response ids for new assistant messages, and generated ids for
   non-persistence streams when `generateMessageId` is supplied.
+- 2026-05-21: `streamText` retry parity added
+  `stream_text_preserves_system_messages_when_retrying_after_retryable_error`
+  and strengthened `stream_text_retries_retryable_pre_stream_errors` in
+  `src/stream_text.rs`, covering upstream `streamText` retry-after behavior for
+  retryable pre-stream 500/429 failures, successful response streaming after
+  retry, and preservation of standardized system/user prompts across retry
+  attempts.
 - 2026-05-20: `streamText` smooth stream chunking parity added
   `smooth_stream_combines_partial_words`,
   `smooth_stream_supports_line_and_pattern_chunking`,
@@ -1912,13 +1919,13 @@ focused tests for each portable behavior before changing rows to `verified`.
    verified or explicitly documented as intentionally non-portable.
 2. Treat the original upstream TypeScript tests as the non-negotiable floor for
    every slice. Each future iteration must start from the exact original
-   package test list and ensure every portable `it`/`test` case, table row,
+   package test list and ensure EVERY portable `it`/`test` case, table row,
    fixture/snapshot-equivalent case, streaming/error/provider-option case, and
    portable type-level assertion exists as Rust in the matching crate.
-   The Rust crate may contain more tests than the original TypeScript package,
-   but it must never contain fewer portable counterparts; EVERY original
-   portable TypeScript test must exist in Rust before the package can be
-   treated as parity-complete.
+   The Rust crate may contain potentially more tests than the original
+   TypeScript package, but never fewer mapped portable counterparts; EVERY
+   original portable TypeScript test must exist in Rust before the package can
+   be treated as parity-complete.
    Rust-specific tests can be added on top, but they are additive only; they
    never replace, collapse, or hide a missing upstream test. A slice with even
    one fewer portable original TypeScript test/case than upstream is incomplete,
@@ -1928,9 +1935,10 @@ focused tests for each portable behavior before changing rows to `verified`.
    crate. Total Rust test count is insufficient evidence on its own, because
    Rust-only tests are extra coverage and cannot compensate for a missing
    original upstream case.
-   Explicit acceptance rule: potentially more Rust tests, never fewer. A crate
-   is incomplete until the complete original portable TypeScript test inventory
-   exists in Rust, with any extra Rust tests counted only as additive coverage.
+   Explicit acceptance rule: EVERY original portable TypeScript test exists in
+   Rust, potentially more Rust tests on top, but no less. A crate is incomplete
+   until the complete original portable TypeScript test inventory exists in
+   Rust, with any extra Rust tests counted only as additive coverage.
 3. Treat real-provider validation as part of parity evidence, not a later QA
    task. Each provider-backed row needs deterministic tests and an ignored
    credential-gated live test or runnable example before it can move to
@@ -1967,9 +1975,8 @@ focused tests for each portable behavior before changing rows to `verified`.
    authenticated loopback Streamable HTTP proof into remaining MCP examples for
    hosted auth variants plus, where credentials are available,
    protected live MCP service validation.
-7. Continue `streamText` parity with remaining retry/backoff edge cases and true
-   post-return `createUIMessageStream` delayed-merge behavior if a live stream
-   abstraction is introduced.
+7. Continue `streamText` parity with true post-return `createUIMessageStream`
+   delayed-merge behavior if a live stream abstraction is introduced.
 8. Continue `streamObject` parity with remaining retry/backoff edge cases and
    remaining partial-output strategy edge cases after the Gateway
    text/stream/UI path is stronger.

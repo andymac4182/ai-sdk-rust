@@ -51,7 +51,10 @@ use crate::provider_utils::{
     ExperimentalSandbox, Tool, convert_to_base64, prepare_tools_with_context,
     with_user_agent_suffix,
 };
-use crate::retry::DEFAULT_MAX_RETRIES;
+use crate::retry::{
+    DEFAULT_INITIAL_RETRY_DELAY_MS, DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BACKOFF_FACTOR,
+    retry_delay_from_response_headers,
+};
 use crate::telemetry::{TelemetryOptions, create_telemetry_dispatcher};
 use crate::text_stream_response::{
     TextStreamResponse, TextStreamResponseInit, TextStreamResponseOptions,
@@ -2892,6 +2895,7 @@ where
     M::Stream: IntoIterator<Item = LanguageModelStreamPart>,
 {
     let mut retries = 0;
+    let mut retry_delay_ms = DEFAULT_INITIAL_RETRY_DELAY_MS;
 
     loop {
         let mut attempt_parts = Vec::new();
@@ -2923,6 +2927,41 @@ where
             && stream_text_step_is_retryable_pre_stream_failure(&collected_step, &attempt_parts)
         {
             retries += 1;
+            if let Some(error) = collected_step.errors.first() {
+                let delay_in_ms = stream_text_retry_delay_in_ms(error, retry_delay_ms);
+                let delay_result = match controls.abort_signal {
+                    Some(abort_signal) => {
+                        ai_sdk_provider_utils::delay_with_options(
+                            Some(i64::try_from(delay_in_ms).unwrap_or(i64::MAX)),
+                            ai_sdk_provider_utils::DelayOptions::new()
+                                .with_abort_signal(abort_signal.clone()),
+                        )
+                        .await
+                    }
+                    None => {
+                        ai_sdk_provider_utils::delay(Some(
+                            i64::try_from(delay_in_ms).unwrap_or(i64::MAX),
+                        ))
+                        .await;
+                        Ok(())
+                    }
+                };
+
+                if delay_result.is_err()
+                    && let Some(abort_part) =
+                        stream_text_abort_part_from_signal(controls.abort_signal)
+                {
+                    let abort_reason = abort_part.reason.clone();
+                    push_text_stream_part(
+                        parts,
+                        TextStreamPart::Abort(abort_part),
+                        controls.on_chunk,
+                    )
+                    .await;
+                    return CollectedStreamTextStep::aborted(abort_reason);
+                }
+            }
+            retry_delay_ms = retry_delay_ms.saturating_mul(DEFAULT_RETRY_BACKOFF_FACTOR);
             continue;
         }
 
@@ -3355,6 +3394,37 @@ fn stream_text_error_is_retryable(error: &JsonValue) -> bool {
                 .and_then(|status_code| u16::try_from(status_code).ok())
                 .is_some_and(ApiCallError::is_retryable_status_code)
         })
+}
+
+fn stream_text_retry_delay_in_ms(error: &JsonValue, exponential_backoff_delay_ms: u64) -> u64 {
+    let response_headers = stream_text_error_response_headers(error);
+    retry_delay_from_response_headers(
+        response_headers.as_ref(),
+        exponential_backoff_delay_ms,
+        time::OffsetDateTime::now_utc(),
+    )
+}
+
+fn stream_text_error_response_headers(error: &JsonValue) -> Option<Headers> {
+    let headers = error
+        .get("responseHeaders")
+        .or_else(|| error.get("response_headers"))
+        .and_then(JsonValue::as_object)?;
+    let mut response_headers = Headers::new();
+
+    for (name, value) in headers {
+        if let Some(value) = value.as_str() {
+            response_headers.insert(name.clone(), value.to_string());
+        } else if let Some(value) = value.as_i64() {
+            response_headers.insert(name.clone(), value.to_string());
+        } else if let Some(value) = value.as_u64() {
+            response_headers.insert(name.clone(), value.to_string());
+        } else if let Some(value) = value.as_f64() {
+            response_headers.insert(name.clone(), value.to_string());
+        }
+    }
+
+    (!response_headers.is_empty()).then_some(response_headers)
 }
 
 fn apply_stream_text_transforms(
@@ -6861,7 +6931,8 @@ mod tests {
             LanguageModelErrorStreamPart::new(json!({
                 "message": "rate limited",
                 "statusCode": 429,
-                "isRetryable": true
+                "isRetryable": true,
+                "responseHeaders": { "retry-after-ms": "1" }
             })),
         )]);
         let successful_stream = LanguageModelStreamResult::new(vec![
@@ -6880,7 +6951,7 @@ mod tests {
         let errors = Arc::clone(&callback_errors);
         let chunks = Arc::clone(&callback_chunks);
 
-        let result = poll_ready(stream_text(
+        let result = poll_until_ready(stream_text(
             StreamTextOptions::new(&model, vec![user_message("Say hello")])
                 .with_max_retries(1)
                 .with_on_error(move |event| {
@@ -6916,6 +6987,44 @@ mod tests {
             callback_chunks.lock().expect("chunks lock").as_slice(),
             ["Recovered"]
         );
+    }
+
+    #[test]
+    fn stream_text_preserves_system_messages_when_retrying_after_retryable_error() {
+        let retryable_error = LanguageModelStreamResult::new(vec![LanguageModelStreamPart::Error(
+            LanguageModelErrorStreamPart::new(json!({
+                "message": "Internal Server Error",
+                "statusCode": 500,
+                "responseHeaders": { "retry-after-ms": "1" }
+            })),
+        )]);
+        let successful_stream = LanguageModelStreamResult::new(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "hello")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", " ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "world")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+        let model =
+            MockLanguageModel::new().with_stream_results([retryable_error, successful_stream]);
+        let prompt = vec![
+            LanguageModelMessage::System(LanguageModelSystemMessage::new("INSTRUCTIONS")),
+            user_message("test-input"),
+        ];
+
+        let result = poll_until_ready(stream_text(
+            StreamTextOptions::new(&model, prompt.clone()).with_max_retries(1),
+        ));
+
+        assert_eq!(result.text_stream, ["hello", " ", "world"]);
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].prompt, prompt);
+        assert_eq!(calls[1].prompt, calls[0].prompt);
     }
 
     #[test]
