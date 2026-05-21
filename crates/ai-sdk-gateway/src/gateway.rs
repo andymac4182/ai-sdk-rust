@@ -3599,22 +3599,23 @@ mod tests {
         DEFAULT_GATEWAY_BASE_URL, GatewayAuthMethod, GatewayCredentialType, GatewayEmbeddingModel,
         GatewayGenerationInfoParams, GatewayModelType, GatewayProvider, GatewayProviderOptions,
         GatewayProviderOptionsSort, GatewayProviderSettings, GatewayProviderTimeouts,
-        GatewaySpendReportDatePart, GatewaySpendReportGroupBy, GatewaySpendReportParams,
-        GatewayTransport, GatewayTransportFuture, create_gateway, gateway, gateway_base_url,
-        gateway_observability_headers_with_env, gateway_provider_headers_with_env,
-        gateway_provider_options, get_gateway_auth_token_with_env, metadata_cache_refresh_duration,
+        GatewayRerankingModel, GatewaySpendReportDatePart, GatewaySpendReportGroupBy,
+        GatewaySpendReportParams, GatewayTransport, GatewayTransportFuture, create_gateway,
+        gateway, gateway_base_url, gateway_observability_headers_with_env,
+        gateway_provider_headers_with_env, gateway_provider_options,
+        get_gateway_auth_token_with_env, metadata_cache_refresh_duration,
         try_gateway_provider_headers_with_env, try_gateway_provider_options,
     };
     use ai_sdk_provider::{
         EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelUsage, FileData, FileDataContent,
-        FinishReason, ImageModel, ImageModelCallOptions, ImageModelFile, JsonObject, JsonValue,
-        LanguageModel, LanguageModelAbortController, LanguageModelCallOptions,
+        FinishReason, Headers, ImageModel, ImageModelCallOptions, ImageModelFile, JsonObject,
+        JsonValue, LanguageModel, LanguageModelAbortController, LanguageModelCallOptions,
         LanguageModelContent, LanguageModelFileData, LanguageModelFilePart, LanguageModelMessage,
         LanguageModelSource, LanguageModelStreamPart, LanguageModelTextPart,
         LanguageModelUserContentPart, LanguageModelUserMessage, Provider, ProviderMetadata,
         ProviderOptions, ProviderWithRerankingModel, ProviderWithVideoModel, RerankingModel,
-        RerankingModelCallOptions, RerankingModelDocuments, SpecificationVersion, VideoModel,
-        VideoModelCallOptions, VideoModelFile, Warning,
+        RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
+        SpecificationVersion, VideoModel, VideoModelCallOptions, VideoModelFile, Warning,
     };
     use ai_sdk_provider_utils::{
         FetchErrorInfo, ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod,
@@ -3845,6 +3846,94 @@ mod tests {
             .and_then(ProviderApiRequestBody::as_text)
             .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
             .expect("embedding request body is JSON")
+    }
+
+    fn capturing_reranking_transport(
+        status_code: u16,
+        status_text: impl Into<String>,
+        body: impl Into<String>,
+        headers: Option<Headers>,
+    ) -> (GatewayTransport, Arc<Mutex<Option<ProviderApiRequest>>>) {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let status_text = status_text.into();
+        let body = body.into();
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            let mut response =
+                ProviderApiResponse::text(status_code, status_text.clone(), body.clone());
+
+            if let Some(headers) = headers.clone() {
+                response = response.with_headers(headers);
+            }
+
+            Box::pin(ready(Ok(response)))
+        });
+
+        (transport, captured_request)
+    }
+
+    fn captured_reranking_request(
+        captured_request: &Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) -> ProviderApiRequest {
+        captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+    }
+
+    fn gateway_reranking_test_model(
+        settings: GatewayProviderSettings,
+        transport: GatewayTransport,
+    ) -> GatewayRerankingModel {
+        GatewayProvider::from_settings(settings)
+            .with_transport(transport)
+            .reranking_model("cohere/rerank-v3.5")
+    }
+
+    fn gateway_reranking_test_documents() -> RerankingModelDocuments {
+        RerankingModelDocuments::text(vec![
+            "Paris is the capital of France.".to_string(),
+            "Berlin is the capital of Germany.".to_string(),
+            "Madrid is the capital of Spain.".to_string(),
+        ])
+    }
+
+    fn gateway_reranking_test_query() -> &'static str {
+        "What is the capital of France?"
+    }
+
+    fn gateway_reranking_success_response_body() -> String {
+        json!({
+            "ranking": [
+                {
+                    "index": 0,
+                    "relevanceScore": 0.89
+                },
+                {
+                    "index": 2,
+                    "relevanceScore": 0.15
+                },
+                {
+                    "index": 1,
+                    "relevanceScore": 0.12
+                }
+            ]
+        })
+        .to_string()
+    }
+
+    fn gateway_reranking_request_json(request: &ProviderApiRequest) -> JsonValue {
+        request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("reranking request body is JSON")
     }
 
     fn assert_auth_token_case(
@@ -5052,6 +5141,442 @@ mod tests {
             .clone()
             .expect("request is captured");
         assert_request_tracks_abort_signal(&request, &abort_controller);
+    }
+
+    #[test]
+    fn gateway_reranking_model_passes_headers_correctly() {
+        let (transport, captured_request) = capturing_reranking_transport(
+            200,
+            "OK",
+            gateway_reranking_success_response_body(),
+            None,
+        );
+        let model = gateway_reranking_test_model(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+            transport,
+        );
+
+        let result = poll_ready(
+            model.do_rerank(
+                RerankingModelCallOptions::new(
+                    gateway_reranking_test_documents(),
+                    gateway_reranking_test_query(),
+                )
+                .with_header("Custom-Header", "test-value"),
+            ),
+        );
+
+        assert_eq!(result.ranking.len(), 3);
+        let request = captured_reranking_request(&captured_request);
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-token")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("test-value")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-reranking-model-specification-version")
+                .map(String::as_str),
+            Some("4")
+        );
+        assert_eq!(
+            request.headers.get("ai-model-id").map(String::as_str),
+            Some("cohere/rerank-v3.5")
+        );
+    }
+
+    #[test]
+    fn gateway_reranking_model_includes_observability_headers() {
+        let (transport, captured_request) = capturing_reranking_transport(
+            200,
+            "OK",
+            gateway_reranking_success_response_body(),
+            None,
+        );
+        let model = gateway_reranking_test_model(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token")
+                .with_vercel_request_id("request-1"),
+            transport,
+        );
+
+        let result = poll_ready(model.do_rerank(RerankingModelCallOptions::new(
+            gateway_reranking_test_documents(),
+            gateway_reranking_test_query(),
+        )));
+
+        assert_eq!(result.ranking.len(), 3);
+        let request = captured_reranking_request(&captured_request);
+        assert_eq!(
+            request
+                .headers
+                .get("ai-o11y-request-id")
+                .map(String::as_str),
+            Some("request-1")
+        );
+    }
+
+    #[test]
+    fn gateway_reranking_model_extracts_ranking_from_response() {
+        let (transport, _captured_request) = capturing_reranking_transport(
+            200,
+            "OK",
+            gateway_reranking_success_response_body(),
+            None,
+        );
+        let model = gateway_reranking_test_model(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+            transport,
+        );
+
+        let result = poll_ready(model.do_rerank(RerankingModelCallOptions::new(
+            gateway_reranking_test_documents(),
+            gateway_reranking_test_query(),
+        )));
+
+        assert_eq!(
+            result.ranking,
+            vec![
+                RerankingModelRanking::new(0, 0.89),
+                RerankingModelRanking::new(2, 0.15),
+                RerankingModelRanking::new(1, 0.12)
+            ]
+        );
+    }
+
+    #[test]
+    fn gateway_reranking_model_sends_documents_and_query_in_request_body() {
+        let (transport, captured_request) = capturing_reranking_transport(
+            200,
+            "OK",
+            gateway_reranking_success_response_body(),
+            None,
+        );
+        let model = gateway_reranking_test_model(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+            transport,
+        );
+
+        let result = poll_ready(
+            model.do_rerank(
+                RerankingModelCallOptions::new(
+                    gateway_reranking_test_documents(),
+                    gateway_reranking_test_query(),
+                )
+                .with_top_n(2),
+            ),
+        );
+
+        assert_eq!(result.ranking.len(), 3);
+        let request = captured_reranking_request(&captured_request);
+        assert_eq!(
+            gateway_reranking_request_json(&request),
+            json!({
+                "documents": {
+                    "type": "text",
+                    "values": [
+                        "Paris is the capital of France.",
+                        "Berlin is the capital of Germany.",
+                        "Madrid is the capital of Spain."
+                    ]
+                },
+                "query": "What is the capital of France?",
+                "topN": 2
+            })
+        );
+    }
+
+    #[test]
+    fn gateway_reranking_model_passes_provider_options_into_request_body() {
+        let (transport, captured_request) = capturing_reranking_transport(
+            200,
+            "OK",
+            gateway_reranking_success_response_body(),
+            None,
+        );
+        let model = gateway_reranking_test_model(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+            transport,
+        );
+        let mut provider_options = ProviderOptions::new();
+        provider_options.insert(
+            "cohere".to_string(),
+            json_object(json!({
+                "maxTokensPerDoc": 512
+            })),
+        );
+
+        let result = poll_ready(
+            model.do_rerank(
+                RerankingModelCallOptions::new(
+                    gateway_reranking_test_documents(),
+                    gateway_reranking_test_query(),
+                )
+                .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(result.ranking.len(), 3);
+        let request = captured_reranking_request(&captured_request);
+        assert_eq!(
+            gateway_reranking_request_json(&request)
+                .get("providerOptions")
+                .and_then(|options| options.get("cohere"))
+                .and_then(|cohere| cohere.get("maxTokensPerDoc"))
+                .and_then(JsonValue::as_u64),
+            Some(512)
+        );
+    }
+
+    #[test]
+    fn gateway_reranking_model_omits_top_n_when_not_provided() {
+        let (transport, captured_request) = capturing_reranking_transport(
+            200,
+            "OK",
+            gateway_reranking_success_response_body(),
+            None,
+        );
+        let model = gateway_reranking_test_model(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+            transport,
+        );
+
+        let result = poll_ready(model.do_rerank(RerankingModelCallOptions::new(
+            gateway_reranking_test_documents(),
+            gateway_reranking_test_query(),
+        )));
+
+        assert_eq!(result.ranking.len(), 3);
+        let request = captured_reranking_request(&captured_request);
+        let body = gateway_reranking_request_json(&request);
+        assert_eq!(
+            body,
+            json!({
+                "documents": {
+                    "type": "text",
+                    "values": [
+                        "Paris is the capital of France.",
+                        "Berlin is the capital of Germany.",
+                        "Madrid is the capital of Spain."
+                    ]
+                },
+                "query": "What is the capital of France?"
+            })
+        );
+        assert!(body.get("topN").is_none());
+    }
+
+    #[test]
+    fn gateway_reranking_model_returns_response_headers() {
+        let mut response_headers = Headers::new();
+        response_headers.insert("x-request-id".to_string(), "req-123".to_string());
+        let (transport, _captured_request) = capturing_reranking_transport(
+            200,
+            "OK",
+            gateway_reranking_success_response_body(),
+            Some(response_headers),
+        );
+        let model = gateway_reranking_test_model(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+            transport,
+        );
+
+        let result = poll_ready(model.do_rerank(RerankingModelCallOptions::new(
+            gateway_reranking_test_documents(),
+            gateway_reranking_test_query(),
+        )));
+
+        assert_eq!(
+            result
+                .response
+                .as_ref()
+                .and_then(|response| response.headers.as_ref())
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("req-123")
+        );
+    }
+
+    #[test]
+    fn gateway_reranking_model_returns_provider_metadata() {
+        let (transport, _captured_request) = capturing_reranking_transport(
+            200,
+            "OK",
+            json!({
+                "ranking": [
+                    {
+                        "index": 0,
+                        "relevanceScore": 0.89
+                    }
+                ],
+                "providerMetadata": {
+                    "gateway": {
+                        "cost": "0.002"
+                    }
+                }
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_reranking_test_model(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+            transport,
+        );
+
+        let result = poll_ready(model.do_rerank(RerankingModelCallOptions::new(
+            gateway_reranking_test_documents(),
+            gateway_reranking_test_query(),
+        )));
+
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|gateway| gateway.get("cost"))
+                .and_then(JsonValue::as_str),
+            Some("0.002")
+        );
+    }
+
+    #[test]
+    fn gateway_reranking_model_maps_invalid_request_error_response() {
+        let (transport, _captured_request) = capturing_reranking_transport(
+            400,
+            "Bad Request",
+            json!({
+                "error": {
+                    "message": "Invalid documents format",
+                    "type": "invalid_request_error"
+                }
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_reranking_test_model(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+            transport,
+        );
+
+        let result = poll_ready(model.do_rerank(RerankingModelCallOptions::new(
+            gateway_reranking_test_documents(),
+            gateway_reranking_test_query(),
+        )));
+
+        assert!(result.ranking.is_empty());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|gateway| gateway.get("errorType"))
+                .and_then(JsonValue::as_str),
+            Some("invalid_request_error")
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|gateway| gateway.get("statusCode"))
+                .and_then(JsonValue::as_u64),
+            Some(400)
+        );
+    }
+
+    #[test]
+    fn gateway_reranking_model_maps_internal_server_error_response() {
+        let (transport, _captured_request) = capturing_reranking_transport(
+            500,
+            "Internal Server Error",
+            json!({
+                "error": {
+                    "message": "Internal server error",
+                    "type": "internal_server_error"
+                }
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_reranking_test_model(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+            transport,
+        );
+
+        let result = poll_ready(model.do_rerank(RerankingModelCallOptions::new(
+            gateway_reranking_test_documents(),
+            gateway_reranking_test_query(),
+        )));
+
+        assert!(result.ranking.is_empty());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|gateway| gateway.get("errorType"))
+                .and_then(JsonValue::as_str),
+            Some("internal_server_error")
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|gateway| gateway.get("statusCode"))
+                .and_then(JsonValue::as_u64),
+            Some(500)
+        );
+    }
+
+    #[test]
+    fn gateway_reranking_model_posts_to_reranking_model_endpoint() {
+        let (transport, captured_request) = capturing_reranking_transport(
+            200,
+            "OK",
+            gateway_reranking_success_response_body(),
+            None,
+        );
+        let model = gateway_reranking_test_model(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+            transport,
+        );
+
+        let result = poll_ready(model.do_rerank(RerankingModelCallOptions::new(
+            gateway_reranking_test_documents(),
+            gateway_reranking_test_query(),
+        )));
+
+        assert_eq!(result.ranking.len(), 3);
+        let request = captured_reranking_request(&captured_request);
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://api.test.com/reranking-model");
     }
 
     #[test]
