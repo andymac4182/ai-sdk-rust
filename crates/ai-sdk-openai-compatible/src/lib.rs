@@ -10,7 +10,10 @@ pub mod openai_compatible;
 
 pub use openai_compatible::{
     OpenAICompatibleChatLanguageModel, OpenAICompatibleCompletionLanguageModel,
-    OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel, OpenAICompatibleModelEntry,
+    OpenAICompatibleEmbeddingModel, OpenAICompatibleExtractMetadataArgs,
+    OpenAICompatibleExtractMetadataFuture, OpenAICompatibleImageModel,
+    OpenAICompatibleMetadataExtractor, OpenAICompatibleModelEntry,
     OpenAICompatibleModelListResponse, OpenAICompatibleProvider, OpenAICompatibleProviderSettings,
-    OpenAICompatibleTransport, OpenAICompatibleTransportFuture, create_openai_compatible,
+    OpenAICompatibleStreamMetadataExtractor, OpenAICompatibleTransport,
+    OpenAICompatibleTransportFuture, create_openai_compatible,
 };
