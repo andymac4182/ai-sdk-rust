@@ -6334,6 +6334,60 @@ mod tests {
     }
 
     #[test]
+    fn gateway_provider_refreshes_available_models_after_refresh_interval() {
+        let request_count = Arc::new(Mutex::new(0_u32));
+        let request_count_for_transport = Arc::clone(&request_count);
+        let transport: GatewayTransport = Arc::new(move |_request| -> GatewayTransportFuture {
+            let mut count = request_count_for_transport
+                .lock()
+                .expect("request count mutex is not poisoned");
+            *count += 1;
+            let model_id = format!("model-{}", *count);
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "models": [{
+                        "id": model_id,
+                        "name": "Refresh Interval Model",
+                        "specification": {
+                            "specificationVersion": "v4",
+                            "provider": "gateway",
+                            "modelId": model_id
+                        },
+                        "modelType": "language"
+                    }]
+                })
+                .to_string(),
+            ))))
+        });
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com/v4/ai")
+                .with_api_key("test-token")
+                .with_metadata_cache_refresh_millis(5),
+        )
+        .with_transport(transport);
+
+        let first = poll_ready(provider.get_available_models()).expect("first fetch succeeds");
+        let second = poll_ready(provider.get_available_models()).expect("second fetch is cached");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let third =
+            poll_ready(provider.get_available_models()).expect("third fetch refreshes cache");
+
+        assert_eq!(
+            *request_count
+                .lock()
+                .expect("request count mutex is not poisoned"),
+            2
+        );
+        assert_eq!(first.models[0].id, "model-1");
+        assert_eq!(second.models[0].id, "model-1");
+        assert_eq!(third.models[0].id, "model-2");
+    }
+
+    #[test]
     fn gateway_provider_uses_default_metadata_cache_refresh_interval() {
         let settings = GatewayProviderSettings::new();
 
