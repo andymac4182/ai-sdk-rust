@@ -9217,6 +9217,33 @@ mod tests {
     }
 
     #[test]
+    fn openai_compatible_chat_sends_request_body() {
+        let (model, _captured_request) = openai_compatible_chat_test_model(
+            openai_compatible_chat_text_response_body("", json!({})),
+        );
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(
+            openai_compatible_chat_prompt_messages(),
+        )));
+
+        assert_eq!(
+            result
+                .request
+                .as_ref()
+                .and_then(|request| request.body.as_ref()),
+            Some(&json!({
+                "model": "grok-3",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello"
+                    }
+                ]
+            }))
+        );
+    }
+
+    #[test]
     fn openai_compatible_chat_passes_settings() {
         let (model, captured_request) = openai_compatible_chat_test_model(
             openai_compatible_chat_text_response_body("", json!({})),
@@ -9963,6 +9990,89 @@ mod tests {
                 if finish.finish_reason.unified == FinishReason::Error
                     && finish.finish_reason.raw.is_none()
                     && finish.usage == Default::default()
+        ));
+    }
+
+    #[test]
+    fn openai_compatible_chat_stream_includes_raw_chunks_when_include_raw_chunks_true() {
+        let (model, _captured_request) = openai_compatible_chat_stream_test_model(
+            [
+                "data: {\"id\":\"chat-id\",\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ]
+            .join(""),
+        );
+
+        let result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_include_raw_chunks(true),
+            ),
+        );
+
+        assert_eq!(result.stream.len(), 8);
+        assert!(matches!(
+            result.stream.first(),
+            Some(LanguageModelStreamPart::StreamStart(start)) if start.warnings.is_empty()
+        ));
+        assert!(matches!(
+            result.stream.get(1),
+            Some(LanguageModelStreamPart::Raw(raw))
+                if raw.raw_value == json!({
+                    "id": "chat-id",
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": "Hello"
+                            }
+                        }
+                    ]
+                })
+        ));
+        assert!(matches!(
+            result.stream.get(2),
+            Some(LanguageModelStreamPart::ResponseMetadata(metadata))
+                if metadata.id.as_deref() == Some("chat-id")
+                    && metadata.model_id.is_none()
+                    && metadata.timestamp.is_none()
+        ));
+        assert!(matches!(
+            result.stream.get(3),
+            Some(LanguageModelStreamPart::TextStart(start)) if start.id == "txt-0"
+        ));
+        assert!(matches!(
+            result.stream.get(4),
+            Some(LanguageModelStreamPart::TextDelta(delta))
+                if delta.id == "txt-0" && delta.delta == "Hello"
+        ));
+        assert!(matches!(
+            result.stream.get(5),
+            Some(LanguageModelStreamPart::Raw(raw))
+                if raw.raw_value == json!({
+                    "choices": [
+                        {
+                            "delta": {},
+                            "finish_reason": "stop"
+                        }
+                    ]
+                })
+        ));
+        assert!(matches!(
+            result.stream.get(6),
+            Some(LanguageModelStreamPart::TextEnd(end)) if end.id == "txt-0"
+        ));
+        assert!(matches!(
+            result.stream.get(7),
+            Some(LanguageModelStreamPart::Finish(finish))
+                if finish.finish_reason.unified == FinishReason::Stop
+                    && finish.finish_reason.raw.as_deref() == Some("stop")
+                    && finish.usage == Default::default()
+                    && finish
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("test-provider"))
+                        .is_some_and(JsonObject::is_empty)
         ));
     }
 
