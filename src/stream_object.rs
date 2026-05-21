@@ -1328,6 +1328,87 @@ mod tests {
         ]
     }
 
+    fn array_three_element_stream() -> Vec<LanguageModelStreamPart> {
+        vec![
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                "1",
+                r#"{"elements":["#,
+            )),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "{")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", r#""content":"#)),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", r#""element 1""#)),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "},")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "{ ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", r#""content": "#)),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", r#""element 2""#)),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "},")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "{")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", r#""content":"#)),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", r#""element 3""#)),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "}")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "]")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "}")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]
+    }
+
+    fn array_two_element_single_chunk_stream() -> Vec<LanguageModelStreamPart> {
+        vec![
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                "1",
+                r#"{"elements":[{"content":"element 1"},{"content":"element 2"}]}"#,
+            )),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]
+    }
+
+    fn expected_three_element_array() -> JsonValue {
+        json!([
+            {"content": "element 1"},
+            {"content": "element 2"},
+            {"content": "element 3"}
+        ])
+    }
+
+    fn expected_two_element_array() -> JsonValue {
+        json!([
+            {"content": "element 1"},
+            {"content": "element 2"}
+        ])
+    }
+
+    fn collect_array_stream_result(
+        stream: Vec<LanguageModelStreamPart>,
+    ) -> (StreamObjectResult, Vec<GenerateObjectEndEvent>) {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(stream));
+        let finish_events = Arc::new(Mutex::new(Vec::<GenerateObjectEndEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_array_schema(answer_schema())
+                .with_on_finish(move |event| {
+                    let finish_events = Arc::clone(&finish_events_for_callback);
+                    async move {
+                        finish_events
+                            .lock()
+                            .expect("finish events lock")
+                            .push(event);
+                    }
+                }),
+        ));
+        let events = finish_events.lock().expect("finish events lock").clone();
+
+        (result, events)
+    }
+
     #[derive(Default)]
     struct ObjectTextStreamResponseSink {
         status: Option<u16>,
@@ -1954,6 +2035,117 @@ mod tests {
         assert_eq!(
             result.element_stream,
             vec![json!({"content": "one"}), json!({"content": "two"})]
+        );
+    }
+
+    #[test]
+    fn stream_object_array_three_elements_streams_complete_objects_in_partial_object_stream() {
+        let (result, _) = collect_array_stream_result(array_three_element_stream());
+
+        assert_eq!(
+            result.partial_object_stream,
+            vec![
+                json!([]),
+                json!([{"content": "element 1"}]),
+                json!([{"content": "element 1"}, {"content": "element 2"}]),
+                expected_three_element_array()
+            ]
+        );
+    }
+
+    #[test]
+    fn stream_object_array_three_elements_streams_complete_objects_in_text_stream() {
+        let (result, _) = collect_array_stream_result(array_three_element_stream());
+
+        assert_eq!(
+            result.text_stream,
+            vec![
+                "[".to_string(),
+                r#"{"content":"element 1"}"#.to_string(),
+                r#",{"content":"element 2"}"#.to_string(),
+                r#",{"content":"element 3"}]"#.to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn stream_object_array_three_elements_has_correct_object_result() {
+        let (result, _) = collect_array_stream_result(array_three_element_stream());
+
+        assert_eq!(result.object, Some(expected_three_element_array()));
+    }
+
+    #[test]
+    fn stream_object_array_three_elements_calls_on_finish_with_full_array() {
+        let (_, finish_events) = collect_array_stream_result(array_three_element_stream());
+
+        assert_eq!(finish_events.len(), 1);
+        assert_eq!(
+            finish_events[0].object,
+            Some(expected_three_element_array())
+        );
+    }
+
+    #[test]
+    fn stream_object_array_three_elements_streams_elements_individually() {
+        let (result, _) = collect_array_stream_result(array_three_element_stream());
+
+        assert_eq!(
+            result.element_stream,
+            vec![
+                json!({"content": "element 1"}),
+                json!({"content": "element 2"}),
+                json!({"content": "element 3"})
+            ]
+        );
+    }
+
+    #[test]
+    fn stream_object_array_single_chunk_streams_complete_objects_in_partial_object_stream() {
+        let (result, _) = collect_array_stream_result(array_two_element_single_chunk_stream());
+
+        assert_eq!(
+            result.partial_object_stream,
+            vec![expected_two_element_array()]
+        );
+    }
+
+    #[test]
+    fn stream_object_array_single_chunk_streams_complete_objects_in_text_stream() {
+        let (result, _) = collect_array_stream_result(array_two_element_single_chunk_stream());
+
+        assert_eq!(
+            result.text_stream,
+            vec![r#"[{"content":"element 1"},{"content":"element 2"}]"#.to_string()]
+        );
+    }
+
+    #[test]
+    fn stream_object_array_single_chunk_has_correct_object_result() {
+        let (result, _) = collect_array_stream_result(array_two_element_single_chunk_stream());
+
+        assert_eq!(result.object, Some(expected_two_element_array()));
+    }
+
+    #[test]
+    fn stream_object_array_single_chunk_calls_on_finish_with_full_array() {
+        let (_, finish_events) =
+            collect_array_stream_result(array_two_element_single_chunk_stream());
+
+        assert_eq!(finish_events.len(), 1);
+        assert_eq!(finish_events[0].object, Some(expected_two_element_array()));
+    }
+
+    #[test]
+    fn stream_object_array_single_chunk_streams_elements_individually() {
+        let (result, _) = collect_array_stream_result(array_two_element_single_chunk_stream());
+
+        assert_eq!(
+            result.element_stream,
+            vec![
+                json!({"content": "element 1"}),
+                json!({"content": "element 2"})
+            ]
         );
     }
 

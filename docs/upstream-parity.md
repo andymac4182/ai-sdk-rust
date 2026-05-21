@@ -915,6 +915,21 @@ focused tests for each portable behavior before changing rows to `verified`.
   parse-failure, and empty-text failures. The JS rejection assertions map to
   Rust's explicit `object: None`, retained error state, response metadata,
   usage, and finish reason.
+- 2026-05-21: `streamObject` array output parity added
+  `stream_object_array_three_elements_streams_complete_objects_in_partial_object_stream`,
+  `stream_object_array_three_elements_streams_complete_objects_in_text_stream`,
+  `stream_object_array_three_elements_has_correct_object_result`,
+  `stream_object_array_three_elements_calls_on_finish_with_full_array`,
+  `stream_object_array_three_elements_streams_elements_individually`,
+  `stream_object_array_single_chunk_streams_complete_objects_in_partial_object_stream`,
+  `stream_object_array_single_chunk_streams_complete_objects_in_text_stream`,
+  `stream_object_array_single_chunk_has_correct_object_result`,
+  `stream_object_array_single_chunk_calls_on_finish_with_full_array`, and
+  `stream_object_array_single_chunk_streams_elements_individually` in
+  `src/stream_object.rs`, mapping upstream `output = "array"` cases for three
+  streamed elements and two elements emitted in one chunk across
+  `partialObjectStream`, `textStream`, `result.object`, `onFinish`, and
+  `elementStream`.
 - 2026-05-20: `streamText` smooth stream chunking parity added
   `smooth_stream_combines_partial_words`,
   `smooth_stream_supports_line_and_pattern_chunking`,
