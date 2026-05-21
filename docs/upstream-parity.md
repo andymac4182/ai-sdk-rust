@@ -88,6 +88,12 @@ a Rust counterpart or an explicit non-portable justification.
 Do not treat a larger Rust-only test suite as parity if even one original
 portable TypeScript test/case is missing from the matching crate.
 
+Future-iteration note: the original upstream TypeScript test list is the
+non-negotiable minimum for each matching Rust crate. The Rust crate must include
+every original portable upstream test/case and may include more Rust-specific
+tests, but never fewer. Extra Rust coverage is counted only after the full
+original TypeScript test inventory has a named Rust counterpart.
+
 ## Required Work Order
 
 The queue is two-phase and gated:
@@ -1623,6 +1629,9 @@ focused tests for each portable behavior before changing rows to `verified`.
    crate. Total Rust test count is insufficient evidence on its own, because
    Rust-only tests are extra coverage and cannot compensate for a missing
    original upstream case.
+   Explicit acceptance rule: potentially more Rust tests, never fewer. A crate
+   is incomplete until the complete original portable TypeScript test inventory
+   exists in Rust, with any extra Rust tests counted only as additive coverage.
 3. Treat real-provider validation as part of parity evidence, not a later QA
    task. Each provider-backed row needs deterministic tests and an ignored
    credential-gated live test or runnable example before it can move to
