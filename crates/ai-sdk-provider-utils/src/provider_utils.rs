@@ -26,13 +26,13 @@ use ai_sdk_provider::headers::Headers;
 use ai_sdk_provider::image_model::ImageModelFile;
 use ai_sdk_provider::json::{JsonObject, JsonSchema, JsonValue};
 use ai_sdk_provider::language_model::{
-    LanguageModelAbortSignal, LanguageModelFilePart, LanguageModelFunctionTool,
-    LanguageModelMessage, LanguageModelPrompt, LanguageModelProviderTool,
-    LanguageModelReasoningEffort, LanguageModelStreamPart, LanguageModelSupportedUrls,
-    LanguageModelSystemMessage, LanguageModelTool, LanguageModelToolApprovalRequestPart,
-    LanguageModelToolApprovalResponsePart, LanguageModelToolCall, LanguageModelToolInputDelta,
-    LanguageModelToolInputEnd, LanguageModelToolInputExample, LanguageModelToolInputStart,
-    LanguageModelToolResultOutput,
+    LanguageModelAbortSignal, LanguageModelFileData, LanguageModelFilePart,
+    LanguageModelFunctionTool, LanguageModelMessage, LanguageModelPrompt,
+    LanguageModelProviderTool, LanguageModelReasoningEffort, LanguageModelStreamPart,
+    LanguageModelSupportedUrls, LanguageModelSystemMessage, LanguageModelTool,
+    LanguageModelToolApprovalRequestPart, LanguageModelToolApprovalResponsePart,
+    LanguageModelToolCall, LanguageModelToolInputDelta, LanguageModelToolInputEnd,
+    LanguageModelToolInputExample, LanguageModelToolInputStart, LanguageModelToolResultOutput,
 };
 use ai_sdk_provider::provider::{
     ApiCallError, EmptyResponseBodyError, InvalidArgumentError, InvalidResponseDataError,
@@ -4475,6 +4475,458 @@ impl ToolResult {
     }
 }
 
+/// File data accepted by provider-utils `FilePart`.
+///
+/// Upstream accepts either a tagged file-data union or bare `DataContent`,
+/// `URL`, and provider-reference shorthand values.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum FilePartData {
+    /// Tagged file data.
+    Tagged(FileData),
+
+    /// Bare raw-byte/base64 shorthand.
+    Data(FileDataContent),
+
+    /// Bare URL shorthand.
+    Url(Url),
+
+    /// Bare provider-reference shorthand.
+    Reference(ProviderReference),
+}
+
+impl From<FileData> for FilePartData {
+    fn from(data: FileData) -> Self {
+        Self::Tagged(data)
+    }
+}
+
+impl From<FileDataContent> for FilePartData {
+    fn from(data: FileDataContent) -> Self {
+        Self::Data(data)
+    }
+}
+
+impl From<Vec<u8>> for FilePartData {
+    fn from(data: Vec<u8>) -> Self {
+        Self::Data(FileDataContent::Bytes(data))
+    }
+}
+
+impl From<&[u8]> for FilePartData {
+    fn from(data: &[u8]) -> Self {
+        Self::Data(FileDataContent::Bytes(data.to_vec()))
+    }
+}
+
+impl From<String> for FilePartData {
+    fn from(data: String) -> Self {
+        Self::Data(FileDataContent::Base64(data))
+    }
+}
+
+impl From<&str> for FilePartData {
+    fn from(data: &str) -> Self {
+        Self::Data(FileDataContent::Base64(data.to_string()))
+    }
+}
+
+impl From<Url> for FilePartData {
+    fn from(url: Url) -> Self {
+        Self::Url(url)
+    }
+}
+
+impl From<ProviderReference> for FilePartData {
+    fn from(reference: ProviderReference) -> Self {
+        Self::Reference(reference)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum FilePartKind {
+    #[serde(rename = "file")]
+    File,
+}
+
+/// File content part owned by provider-utils model-message types.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilePart {
+    #[serde(rename = "type")]
+    kind: FilePartKind,
+
+    /// File data as a tagged union or accepted shorthand.
+    pub data: FilePartData,
+
+    /// Optional filename of the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+
+    /// Full IANA media type or top-level IANA media segment.
+    pub media_type: String,
+
+    /// Provider-specific options for this content part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+}
+
+impl FilePart {
+    /// Creates a provider-utils file content part.
+    pub fn new(data: impl Into<FilePartData>, media_type: impl Into<String>) -> Self {
+        Self {
+            kind: FilePartKind::File,
+            data: data.into(),
+            filename: None,
+            media_type: media_type.into(),
+            provider_options: None,
+        }
+    }
+
+    /// Sets the file name.
+    pub fn with_filename(mut self, filename: impl Into<String>) -> Self {
+        self.filename = Some(filename.into());
+        self
+    }
+
+    /// Adds provider-specific options.
+    pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
+        self.provider_options = Some(provider_options);
+        self
+    }
+}
+
+/// Reasoning-file data accepted by provider-utils `ReasoningFilePart`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ReasoningFilePartData {
+    /// Tagged reasoning file data.
+    Tagged(LanguageModelFileData),
+
+    /// Bare raw-byte/base64 shorthand.
+    Data(FileDataContent),
+
+    /// Bare URL shorthand.
+    Url(Url),
+}
+
+impl From<LanguageModelFileData> for ReasoningFilePartData {
+    fn from(data: LanguageModelFileData) -> Self {
+        Self::Tagged(data)
+    }
+}
+
+impl From<FileDataContent> for ReasoningFilePartData {
+    fn from(data: FileDataContent) -> Self {
+        Self::Data(data)
+    }
+}
+
+impl From<Vec<u8>> for ReasoningFilePartData {
+    fn from(data: Vec<u8>) -> Self {
+        Self::Data(FileDataContent::Bytes(data))
+    }
+}
+
+impl From<&[u8]> for ReasoningFilePartData {
+    fn from(data: &[u8]) -> Self {
+        Self::Data(FileDataContent::Bytes(data.to_vec()))
+    }
+}
+
+impl From<String> for ReasoningFilePartData {
+    fn from(data: String) -> Self {
+        Self::Data(FileDataContent::Base64(data))
+    }
+}
+
+impl From<&str> for ReasoningFilePartData {
+    fn from(data: &str) -> Self {
+        Self::Data(FileDataContent::Base64(data.to_string()))
+    }
+}
+
+impl From<Url> for ReasoningFilePartData {
+    fn from(url: Url) -> Self {
+        Self::Url(url)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum ReasoningFilePartKind {
+    #[serde(rename = "reasoning-file")]
+    ReasoningFile,
+}
+
+/// Reasoning-file content part owned by provider-utils model-message types.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReasoningFilePart {
+    #[serde(rename = "type")]
+    kind: ReasoningFilePartKind,
+
+    /// Reasoning file data as a tagged union or accepted shorthand.
+    pub data: ReasoningFilePartData,
+
+    /// Full IANA media type of the file.
+    pub media_type: String,
+
+    /// Provider-specific options for this content part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<ProviderOptions>,
+}
+
+impl ReasoningFilePart {
+    /// Creates a provider-utils reasoning-file content part.
+    pub fn new(data: impl Into<ReasoningFilePartData>, media_type: impl Into<String>) -> Self {
+        Self {
+            kind: ReasoningFilePartKind::ReasoningFile,
+            data: data.into(),
+            media_type: media_type.into(),
+            provider_options: None,
+        }
+    }
+
+    /// Adds provider-specific options.
+    pub fn with_provider_options(mut self, provider_options: ProviderOptions) -> Self {
+        self.provider_options = Some(provider_options);
+        self
+    }
+}
+
+/// Provider reference or a single provider file id used by legacy content parts.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ProviderReferenceOrString {
+    /// A single provider file id.
+    String(String),
+
+    /// A provider-to-file-id reference map.
+    Reference(ProviderReference),
+}
+
+impl From<String> for ProviderReferenceOrString {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl From<&str> for ProviderReferenceOrString {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_string())
+    }
+}
+
+impl From<ProviderReference> for ProviderReferenceOrString {
+    fn from(reference: ProviderReference) -> Self {
+        Self::Reference(reference)
+    }
+}
+
+/// Content item inside a provider-utils tool-result output.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "type",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase"
+)]
+pub enum ToolResultContentPart {
+    /// Text content.
+    Text {
+        /// Text content.
+        text: String,
+
+        /// Provider-specific options.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_options: Option<ProviderOptions>,
+    },
+
+    /// File content using the current tagged file-data shape.
+    File {
+        /// Tagged file data. Bare shorthand values are intentionally not
+        /// accepted for tool-result file parts.
+        data: FileData,
+
+        /// Full IANA media type or top-level IANA media segment.
+        media_type: String,
+
+        /// Optional filename of the file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
+
+        /// Provider-specific options.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_options: Option<ProviderOptions>,
+    },
+
+    /// Deprecated base64 file-data content.
+    FileData {
+        /// Base64-encoded file data.
+        data: String,
+
+        /// Full IANA media type.
+        media_type: String,
+
+        /// Optional filename of the file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
+
+        /// Provider-specific options.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_options: Option<ProviderOptions>,
+    },
+
+    /// Deprecated file URL content.
+    FileUrl {
+        /// URL of the file.
+        url: String,
+
+        /// Optional full IANA media type.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media_type: Option<String>,
+
+        /// Provider-specific options.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_options: Option<ProviderOptions>,
+    },
+
+    /// Deprecated provider file-id content.
+    FileId {
+        /// Provider file id or provider-reference map.
+        file_id: ProviderReferenceOrString,
+
+        /// Provider-specific options.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_options: Option<ProviderOptions>,
+    },
+
+    /// Deprecated provider file-reference content.
+    FileReference {
+        /// Provider-reference map.
+        provider_reference: ProviderReference,
+
+        /// Provider-specific options.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_options: Option<ProviderOptions>,
+    },
+
+    /// Deprecated base64 image-data content.
+    ImageData {
+        /// Base64-encoded image data.
+        data: String,
+
+        /// Full IANA media type.
+        media_type: String,
+
+        /// Provider-specific options.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_options: Option<ProviderOptions>,
+    },
+
+    /// Deprecated image URL content.
+    ImageUrl {
+        /// URL of the image.
+        url: String,
+
+        /// Provider-specific options.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_options: Option<ProviderOptions>,
+    },
+
+    /// Deprecated provider image file-id content.
+    ImageFileId {
+        /// Provider file id or provider-reference map.
+        file_id: ProviderReferenceOrString,
+
+        /// Provider-specific options.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_options: Option<ProviderOptions>,
+    },
+
+    /// Deprecated provider image file-reference content.
+    ImageFileReference {
+        /// Provider-reference map.
+        provider_reference: ProviderReference,
+
+        /// Provider-specific options.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_options: Option<ProviderOptions>,
+    },
+
+    /// Provider-specific content part.
+    Custom {
+        /// Provider-specific options.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_options: Option<ProviderOptions>,
+    },
+}
+
+/// Output returned from provider-utils tool execution conversion hooks.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "type",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase"
+)]
+pub enum ToolResultOutput {
+    /// Text tool output.
+    Text {
+        /// Text output value.
+        value: String,
+
+        /// Provider-specific options.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_options: Option<ProviderOptions>,
+    },
+
+    /// JSON tool output.
+    Json {
+        /// JSON output value.
+        value: JsonValue,
+
+        /// Provider-specific options.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_options: Option<ProviderOptions>,
+    },
+
+    /// Execution denied by the user.
+    ExecutionDenied {
+        /// Optional denial reason.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+
+        /// Provider-specific options.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_options: Option<ProviderOptions>,
+    },
+
+    /// Text error output.
+    ErrorText {
+        /// Text error value.
+        value: String,
+
+        /// Provider-specific options.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_options: Option<ProviderOptions>,
+    },
+
+    /// JSON error output.
+    ErrorJson {
+        /// JSON error value.
+        value: JsonValue,
+
+        /// Provider-specific options.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_options: Option<ProviderOptions>,
+    },
+
+    /// Multi-part tool output.
+    Content {
+        /// Content output parts.
+        value: Vec<ToolResultContentPart>,
+    },
+}
+
 /// Options passed when resolving a runtime-dependent tool description.
 #[derive(Clone, Debug)]
 pub struct ToolDescriptionOptions {
@@ -8104,10 +8556,10 @@ mod tests {
 
     use ai_sdk_provider::language_model::{
         LanguageModelAbortController, LanguageModelAssistantContentPart,
-        LanguageModelAssistantMessage, LanguageModelFilePart, LanguageModelFunctionTool,
-        LanguageModelMessage, LanguageModelProviderTool, LanguageModelReasoningEffort,
-        LanguageModelStreamPart, LanguageModelSystemMessage, LanguageModelTextPart,
-        LanguageModelTool, LanguageModelToolApprovalRequestPart,
+        LanguageModelAssistantMessage, LanguageModelFileData, LanguageModelFilePart,
+        LanguageModelFunctionTool, LanguageModelMessage, LanguageModelProviderTool,
+        LanguageModelReasoningEffort, LanguageModelStreamPart, LanguageModelSystemMessage,
+        LanguageModelTextPart, LanguageModelTool, LanguageModelToolApprovalRequestPart,
         LanguageModelToolApprovalResponsePart, LanguageModelToolResultOutput,
         LanguageModelUserContentPart, LanguageModelUserMessage,
     };
@@ -8124,26 +8576,27 @@ mod tests {
         ConvertToFormDataOptions, DEFAULT_MAX_DOWNLOAD_SIZE, DelayError, DelayOptions,
         DelayedPromise, DownloadBlobOptions, DownloadBlobResponse, DownloadError, DownloadedBlob,
         EventSourceResponseHandlerOptions, ExecuteToolOutput, ExperimentalSandbox, FetchErrorInfo,
-        FlexibleSchema, FormData, FormDataEntry, FormDataInputValue, FormDataValue,
-        GetFromApiOptions, HandledFetchError, IdGeneratorOptions,
+        FilePart, FilePartData, FlexibleSchema, FormData, FormDataEntry, FormDataInputValue,
+        FormDataValue, GetFromApiOptions, HandledFetchError, IdGeneratorOptions,
         InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
         JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, JsonSerializableValue,
         LazySchema, LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions,
         ParseJsonError, ParseJsonResult, PostFormDataToApiOptions, PostJsonToApiOptions,
         PostToApiOptions, ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod,
         ProviderApiResponse, ProviderApiResponseBody, ProviderApiResponseHandlerError,
-        ProviderDefinedToolFactory, ProviderExecutedToolFactory, ReasoningLevel, Resolvable,
-        ResponseHandlerResult, RuntimeEnvironment, SandboxCommandOptions, SandboxCommandResult,
-        SandboxRunCommandFuture, Schema, SerializedModelOptions, StandardSchema,
-        StandardSchemaJsonSchemaOptions, StatusCodeErrorResponseHandlerOptions,
-        StreamingToolCallDelta, StreamingToolCallDeltaFunction, StreamingToolCallTracker,
-        StreamingToolCallTrackerOptions, StreamingToolCallTypeValidation, Tool,
-        ToolApprovalRequest, ToolApprovalResponse, ToolCall, ToolDescriptionOptions,
-        ToolExecuteFunction, ToolExecutionError, ToolExecutionOptions, ToolModelOutputOptions,
-        ToolNeedsApprovalFunction, ToolNeedsApprovalOptions, ToolResult, ValidateTypesResult,
-        ValidationResult, add_additional_properties_to_json_schema, as_array, as_flexible_schema,
-        as_schema, combine_headers, convert_async_iterator_to_readable_stream,
-        convert_base64_to_bytes, convert_bytes_to_base64, convert_image_model_file_to_data_uri,
+        ProviderDefinedToolFactory, ProviderExecutedToolFactory, ReasoningFilePart,
+        ReasoningFilePartData, ReasoningLevel, Resolvable, ResponseHandlerResult,
+        RuntimeEnvironment, SandboxCommandOptions, SandboxCommandResult, SandboxRunCommandFuture,
+        Schema, SerializedModelOptions, StandardSchema, StandardSchemaJsonSchemaOptions,
+        StatusCodeErrorResponseHandlerOptions, StreamingToolCallDelta,
+        StreamingToolCallDeltaFunction, StreamingToolCallTracker, StreamingToolCallTrackerOptions,
+        StreamingToolCallTypeValidation, Tool, ToolApprovalRequest, ToolApprovalResponse, ToolCall,
+        ToolDescriptionOptions, ToolExecuteFunction, ToolExecutionError, ToolExecutionOptions,
+        ToolModelOutputOptions, ToolNeedsApprovalFunction, ToolNeedsApprovalOptions, ToolResult,
+        ToolResultContentPart, ToolResultOutput, ValidateTypesResult, ValidationResult,
+        add_additional_properties_to_json_schema, as_array, as_flexible_schema, as_schema,
+        combine_headers, convert_async_iterator_to_readable_stream, convert_base64_to_bytes,
+        convert_bytes_to_base64, convert_image_model_file_to_data_uri,
         convert_inline_file_data_to_bytes, convert_to_base64, convert_to_form_data,
         create_binary_response_handler, create_event_source_response_handler, create_id_generator,
         create_json_error_response_handler, create_json_response_handler,
@@ -8180,6 +8633,50 @@ mod tests {
         match Pin::new(&mut future).poll(&mut context) {
             Poll::Ready(value) => value,
             Poll::Pending => unreachable!("test futures should be ready"),
+        }
+    }
+
+    fn test_provider_reference(entries: &[(&str, &str)]) -> ProviderReference {
+        ProviderReference::try_from(
+            entries
+                .iter()
+                .map(|(provider, id)| ((*provider).to_string(), (*id).to_string()))
+                .collect::<BTreeMap<_, _>>(),
+        )
+        .expect("provider reference is valid")
+    }
+
+    fn tagged_file_data_type(data: &FileData) -> &'static str {
+        match data {
+            FileData::Data { data } => {
+                let _: &FileDataContent = data;
+                "data"
+            }
+            FileData::Url { url } => {
+                let _: &Url = url;
+                "url"
+            }
+            FileData::Reference { reference } => {
+                let _: &ProviderReference = reference;
+                "reference"
+            }
+            FileData::Text { text } => {
+                let _: &String = text;
+                "text"
+            }
+        }
+    }
+
+    fn tagged_reasoning_file_data_type(data: &LanguageModelFileData) -> &'static str {
+        match data {
+            LanguageModelFileData::Data { data } => {
+                let _: &FileDataContent = data;
+                "data"
+            }
+            LanguageModelFileData::Url { url } => {
+                let _: &Url = url;
+                "url"
+            }
         }
     }
 
@@ -8525,6 +9022,555 @@ mod tests {
                     "q": "rust"
                 },
                 "output": ["result"]
+            })
+        );
+    }
+
+    #[test]
+    fn content_part_file_part_data_narrows_exhaustively_across_the_4_tagged_arms() {
+        let reference = test_provider_reference(&[("openai", "file-abc")]);
+        let data = vec![
+            FileData::Data {
+                data: FileDataContent::Bytes(vec![1, 2, 3]),
+            },
+            FileData::Url {
+                url: Url::parse("https://example.com/file.png").expect("valid URL"),
+            },
+            FileData::Reference { reference },
+            FileData::Text {
+                text: "inline text".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            data.iter().map(tagged_file_data_type).collect::<Vec<_>>(),
+            vec!["data", "url", "reference", "text"]
+        );
+    }
+
+    #[test]
+    fn content_part_file_part_data_exposes_exactly_4_tagged_type_discriminants() {
+        let reference = test_provider_reference(&[("openai", "file-abc")]);
+        let data = [
+            FileData::Data {
+                data: FileDataContent::Base64("aGVsbG8=".to_string()),
+            },
+            FileData::Url {
+                url: Url::parse("https://example.com/file.png").expect("valid URL"),
+            },
+            FileData::Reference { reference },
+            FileData::Text {
+                text: "inline text".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            data.iter().map(tagged_file_data_type).collect::<Vec<_>>(),
+            vec!["data", "url", "reference", "text"]
+        );
+    }
+
+    #[test]
+    fn content_part_file_part_accepts_the_tagged_data_arm() {
+        let part = FilePart::new(
+            FileData::Data {
+                data: FileDataContent::Bytes(vec![1, 2, 3]),
+            },
+            "application/octet-stream",
+        );
+
+        assert_eq!(
+            serde_json::to_value(part).expect("file part serializes"),
+            json!({
+                "type": "file",
+                "data": {
+                    "type": "data",
+                    "data": [1, 2, 3]
+                },
+                "mediaType": "application/octet-stream"
+            })
+        );
+    }
+
+    #[test]
+    fn content_part_file_part_accepts_the_tagged_url_arm() {
+        let part = FilePart::new(
+            FileData::Url {
+                url: Url::parse("https://example.com/file.png").expect("valid URL"),
+            },
+            "image/png",
+        );
+
+        assert_eq!(
+            serde_json::to_value(part).expect("file part serializes"),
+            json!({
+                "type": "file",
+                "data": {
+                    "type": "url",
+                    "url": "https://example.com/file.png"
+                },
+                "mediaType": "image/png"
+            })
+        );
+    }
+
+    #[test]
+    fn content_part_file_part_accepts_the_tagged_reference_arm() {
+        let part = FilePart::new(
+            FileData::Reference {
+                reference: test_provider_reference(&[("openai", "file-abc")]),
+            },
+            "application/octet-stream",
+        );
+
+        assert_eq!(
+            serde_json::to_value(part).expect("file part serializes"),
+            json!({
+                "type": "file",
+                "data": {
+                    "type": "reference",
+                    "reference": {
+                        "openai": "file-abc"
+                    }
+                },
+                "mediaType": "application/octet-stream"
+            })
+        );
+    }
+
+    #[test]
+    fn content_part_file_part_accepts_the_tagged_text_arm() {
+        let part = FilePart::new(
+            FileData::Text {
+                text: "inline text".to_string(),
+            },
+            "text/plain",
+        );
+
+        assert_eq!(
+            serde_json::to_value(part).expect("file part serializes"),
+            json!({
+                "type": "file",
+                "data": {
+                    "type": "text",
+                    "text": "inline text"
+                },
+                "mediaType": "text/plain"
+            })
+        );
+    }
+
+    #[test]
+    fn content_part_file_part_also_accepts_bare_data_content_url_and_provider_reference_shorthands()
+    {
+        let data_part = FilePart::new(FileDataContent::Bytes(vec![1, 2, 3]), "image/png");
+        assert!(matches!(
+            data_part.data,
+            FilePartData::Data(FileDataContent::Bytes(bytes)) if bytes == vec![1, 2, 3]
+        ));
+
+        let base64_part = FilePart::new("aGVsbG8=", "image/png");
+        assert!(matches!(
+            base64_part.data,
+            FilePartData::Data(FileDataContent::Base64(base64)) if base64 == "aGVsbG8="
+        ));
+
+        let url = Url::parse("https://example.com/file.png").expect("valid URL");
+        let url_part = FilePart::new(url.clone(), "image/png");
+        assert!(matches!(url_part.data, FilePartData::Url(part_url) if part_url == url));
+
+        let reference = test_provider_reference(&[("openai", "file-abc")]);
+        let reference_part = FilePart::new(reference.clone(), "application/octet-stream");
+        assert!(matches!(
+            reference_part.data,
+            FilePartData::Reference(part_reference) if part_reference == reference
+        ));
+    }
+
+    #[test]
+    fn content_part_reasoning_file_part_data_narrows_exhaustively_across_the_2_tagged_arms() {
+        let data = [
+            LanguageModelFileData::Data {
+                data: FileDataContent::Bytes(vec![1, 2, 3]),
+            },
+            LanguageModelFileData::Url {
+                url: Url::parse("https://example.com/reasoning.pdf").expect("valid URL"),
+            },
+        ];
+
+        assert_eq!(
+            data.iter()
+                .map(tagged_reasoning_file_data_type)
+                .collect::<Vec<_>>(),
+            vec!["data", "url"]
+        );
+    }
+
+    #[test]
+    fn content_part_reasoning_file_part_data_exposes_exactly_2_tagged_type_discriminants() {
+        let data = [
+            LanguageModelFileData::Data {
+                data: FileDataContent::Base64("cmVhc29uaW5n".to_string()),
+            },
+            LanguageModelFileData::Url {
+                url: Url::parse("https://example.com/reasoning.pdf").expect("valid URL"),
+            },
+        ];
+
+        assert_eq!(
+            data.iter()
+                .map(tagged_reasoning_file_data_type)
+                .collect::<Vec<_>>(),
+            vec!["data", "url"]
+        );
+    }
+
+    #[test]
+    fn content_part_reasoning_file_part_accepts_the_tagged_data_arm() {
+        let part = ReasoningFilePart::new(
+            LanguageModelFileData::Data {
+                data: FileDataContent::Bytes(vec![4, 5, 6]),
+            },
+            "application/pdf",
+        );
+
+        assert_eq!(
+            serde_json::to_value(part).expect("reasoning file part serializes"),
+            json!({
+                "type": "reasoning-file",
+                "data": {
+                    "type": "data",
+                    "data": [4, 5, 6]
+                },
+                "mediaType": "application/pdf"
+            })
+        );
+    }
+
+    #[test]
+    fn content_part_reasoning_file_part_accepts_the_tagged_url_arm() {
+        let part = ReasoningFilePart::new(
+            LanguageModelFileData::Url {
+                url: Url::parse("https://example.com/reasoning.pdf").expect("valid URL"),
+            },
+            "application/pdf",
+        );
+
+        assert_eq!(
+            serde_json::to_value(part).expect("reasoning file part serializes"),
+            json!({
+                "type": "reasoning-file",
+                "data": {
+                    "type": "url",
+                    "url": "https://example.com/reasoning.pdf"
+                },
+                "mediaType": "application/pdf"
+            })
+        );
+    }
+
+    #[test]
+    fn content_part_reasoning_file_part_also_accepts_bare_data_content_and_url_shorthands() {
+        let data_part = ReasoningFilePart::new(FileDataContent::Bytes(vec![1, 2, 3]), "image/png");
+        assert!(matches!(
+            data_part.data,
+            ReasoningFilePartData::Data(FileDataContent::Bytes(bytes)) if bytes == vec![1, 2, 3]
+        ));
+
+        let url = Url::parse("https://example.com/reasoning.pdf").expect("valid URL");
+        let url_part = ReasoningFilePart::new(url.clone(), "application/pdf");
+        assert!(matches!(url_part.data, ReasoningFilePartData::Url(part_url) if part_url == url));
+    }
+
+    #[test]
+    fn content_part_tool_result_file_variant_accepts_the_tagged_data_arm_with_a_full_media_type() {
+        let part = ToolResultContentPart::File {
+            data: FileData::Data {
+                data: FileDataContent::Bytes(vec![137, 80, 78, 71]),
+            },
+            media_type: "image/png".to_string(),
+            filename: None,
+            provider_options: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(part).expect("tool result content part serializes"),
+            json!({
+                "type": "file",
+                "data": {
+                    "type": "data",
+                    "data": [137, 80, 78, 71]
+                },
+                "mediaType": "image/png"
+            })
+        );
+    }
+
+    #[test]
+    fn content_part_tool_result_file_variant_accepts_the_tagged_url_arm_with_top_level_media_type()
+    {
+        let part = ToolResultContentPart::File {
+            data: FileData::Url {
+                url: Url::parse("https://example.com/image.png").expect("valid URL"),
+            },
+            media_type: "image".to_string(),
+            filename: None,
+            provider_options: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(part).expect("tool result content part serializes"),
+            json!({
+                "type": "file",
+                "data": {
+                    "type": "url",
+                    "url": "https://example.com/image.png"
+                },
+                "mediaType": "image"
+            })
+        );
+    }
+
+    #[test]
+    fn content_part_tool_result_file_variant_accepts_the_tagged_reference_arm() {
+        let part = ToolResultContentPart::File {
+            data: FileData::Reference {
+                reference: test_provider_reference(&[("openai", "file-abc")]),
+            },
+            media_type: "application/octet-stream".to_string(),
+            filename: None,
+            provider_options: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(part).expect("tool result content part serializes"),
+            json!({
+                "type": "file",
+                "data": {
+                    "type": "reference",
+                    "reference": {
+                        "openai": "file-abc"
+                    }
+                },
+                "mediaType": "application/octet-stream"
+            })
+        );
+    }
+
+    #[test]
+    fn content_part_tool_result_file_variant_accepts_the_tagged_text_arm() {
+        let part = ToolResultContentPart::File {
+            data: FileData::Text {
+                text: "inline text".to_string(),
+            },
+            media_type: "text/plain".to_string(),
+            filename: None,
+            provider_options: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(part).expect("tool result content part serializes"),
+            json!({
+                "type": "file",
+                "data": {
+                    "type": "text",
+                    "text": "inline text"
+                },
+                "mediaType": "text/plain"
+            })
+        );
+    }
+
+    #[test]
+    fn content_part_tool_result_file_variant_rejects_bare_data_shorthands() {
+        serde_json::from_value::<ToolResultContentPart>(json!({
+            "type": "file",
+            "data": [1, 2, 3],
+            "mediaType": "image/png"
+        }))
+        .expect_err("bare data shorthand is rejected for tool-result file parts");
+
+        serde_json::from_value::<ToolResultContentPart>(json!({
+            "type": "file",
+            "data": "https://example.com/image.png",
+            "mediaType": "image/png"
+        }))
+        .expect_err("bare URL shorthand is rejected for tool-result file parts");
+    }
+
+    #[test]
+    fn content_part_tool_result_file_variant_exposes_the_four_tagged_data_type_discriminants() {
+        let data = [
+            FileData::Data {
+                data: FileDataContent::Base64("aW1hZ2U=".to_string()),
+            },
+            FileData::Url {
+                url: Url::parse("https://example.com/image.png").expect("valid URL"),
+            },
+            FileData::Reference {
+                reference: test_provider_reference(&[("openai", "file-abc")]),
+            },
+            FileData::Text {
+                text: "inline text".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            data.iter().map(tagged_file_data_type).collect::<Vec<_>>(),
+            vec!["data", "url", "reference", "text"]
+        );
+    }
+
+    #[test]
+    fn content_part_tool_result_legacy_variants_still_type_checks_file_data() {
+        let part = ToolResultContentPart::FileData {
+            data: "aGVsbG8=".to_string(),
+            media_type: "text/plain".to_string(),
+            filename: None,
+            provider_options: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(part).expect("legacy file-data serializes"),
+            json!({
+                "type": "file-data",
+                "data": "aGVsbG8=",
+                "mediaType": "text/plain"
+            })
+        );
+    }
+
+    #[test]
+    fn content_part_tool_result_legacy_variants_still_type_checks_file_url_with_media_type() {
+        let part = ToolResultContentPart::FileUrl {
+            url: "https://example.com/file.pdf".to_string(),
+            media_type: Some("application/pdf".to_string()),
+            provider_options: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(part).expect("legacy file-url serializes"),
+            json!({
+                "type": "file-url",
+                "url": "https://example.com/file.pdf",
+                "mediaType": "application/pdf"
+            })
+        );
+    }
+
+    #[test]
+    fn content_part_tool_result_legacy_variants_still_type_checks_file_url_without_media_type() {
+        let part = ToolResultContentPart::FileUrl {
+            url: "https://example.com/file.pdf".to_string(),
+            media_type: None,
+            provider_options: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(part).expect("legacy file-url serializes"),
+            json!({
+                "type": "file-url",
+                "url": "https://example.com/file.pdf"
+            })
+        );
+    }
+
+    #[test]
+    fn content_part_tool_result_legacy_variants_still_type_checks_file_reference() {
+        let part = ToolResultContentPart::FileReference {
+            provider_reference: test_provider_reference(&[("openai", "file-abc")]),
+            provider_options: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(part).expect("legacy file-reference serializes"),
+            json!({
+                "type": "file-reference",
+                "providerReference": {
+                    "openai": "file-abc"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn content_part_tool_result_legacy_variants_still_type_checks_legacy_image_variants() {
+        let image_data = ToolResultContentPart::ImageData {
+            data: "iVBORw0KGgo=".to_string(),
+            media_type: "image/png".to_string(),
+            provider_options: None,
+        };
+        let image_url = ToolResultContentPart::ImageUrl {
+            url: "https://example.com/image.png".to_string(),
+            provider_options: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(image_data).expect("legacy image-data serializes"),
+            json!({
+                "type": "image-data",
+                "data": "iVBORw0KGgo=",
+                "mediaType": "image/png"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(image_url).expect("legacy image-url serializes"),
+            json!({
+                "type": "image-url",
+                "url": "https://example.com/image.png"
+            })
+        );
+    }
+
+    #[test]
+    fn content_part_provider_reference_top_level_accepts_plain_provider_id_records() {
+        assert_eq!(
+            test_provider_reference(&[("openai", "file-abc")])
+                .provider_id("openai")
+                .expect("openai provider id exists"),
+            "file-abc"
+        );
+        assert_eq!(
+            test_provider_reference(&[("fileId", "abc")])
+                .provider_id("fileId")
+                .expect("fileId provider id exists"),
+            "abc"
+        );
+    }
+
+    #[test]
+    fn content_part_provider_reference_top_level_rejects_records_that_carry_a_type_key() {
+        let error = ProviderReference::try_from(BTreeMap::from([
+            ("type".to_string(), "x".to_string()),
+            ("openai".to_string(), "file-abc".to_string()),
+        ]))
+        .expect_err("provider reference with type key is rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "provider references cannot contain the reserved `type` key"
+        );
+    }
+
+    #[test]
+    fn content_part_tool_result_output_wraps_content_parts() {
+        let output = ToolResultOutput::Content {
+            value: vec![ToolResultContentPart::Text {
+                text: "done".to_string(),
+                provider_options: None,
+            }],
+        };
+
+        assert_eq!(
+            serde_json::to_value(output).expect("tool result output serializes"),
+            json!({
+                "type": "content",
+                "value": [
+                    {
+                        "type": "text",
+                        "text": "done"
+                    }
+                ]
             })
         );
     }
