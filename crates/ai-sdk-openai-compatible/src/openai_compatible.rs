@@ -13445,6 +13445,151 @@ mod tests {
     }
 
     #[test]
+    fn openai_compatible_chat_parses_thought_signature_from_extra_content_and_includes_provider_metadata()
+     {
+        let (model, _captured_request) =
+            openai_compatible_chat_test_model(openai_compatible_chat_tool_response_body(
+                json!([
+                    {
+                        "id": "function-call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "check_flight",
+                            "arguments": "{\"flight\":\"AA100\"}"
+                        },
+                        "extra_content": {
+                            "google": {
+                                "thought_signature": "<Signature A>"
+                            }
+                        }
+                    }
+                ]),
+                json!({}),
+            ));
+
+        let result = poll_ready(model.do_generate(
+            LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages()).with_tool(
+                openai_compatible_test_function_tool("check_flight", "Check flight status"),
+            ),
+        ));
+
+        assert_eq!(result.content.len(), 1);
+        assert!(matches!(
+            result.content.first(),
+            Some(LanguageModelContent::ToolCall(tool_call))
+                if tool_call.tool_call_id == "function-call-1"
+                    && tool_call.tool_name == "check_flight"
+                    && tool_call.input == "{\"flight\":\"AA100\"}"
+                    && tool_call
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("test-provider"))
+                        .and_then(|metadata| metadata.get("thoughtSignature"))
+                        .and_then(JsonValue::as_str)
+                        == Some("<Signature A>")
+        ));
+    }
+
+    #[test]
+    fn openai_compatible_chat_handles_parallel_tool_calls_with_signature_only_on_first_call() {
+        let (model, _captured_request) =
+            openai_compatible_chat_test_model(openai_compatible_chat_tool_response_body(
+                json!([
+                    {
+                        "id": "function-call-paris",
+                        "type": "function",
+                        "function": {
+                            "name": "get_current_temperature",
+                            "arguments": "{\"location\":\"Paris\"}"
+                        },
+                        "extra_content": {
+                            "google": {
+                                "thought_signature": "<Signature A>"
+                            }
+                        }
+                    },
+                    {
+                        "id": "function-call-london",
+                        "type": "function",
+                        "function": {
+                            "name": "get_current_temperature",
+                            "arguments": "{\"location\":\"London\"}"
+                        }
+                    }
+                ]),
+                json!({}),
+            ));
+
+        let result = poll_ready(model.do_generate(
+            LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages()).with_tool(
+                openai_compatible_test_function_tool(
+                    "get_current_temperature",
+                    "Get current temperature",
+                ),
+            ),
+        ));
+
+        assert_eq!(result.content.len(), 2);
+        assert!(matches!(
+            result.content.first(),
+            Some(LanguageModelContent::ToolCall(tool_call))
+                if tool_call.tool_call_id == "function-call-paris"
+                    && tool_call.tool_name == "get_current_temperature"
+                    && tool_call.input == "{\"location\":\"Paris\"}"
+                    && tool_call
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("test-provider"))
+                        .and_then(|metadata| metadata.get("thoughtSignature"))
+                        .and_then(JsonValue::as_str)
+                        == Some("<Signature A>")
+        ));
+        assert!(matches!(
+            result.content.get(1),
+            Some(LanguageModelContent::ToolCall(tool_call))
+                if tool_call.tool_call_id == "function-call-london"
+                    && tool_call.tool_name == "get_current_temperature"
+                    && tool_call.input == "{\"location\":\"London\"}"
+                    && tool_call.provider_metadata.is_none()
+        ));
+    }
+
+    #[test]
+    fn openai_compatible_chat_does_not_include_provider_metadata_when_no_thought_signature_is_present()
+     {
+        let (model, _captured_request) =
+            openai_compatible_chat_test_model(openai_compatible_chat_tool_response_body(
+                json!([
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "some_tool",
+                            "arguments": "{\"param\":\"value\"}"
+                        }
+                    }
+                ]),
+                json!({}),
+            ));
+
+        let result = poll_ready(model.do_generate(
+            LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages()).with_tool(
+                openai_compatible_test_function_tool("some_tool", "Run a tool"),
+            ),
+        ));
+
+        assert_eq!(result.content.len(), 1);
+        assert!(matches!(
+            result.content.first(),
+            Some(LanguageModelContent::ToolCall(tool_call))
+                if tool_call.tool_call_id == "call-1"
+                    && tool_call.tool_name == "some_tool"
+                    && tool_call.input == "{\"param\":\"value\"}"
+                    && tool_call.provider_metadata.is_none()
+        ));
+    }
+
+    #[test]
     fn openai_compatible_chat_includes_thought_signature_in_provider_metadata_with_camel_case_key()
     {
         let (model, _captured_request) =
