@@ -15688,12 +15688,15 @@ mod tests {
 
     #[test]
     fn open_responses_provider_defaults_missing_assistant_tool_call_input_to_empty_object() {
+        let tool_call: LanguageModelToolCallPart = serde_json::from_value(json!({
+            "type": "tool-call",
+            "toolCallId": "call_123",
+            "toolName": "search"
+        }))
+        .expect("assistant tool call without input deserializes");
+
         let (request_body, warnings) = open_responses_assistant_message_request_body(vec![
-            LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
-                "call_123",
-                "search",
-                JsonValue::Null,
-            )),
+            LanguageModelAssistantContentPart::ToolCall(tool_call),
         ]);
 
         assert!(warnings.is_empty());

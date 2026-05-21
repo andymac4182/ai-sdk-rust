@@ -2635,6 +2635,7 @@ pub struct LanguageModelToolCallPart {
     pub tool_name: String,
 
     /// JSON-serializable tool call input.
+    #[serde(default)]
     pub input: JsonValue,
 
     /// Whether the provider will execute this tool call.
@@ -5090,6 +5091,21 @@ mod tests {
                         .with_automatic(true),
                 ),
             ]))
+        );
+    }
+
+    #[test]
+    fn assistant_tool_call_part_deserializes_missing_input_as_null() {
+        let tool_call: LanguageModelToolCallPart = serde_json::from_value(json!({
+            "type": "tool-call",
+            "toolCallId": "tool_call_123",
+            "toolName": "weather"
+        }))
+        .expect("assistant tool call part deserializes");
+
+        assert_eq!(
+            tool_call,
+            LanguageModelToolCallPart::new("tool_call_123", "weather", json!(null))
         );
     }
 
