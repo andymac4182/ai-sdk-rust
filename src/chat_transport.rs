@@ -2164,6 +2164,263 @@ mod tests {
     }
 
     #[test]
+    fn convert_ui_messages_maps_user_file_url_part() {
+        let messages =
+            convert_ui_messages_to_model_messages(&[UiMessage::new("msg-1", UiMessageRole::User)
+                .with_part(json!({
+                    "type": "file",
+                    "mediaType": "image/jpeg",
+                    "url": "https://example.com/image.jpg"
+                }))
+                .with_part(json!({
+                    "type": "text",
+                    "text": "Check this image"
+                }))])
+            .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "file",
+                            "mediaType": "image/jpeg",
+                            "data": {
+                                "type": "url",
+                                "url": "https://example.com/image.jpg"
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": "Check this image"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_includes_user_file_filename() {
+        let messages =
+            convert_ui_messages_to_model_messages(&[UiMessage::new("msg-1", UiMessageRole::User)
+                .with_part(json!({
+                    "type": "file",
+                    "mediaType": "image/jpeg",
+                    "url": "https://example.com/image.jpg",
+                    "filename": "image.jpg"
+                }))])
+            .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "file",
+                            "mediaType": "image/jpeg",
+                            "filename": "image.jpg",
+                            "data": {
+                                "type": "url",
+                                "url": "https://example.com/image.jpg"
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_user_file_provider_reference() {
+        let messages =
+            convert_ui_messages_to_model_messages(&[UiMessage::new("msg-1", UiMessageRole::User)
+                .with_part(json!({
+                    "type": "file",
+                    "mediaType": "application/pdf",
+                    "filename": "doc.pdf",
+                    "url": "data:application/pdf;base64,abc",
+                    "providerReference": {
+                        "openai": "file-abc123"
+                    }
+                }))
+                .with_part(json!({
+                    "type": "text",
+                    "text": "Summarize this"
+                }))])
+            .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "file",
+                            "mediaType": "application/pdf",
+                            "filename": "doc.pdf",
+                            "data": {
+                                "type": "reference",
+                                "reference": {
+                                    "openai": "file-abc123"
+                                }
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": "Summarize this"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_omits_user_file_filename_when_absent() {
+        let messages =
+            convert_ui_messages_to_model_messages(&[UiMessage::new("msg-1", UiMessageRole::User)
+                .with_part(json!({
+                    "type": "file",
+                    "mediaType": "image/jpeg",
+                    "url": "https://example.com/image.jpg"
+                }))])
+            .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "file",
+                            "mediaType": "image/jpeg",
+                            "data": {
+                                "type": "url",
+                                "url": "https://example.com/image.jpg"
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_assistant_file_url_part() {
+        let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
+            "msg-1",
+            UiMessageRole::Assistant,
+        )
+        .with_part(json!({
+            "type": "file",
+            "mediaType": "image/png",
+            "url": "data:image/png;base64,dGVzdA=="
+        }))])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "file",
+                            "mediaType": "image/png",
+                            "data": {
+                                "type": "url",
+                                "url": "data:image/png;base64,dGVzdA=="
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_includes_assistant_file_filename() {
+        let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
+            "msg-1",
+            UiMessageRole::Assistant,
+        )
+        .with_part(json!({
+            "type": "file",
+            "mediaType": "image/png",
+            "url": "data:image/png;base64,dGVzdA==",
+            "filename": "test.png"
+        }))])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "file",
+                            "mediaType": "image/png",
+                            "filename": "test.png",
+                            "data": {
+                                "type": "url",
+                                "url": "data:image/png;base64,dGVzdA=="
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_assistant_file_provider_reference() {
+        let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
+            "msg-1",
+            UiMessageRole::Assistant,
+        )
+        .with_part(json!({
+            "type": "file",
+            "mediaType": "application/pdf",
+            "filename": "doc.pdf",
+            "url": "data:application/pdf;base64,xyz",
+            "providerReference": {
+                "anthropic": "file-xyz789"
+            }
+        }))])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "file",
+                            "mediaType": "application/pdf",
+                            "filename": "doc.pdf",
+                            "data": {
+                                "type": "reference",
+                                "reference": {
+                                    "anthropic": "file-xyz789"
+                                }
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn convert_ui_messages_maps_static_tool_output_available_to_assistant_and_tool_messages() {
         let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
             "msg-1",
