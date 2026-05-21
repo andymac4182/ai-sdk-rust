@@ -3596,7 +3596,7 @@ fn provider_api_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_GATEWAY_BASE_URL, GatewayAuthMethod, GatewayCredentialType,
+        DEFAULT_GATEWAY_BASE_URL, GatewayAuthMethod, GatewayCredentialType, GatewayEmbeddingModel,
         GatewayGenerationInfoParams, GatewayModelType, GatewayProvider, GatewayProviderOptions,
         GatewayProviderOptionsSort, GatewayProviderSettings, GatewayProviderTimeouts,
         GatewaySpendReportDatePart, GatewaySpendReportGroupBy, GatewaySpendReportParams,
@@ -3606,14 +3606,15 @@ mod tests {
         try_gateway_provider_headers_with_env, try_gateway_provider_options,
     };
     use ai_sdk_provider::{
-        EmbeddingModel, EmbeddingModelCallOptions, FileData, FileDataContent, FinishReason,
-        ImageModel, ImageModelCallOptions, ImageModelFile, JsonObject, JsonValue, LanguageModel,
-        LanguageModelAbortController, LanguageModelCallOptions, LanguageModelContent,
-        LanguageModelFileData, LanguageModelFilePart, LanguageModelMessage, LanguageModelSource,
-        LanguageModelStreamPart, LanguageModelTextPart, LanguageModelUserContentPart,
-        LanguageModelUserMessage, Provider, ProviderMetadata, ProviderWithRerankingModel,
-        ProviderWithVideoModel, RerankingModel, RerankingModelCallOptions, RerankingModelDocuments,
-        SpecificationVersion, VideoModel, VideoModelCallOptions, VideoModelFile, Warning,
+        EmbeddingModel, EmbeddingModelCallOptions, EmbeddingModelUsage, FileData, FileDataContent,
+        FinishReason, ImageModel, ImageModelCallOptions, ImageModelFile, JsonObject, JsonValue,
+        LanguageModel, LanguageModelAbortController, LanguageModelCallOptions,
+        LanguageModelContent, LanguageModelFileData, LanguageModelFilePart, LanguageModelMessage,
+        LanguageModelSource, LanguageModelStreamPart, LanguageModelTextPart,
+        LanguageModelUserContentPart, LanguageModelUserMessage, Provider, ProviderMetadata,
+        ProviderOptions, ProviderWithRerankingModel, ProviderWithVideoModel, RerankingModel,
+        RerankingModelCallOptions, RerankingModelDocuments, SpecificationVersion, VideoModel,
+        VideoModelCallOptions, VideoModelFile, Warning,
     };
     use ai_sdk_provider_utils::{
         FetchErrorInfo, ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod,
@@ -3775,6 +3776,75 @@ mod tests {
             .expect("captured request mutex is not poisoned")
             .clone()
             .expect("request is captured")
+    }
+
+    fn capturing_embedding_transport(
+        status_code: u16,
+        status_text: impl Into<String>,
+        body: impl Into<String>,
+    ) -> (GatewayTransport, Arc<Mutex<Option<ProviderApiRequest>>>) {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let status_text = status_text.into();
+        let body = body.into();
+        let transport: GatewayTransport = Arc::new(move |request| -> GatewayTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                status_code,
+                status_text.clone(),
+                body.clone(),
+            ))))
+        });
+
+        (transport, captured_request)
+    }
+
+    fn captured_embedding_request(
+        captured_request: &Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) -> ProviderApiRequest {
+        captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+    }
+
+    fn gateway_embedding_test_model(
+        settings: GatewayProviderSettings,
+        transport: GatewayTransport,
+    ) -> GatewayEmbeddingModel {
+        GatewayProvider::from_settings(settings)
+            .with_transport(transport)
+            .embedding_model("openai/text-embedding-3-small")
+    }
+
+    fn gateway_embedding_test_values() -> Vec<String> {
+        vec![
+            "sunny day at the beach".to_string(),
+            "rainy afternoon in the city".to_string(),
+        ]
+    }
+
+    fn gateway_embedding_success_response_body() -> String {
+        json!({
+            "embeddings": [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+            "usage": {
+                "tokens": 8
+            }
+        })
+        .to_string()
+    }
+
+    fn gateway_embedding_request_json(request: &ProviderApiRequest) -> JsonValue {
+        request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("embedding request body is JSON")
     }
 
     fn assert_auth_token_case(
@@ -4494,6 +4564,399 @@ mod tests {
             .clone()
             .expect("request is captured");
         assert_request_tracks_abort_signal(&request, &abort_controller);
+    }
+
+    #[test]
+    fn gateway_embedding_model_passes_headers_correctly() {
+        let (transport, captured_request) =
+            capturing_embedding_transport(200, "OK", gateway_embedding_success_response_body());
+        let model = gateway_embedding_test_model(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+            transport,
+        );
+
+        let result = poll_ready(
+            model.do_embed(
+                EmbeddingModelCallOptions::new(gateway_embedding_test_values())
+                    .with_header("Custom-Header", "test-value"),
+            ),
+        );
+
+        assert_eq!(
+            result.embeddings,
+            vec![vec![0.1, 0.2, 0.3], vec![0.4, 0.5, 0.6]]
+        );
+        let request = captured_embedding_request(&captured_request);
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://api.test.com/embedding-model");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-token")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-gateway-auth-method")
+                .map(String::as_str),
+            Some("api-key")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("test-value")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-embedding-model-specification-version")
+                .map(String::as_str),
+            Some("4")
+        );
+        assert_eq!(
+            request.headers.get("ai-model-id").map(String::as_str),
+            Some("openai/text-embedding-3-small")
+        );
+    }
+
+    #[test]
+    fn gateway_embedding_model_includes_observability_headers() {
+        let (transport, captured_request) =
+            capturing_embedding_transport(200, "OK", gateway_embedding_success_response_body());
+        let model = gateway_embedding_test_model(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token")
+                .with_vercel_request_id("request-1"),
+            transport,
+        );
+
+        let result = poll_ready(model.do_embed(EmbeddingModelCallOptions::new(
+            gateway_embedding_test_values(),
+        )));
+
+        assert_eq!(
+            result.embeddings,
+            vec![vec![0.1, 0.2, 0.3], vec![0.4, 0.5, 0.6]]
+        );
+        let request = captured_embedding_request(&captured_request);
+        assert_eq!(
+            request
+                .headers
+                .get("ai-o11y-request-id")
+                .map(String::as_str),
+            Some("request-1")
+        );
+    }
+
+    #[test]
+    fn gateway_embedding_model_extracts_embeddings_and_usage() {
+        let (transport, _captured_request) = capturing_embedding_transport(
+            200,
+            "OK",
+            json!({
+                "embeddings": [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+                "usage": {
+                    "tokens": 42
+                }
+            })
+            .to_string(),
+        );
+        let model = gateway_embedding_test_model(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+            transport,
+        );
+
+        let result = poll_ready(model.do_embed(EmbeddingModelCallOptions::new(
+            gateway_embedding_test_values(),
+        )));
+
+        assert_eq!(
+            result.embeddings,
+            vec![vec![0.1, 0.2, 0.3], vec![0.4, 0.5, 0.6]]
+        );
+        assert_eq!(result.usage, Some(EmbeddingModelUsage::new(42)));
+    }
+
+    #[test]
+    fn gateway_embedding_model_sends_values_as_array() {
+        let (transport, captured_request) =
+            capturing_embedding_transport(200, "OK", gateway_embedding_success_response_body());
+        let model = gateway_embedding_test_model(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+            transport,
+        );
+
+        let result = poll_ready(model.do_embed(EmbeddingModelCallOptions::new(
+            gateway_embedding_test_values(),
+        )));
+
+        assert_eq!(
+            result.embeddings,
+            vec![vec![0.1, 0.2, 0.3], vec![0.4, 0.5, 0.6]]
+        );
+        let request = captured_embedding_request(&captured_request);
+        assert_eq!(
+            gateway_embedding_request_json(&request),
+            json!({
+                "values": ["sunny day at the beach", "rainy afternoon in the city"]
+            })
+        );
+    }
+
+    #[test]
+    fn gateway_embedding_model_passes_provider_options_into_request_body() {
+        let (transport, captured_request) =
+            capturing_embedding_transport(200, "OK", gateway_embedding_success_response_body());
+        let model = gateway_embedding_test_model(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+            transport,
+        );
+        let mut provider_options = ProviderOptions::new();
+        provider_options.insert(
+            "openai".to_string(),
+            json_object(json!({
+                "dimensions": 64
+            })),
+        );
+
+        let result = poll_ready(
+            model.do_embed(
+                EmbeddingModelCallOptions::new(gateway_embedding_test_values())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(
+            result.embeddings,
+            vec![vec![0.1, 0.2, 0.3], vec![0.4, 0.5, 0.6]]
+        );
+        let request = captured_embedding_request(&captured_request);
+        assert_eq!(
+            gateway_embedding_request_json(&request),
+            json!({
+                "values": ["sunny day at the beach", "rainy afternoon in the city"],
+                "providerOptions": {
+                    "openai": {
+                        "dimensions": 64
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn gateway_embedding_model_omits_provider_options_when_not_provided() {
+        let (transport, captured_request) =
+            capturing_embedding_transport(200, "OK", gateway_embedding_success_response_body());
+        let model = gateway_embedding_test_model(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+            transport,
+        );
+
+        let result = poll_ready(model.do_embed(EmbeddingModelCallOptions::new(
+            gateway_embedding_test_values(),
+        )));
+
+        assert_eq!(
+            result.embeddings,
+            vec![vec![0.1, 0.2, 0.3], vec![0.4, 0.5, 0.6]]
+        );
+        let request = captured_embedding_request(&captured_request);
+        let body = gateway_embedding_request_json(&request);
+        assert_eq!(
+            body,
+            json!({
+                "values": ["sunny day at the beach", "rainy afternoon in the city"]
+            })
+        );
+        assert!(body.get("providerOptions").is_none());
+    }
+
+    #[test]
+    fn gateway_embedding_model_converts_gateway_error_responses() {
+        let (invalid_request_transport, _captured_request) = capturing_embedding_transport(
+            400,
+            "Bad Request",
+            json!({
+                "error": {
+                    "message": "Invalid input",
+                    "type": "invalid_request_error"
+                }
+            })
+            .to_string(),
+        );
+        let invalid_request_model = gateway_embedding_test_model(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+            invalid_request_transport,
+        );
+
+        let invalid_request_result = poll_ready(invalid_request_model.do_embed(
+            EmbeddingModelCallOptions::new(gateway_embedding_test_values()),
+        ));
+
+        assert!(invalid_request_result.embeddings.is_empty());
+        assert_eq!(
+            invalid_request_result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("errorType"))
+                .and_then(JsonValue::as_str),
+            Some("invalid_request_error")
+        );
+        assert_eq!(
+            invalid_request_result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("statusCode"))
+                .and_then(JsonValue::as_u64),
+            Some(400)
+        );
+
+        let (internal_error_transport, _captured_request) = capturing_embedding_transport(
+            500,
+            "Internal Server Error",
+            json!({
+                "error": {
+                    "message": "Server blew up",
+                    "type": "internal_server_error"
+                }
+            })
+            .to_string(),
+        );
+        let internal_error_model = gateway_embedding_test_model(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+            internal_error_transport,
+        );
+
+        let internal_error_result = poll_ready(internal_error_model.do_embed(
+            EmbeddingModelCallOptions::new(gateway_embedding_test_values()),
+        ));
+
+        assert!(internal_error_result.embeddings.is_empty());
+        assert_eq!(
+            internal_error_result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("errorType"))
+                .and_then(JsonValue::as_str),
+            Some("internal_server_error")
+        );
+        assert_eq!(
+            internal_error_result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|metadata| metadata.get("statusCode"))
+                .and_then(JsonValue::as_u64),
+            Some(500)
+        );
+    }
+
+    #[test]
+    fn gateway_embedding_model_includes_provider_metadata_in_response_body() {
+        let (transport, _captured_request) = capturing_embedding_transport(
+            200,
+            "OK",
+            json!({
+                "embeddings": [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+                "usage": {
+                    "tokens": 5
+                },
+                "providerMetadata": {
+                    "gateway": {
+                        "routing": {
+                            "test": true
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        );
+        let model = gateway_embedding_test_model(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+            transport,
+        );
+
+        let result = poll_ready(model.do_embed(EmbeddingModelCallOptions::new(
+            gateway_embedding_test_values(),
+        )));
+
+        assert_eq!(
+            result
+                .response
+                .as_ref()
+                .and_then(|response| response.body.as_ref())
+                .and_then(|body| body.get("providerMetadata")),
+            Some(&json!({
+                "gateway": {
+                    "routing": {
+                        "test": true
+                    }
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn gateway_embedding_model_extracts_provider_metadata_to_top_level() {
+        let (transport, _captured_request) = capturing_embedding_transport(
+            200,
+            "OK",
+            json!({
+                "embeddings": [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+                "usage": {
+                    "tokens": 5
+                },
+                "providerMetadata": {
+                    "gateway": {
+                        "routing": {
+                            "test": true
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        );
+        let model = gateway_embedding_test_model(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.test.com")
+                .with_api_key("test-token"),
+            transport,
+        );
+
+        let result = poll_ready(model.do_embed(EmbeddingModelCallOptions::new(
+            gateway_embedding_test_values(),
+        )));
+
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway")),
+            Some(&json_object(json!({
+                "routing": {
+                    "test": true
+                }
+            })))
+        );
     }
 
     #[test]
