@@ -4960,7 +4960,108 @@ mod tests {
     }
 
     #[test]
-    fn convert_ui_messages_converts_user_data_parts_to_text_with_converter() {
+    fn convert_ui_messages_converts_user_data_url_to_text_with_converter() {
+        let messages = convert_ui_messages_to_model_messages_with_data_part_converter(
+            &[
+                UiMessage::new("msg-1", UiMessageRole::User).with_part(json!({
+                    "type": "data-url",
+                    "data": {
+                        "url": "https://example.com",
+                        "content": "Article text"
+                    }
+                })),
+            ],
+            ConvertUiMessagesToModelMessagesOptions::default(),
+            |part| {
+                let data = &part["data"];
+                let url = data["url"].as_str().expect("url is a string");
+                let content = data["content"].as_str().expect("content is a string");
+                Ok(Some(ConvertedUiMessageDataPart::text(format!(
+                    "\n\n[{url}]\n{content}"
+                ))))
+            },
+        )
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "\n\n[https://example.com]\nArticle text"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_skips_user_data_parts_when_no_converter_provided() {
+        let messages =
+            convert_ui_messages_to_model_messages(&[UiMessage::new("msg-1", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Hello" }))
+                .with_part(json!({
+                    "type": "data-url",
+                    "data": { "url": "https://example.com" }
+                }))])
+            .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "Hello" }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_selectively_converts_user_data_parts() {
+        let messages = convert_ui_messages_to_model_messages_with_data_part_converter(
+            &[UiMessage::new("msg-1", UiMessageRole::User)
+                .with_part(json!({
+                    "type": "data-url",
+                    "data": { "url": "https://example.com" }
+                }))
+                .with_part(json!({
+                    "type": "data-ui-state",
+                    "data": { "enabled": true }
+                }))],
+            ConvertUiMessagesToModelMessagesOptions::default(),
+            |part| {
+                if ui_message_part_type(part)? == "data-url" {
+                    let url = part["data"]["url"].as_str().expect("url is a string");
+                    Ok(Some(ConvertedUiMessageDataPart::text(url.to_string())))
+                } else {
+                    Ok(None)
+                }
+            },
+        )
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "https://example.com" }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_preserves_user_data_part_order_with_converter() {
         let messages = convert_ui_messages_to_model_messages_with_data_part_converter(
             &[UiMessage::new("msg-1", UiMessageRole::User)
                 .with_part(json!({ "type": "text", "text": "First" }))
@@ -4993,6 +5094,108 @@ mod tests {
                         { "type": "text", "text": "Second" },
                         { "type": "text", "text": "[tag2]" },
                         { "type": "text", "text": "Third" }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_converts_multiple_user_data_part_types() {
+        let messages = convert_ui_messages_to_model_messages_with_data_part_converter(
+            &[UiMessage::new("msg-1", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Review these:" }))
+                .with_part(json!({
+                    "type": "data-url",
+                    "data": {
+                        "url": "https://example.com",
+                        "title": "Example"
+                    }
+                }))
+                .with_part(json!({
+                    "type": "data-code",
+                    "data": {
+                        "code": "console.log(\"test\")",
+                        "language": "javascript"
+                    }
+                }))
+                .with_part(json!({
+                    "type": "data-note",
+                    "data": { "text": "Internal note" }
+                }))],
+            ConvertUiMessagesToModelMessagesOptions::default(),
+            |part| match ui_message_part_type(part)? {
+                "data-url" => {
+                    let data = &part["data"];
+                    let title = data["title"].as_str().expect("title is a string");
+                    let url = data["url"].as_str().expect("url is a string");
+                    Ok(Some(ConvertedUiMessageDataPart::text(format!(
+                        "[{title}]({url})"
+                    ))))
+                }
+                "data-code" => {
+                    let data = &part["data"];
+                    let language = data["language"].as_str().expect("language is a string");
+                    let code = data["code"].as_str().expect("code is a string");
+                    Ok(Some(ConvertedUiMessageDataPart::text(format!(
+                        "```{language}\n{code}\n```"
+                    ))))
+                }
+                _ => Ok(None),
+            },
+        )
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "Review these:" },
+                        { "type": "text", "text": "[Example](https://example.com)" },
+                        {
+                            "type": "text",
+                            "text": "```javascript\nconsole.log(\"test\")\n```"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_handles_user_message_without_data_parts_with_converter() {
+        let messages = convert_ui_messages_to_model_messages_with_data_part_converter(
+            &[UiMessage::new("msg-1", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Hello" }))
+                .with_part(json!({
+                    "type": "file",
+                    "mediaType": "image/png",
+                    "url": "https://example.com/image.png"
+                }))],
+            ConvertUiMessagesToModelMessagesOptions::default(),
+            |_| -> Result<Option<ConvertedUiMessageDataPart>, ChatTransportError> {
+                panic!("converter should not run for non-data parts")
+            },
+        )
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "Hello" },
+                        {
+                            "type": "file",
+                            "data": {
+                                "type": "url",
+                                "url": "https://example.com/image.png"
+                            },
+                            "mediaType": "image/png"
+                        }
                     ]
                 }
             ])
@@ -5065,7 +5268,110 @@ mod tests {
     }
 
     #[test]
-    fn convert_ui_messages_converts_assistant_data_parts_to_text_with_converter() {
+    fn convert_ui_messages_converts_assistant_data_url_to_text_with_converter() {
+        let messages = convert_ui_messages_to_model_messages_with_data_part_converter(
+            &[
+                UiMessage::new("msg-1", UiMessageRole::Assistant).with_part(json!({
+                    "type": "data-url",
+                    "data": {
+                        "url": "https://example.com",
+                        "content": "Article text"
+                    }
+                })),
+            ],
+            ConvertUiMessagesToModelMessagesOptions::default(),
+            |part| {
+                let data = &part["data"];
+                let url = data["url"].as_str().expect("url is a string");
+                let content = data["content"].as_str().expect("content is a string");
+                Ok(Some(ConvertedUiMessageDataPart::text(format!(
+                    "\n\n[{url}]\n{content}"
+                ))))
+            },
+        )
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "\n\n[https://example.com]\nArticle text"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_skips_assistant_data_parts_when_no_converter_provided() {
+        let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
+            "msg-1",
+            UiMessageRole::Assistant,
+        )
+        .with_part(json!({ "type": "text", "text": "Hello", "state": "done" }))
+        .with_part(json!({
+            "type": "data-url",
+            "data": { "url": "https://example.com" }
+        }))])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "Hello" }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_selectively_converts_assistant_data_parts() {
+        let messages = convert_ui_messages_to_model_messages_with_data_part_converter(
+            &[UiMessage::new("msg-1", UiMessageRole::Assistant)
+                .with_part(json!({
+                    "type": "data-url",
+                    "data": { "url": "https://example.com" }
+                }))
+                .with_part(json!({
+                    "type": "data-ui-state",
+                    "data": { "enabled": true }
+                }))],
+            ConvertUiMessagesToModelMessagesOptions::default(),
+            |part| {
+                if ui_message_part_type(part)? == "data-url" {
+                    let url = part["data"]["url"].as_str().expect("url is a string");
+                    Ok(Some(ConvertedUiMessageDataPart::text(url.to_string())))
+                } else {
+                    Ok(None)
+                }
+            },
+        )
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "https://example.com" }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_preserves_assistant_data_part_order_with_converter() {
         let messages = convert_ui_messages_to_model_messages_with_data_part_converter(
             &[UiMessage::new("msg-1", UiMessageRole::Assistant)
                 .with_part(json!({ "type": "text", "text": "First", "state": "done" }))
@@ -5098,6 +5404,108 @@ mod tests {
                         { "type": "text", "text": "Second" },
                         { "type": "text", "text": "[tag2]" },
                         { "type": "text", "text": "Third" }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_converts_multiple_assistant_data_part_types() {
+        let messages = convert_ui_messages_to_model_messages_with_data_part_converter(
+            &[UiMessage::new("msg-1", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "text", "text": "Review these:", "state": "done" }))
+                .with_part(json!({
+                    "type": "data-url",
+                    "data": {
+                        "url": "https://example.com",
+                        "title": "Example"
+                    }
+                }))
+                .with_part(json!({
+                    "type": "data-code",
+                    "data": {
+                        "code": "console.log(\"test\")",
+                        "language": "javascript"
+                    }
+                }))
+                .with_part(json!({
+                    "type": "data-note",
+                    "data": { "text": "Internal note" }
+                }))],
+            ConvertUiMessagesToModelMessagesOptions::default(),
+            |part| match ui_message_part_type(part)? {
+                "data-url" => {
+                    let data = &part["data"];
+                    let title = data["title"].as_str().expect("title is a string");
+                    let url = data["url"].as_str().expect("url is a string");
+                    Ok(Some(ConvertedUiMessageDataPart::text(format!(
+                        "[{title}]({url})"
+                    ))))
+                }
+                "data-code" => {
+                    let data = &part["data"];
+                    let language = data["language"].as_str().expect("language is a string");
+                    let code = data["code"].as_str().expect("code is a string");
+                    Ok(Some(ConvertedUiMessageDataPart::text(format!(
+                        "```{language}\n{code}\n```"
+                    ))))
+                }
+                _ => Ok(None),
+            },
+        )
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "Review these:" },
+                        { "type": "text", "text": "[Example](https://example.com)" },
+                        {
+                            "type": "text",
+                            "text": "```javascript\nconsole.log(\"test\")\n```"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_handles_assistant_message_without_data_parts_with_converter() {
+        let messages = convert_ui_messages_to_model_messages_with_data_part_converter(
+            &[UiMessage::new("msg-1", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "text", "text": "Hello", "state": "done" }))
+                .with_part(json!({
+                    "type": "file",
+                    "mediaType": "image/png",
+                    "url": "https://example.com/image.png"
+                }))],
+            ConvertUiMessagesToModelMessagesOptions::default(),
+            |_| -> Result<Option<ConvertedUiMessageDataPart>, ChatTransportError> {
+                panic!("converter should not run for non-data parts")
+            },
+        )
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "Hello" },
+                        {
+                            "type": "file",
+                            "data": {
+                                "type": "url",
+                                "url": "https://example.com/image.png"
+                            },
+                            "mediaType": "image/png"
+                        }
                     ]
                 }
             ])
