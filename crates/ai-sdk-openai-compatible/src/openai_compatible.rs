@@ -802,6 +802,10 @@ impl OpenAICompatibleChatLanguageModel {
         &self,
         options: LanguageModelCallOptions,
     ) -> LanguageModelGenerateResult {
+        let provider_metadata_key = openai_compatible_provider_metadata_key(
+            &self.config.provider,
+            options.provider_options.as_ref(),
+        );
         let (request_body, warnings) = match openai_compatible_chat_request_body(
             &self.model_id,
             &self.config.provider,
@@ -863,6 +867,7 @@ impl OpenAICompatibleChatLanguageModel {
                     response.response_headers,
                     request_body_for_response,
                     warnings,
+                    provider_metadata_key,
                 )
                 .await
             }
@@ -875,6 +880,10 @@ impl OpenAICompatibleChatLanguageModel {
         options: LanguageModelCallOptions,
     ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
         let include_raw_chunks = options.include_raw_chunks.unwrap_or(false);
+        let provider_metadata_key = openai_compatible_provider_metadata_key(
+            &self.config.provider,
+            options.provider_options.as_ref(),
+        );
         let (request_body, warnings) = match openai_compatible_chat_stream_request_body(
             &self.model_id,
             &self.config.provider,
@@ -932,7 +941,7 @@ impl OpenAICompatibleChatLanguageModel {
         .await
         {
             Ok(response) => openai_compatible_stream_result_from_response(
-                &self.config.settings.name,
+                &provider_metadata_key,
                 response.value,
                 response.response_headers,
                 request_body_for_response,
@@ -978,13 +987,14 @@ impl OpenAICompatibleChatLanguageModel {
         response_headers: Option<Headers>,
         request_body: JsonValue,
         warnings: Vec<Warning>,
+        provider_metadata_key: String,
     ) -> LanguageModelGenerateResult {
         let choice = response
             .get("choices")
             .and_then(JsonValue::as_array)
             .and_then(|choices| choices.first());
         let message = choice.and_then(|choice| choice.get("message"));
-        let content = openai_compatible_response_content(message, &self.config.settings.name);
+        let content = openai_compatible_response_content(message, &provider_metadata_key);
         let finish_reason = openai_compatible_finish_reason(
             choice
                 .and_then(|choice| choice.get("finish_reason"))
@@ -1014,7 +1024,7 @@ impl OpenAICompatibleChatLanguageModel {
         }
 
         let metadata = openai_compatible_provider_metadata(
-            &self.config.settings.name,
+            &provider_metadata_key,
             &raw_body,
             self.config.settings.metadata_extractor.as_ref(),
         )
@@ -2628,6 +2638,15 @@ fn openai_compatible_chat_provider_options(
     }
 
     resolved
+}
+
+fn openai_compatible_provider_metadata_key(
+    provider_name: &str,
+    provider_options: Option<&ProviderOptions>,
+) -> String {
+    let provider_options_name = openai_compatible_provider_options_name(provider_name);
+    resolve_openai_compatible_provider_options_key(provider_options_name, provider_options)
+        .to_string()
 }
 
 fn merge_openai_compatible_chat_known_options(
@@ -4527,8 +4546,9 @@ fn provider_api_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        OpenAICompatibleCompletionLanguageModel, OpenAICompatibleEmbeddingModel,
-        OpenAICompatibleImageModel, OpenAICompatibleMetadataExtractor, OpenAICompatibleProvider,
+        OpenAICompatibleChatLanguageModel, OpenAICompatibleCompletionLanguageModel,
+        OpenAICompatibleEmbeddingModel, OpenAICompatibleImageModel,
+        OpenAICompatibleMetadataExtractor, OpenAICompatibleProvider,
         OpenAICompatibleProviderSettings, OpenAICompatibleStreamMetadataExtractor,
         OpenAICompatibleTransport, OpenAICompatibleTransportFuture, create_openai_compatible,
         openai_compatible_prepare_tools, openai_compatible_provider_options_name,
@@ -4679,6 +4699,102 @@ mod tests {
                 LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
             ])),
         ])))
+    }
+
+    fn openai_compatible_chat_prompt_messages() -> Vec<LanguageModelMessage> {
+        vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![LanguageModelUserContentPart::Text(
+                LanguageModelTextPart::new("Hello"),
+            )],
+        ))]
+    }
+
+    fn openai_compatible_chat_response_body(message: JsonValue, usage: JsonValue) -> JsonValue {
+        json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1711115037,
+            "model": "grok-3",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": message,
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": usage
+        })
+    }
+
+    fn openai_compatible_chat_text_response_body(content: &str, usage: JsonValue) -> JsonValue {
+        openai_compatible_chat_response_body(
+            json!({
+                "role": "assistant",
+                "content": content
+            }),
+            usage,
+        )
+    }
+
+    fn openai_compatible_chat_tool_response_body(
+        tool_calls: JsonValue,
+        usage: JsonValue,
+    ) -> JsonValue {
+        let mut body = openai_compatible_chat_response_body(
+            json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": tool_calls
+            }),
+            usage,
+        );
+        body["choices"][0]["finish_reason"] = json!("tool_calls");
+        body
+    }
+
+    fn openai_compatible_chat_test_model(
+        response_body: JsonValue,
+    ) -> (
+        OpenAICompatibleChatLanguageModel,
+        Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+                let response_body = response_body.clone();
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    response_body.to_string(),
+                ))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(OpenAICompatibleProviderSettings::new(
+            "test-provider",
+            "https://my.api.com/v1",
+        ))
+        .with_transport(transport)
+        .chat_model("grok-3");
+
+        (model, captured_request)
+    }
+
+    fn captured_openai_compatible_chat_request_body(
+        captured_request: &Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) -> JsonValue {
+        captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .and_then(|body| body.as_text().map(str::to_string))
+            .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok())
+            .expect("request body is JSON")
     }
 
     fn openai_compatible_test_provider_metadata_entry<'a>(
@@ -8525,6 +8641,298 @@ mod tests {
                 }
             }))
         );
+    }
+
+    #[test]
+    fn openai_compatible_chat_accepts_camel_case_provider_options_key_for_hyphenated_provider_name()
+    {
+        let (model, captured_request) = openai_compatible_chat_test_model(
+            openai_compatible_chat_text_response_body("Hello!", json!({})),
+        );
+        let provider_options = test_provider_options(json!({
+            "testProvider": {
+                "someCustomOption": "test-value"
+            }
+        }));
+
+        poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(
+            captured_openai_compatible_chat_request_body(&captured_request).get("someCustomOption"),
+            Some(&json!("test-value"))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_prefers_camel_case_options_over_raw_name_options() {
+        let (model, captured_request) = openai_compatible_chat_test_model(
+            openai_compatible_chat_text_response_body("Hello!", json!({})),
+        );
+        let provider_options = test_provider_options(json!({
+            "test-provider": {
+                "someCustomOption": "raw-value"
+            },
+            "testProvider": {
+                "someCustomOption": "camel-value"
+            }
+        }));
+
+        poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(
+            captured_openai_compatible_chat_request_body(&captured_request).get("someCustomOption"),
+            Some(&json!("camel-value"))
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_uses_camel_case_metadata_key_when_camel_case_provider_options_are_used()
+     {
+        let (model, _captured_request) =
+            openai_compatible_chat_test_model(openai_compatible_chat_text_response_body(
+                "Hello!",
+                json!({
+                    "prompt_tokens": 20,
+                    "completion_tokens": 30,
+                    "total_tokens": 50,
+                    "completion_tokens_details": {
+                        "accepted_prediction_tokens": 15
+                    }
+                }),
+            ));
+        let provider_options = test_provider_options(json!({
+            "testProvider": {
+                "reasoningEffort": "high"
+            }
+        }));
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        let metadata = result
+            .provider_metadata
+            .as_ref()
+            .expect("provider metadata exists");
+        assert!(metadata.contains_key("testProvider"));
+        assert!(!metadata.contains_key("test-provider"));
+        assert_eq!(
+            metadata
+                .get("testProvider")
+                .and_then(|metadata| metadata.get("acceptedPredictionTokens"))
+                .and_then(JsonValue::as_u64),
+            Some(15)
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_uses_raw_metadata_key_when_raw_provider_options_are_used() {
+        let (model, _captured_request) =
+            openai_compatible_chat_test_model(openai_compatible_chat_text_response_body(
+                "Hello!",
+                json!({
+                    "prompt_tokens": 20,
+                    "completion_tokens": 30,
+                    "total_tokens": 50,
+                    "completion_tokens_details": {
+                        "accepted_prediction_tokens": 15
+                    }
+                }),
+            ));
+        let provider_options = test_provider_options(json!({
+            "test-provider": {
+                "reasoningEffort": "high"
+            }
+        }));
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        let metadata = result
+            .provider_metadata
+            .as_ref()
+            .expect("provider metadata exists");
+        assert!(metadata.contains_key("test-provider"));
+        assert_eq!(
+            metadata
+                .get("test-provider")
+                .and_then(|metadata| metadata.get("acceptedPredictionTokens"))
+                .and_then(JsonValue::as_u64),
+            Some(15)
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_emits_deprecated_warning_when_raw_provider_options_key_is_used() {
+        let (model, _captured_request) = openai_compatible_chat_test_model(
+            openai_compatible_chat_text_response_body("Hello!", json!({})),
+        );
+        let provider_options = test_provider_options(json!({
+            "test-provider": {
+                "reasoningEffort": "high"
+            }
+        }));
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Deprecated {
+                setting: "providerOptions key 'test-provider'".to_string(),
+                message: "Use 'testProvider' instead.".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn openai_compatible_chat_does_not_warn_when_camel_case_provider_options_key_is_used() {
+        let (model, _captured_request) = openai_compatible_chat_test_model(
+            openai_compatible_chat_text_response_body("Hello!", json!({})),
+        );
+        let provider_options = test_provider_options(json!({
+            "testProvider": {
+                "reasoningEffort": "high"
+            }
+        }));
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_compatible_chat_uses_raw_metadata_key_when_no_provider_options_are_passed() {
+        let (model, _captured_request) = openai_compatible_chat_test_model(
+            openai_compatible_chat_text_response_body("Hello!", json!({})),
+        );
+
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(
+            openai_compatible_chat_prompt_messages(),
+        )));
+
+        let metadata = result
+            .provider_metadata
+            .as_ref()
+            .expect("provider metadata exists");
+        assert!(metadata.contains_key("test-provider"));
+    }
+
+    #[test]
+    fn openai_compatible_chat_includes_thought_signature_in_provider_metadata_with_camel_case_key()
+    {
+        let (model, _captured_request) =
+            openai_compatible_chat_test_model(openai_compatible_chat_tool_response_body(
+                json!([
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "test_tool",
+                            "arguments": "{\"arg\":\"value\"}"
+                        },
+                        "extra_content": {
+                            "google": {
+                                "thought_signature": "<Sig>"
+                            }
+                        }
+                    }
+                ]),
+                json!({}),
+            ));
+        let provider_options = test_provider_options(json!({
+            "testProvider": {}
+        }));
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(matches!(
+            result.content.first(),
+            Some(LanguageModelContent::ToolCall(tool_call))
+                if tool_call
+                    .provider_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("testProvider"))
+                    .and_then(|metadata| metadata.get("thoughtSignature"))
+                    .and_then(JsonValue::as_str)
+                    == Some("<Sig>")
+        ));
+    }
+
+    #[test]
+    fn openai_compatible_chat_includes_thought_signature_in_provider_metadata_with_raw_key() {
+        let (model, _captured_request) =
+            openai_compatible_chat_test_model(openai_compatible_chat_tool_response_body(
+                json!([
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "test_tool",
+                            "arguments": "{\"arg\":\"value\"}"
+                        },
+                        "extra_content": {
+                            "google": {
+                                "thought_signature": "<Sig>"
+                            }
+                        }
+                    }
+                ]),
+                json!({}),
+            ));
+        let provider_options = test_provider_options(json!({
+            "test-provider": {}
+        }));
+
+        let result = poll_ready(
+            model.do_generate(
+                LanguageModelCallOptions::new(openai_compatible_chat_prompt_messages())
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert!(matches!(
+            result.content.first(),
+            Some(LanguageModelContent::ToolCall(tool_call))
+                if tool_call
+                    .provider_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("test-provider"))
+                    .and_then(|metadata| metadata.get("thoughtSignature"))
+                    .and_then(JsonValue::as_str)
+                    == Some("<Sig>")
+        ));
     }
 
     #[test]
