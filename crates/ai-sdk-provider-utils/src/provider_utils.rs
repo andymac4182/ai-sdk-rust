@@ -447,6 +447,61 @@ where
     }
 }
 
+/// Error returned when an abortable delay is cancelled.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelayError {
+    message: String,
+}
+
+impl DelayError {
+    /// Upstream-compatible abort error name.
+    pub const NAME: &'static str = "AbortError";
+
+    fn aborted() -> Self {
+        Self {
+            message: "Delay was aborted".to_string(),
+        }
+    }
+
+    /// Returns the upstream-compatible error name.
+    pub fn name(&self) -> &'static str {
+        Self::NAME
+    }
+
+    /// Returns the abort error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for DelayError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for DelayError {}
+
+/// Options for [`delay_with_options`].
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DelayOptions {
+    /// Caller-controlled abort signal for cancelling a pending delay.
+    pub abort_signal: Option<LanguageModelAbortSignal>,
+}
+
+impl DelayOptions {
+    /// Creates delay options with upstream defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the abort signal used to cancel the delay.
+    pub fn with_abort_signal(mut self, abort_signal: LanguageModelAbortSignal) -> Self {
+        self.abort_signal = Some(abort_signal);
+        self
+    }
+}
+
 struct DelayState {
     completed: bool,
     waker: Option<Waker>,
@@ -454,35 +509,52 @@ struct DelayState {
 
 struct DelayFuture {
     delay: Option<Duration>,
+    abort_signal: Option<LanguageModelAbortSignal>,
     state: Option<Arc<Mutex<DelayState>>>,
 }
 
 impl DelayFuture {
-    fn new(delay_in_ms: Option<i64>) -> Self {
+    fn new(delay_in_ms: Option<i64>, abort_signal: Option<LanguageModelAbortSignal>) -> Self {
         Self {
             delay: delay_in_ms.map(|delay| Duration::from_millis(delay.max(0) as u64)),
+            abort_signal,
             state: None,
         }
     }
 }
 
 impl Future for DelayFuture {
-    type Output = ();
+    type Output = Result<(), DelayError>;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let Some(delay) = self.delay else {
-            return Poll::Ready(());
+            return Poll::Ready(Ok(()));
         };
 
         if let Some(state) = &self.state {
             let mut state = state.lock().expect("delay state mutex is not poisoned");
             if state.completed {
-                Poll::Ready(())
+                Poll::Ready(Ok(()))
             } else {
+                if self
+                    .abort_signal
+                    .as_ref()
+                    .is_some_and(|abort_signal| abort_signal.poll_aborted(context).is_ready())
+                {
+                    return Poll::Ready(Err(DelayError::aborted()));
+                }
                 state.waker = Some(context.waker().clone());
                 Poll::Pending
             }
         } else {
+            if self
+                .abort_signal
+                .as_ref()
+                .is_some_and(|abort_signal| abort_signal.poll_aborted(context).is_ready())
+            {
+                return Poll::Ready(Err(DelayError::aborted()));
+            }
+
             let state = Arc::new(Mutex::new(DelayState {
                 completed: false,
                 waker: Some(context.waker().clone()),
@@ -516,10 +588,17 @@ impl Future for DelayFuture {
 /// Creates a future that resolves after a delay in milliseconds.
 ///
 /// This mirrors upstream provider-utils `delay`: `None` resolves immediately,
-/// while numeric delays use timer-like deferred completion. JavaScript
-/// `AbortSignal` cancellation is intentionally omitted from the Rust boundary.
-pub fn delay(delay_in_ms: Option<i64>) -> impl Future<Output = ()> {
-    DelayFuture::new(delay_in_ms)
+/// while numeric delays use timer-like deferred completion.
+pub async fn delay(delay_in_ms: Option<i64>) {
+    let _ = delay_with_options(delay_in_ms, DelayOptions::default()).await;
+}
+
+/// Creates a future that resolves after a delay or fails when aborted.
+pub fn delay_with_options(
+    delay_in_ms: Option<i64>,
+    options: DelayOptions,
+) -> impl Future<Output = Result<(), DelayError>> {
+    DelayFuture::new(delay_in_ms, options.abort_signal)
 }
 
 fn is_false(value: &bool) -> bool {
@@ -7833,7 +7912,7 @@ mod tests {
     };
     use std::task::{Context, Poll, Waker};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use ai_sdk_provider::language_model::{
         LanguageModelAbortController, LanguageModelAssistantContentPart,
@@ -7854,11 +7933,12 @@ mod tests {
     use super::{
         Arrayable, AsyncIteratorReadableStreamNextFuture, AsyncIteratorReadableStreamReturnFuture,
         AsyncIteratorReadableStreamSource, Base64DecodeError, BinaryResponseHandlerOptions,
-        ConvertToFormDataOptions, DEFAULT_MAX_DOWNLOAD_SIZE, DelayedPromise, DownloadBlobOptions,
-        DownloadBlobResponse, DownloadError, DownloadedBlob, EventSourceResponseHandlerOptions,
-        ExecuteToolOutput, ExperimentalSandbox, FetchErrorInfo, FlexibleSchema, FormData,
-        FormDataEntry, FormDataInputValue, FormDataValue, GetFromApiOptions, HandledFetchError,
-        IdGeneratorOptions, InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
+        ConvertToFormDataOptions, DEFAULT_MAX_DOWNLOAD_SIZE, DelayError, DelayOptions,
+        DelayedPromise, DownloadBlobOptions, DownloadBlobResponse, DownloadError, DownloadedBlob,
+        EventSourceResponseHandlerOptions, ExecuteToolOutput, ExperimentalSandbox, FetchErrorInfo,
+        FlexibleSchema, FormData, FormDataEntry, FormDataInputValue, FormDataValue,
+        GetFromApiOptions, HandledFetchError, IdGeneratorOptions,
+        InjectJsonInstructionIntoMessagesOptions, InlineFileDataBytesError,
         JsonErrorResponseHandlerOptions, JsonResponseHandlerOptions, JsonSerializableValue,
         LazySchema, LoadApiKeyOptions, LoadOptionalSettingOptions, LoadSettingOptions,
         ParseJsonError, ParseJsonResult, PostFormDataToApiOptions, PostJsonToApiOptions,
@@ -7881,25 +7961,26 @@ mod tests {
         create_provider_defined_tool_factory,
         create_provider_defined_tool_factory_with_output_schema,
         create_provider_executed_tool_factory, create_status_code_error_response_handler,
-        create_tool_name_mapping, delay, detect_media_type, download_blob, dynamic_tool,
-        execute_provider_api_request, execute_tool, extract_response_headers, filter_nullable,
-        generate_id, get_error_message, get_from_api, get_runtime_environment_user_agent,
-        get_top_level_media_type, handle_fetch_error, handle_provider_api_response,
-        inject_json_instruction, inject_json_instruction_into_messages, is_abort_error,
-        is_custom_reasoning, is_executable_tool, is_full_media_type, is_json_serializable,
-        is_non_nullable, is_parsable_json, is_provider_reference, is_url_supported, json_schema,
-        lazy_json_schema, lazy_schema, load_api_key, load_api_key_with_env,
-        load_optional_setting_with_env, load_setting, load_setting_with_env,
-        map_reasoning_to_provider_budget, map_reasoning_to_provider_effort,
-        media_type_to_extension, normalize_headers, parse_json, parse_json_event_stream,
-        parse_json_with_schema, parse_provider_options, post_form_data_to_api, post_json_to_api,
-        post_to_api, prepare_get_from_api_request, prepare_post_form_data_to_api_request,
-        prepare_post_json_to_api_request, prepare_post_to_api_request, prepare_tools,
-        prepare_tools_with_context, read_response_with_size_limit, remove_undefined_entries,
-        resolve, resolve_full_media_type, resolve_provider_reference, safe_parse_json,
-        safe_parse_json_with_schema, safe_validate_types, secure_json_parse,
-        serialize_model_options, strip_file_extension, tool, validate_download_url, validate_types,
-        with_provider_utils_user_agent, with_user_agent_suffix, without_trailing_slash,
+        create_tool_name_mapping, delay, delay_with_options, detect_media_type, download_blob,
+        dynamic_tool, execute_provider_api_request, execute_tool, extract_response_headers,
+        filter_nullable, generate_id, get_error_message, get_from_api,
+        get_runtime_environment_user_agent, get_top_level_media_type, handle_fetch_error,
+        handle_provider_api_response, inject_json_instruction,
+        inject_json_instruction_into_messages, is_abort_error, is_custom_reasoning,
+        is_executable_tool, is_full_media_type, is_json_serializable, is_non_nullable,
+        is_parsable_json, is_provider_reference, is_url_supported, json_schema, lazy_json_schema,
+        lazy_schema, load_api_key, load_api_key_with_env, load_optional_setting_with_env,
+        load_setting, load_setting_with_env, map_reasoning_to_provider_budget,
+        map_reasoning_to_provider_effort, media_type_to_extension, normalize_headers, parse_json,
+        parse_json_event_stream, parse_json_with_schema, parse_provider_options,
+        post_form_data_to_api, post_json_to_api, post_to_api, prepare_get_from_api_request,
+        prepare_post_form_data_to_api_request, prepare_post_json_to_api_request,
+        prepare_post_to_api_request, prepare_tools, prepare_tools_with_context,
+        read_response_with_size_limit, remove_undefined_entries, resolve, resolve_full_media_type,
+        resolve_provider_reference, safe_parse_json, safe_parse_json_with_schema,
+        safe_validate_types, secure_json_parse, serialize_model_options, strip_file_extension,
+        tool, validate_download_url, validate_types, with_provider_utils_user_agent,
+        with_user_agent_suffix, without_trailing_slash,
     };
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -8018,6 +8099,22 @@ mod tests {
         let mut context = Context::from_waker(waker);
 
         Future::poll(future.as_mut(), &mut context)
+    }
+
+    fn poll_pinned_until_ready<F: Future>(mut future: Pin<&mut F>, timeout: Duration) -> F::Output {
+        let start = Instant::now();
+
+        loop {
+            if let Poll::Ready(value) = poll_once(future.as_mut()) {
+                return value;
+            }
+
+            assert!(
+                start.elapsed() < timeout,
+                "future did not become ready within {timeout:?}"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
     }
 
     #[derive(Debug)]
@@ -8804,6 +8901,175 @@ mod tests {
                 "{delay_in_ms}ms delay should complete after the timer runs"
             );
         }
+    }
+
+    #[test]
+    fn delay_upstream_should_resolve_after_the_specified_delay() {
+        let mut future = Box::pin(delay(Some(40)));
+
+        assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
+
+        thread::sleep(Duration::from_millis(10));
+        assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
+
+        poll_pinned_until_ready(future.as_mut(), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn delay_upstream_should_resolve_immediately_when_delay_in_ms_is_null() {
+        poll_ready(delay(None));
+    }
+
+    #[test]
+    fn delay_upstream_should_resolve_immediately_when_delay_in_ms_is_undefined() {
+        poll_ready(delay(None));
+    }
+
+    #[test]
+    fn delay_upstream_should_resolve_immediately_when_delay_in_ms_is_0() {
+        let mut future = Box::pin(delay(Some(0)));
+
+        assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
+
+        poll_pinned_until_ready(future.as_mut(), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn delay_upstream_should_reject_immediately_if_signal_is_already_aborted() {
+        let abort_controller = LanguageModelAbortController::new();
+        abort_controller.abort();
+
+        let mut future = Box::pin(delay_with_options(
+            Some(1000),
+            DelayOptions::new().with_abort_signal(abort_controller.signal()),
+        ));
+
+        assert_eq!(
+            poll_once(future.as_mut()),
+            Poll::Ready(Err(DelayError::aborted()))
+        );
+    }
+
+    #[test]
+    fn delay_upstream_should_reject_when_signal_is_aborted_during_delay() {
+        let abort_controller = LanguageModelAbortController::new();
+        let mut future = Box::pin(delay_with_options(
+            Some(1000),
+            DelayOptions::new().with_abort_signal(abort_controller.signal()),
+        ));
+
+        assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
+
+        abort_controller.abort();
+
+        assert_eq!(
+            poll_once(future.as_mut()),
+            Poll::Ready(Err(DelayError::aborted()))
+        );
+    }
+
+    #[test]
+    fn delay_upstream_should_clean_up_timeout_when_aborted() {
+        let abort_controller = LanguageModelAbortController::new();
+        let mut future = Box::pin(delay_with_options(
+            Some(5000),
+            DelayOptions::new().with_abort_signal(abort_controller.signal()),
+        ));
+
+        assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
+
+        abort_controller.abort();
+
+        assert_eq!(
+            poll_once(future.as_mut()),
+            Poll::Ready(Err(DelayError::aborted()))
+        );
+    }
+
+    #[test]
+    fn delay_upstream_should_clean_up_event_listener_when_delay_completes_normally() {
+        let abort_controller = LanguageModelAbortController::new();
+        let mut future = Box::pin(delay_with_options(
+            Some(10),
+            DelayOptions::new().with_abort_signal(abort_controller.signal()),
+        ));
+
+        assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
+        assert_eq!(
+            poll_pinned_until_ready(future.as_mut(), Duration::from_millis(100)),
+            Ok(())
+        );
+
+        abort_controller.abort();
+        assert!(abort_controller.signal().is_aborted());
+    }
+
+    #[test]
+    fn delay_upstream_should_work_without_signal_option() {
+        let mut future = Box::pin(delay_with_options(Some(10), DelayOptions::new()));
+
+        assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
+        assert_eq!(
+            poll_pinned_until_ready(future.as_mut(), Duration::from_millis(100)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn delay_upstream_should_create_proper_dom_exception_for_abort() {
+        let abort_controller = LanguageModelAbortController::new();
+        abort_controller.abort();
+
+        let error = poll_ready(delay_with_options(
+            Some(1000),
+            DelayOptions::new().with_abort_signal(abort_controller.signal()),
+        ))
+        .expect_err("aborted delay should fail");
+
+        assert_eq!(error.name(), "AbortError");
+        assert_eq!(error.message(), "Delay was aborted");
+        assert_eq!(error.to_string(), "Delay was aborted");
+    }
+
+    #[test]
+    fn delay_upstream_should_handle_very_large_delays() {
+        let mut future = Box::pin(delay(Some(i64::MAX)));
+
+        assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
+
+        thread::sleep(Duration::from_millis(2));
+        assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
+    }
+
+    #[test]
+    fn delay_upstream_should_handle_negative_delays_treated_as_0() {
+        let mut future = Box::pin(delay(Some(-100)));
+
+        assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
+
+        poll_pinned_until_ready(future.as_mut(), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn delay_upstream_should_handle_multiple_delays_simultaneously() {
+        let mut delay1 = Box::pin(delay(Some(20)));
+        let mut delay2 = Box::pin(delay(Some(90)));
+        let mut delay3 = Box::pin(delay(Some(170)));
+
+        assert!(matches!(poll_once(delay1.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(delay2.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(delay3.as_mut()), Poll::Pending));
+
+        thread::sleep(Duration::from_millis(45));
+        assert!(matches!(poll_once(delay1.as_mut()), Poll::Ready(())));
+        assert!(matches!(poll_once(delay2.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(delay3.as_mut()), Poll::Pending));
+
+        thread::sleep(Duration::from_millis(75));
+        assert!(matches!(poll_once(delay2.as_mut()), Poll::Ready(())));
+        assert!(matches!(poll_once(delay3.as_mut()), Poll::Pending));
+
+        poll_pinned_until_ready(delay3.as_mut(), Duration::from_millis(200));
     }
 
     fn object_schema() -> JsonSchema {
