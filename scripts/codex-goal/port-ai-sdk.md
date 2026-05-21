@@ -94,6 +94,10 @@ The ledger must include:
    based on the original TypeScript test inventory, not Rust test counts; Rust
    may add more tests, but every original portable TypeScript test must exist
    in Rust before a package can be marked `verified`.
+   Future iterations must treat this as a test-for-test Rust superset
+   requirement: EVERY portable original TypeScript test/case must exist in the
+   matching Rust crate, Rust may add extra tests on top, and a crate with fewer
+   mapped original tests than upstream is incomplete.
 
 Re-scan upstream often with `npx opensrc@latest path github:vercel/ai`. If the
 upstream inventory changes, update the ledger and continue. Do not stop while

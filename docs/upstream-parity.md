@@ -52,6 +52,9 @@ Future iterations must start from the original TypeScript test list and port it
 one-to-one into Rust before counting any Rust-only coverage as additive. Extra
 Rust tests are welcome, but they cannot replace, collapse, or hide a missing
 upstream test case.
+Test parity is therefore a Rust superset of the original TypeScript tests:
+EVERY portable original TypeScript test/case must exist in the matching Rust
+crate, and Rust may have more tests, but never fewer mapped original tests.
 
 Every original portable TypeScript test case must be accounted for, including
 table-driven cases, helper-backed scenarios, fixtures, snapshot-equivalent
