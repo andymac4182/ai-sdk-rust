@@ -173,6 +173,12 @@ still open.
    test/case before any extra Rust tests are counted. The acceptable end state
    is the full original TypeScript test inventory recreated in Rust, plus
    optional additional Rust tests; anything less is incomplete.
+   Count parity from the original upstream TypeScript test list, not from the
+   number of Rust tests. A Rust crate with extra Rust-specific tests but even
+   one missing original portable upstream test/case is still incomplete. The
+   only acceptable comparison is: every original portable TypeScript test/case
+   exists in the matching Rust crate, and Rust may then add more tests on top,
+   but never fewer.
 5. For provider-backed behavior, require two layers of proof before marking a
    row `verified`: deterministic fake/mock/transport tests that run in normal
    validation, plus credential-gated live provider validation when a usable
