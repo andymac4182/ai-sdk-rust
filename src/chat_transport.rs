@@ -2483,6 +2483,486 @@ mod tests {
     }
 
     #[test]
+    fn convert_ui_messages_maps_denied_static_tool_approval_with_follow_up_text() {
+        let messages = convert_ui_messages_to_model_messages(&[
+            user_text_message("msg-1", "What is the weather in Tokyo?"),
+            UiMessage::new("msg-2", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({
+                    "type": "tool-weather",
+                    "state": "approval-responded",
+                    "toolCallId": "call-1",
+                    "input": { "city": "Tokyo" },
+                    "approval": {
+                        "id": "approval-1",
+                        "approved": false,
+                        "reason": "I don't want to approve this"
+                    }
+                }))
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({
+                    "type": "text",
+                    "text": "I was not able to retrieve the weather.",
+                    "state": "done"
+                })),
+        ])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "What is the weather in Tokyo?" }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-1",
+                            "toolName": "weather",
+                            "input": { "city": "Tokyo" }
+                        },
+                        {
+                            "type": "tool-approval-request",
+                            "approvalId": "approval-1",
+                            "toolCallId": "call-1"
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-approval-response",
+                            "approvalId": "approval-1",
+                            "approved": false,
+                            "reason": "I don't want to approve this"
+                        },
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-1",
+                            "toolName": "weather",
+                            "output": {
+                                "type": "execution-denied",
+                                "reason": "I don't want to approve this"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "I was not able to retrieve the weather."
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_denied_dynamic_tool_approval_with_follow_up_text() {
+        let messages = convert_ui_messages_to_model_messages(&[
+            user_text_message("msg-1", "What is the weather in Tokyo?"),
+            UiMessage::new("msg-2", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({
+                    "type": "dynamic-tool",
+                    "toolName": "weather",
+                    "state": "approval-responded",
+                    "toolCallId": "call-1",
+                    "input": { "city": "Tokyo" },
+                    "approval": {
+                        "id": "approval-1",
+                        "approved": false,
+                        "reason": "I don't want to approve this"
+                    }
+                }))
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({
+                    "type": "text",
+                    "text": "I was not able to retrieve the weather.",
+                    "state": "done"
+                })),
+        ])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "What is the weather in Tokyo?" }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-1",
+                            "toolName": "weather",
+                            "input": { "city": "Tokyo" }
+                        },
+                        {
+                            "type": "tool-approval-request",
+                            "approvalId": "approval-1",
+                            "toolCallId": "call-1"
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-approval-response",
+                            "approvalId": "approval-1",
+                            "approved": false,
+                            "reason": "I don't want to approve this"
+                        },
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-1",
+                            "toolName": "weather",
+                            "output": {
+                                "type": "execution-denied",
+                                "reason": "I don't want to approve this"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "I was not able to retrieve the weather."
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_static_tool_output_denied() {
+        let messages = convert_ui_messages_to_model_messages(&[
+            user_text_message("msg-1", "What is the weather in Tokyo?"),
+            UiMessage::new("msg-2", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({
+                    "type": "tool-weather",
+                    "state": "output-denied",
+                    "toolCallId": "call-1",
+                    "input": { "city": "Tokyo" },
+                    "approval": {
+                        "id": "approval-1",
+                        "approved": false,
+                        "reason": "I don't want to approve this"
+                    }
+                })),
+        ])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "What is the weather in Tokyo?" }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-1",
+                            "toolName": "weather",
+                            "input": { "city": "Tokyo" }
+                        },
+                        {
+                            "type": "tool-approval-request",
+                            "approvalId": "approval-1",
+                            "toolCallId": "call-1"
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-approval-response",
+                            "approvalId": "approval-1",
+                            "approved": false,
+                            "reason": "I don't want to approve this"
+                        },
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-1",
+                            "toolName": "weather",
+                            "output": {
+                                "type": "error-text",
+                                "value": "I don't want to approve this"
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_dynamic_tool_output_denied() {
+        let messages = convert_ui_messages_to_model_messages(&[
+            user_text_message("msg-1", "What is the weather in Tokyo?"),
+            UiMessage::new("msg-2", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({
+                    "type": "dynamic-tool",
+                    "toolName": "weather",
+                    "state": "output-denied",
+                    "toolCallId": "call-1",
+                    "input": { "city": "Tokyo" },
+                    "approval": {
+                        "id": "approval-1",
+                        "approved": false,
+                        "reason": "I don't want to approve this"
+                    }
+                })),
+        ])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "What is the weather in Tokyo?" }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-1",
+                            "toolName": "weather",
+                            "input": { "city": "Tokyo" }
+                        },
+                        {
+                            "type": "tool-approval-request",
+                            "approvalId": "approval-1",
+                            "toolCallId": "call-1"
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-approval-response",
+                            "approvalId": "approval-1",
+                            "approved": false,
+                            "reason": "I don't want to approve this"
+                        },
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-1",
+                            "toolName": "weather",
+                            "output": {
+                                "type": "error-text",
+                                "value": "I don't want to approve this"
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_approved_tool_result_with_follow_up_text() {
+        let messages = convert_ui_messages_to_model_messages(&[
+            user_text_message("msg-1", "What is the weather in Tokyo?"),
+            UiMessage::new("msg-2", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({
+                    "type": "tool-weather",
+                    "state": "output-available",
+                    "toolCallId": "call-1",
+                    "input": { "city": "Tokyo" },
+                    "output": {
+                        "weather": "Sunny",
+                        "temperature": "20\u{00b0}C"
+                    },
+                    "approval": {
+                        "id": "approval-1",
+                        "approved": true
+                    }
+                }))
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({
+                    "type": "text",
+                    "text": "The weather in Tokyo is sunny.",
+                    "state": "done"
+                })),
+        ])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "What is the weather in Tokyo?" }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-1",
+                            "toolName": "weather",
+                            "input": { "city": "Tokyo" }
+                        },
+                        {
+                            "type": "tool-approval-request",
+                            "approvalId": "approval-1",
+                            "toolCallId": "call-1"
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-approval-response",
+                            "approvalId": "approval-1",
+                            "approved": true
+                        },
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-1",
+                            "toolName": "weather",
+                            "output": {
+                                "type": "json",
+                                "value": {
+                                    "weather": "Sunny",
+                                    "temperature": "20\u{00b0}C"
+                                }
+                            }
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "The weather in Tokyo is sunny."
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_approved_tool_error_with_follow_up_text() {
+        let messages = convert_ui_messages_to_model_messages(&[
+            user_text_message("msg-1", "What is the weather in Tokyo?"),
+            UiMessage::new("msg-2", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({
+                    "type": "tool-weather",
+                    "state": "output-error",
+                    "toolCallId": "call-1",
+                    "input": { "city": "Tokyo" },
+                    "errorText": "Error: Fetching weather data failed",
+                    "approval": {
+                        "id": "approval-1",
+                        "approved": true
+                    }
+                }))
+                .with_part(json!({ "type": "step-start" }))
+                .with_part(json!({
+                    "type": "text",
+                    "text": "The weather in Tokyo is sunny.",
+                    "state": "done"
+                })),
+        ])
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "What is the weather in Tokyo?" }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-1",
+                            "toolName": "weather",
+                            "input": { "city": "Tokyo" }
+                        },
+                        {
+                            "type": "tool-approval-request",
+                            "approvalId": "approval-1",
+                            "toolCallId": "call-1"
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-approval-response",
+                            "approvalId": "approval-1",
+                            "approved": true
+                        },
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-1",
+                            "toolName": "weather",
+                            "output": {
+                                "type": "error-text",
+                                "value": "Error: Fetching weather data failed"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "The weather in Tokyo is sunny."
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn convert_ui_messages_skips_unconverted_data_parts() {
         let messages = convert_ui_messages_to_model_messages(&[
             UiMessage::new("msg-1", UiMessageRole::System)
