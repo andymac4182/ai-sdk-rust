@@ -899,6 +899,12 @@ focused tests for each portable behavior before changing rows to `verified`.
   schema-validation rejection, no-unhandled-rejection schema-failure, and
   `result.finishReason` cases. The two JS promise-rejection checks map to
   Rust's explicit `object: None` plus retained error state.
+- 2026-05-21: `streamObject` `onFinish` parity added
+  `stream_object_on_finish_is_called_when_valid_object_is_generated` and
+  `stream_object_on_finish_is_called_when_object_does_not_match_schema` in
+  `src/stream_object.rs`, mapping upstream `options.onFinish` success and
+  schema-mismatch cases with callback object/error, finish reason, usage,
+  response id/model/timestamp, and finish provider metadata.
 - 2026-05-20: `streamText` smooth stream chunking parity added
   `smooth_stream_combines_partial_words`,
   `smooth_stream_supports_line_and_pattern_chunking`,
