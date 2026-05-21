@@ -186,7 +186,9 @@ still open.
    the matching Rust crate must contain every original upstream portable
    test/case before any extra Rust tests are counted. The acceptable end state
    is the full original TypeScript test inventory recreated in Rust, plus
-   optional additional Rust tests; anything less is incomplete.
+   optional additional Rust tests; anything less is incomplete. Treat this as
+   inventory containment: every original portable TypeScript test exists in
+   Rust, and Rust may have more tests, but no less mapped upstream coverage.
    Count parity from the original upstream TypeScript test list, not from the
    number of Rust tests. A Rust crate with extra Rust-specific tests but even
    one missing original portable upstream test/case is still incomplete. The

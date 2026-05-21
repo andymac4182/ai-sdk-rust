@@ -47,7 +47,9 @@ A crate may have more Rust tests overall, but it is still incomplete if even
 one original portable TypeScript test/case is not represented in Rust.
 Read EVERY literally: enumerate the original TypeScript tests first, port each
 portable case into Rust, document any JavaScript-only exception, and only then
-count additional Rust tests as additive coverage.
+count additional Rust tests as additive coverage. The required end state is
+every portable original TypeScript test existing in Rust, with potentially more
+Rust tests on top, but never fewer mapped original tests.
 
 Required order: finish ALL common/core SDK packages together with Vercel AI
 Gateway provider coverage before taking more unrelated standalone provider
