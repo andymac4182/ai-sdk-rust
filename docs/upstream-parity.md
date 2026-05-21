@@ -4,6 +4,13 @@ This ledger is maintained by long-running Codex `/goal` sessions. It is the
 source of truth for deciding what remains before this repository can claim full
 portable parity with upstream [`vercel/ai`](https://github.com/vercel/ai).
 
+Non-negotiable test floor: EVERY portable original upstream TypeScript test/case
+must exist as an equivalent Rust test in the matching 1:1 crate. Rust may add
+more tests for stronger typing, extra edge cases, live-provider proof, and
+Rust-specific failures, but it must never have fewer mapped original TypeScript
+tests. A package with even one missing portable upstream test/case is not
+parity-complete.
+
 ## Crate Boundary Gate
 
 Full parity requires a strict 1:1 mapping between upstream TypeScript packages

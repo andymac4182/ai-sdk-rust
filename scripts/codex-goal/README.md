@@ -37,6 +37,11 @@ working until every upstream package, provider, public API, example, testable
 behavior, and portable feature is verified or explicitly documented as
 JavaScript-only.
 
+Non-negotiable test floor: EVERY portable original upstream TypeScript test/case
+must exist as an equivalent Rust test in the matching 1:1 crate. Rust may add
+more tests, but never fewer mapped original TypeScript tests; a package with even
+one missing portable upstream test/case is incomplete.
+
 Future iterations must treat the original upstream TypeScript test inventory as
 the floor for every package. Every portable original TypeScript test/case must
 exist as an equivalent Rust test in the matching 1:1 crate before that package

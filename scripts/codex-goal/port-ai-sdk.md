@@ -65,6 +65,12 @@ Do not decide the goal is complete until an upstream parity ledger proves there
 are no unchecked upstream packages, providers, public APIs, examples, tests, or
 features left.
 
+Non-negotiable test floor: EVERY portable test/case from the original upstream
+TypeScript packages must exist as an equivalent Rust test in the matching 1:1
+crate. Rust may add more tests for stronger coverage, but it must never have
+fewer mapped original TypeScript tests, and one missing upstream portable test is
+a completion blocker.
+
 ## Required Parity Ledger
 
 First action: create or update `docs/upstream-parity.md`.
