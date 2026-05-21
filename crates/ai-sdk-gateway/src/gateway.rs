@@ -3593,9 +3593,9 @@ mod tests {
         GatewayProvider, GatewayProviderOptions, GatewayProviderOptionsSort,
         GatewayProviderSettings, GatewayProviderTimeouts, GatewaySpendReportDatePart,
         GatewaySpendReportGroupBy, GatewaySpendReportParams, GatewayTransport,
-        GatewayTransportFuture, create_gateway, gateway, gateway_observability_headers_with_env,
-        gateway_provider_headers_with_env, gateway_provider_options,
-        get_gateway_auth_token_with_env, metadata_cache_refresh_duration,
+        GatewayTransportFuture, create_gateway, gateway, gateway_base_url,
+        gateway_observability_headers_with_env, gateway_provider_headers_with_env,
+        gateway_provider_options, get_gateway_auth_token_with_env, metadata_cache_refresh_duration,
         try_gateway_provider_options,
     };
     use ai_sdk_provider::{
@@ -5982,6 +5982,50 @@ mod tests {
             request
                 .headers
                 .get("user-agent")
+                .is_some_and(|value| value.starts_with("ai-sdk/gateway/"))
+        );
+    }
+
+    #[test]
+    fn create_gateway_language_model_uses_oidc_when_api_key_is_absent() {
+        let provider = create_gateway(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_header("custom-header", "value"),
+        );
+        let model = provider.language_model("test-model");
+        let headers = gateway_provider_headers_with_env(
+            &model.settings,
+            env_lookup(&[("VERCEL_OIDC_TOKEN", "mock-oidc-token")]),
+        );
+
+        assert_eq!(model.provider(), "gateway");
+        assert_eq!(model.model_id(), "test-model");
+        assert_eq!(gateway_base_url(&model.settings), "https://api.example.com");
+        assert_eq!(
+            headers.get("authorization").and_then(Option::as_deref),
+            Some("Bearer mock-oidc-token")
+        );
+        assert_eq!(
+            headers.get("custom-header").and_then(Option::as_deref),
+            Some("value")
+        );
+        assert_eq!(
+            headers
+                .get("ai-gateway-protocol-version")
+                .and_then(Option::as_deref),
+            Some("0.0.1")
+        );
+        assert_eq!(
+            headers
+                .get("ai-gateway-auth-method")
+                .and_then(Option::as_deref),
+            Some("oidc")
+        );
+        assert!(
+            headers
+                .get("user-agent")
+                .and_then(Option::as_deref)
                 .is_some_and(|value| value.starts_with("ai-sdk/gateway/"))
         );
     }
