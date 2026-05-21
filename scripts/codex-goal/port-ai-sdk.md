@@ -88,6 +88,12 @@ The ledger must include:
    warnings/errors, prompt/message parts, and any other upstream public API.
 6. A "next unported work" queue. At the end of every slice, update this queue
    before committing.
+7. A named test-case parity map for every portable original upstream
+   TypeScript test/case, showing the matching Rust test in the owning 1:1 crate
+   or an explicit JavaScript-only/non-portable justification. This map must be
+   based on the original TypeScript test inventory, not Rust test counts; Rust
+   may add more tests, but every original portable TypeScript test must exist
+   in Rust before a package can be marked `verified`.
 
 Re-scan upstream often with `npx opensrc@latest path github:vercel/ai`. If the
 upstream inventory changes, update the ledger and continue. Do not stop while
