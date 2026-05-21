@@ -4081,7 +4081,7 @@ fn provider_api_response(
 mod tests {
     use super::{
         OpenAICompatibleProvider, OpenAICompatibleProviderSettings, OpenAICompatibleTransport,
-        OpenAICompatibleTransportFuture, create_openai_compatible,
+        OpenAICompatibleTransportFuture, create_openai_compatible, openai_compatible_prepare_tools,
         resolve_openai_compatible_provider_options_key, to_openai_compatible_camel_case,
         warn_if_deprecated_openai_compatible_provider_options_key,
     };
@@ -4127,6 +4127,35 @@ mod tests {
 
     fn test_provider_options(value: JsonValue) -> ProviderOptions {
         serde_json::from_value(value).expect("provider options deserialize")
+    }
+
+    fn openai_compatible_prepare_tools_for_test(
+        tools: Option<Vec<LanguageModelTool>>,
+        tool_choice: Option<LanguageModelToolChoice>,
+    ) -> (Option<Vec<JsonValue>>, Option<JsonValue>, Vec<Warning>) {
+        let mut warnings = Vec::new();
+        let (prepared_tools, prepared_tool_choice) =
+            openai_compatible_prepare_tools(&tools, &tool_choice, &mut warnings);
+
+        (prepared_tools, prepared_tool_choice, warnings)
+    }
+
+    fn openai_compatible_test_object_schema() -> JsonObject {
+        serde_json::from_value(json!({
+            "type": "object",
+            "properties": {}
+        }))
+        .expect("test schema deserializes")
+    }
+
+    fn openai_compatible_test_function_tool(
+        name: impl Into<String>,
+        description: impl Into<String>,
+    ) -> LanguageModelTool {
+        LanguageModelTool::Function(
+            LanguageModelFunctionTool::new(name, openai_compatible_test_object_schema())
+                .with_description(description),
+        )
     }
 
     #[test]
@@ -4349,6 +4378,314 @@ mod tests {
         );
 
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_compatible_prepare_tools_returns_undefined_tools_and_tool_choice_when_tools_are_null()
+    {
+        let (tools, tool_choice, warnings) = openai_compatible_prepare_tools_for_test(None, None);
+
+        assert_eq!(tools, None);
+        assert_eq!(tool_choice, None);
+        assert_eq!(warnings, Vec::<Warning>::new());
+    }
+
+    #[test]
+    fn openai_compatible_prepare_tools_returns_undefined_tools_and_tool_choice_when_tools_are_empty()
+     {
+        let (tools, tool_choice, warnings) =
+            openai_compatible_prepare_tools_for_test(Some(Vec::new()), None);
+
+        assert_eq!(tools, None);
+        assert_eq!(tool_choice, None);
+        assert_eq!(warnings, Vec::<Warning>::new());
+    }
+
+    #[test]
+    fn openai_compatible_prepare_tools_prepares_function_tools() {
+        let (tools, tool_choice, warnings) = openai_compatible_prepare_tools_for_test(
+            Some(vec![openai_compatible_test_function_tool(
+                "testFunction",
+                "A test function",
+            )]),
+            None,
+        );
+
+        assert_eq!(
+            tools,
+            Some(vec![json!({
+                "type": "function",
+                "function": {
+                    "name": "testFunction",
+                    "description": "A test function",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
+            })])
+        );
+        assert_eq!(tool_choice, None);
+        assert_eq!(warnings, Vec::<Warning>::new());
+    }
+
+    #[test]
+    fn openai_compatible_prepare_tools_warns_for_unsupported_provider_defined_tools() {
+        let (tools, tool_choice, warnings) = openai_compatible_prepare_tools_for_test(
+            Some(vec![LanguageModelTool::Provider(
+                LanguageModelProviderTool::new(
+                    "some.unsupported_tool",
+                    "unsupported_tool",
+                    JsonObject::new(),
+                ),
+            )]),
+            None,
+        );
+
+        assert_eq!(tools, Some(vec![]));
+        assert_eq!(tool_choice, None);
+        assert_eq!(
+            warnings,
+            vec![Warning::Unsupported {
+                feature: "provider-defined tool some.unsupported_tool".to_string(),
+                details: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn openai_compatible_prepare_tools_handles_auto_tool_choice() {
+        let (_tools, tool_choice, warnings) = openai_compatible_prepare_tools_for_test(
+            Some(vec![openai_compatible_test_function_tool(
+                "testFunction",
+                "Test",
+            )]),
+            Some(LanguageModelToolChoice::Auto),
+        );
+
+        assert_eq!(tool_choice, Some(json!("auto")));
+        assert_eq!(warnings, Vec::<Warning>::new());
+    }
+
+    #[test]
+    fn openai_compatible_prepare_tools_handles_required_tool_choice() {
+        let (_tools, tool_choice, warnings) = openai_compatible_prepare_tools_for_test(
+            Some(vec![openai_compatible_test_function_tool(
+                "testFunction",
+                "Test",
+            )]),
+            Some(LanguageModelToolChoice::Required),
+        );
+
+        assert_eq!(tool_choice, Some(json!("required")));
+        assert_eq!(warnings, Vec::<Warning>::new());
+    }
+
+    #[test]
+    fn openai_compatible_prepare_tools_handles_none_tool_choice() {
+        let (_tools, tool_choice, warnings) = openai_compatible_prepare_tools_for_test(
+            Some(vec![openai_compatible_test_function_tool(
+                "testFunction",
+                "Test",
+            )]),
+            Some(LanguageModelToolChoice::None),
+        );
+
+        assert_eq!(tool_choice, Some(json!("none")));
+        assert_eq!(warnings, Vec::<Warning>::new());
+    }
+
+    #[test]
+    fn openai_compatible_prepare_tools_handles_specific_tool_choice() {
+        let (_tools, tool_choice, warnings) = openai_compatible_prepare_tools_for_test(
+            Some(vec![openai_compatible_test_function_tool(
+                "testFunction",
+                "Test",
+            )]),
+            Some(LanguageModelToolChoice::Tool {
+                tool_name: "testFunction".to_string(),
+            }),
+        );
+
+        assert_eq!(
+            tool_choice,
+            Some(json!({
+                "type": "function",
+                "function": {
+                    "name": "testFunction"
+                }
+            }))
+        );
+        assert_eq!(warnings, Vec::<Warning>::new());
+    }
+
+    #[test]
+    fn openai_compatible_prepare_tools_passes_through_strict_true() {
+        let (tools, tool_choice, warnings) = openai_compatible_prepare_tools_for_test(
+            Some(vec![LanguageModelTool::Function(
+                LanguageModelFunctionTool::new(
+                    "testFunction",
+                    openai_compatible_test_object_schema(),
+                )
+                .with_description("A test function")
+                .with_strict(true),
+            )]),
+            None,
+        );
+
+        assert_eq!(
+            tools,
+            Some(vec![json!({
+                "type": "function",
+                "function": {
+                    "name": "testFunction",
+                    "description": "A test function",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    },
+                    "strict": true
+                }
+            })])
+        );
+        assert_eq!(tool_choice, None);
+        assert_eq!(warnings, Vec::<Warning>::new());
+    }
+
+    #[test]
+    fn openai_compatible_prepare_tools_passes_through_strict_false() {
+        let (tools, tool_choice, warnings) = openai_compatible_prepare_tools_for_test(
+            Some(vec![LanguageModelTool::Function(
+                LanguageModelFunctionTool::new(
+                    "testFunction",
+                    openai_compatible_test_object_schema(),
+                )
+                .with_description("A test function")
+                .with_strict(false),
+            )]),
+            None,
+        );
+
+        assert_eq!(
+            tools,
+            Some(vec![json!({
+                "type": "function",
+                "function": {
+                    "name": "testFunction",
+                    "description": "A test function",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    },
+                    "strict": false
+                }
+            })])
+        );
+        assert_eq!(tool_choice, None);
+        assert_eq!(warnings, Vec::<Warning>::new());
+    }
+
+    #[test]
+    fn openai_compatible_prepare_tools_omits_undefined_strict() {
+        let (tools, tool_choice, warnings) = openai_compatible_prepare_tools_for_test(
+            Some(vec![openai_compatible_test_function_tool(
+                "testFunction",
+                "A test function",
+            )]),
+            None,
+        );
+
+        assert_eq!(
+            tools,
+            Some(vec![json!({
+                "type": "function",
+                "function": {
+                    "name": "testFunction",
+                    "description": "A test function",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
+            })])
+        );
+        assert_eq!(tool_choice, None);
+        assert_eq!(warnings, Vec::<Warning>::new());
+    }
+
+    #[test]
+    fn openai_compatible_prepare_tools_passes_mixed_strict_settings() {
+        let (tools, tool_choice, warnings) = openai_compatible_prepare_tools_for_test(
+            Some(vec![
+                LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "strictTool",
+                        openai_compatible_test_object_schema(),
+                    )
+                    .with_description("A strict tool")
+                    .with_strict(true),
+                ),
+                LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "nonStrictTool",
+                        openai_compatible_test_object_schema(),
+                    )
+                    .with_description("A non-strict tool")
+                    .with_strict(false),
+                ),
+                LanguageModelTool::Function(
+                    LanguageModelFunctionTool::new(
+                        "defaultTool",
+                        openai_compatible_test_object_schema(),
+                    )
+                    .with_description("A tool without strict setting"),
+                ),
+            ]),
+            None,
+        );
+
+        assert_eq!(
+            tools,
+            Some(vec![
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": "strictTool",
+                        "description": "A strict tool",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {}
+                        },
+                        "strict": true
+                    }
+                }),
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": "nonStrictTool",
+                        "description": "A non-strict tool",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {}
+                        },
+                        "strict": false
+                    }
+                }),
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": "defaultTool",
+                        "description": "A tool without strict setting",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {}
+                        }
+                    }
+                })
+            ])
+        );
+        assert_eq!(tool_choice, None);
+        assert_eq!(warnings, Vec::<Warning>::new());
     }
 
     #[test]
