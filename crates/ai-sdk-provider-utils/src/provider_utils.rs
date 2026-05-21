@@ -5670,8 +5670,10 @@ impl Tool {
 
     /// Sets the tool description.
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
-        self.description_resolver = None;
+        if !self.is_provider_tool() {
+            self.description = Some(description.into());
+            self.description_resolver = None;
+        }
         self
     }
 
@@ -5698,9 +5700,11 @@ impl Tool {
 
     /// Adds a tool input example.
     pub fn with_input_example(mut self, input: JsonObject) -> Self {
-        self.input_examples
-            .get_or_insert_with(Vec::new)
-            .push(LanguageModelToolInputExample::new(input));
+        if !self.is_provider_tool() {
+            self.input_examples
+                .get_or_insert_with(Vec::new)
+                .push(LanguageModelToolInputExample::new(input));
+        }
         self
     }
 
@@ -5715,7 +5719,9 @@ impl Tool {
 
     /// Sets strict mode for providers that support it.
     pub fn with_strict(mut self, strict: bool) -> Self {
-        self.strict = Some(strict);
+        if !self.is_provider_tool() {
+            self.strict = Some(strict);
+        }
         self
     }
 
@@ -5739,6 +5745,7 @@ impl Tool {
     /// Sets whether a provider-executed tool supports deferred results.
     pub fn with_supports_deferred_results(mut self, supports_deferred_results: bool) -> Self {
         if let ToolKind::Provider {
+            provider_executed: true,
             supports_deferred_results: stored_supports_deferred_results,
             ..
         } = &mut self.kind
@@ -8794,8 +8801,8 @@ mod tests {
         LanguageModelFunctionTool, LanguageModelMessage, LanguageModelProviderTool,
         LanguageModelReasoningEffort, LanguageModelStreamPart, LanguageModelSystemMessage,
         LanguageModelTextPart, LanguageModelTool, LanguageModelToolApprovalRequestPart,
-        LanguageModelToolApprovalResponsePart, LanguageModelToolResultOutput,
-        LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelToolApprovalResponsePart, LanguageModelToolInputExample,
+        LanguageModelToolResultOutput, LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use ai_sdk_provider::{
         ApiCallError, FileData, FileDataContent, ImageModelFile, JsonObject, JsonSchema, JsonValue,
@@ -21789,6 +21796,97 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_tool_upstream_should_include_dynamic_tools_in_the_tool_union() {
+        let dynamic = dynamic_tool("runtimeWeather", object_schema());
+        let as_tool: &Tool = &dynamic;
+
+        assert!(as_tool.is_dynamic());
+        assert!(!as_tool.is_provider_tool());
+        assert!(!as_tool.is_provider_executed());
+    }
+
+    #[test]
+    fn dynamic_tool_upstream_should_allow_function_style_properties() {
+        let input_example = json!({ "location": "San Francisco" })
+            .as_object()
+            .expect("input example is an object")
+            .clone();
+        let output_schema = schema_object(json!({ "type": "string" }));
+        let tool = dynamic_tool("weather", object_schema())
+            .with_description("Get the weather for a location")
+            .with_strict(true)
+            .with_input_example(input_example.clone())
+            .with_output_schema(output_schema.clone());
+
+        assert_eq!(
+            tool.description.as_deref(),
+            Some("Get the weather for a location")
+        );
+        assert_eq!(tool.strict, Some(true));
+        assert_eq!(
+            tool.input_examples,
+            Some(vec![LanguageModelToolInputExample::new(input_example)])
+        );
+        assert_eq!(tool.output_schema(), Some(&output_schema));
+        assert_eq!(
+            serde_json::to_value(tool.to_language_model_tool()).expect("tool serializes"),
+            json!({
+                "type": "function",
+                "name": "weather",
+                "description": "Get the weather for a location",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    },
+                    "required": ["city"]
+                },
+                "inputExamples": [
+                    {
+                        "input": {
+                            "location": "San Francisco"
+                        }
+                    }
+                ],
+                "strict": true
+            })
+        );
+    }
+
+    #[test]
+    fn dynamic_tool_upstream_should_reject_provider_only_properties() {
+        let tool = dynamic_tool("weather", object_schema()).with_supports_deferred_results(true);
+
+        assert!(tool.is_dynamic());
+        assert!(!tool.is_provider_tool());
+        assert!(!tool.is_provider_executed());
+        assert_eq!(tool.provider_tool_id(), None);
+        assert_eq!(tool.provider_tool_args(), None);
+        assert_eq!(tool.supports_deferred_results(), None);
+    }
+
+    #[test]
+    fn dynamic_tool_upstream_should_create_dynamic_tools_with_the_dynamic_discriminator() {
+        let tool = dynamic_tool("weather", object_schema());
+
+        assert!(tool.is_dynamic());
+        assert_eq!(
+            serde_json::to_value(tool.to_language_model_tool()).expect("tool serializes"),
+            json!({
+                "type": "function",
+                "name": "weather",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    },
+                    "required": ["city"]
+                }
+            })
+        );
+    }
+
+    #[test]
     fn dynamic_tool_prepares_upstream_function_tool_shape() {
         let tool = dynamic_tool("mcpWeather", object_schema())
             .with_description("Runtime weather lookup.")
@@ -21851,6 +21949,112 @@ mod tests {
     }
 
     #[test]
+    fn provider_defined_tool_upstream_should_include_provider_defined_tools_in_the_tool_union() {
+        let args = json!({ "maxResults": 3 })
+            .as_object()
+            .expect("args are an object")
+            .clone();
+        let tool =
+            Tool::provider_defined("webSearch", "provider.web_search", args, object_schema());
+        let as_tool: &Tool = &tool;
+
+        assert!(as_tool.is_provider_tool());
+        assert!(!as_tool.is_provider_executed());
+        assert!(!as_tool.is_dynamic());
+    }
+
+    #[test]
+    fn provider_defined_tool_upstream_should_require_provider_specific_properties() {
+        let args = json!({ "maxResults": 3 })
+            .as_object()
+            .expect("args are an object")
+            .clone();
+        let tool = Tool::provider_defined(
+            "webSearch",
+            "provider.web_search",
+            args.clone(),
+            object_schema(),
+        );
+
+        assert_eq!(tool.provider_tool_id(), Some("provider.web_search"));
+        assert_eq!(tool.provider_tool_args(), Some(&args));
+        assert!(!tool.is_provider_executed());
+        assert_eq!(tool.supports_deferred_results(), None);
+    }
+
+    #[test]
+    fn provider_defined_tool_upstream_should_allow_user_execution_or_an_output_schema() {
+        let args = json!({ "maxResults": 3 })
+            .as_object()
+            .expect("args are an object")
+            .clone();
+        let executable_tool = Tool::provider_defined(
+            "webSearch",
+            "provider.web_search",
+            args.clone(),
+            object_schema(),
+        )
+        .with_execute(|input, _options| ready(Ok(json!({ "echo": input }))));
+        let output = poll_ready(
+            executable_tool
+                .execute(
+                    json!({ "location": "Brisbane" }),
+                    ToolExecutionOptions::new("call-1", Vec::new()),
+                )
+                .expect("execute callback is configured"),
+        )
+        .expect("execute succeeds");
+
+        let output_schema = schema_object(json!({ "type": "string" }));
+        let output_schema_tool =
+            Tool::provider_defined("webSearch", "provider.web_search", args, object_schema())
+                .with_output_schema(output_schema.clone());
+
+        assert!(executable_tool.is_executable());
+        assert_eq!(output, json!({ "echo": { "location": "Brisbane" } }));
+        assert_eq!(output_schema_tool.output_schema(), Some(&output_schema));
+    }
+
+    #[test]
+    fn provider_defined_tool_upstream_rejects_function_only_properties() {
+        let args = json!({ "maxResults": 3 })
+            .as_object()
+            .expect("args are an object")
+            .clone();
+        let tool = Tool::provider_defined(
+            "webSearch",
+            "provider.web_search",
+            args.clone(),
+            object_schema(),
+        )
+        .with_description("Get weather")
+        .with_input_example(
+            json!({ "location": "San Francisco" })
+                .as_object()
+                .expect("input example is an object")
+                .clone(),
+        )
+        .with_strict(true)
+        .with_supports_deferred_results(true);
+
+        assert_eq!(tool.description, None);
+        assert_eq!(tool.input_examples, None);
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.supports_deferred_results(), None);
+        assert_eq!(
+            serde_json::to_value(tool.to_language_model_tool()).expect("tool serializes"),
+            json!({
+                "type": "provider",
+                "id": "provider.web_search",
+                "name": "webSearch",
+                "args": {
+                    "maxResults": 3
+                }
+            })
+        );
+    }
+
+    #[test]
     fn tool_prepares_upstream_provider_defined_tool_shape() {
         let args = json!({ "maxResults": 3 })
             .as_object()
@@ -21901,6 +22105,104 @@ mod tests {
     }
 
     #[test]
+    fn provider_executed_tool_upstream_should_include_provider_executed_tools_in_the_tool_union() {
+        let args = json!({ "region": "au" })
+            .as_object()
+            .expect("args are an object")
+            .clone();
+        let output_schema = schema_object(json!({ "type": "object" }));
+        let tool = Tool::provider_executed(
+            "codeInterpreter",
+            "provider.code_interpreter",
+            args,
+            object_schema(),
+            output_schema,
+        );
+        let as_tool: &Tool = &tool;
+
+        assert!(as_tool.is_provider_tool());
+        assert!(as_tool.is_provider_executed());
+        assert!(!as_tool.is_dynamic());
+    }
+
+    #[test]
+    fn provider_executed_tool_upstream_should_require_provider_specific_properties() {
+        let args = json!({ "region": "au" })
+            .as_object()
+            .expect("args are an object")
+            .clone();
+        let output_schema = schema_object(json!({ "type": "object" }));
+        let tool = Tool::provider_executed(
+            "codeInterpreter",
+            "provider.code_interpreter",
+            args.clone(),
+            object_schema(),
+            output_schema.clone(),
+        );
+
+        assert_eq!(tool.provider_tool_id(), Some("provider.code_interpreter"));
+        assert_eq!(tool.provider_tool_args(), Some(&args));
+        assert!(tool.is_provider_executed());
+        assert_eq!(tool.output_schema(), Some(&output_schema));
+    }
+
+    #[test]
+    fn provider_executed_tool_upstream_should_allow_deferred_result_support() {
+        let args = json!({ "region": "au" })
+            .as_object()
+            .expect("args are an object")
+            .clone();
+        let tool = Tool::provider_executed(
+            "codeInterpreter",
+            "provider.code_interpreter",
+            args,
+            object_schema(),
+            schema_object(json!({ "type": "object" })),
+        )
+        .with_supports_deferred_results(true);
+
+        assert_eq!(tool.supports_deferred_results(), Some(true));
+    }
+
+    #[test]
+    fn provider_executed_tool_upstream_rejects_function_only_properties() {
+        let args = json!({ "region": "au" })
+            .as_object()
+            .expect("args are an object")
+            .clone();
+        let tool = Tool::provider_executed(
+            "codeInterpreter",
+            "provider.code_interpreter",
+            args.clone(),
+            object_schema(),
+            schema_object(json!({ "type": "object" })),
+        )
+        .with_description("Get weather")
+        .with_input_example(
+            json!({ "location": "San Francisco" })
+                .as_object()
+                .expect("input example is an object")
+                .clone(),
+        )
+        .with_strict(true);
+
+        assert_eq!(tool.description, None);
+        assert_eq!(tool.input_examples, None);
+        assert_eq!(tool.strict, None);
+        assert_eq!(
+            serde_json::to_value(tool.to_language_model_tool()).expect("tool serializes"),
+            json!({
+                "type": "provider",
+                "id": "provider.code_interpreter",
+                "name": "codeInterpreter",
+                "args": {
+                    "region": "au"
+                }
+            })
+        );
+    }
+
+    #[test]
     fn tool_prepares_upstream_provider_executed_tool_shape() {
         let args = json!({ "region": "au" })
             .as_object()
@@ -21937,6 +22239,173 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn function_tool_upstream_should_expose_the_function_tool_discriminator() {
+        let tool = Tool::new("weather", object_schema());
+
+        assert!(!tool.is_dynamic());
+        assert!(!tool.is_provider_tool());
+        assert_eq!(
+            serde_json::to_value(tool.to_language_model_tool()).expect("tool serializes"),
+            json!({
+                "type": "function",
+                "name": "weather",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string" }
+                    },
+                    "required": ["city"]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn function_tool_upstream_should_include_function_tools_in_the_tool_union() {
+        let function_tool = Tool::new("weather", object_schema());
+        let as_tool: &Tool = &function_tool;
+
+        assert!(!as_tool.is_dynamic());
+        assert!(!as_tool.is_provider_tool());
+        assert!(!as_tool.is_provider_executed());
+    }
+
+    #[test]
+    fn function_tool_upstream_should_allow_omitted_and_explicit_function_discriminators() {
+        let direct_constructor = Tool::new("directWeather", object_schema());
+        let helper_constructor = tool("helperWeather", object_schema());
+
+        for function_tool in [direct_constructor, helper_constructor] {
+            assert!(!function_tool.is_provider_tool());
+            assert!(!function_tool.is_dynamic());
+            assert!(matches!(
+                function_tool.to_language_model_tool(),
+                LanguageModelTool::Function(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn function_tool_upstream_should_reject_dynamic_and_provider_only_properties() {
+        let tool = tool("weather", object_schema()).with_supports_deferred_results(true);
+
+        assert!(!tool.is_dynamic());
+        assert!(!tool.is_provider_tool());
+        assert_eq!(tool.provider_tool_id(), None);
+        assert_eq!(tool.provider_tool_args(), None);
+        assert_eq!(tool.supports_deferred_results(), None);
+    }
+
+    #[test]
+    fn tool_union_upstream_should_expose_all_tool_variants_and_type_discriminators() {
+        let provider_args = json!({ "region": "au" })
+            .as_object()
+            .expect("args are an object")
+            .clone();
+        let tools = vec![
+            Tool::new("weather", object_schema()),
+            dynamic_tool("runtimeWeather", object_schema()),
+            Tool::provider_defined(
+                "webSearch",
+                "provider.web_search",
+                provider_args.clone(),
+                object_schema(),
+            ),
+            Tool::provider_executed(
+                "codeInterpreter",
+                "provider.code_interpreter",
+                provider_args,
+                object_schema(),
+                schema_object(json!({ "type": "object" })),
+            ),
+        ];
+
+        let high_level_variants = tools
+            .iter()
+            .map(|tool| {
+                if tool.is_provider_tool() {
+                    if tool.is_provider_executed() {
+                        "provider-executed"
+                    } else {
+                        "provider-defined"
+                    }
+                } else if tool.is_dynamic() {
+                    "dynamic"
+                } else {
+                    "function"
+                }
+            })
+            .collect::<Vec<_>>();
+        let model_discriminators = tools
+            .iter()
+            .map(|tool| match tool.to_language_model_tool() {
+                LanguageModelTool::Function(_) => "function",
+                LanguageModelTool::Provider(_) => "provider",
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            high_level_variants,
+            vec![
+                "function",
+                "dynamic",
+                "provider-defined",
+                "provider-executed"
+            ]
+        );
+        assert_eq!(
+            model_discriminators,
+            vec!["function", "function", "provider", "provider"]
+        );
+    }
+
+    #[test]
+    fn tool_union_upstream_should_narrow_tools_by_type() {
+        fn classify_tool(tool: &Tool) -> &'static str {
+            if tool.is_provider_tool() {
+                if tool.is_provider_executed() {
+                    "provider-executed"
+                } else {
+                    "provider-defined"
+                }
+            } else if tool.is_dynamic() {
+                "dynamic"
+            } else {
+                "function"
+            }
+        }
+
+        let provider_args = json!({}).as_object().expect("args are an object").clone();
+        let cases = vec![
+            (Tool::new("weather", object_schema()), "function"),
+            (dynamic_tool("runtimeWeather", object_schema()), "dynamic"),
+            (
+                Tool::provider_defined(
+                    "webSearch",
+                    "provider.web_search",
+                    provider_args.clone(),
+                    object_schema(),
+                ),
+                "provider-defined",
+            ),
+            (
+                Tool::provider_executed(
+                    "codeInterpreter",
+                    "provider.code_interpreter",
+                    provider_args,
+                    object_schema(),
+                    schema_object(json!({ "type": "object" })),
+                ),
+                "provider-executed",
+            ),
+        ];
+
+        for (tool, expected) in cases {
+            assert_eq!(classify_tool(&tool), expected);
+        }
     }
 
     #[test]
