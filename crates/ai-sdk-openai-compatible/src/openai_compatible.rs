@@ -4549,12 +4549,12 @@ mod tests {
         OpenAICompatibleMetadataExtractor, OpenAICompatibleProvider,
         OpenAICompatibleProviderSettings, OpenAICompatibleStreamMetadataExtractor,
         OpenAICompatibleTransport, OpenAICompatibleTransportFuture, create_openai_compatible,
-        openai_compatible_prepare_tools, openai_compatible_provider_options_name,
-        resolve_openai_compatible_provider_options_key, to_openai_compatible_camel_case,
-        warn_if_deprecated_openai_compatible_provider_options_key,
+        openai_compatible_messages, openai_compatible_prepare_tools,
+        openai_compatible_provider_options_name, resolve_openai_compatible_provider_options_key,
+        to_openai_compatible_camel_case, warn_if_deprecated_openai_compatible_provider_options_key,
     };
     use ai_sdk_provider::embedding_model::{EmbeddingModel, EmbeddingModelCallOptions};
-    use ai_sdk_provider::file_data::{FileData, FileDataContent};
+    use ai_sdk_provider::file_data::{FileData, FileDataContent, ProviderReference};
     use ai_sdk_provider::headers::Headers;
     use ai_sdk_provider::image_model::{ImageModel, ImageModelCallOptions, ImageModelFile};
     use ai_sdk_provider::json::{JsonObject, JsonValue};
@@ -4576,6 +4576,7 @@ mod tests {
         FormData, FormDataValue, ProviderApiRequest, ProviderApiRequestMethod, ProviderApiResponse,
     };
     use serde_json::json;
+    use std::collections::BTreeMap;
     use std::future::{Future, ready};
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
@@ -4600,6 +4601,1446 @@ mod tests {
 
     fn test_provider_options(value: JsonValue) -> ProviderOptions {
         serde_json::from_value(value).expect("provider options deserialize")
+    }
+
+    fn openai_compatible_messages_json(prompt: Vec<LanguageModelMessage>) -> JsonValue {
+        JsonValue::Array(openai_compatible_messages(&prompt).expect("messages convert"))
+    }
+
+    fn openai_compatible_messages_error(prompt: Vec<LanguageModelMessage>) -> String {
+        openai_compatible_messages(&prompt).expect_err("messages conversion fails")
+    }
+
+    fn openai_compatible_user_prompt(
+        content: Vec<LanguageModelUserContentPart>,
+    ) -> LanguageModelMessage {
+        LanguageModelMessage::User(LanguageModelUserMessage::new(content))
+    }
+
+    fn openai_compatible_assistant_prompt(
+        content: Vec<LanguageModelAssistantContentPart>,
+    ) -> LanguageModelMessage {
+        LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(content))
+    }
+
+    fn openai_compatible_tool_prompt(
+        content: Vec<LanguageModelToolContentPart>,
+    ) -> LanguageModelMessage {
+        LanguageModelMessage::Tool(LanguageModelToolMessage::new(content))
+    }
+
+    fn openai_compatible_text_prompt_part(text: impl Into<String>) -> LanguageModelUserContentPart {
+        LanguageModelUserContentPart::Text(LanguageModelTextPart::new(text))
+    }
+
+    fn openai_compatible_file_prompt_part(
+        data: FileData,
+        media_type: impl Into<String>,
+    ) -> LanguageModelUserContentPart {
+        LanguageModelUserContentPart::File(LanguageModelFilePart::new(data, media_type))
+    }
+
+    fn openai_compatible_data_file_prompt_part(
+        data: FileDataContent,
+        media_type: impl Into<String>,
+    ) -> LanguageModelUserContentPart {
+        openai_compatible_file_prompt_part(FileData::Data { data }, media_type)
+    }
+
+    fn openai_compatible_url_file_prompt_part(
+        url: &str,
+        media_type: impl Into<String>,
+    ) -> LanguageModelUserContentPart {
+        openai_compatible_file_prompt_part(
+            FileData::Url {
+                url: Url::parse(url).expect("url parses"),
+            },
+            media_type,
+        )
+    }
+
+    fn openai_compatible_provider_reference(provider: &str, reference: &str) -> ProviderReference {
+        ProviderReference::from_map(BTreeMap::from([(
+            provider.to_string(),
+            reference.to_string(),
+        )]))
+        .expect("provider reference is valid")
+    }
+
+    #[test]
+    fn openai_compatible_convert_messages_with_only_a_text_part_to_string_content() {
+        let result = openai_compatible_messages_json(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_text_prompt_part("Hello"),
+        ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "user",
+                    "content": "Hello"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_convert_messages_with_image_parts() {
+        let result = openai_compatible_messages_json(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_text_prompt_part("Hello"),
+            openai_compatible_data_file_prompt_part(
+                FileDataContent::Base64("AAECAw==".to_string()),
+                "image/png",
+            ),
+        ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "Hello" },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "data:image/png;base64,AAECAw=="
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_convert_messages_with_image_parts_from_uint8_array() {
+        let result = openai_compatible_messages_json(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_text_prompt_part("Hi"),
+            openai_compatible_data_file_prompt_part(
+                FileDataContent::Bytes(vec![0, 1, 2, 3]),
+                "image/png",
+            ),
+        ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "Hi" },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "data:image/png;base64,AAECAw=="
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_handle_url_based_images() {
+        let result = openai_compatible_messages_json(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_url_file_prompt_part("https://example.com/image.jpg", "image/*"),
+        ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "https://example.com/image.jpg"
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_convert_messages_with_audio_wav_parts() {
+        let result = openai_compatible_messages_json(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_text_prompt_part("Transcribe this audio"),
+            openai_compatible_data_file_prompt_part(
+                FileDataContent::Base64("AAECAw==".to_string()),
+                "audio/wav",
+            ),
+        ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "Transcribe this audio" },
+                        {
+                            "type": "input_audio",
+                            "input_audio": {
+                                "data": "AAECAw==",
+                                "format": "wav"
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_convert_messages_with_audio_mp3_parts() {
+        let result = openai_compatible_messages_json(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_data_file_prompt_part(
+                FileDataContent::Bytes(vec![0, 1, 2, 3]),
+                "audio/mp3",
+            ),
+        ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_audio",
+                            "input_audio": {
+                                "data": "AAECAw==",
+                                "format": "mp3"
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_convert_messages_with_audio_mpeg_parts_to_mp3_format() {
+        let result = openai_compatible_messages_json(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_data_file_prompt_part(
+                FileDataContent::Bytes(vec![0, 1, 2, 3]),
+                "audio/mpeg",
+            ),
+        ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_audio",
+                            "input_audio": {
+                                "data": "AAECAw==",
+                                "format": "mp3"
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_throw_error_for_audio_parts_with_urls() {
+        let error = openai_compatible_messages_error(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_url_file_prompt_part("https://example.com/audio.wav", "audio/wav"),
+        ])]);
+
+        assert_eq!(
+            error,
+            "'audio file parts with URLs' functionality not supported"
+        );
+    }
+
+    #[test]
+    fn openai_compatible_throw_error_for_unsupported_audio_format() {
+        let error = openai_compatible_messages_error(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_data_file_prompt_part(
+                FileDataContent::Bytes(vec![0, 1, 2, 3]),
+                "audio/ogg",
+            ),
+        ])]);
+
+        assert_eq!(
+            error,
+            "'audio media type audio/ogg' functionality not supported"
+        );
+    }
+
+    #[test]
+    fn openai_compatible_convert_messages_with_pdf_parts() {
+        let result = openai_compatible_messages_json(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_text_prompt_part("Summarize this PDF"),
+            openai_compatible_data_file_prompt_part(
+                FileDataContent::Base64("AAECAw==".to_string()),
+                "application/pdf",
+            ),
+        ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "Summarize this PDF" },
+                        {
+                            "type": "file",
+                            "file": {
+                                "filename": "document.pdf",
+                                "file_data": "data:application/pdf;base64,AAECAw=="
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_convert_messages_with_pdf_parts_using_provided_filename() {
+        let result = openai_compatible_messages_json(vec![openai_compatible_user_prompt(vec![
+            LanguageModelUserContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Data {
+                        data: FileDataContent::Bytes(vec![0, 1, 2, 3]),
+                    },
+                    "application/pdf",
+                )
+                .with_filename("report.pdf"),
+            ),
+        ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "file",
+                            "file": {
+                                "filename": "report.pdf",
+                                "file_data": "data:application/pdf;base64,AAECAw=="
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_throw_error_for_pdf_parts_with_urls() {
+        let error = openai_compatible_messages_error(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_url_file_prompt_part(
+                "https://example.com/document.pdf",
+                "application/pdf",
+            ),
+        ])]);
+
+        assert_eq!(
+            error,
+            "'PDF file parts with URLs' functionality not supported"
+        );
+    }
+
+    #[test]
+    fn openai_compatible_convert_messages_with_base64_encoded_text_markdown_parts() {
+        let markdown_text = "# Hello World\n\nThis is **markdown** content.";
+        let result = openai_compatible_messages_json(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_text_prompt_part("Summarize this document"),
+            openai_compatible_data_file_prompt_part(
+                FileDataContent::Base64(
+                    "IyBIZWxsbyBXb3JsZAoKVGhpcyBpcyAqKm1hcmtkb3duKiogY29udGVudC4=".to_string(),
+                ),
+                "text/markdown",
+            ),
+        ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "Summarize this document" },
+                        {
+                            "type": "text",
+                            "text": markdown_text
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_convert_messages_with_text_plain_parts_from_uint8_array() {
+        let result = openai_compatible_messages_json(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_data_file_prompt_part(
+                FileDataContent::Bytes(b"Plain text content".to_vec()),
+                "text/plain",
+            ),
+        ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Plain text content"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_decode_base64_string_data_for_text_file_parts() {
+        let result = openai_compatible_messages_json(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_data_file_prompt_part(
+                FileDataContent::Base64("UGxhaW4gdGV4dCBjb250ZW50".to_string()),
+                "text/plain",
+            ),
+        ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Plain text content"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_convert_text_file_url_to_string() {
+        let result = openai_compatible_messages_json(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_url_file_prompt_part(
+                "https://example.com/readme.md",
+                "text/markdown",
+            ),
+        ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "https://example.com/readme.md"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_throw_error_for_unsupported_file_types() {
+        let error = openai_compatible_messages_error(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_data_file_prompt_part(
+                FileDataContent::Bytes(vec![0, 1, 2, 3]),
+                "video/mp4",
+            ),
+        ])]);
+
+        assert_eq!(
+            error,
+            "'file part media type video/mp4' functionality not supported"
+        );
+    }
+
+    #[test]
+    fn openai_compatible_throw_error_for_file_parts_with_provider_references() {
+        let error = openai_compatible_messages_error(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_file_prompt_part(
+                FileData::Reference {
+                    reference: openai_compatible_provider_reference("openaiCompatible", "file-123"),
+                },
+                "image/png",
+            ),
+        ])]);
+
+        assert_eq!(
+            error,
+            "'file parts with provider references' functionality not supported"
+        );
+    }
+
+    #[test]
+    fn openai_compatible_stringify_arguments_to_tool_calls() {
+        let result = openai_compatible_messages_json(vec![
+            openai_compatible_assistant_prompt(vec![LanguageModelAssistantContentPart::ToolCall(
+                LanguageModelToolCallPart::new("quux", "thwomp", json!({ "foo": "bar123" })),
+            )]),
+            openai_compatible_tool_prompt(vec![LanguageModelToolContentPart::ToolResult(
+                LanguageModelToolResultPart::new(
+                    "quux",
+                    "thwomp",
+                    LanguageModelToolResultOutput::json(json!({ "oof": "321rab" })),
+                ),
+            )]),
+        ]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "id": "quux",
+                            "function": {
+                                "name": "thwomp",
+                                "arguments": "{\"foo\":\"bar123\"}"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": "{\"oof\":\"321rab\"}",
+                    "tool_call_id": "quux"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_send_empty_string_content_for_assistant_messages_with_no_tool_calls() {
+        let result =
+            openai_compatible_messages_json(vec![openai_compatible_assistant_prompt(vec![
+                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new("")),
+            ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "assistant",
+                    "content": ""
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_handle_text_output_type_in_tool_results() {
+        let result = openai_compatible_messages_json(vec![
+            openai_compatible_assistant_prompt(vec![LanguageModelAssistantContentPart::ToolCall(
+                LanguageModelToolCallPart::new(
+                    "call-1",
+                    "getWeather",
+                    json!({ "query": "weather" }),
+                ),
+            )]),
+            openai_compatible_tool_prompt(vec![LanguageModelToolContentPart::ToolResult(
+                LanguageModelToolResultPart::new(
+                    "call-1",
+                    "getWeather",
+                    LanguageModelToolResultOutput::text("It is sunny today"),
+                ),
+            )]),
+        ]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "id": "call-1",
+                            "function": {
+                                "name": "getWeather",
+                                "arguments": "{\"query\":\"weather\"}"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": "It is sunny today",
+                    "tool_call_id": "call-1"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_merge_system_message_metadata() {
+        let result = openai_compatible_messages_json(vec![LanguageModelMessage::System(
+            LanguageModelSystemMessage::new("You are a helpful assistant.").with_provider_options(
+                test_provider_options(json!({
+                    "openaiCompatible": {
+                        "cacheControl": { "type": "ephemeral" }
+                    }
+                })),
+            ),
+        )]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant.",
+                    "cacheControl": { "type": "ephemeral" }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_merge_user_message_content_metadata() {
+        let result = openai_compatible_messages_json(vec![openai_compatible_user_prompt(vec![
+            LanguageModelUserContentPart::Text(
+                LanguageModelTextPart::new("Hello").with_provider_options(test_provider_options(
+                    json!({
+                        "openaiCompatible": {
+                            "cacheControl": { "type": "ephemeral" }
+                        }
+                    }),
+                )),
+            ),
+        ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "user",
+                    "content": "Hello",
+                    "cacheControl": { "type": "ephemeral" }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_prioritize_content_level_metadata_when_merging() {
+        let result = openai_compatible_messages_json(vec![LanguageModelMessage::User(
+            LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                LanguageModelTextPart::new("Hello").with_provider_options(test_provider_options(
+                    json!({
+                        "openaiCompatible": {
+                            "contentLevel": true
+                        }
+                    }),
+                )),
+            )])
+            .with_provider_options(test_provider_options(json!({
+                "openaiCompatible": {
+                    "messageLevel": true
+                }
+            }))),
+        )]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "user",
+                    "content": "Hello",
+                    "contentLevel": true
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_handle_tool_calls_with_metadata() {
+        let result =
+            openai_compatible_messages_json(vec![openai_compatible_assistant_prompt(vec![
+                LanguageModelAssistantContentPart::ToolCall(
+                    LanguageModelToolCallPart::new(
+                        "call1",
+                        "calculator",
+                        json!({ "x": 1, "y": 2 }),
+                    )
+                    .with_provider_options(test_provider_options(json!({
+                        "openaiCompatible": {
+                            "cacheControl": { "type": "ephemeral" }
+                        }
+                    }))),
+                ),
+            ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        {
+                            "id": "call1",
+                            "type": "function",
+                            "function": {
+                                "name": "calculator",
+                                "arguments": "{\"x\":1,\"y\":2}"
+                            },
+                            "cacheControl": { "type": "ephemeral" }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_handle_image_content_with_metadata() {
+        let result = openai_compatible_messages_json(vec![openai_compatible_user_prompt(vec![
+            LanguageModelUserContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Url {
+                        url: Url::parse("https://example.com/image.jpg").expect("url parses"),
+                    },
+                    "image/*",
+                )
+                .with_provider_options(test_provider_options(json!({
+                    "openaiCompatible": {
+                        "cacheControl": { "type": "ephemeral" }
+                    }
+                }))),
+            ),
+        ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "https://example.com/image.jpg"
+                            },
+                            "cacheControl": { "type": "ephemeral" }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_omit_non_openai_compatible_metadata() {
+        let result = openai_compatible_messages_json(vec![LanguageModelMessage::System(
+            LanguageModelSystemMessage::new("Hello").with_provider_options(test_provider_options(
+                json!({
+                    "someOtherProvider": {
+                        "shouldBeIgnored": true
+                    }
+                }),
+            )),
+        )]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "system",
+                    "content": "Hello"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_handle_user_message_with_multiple_content_parts_text_and_image() {
+        let result = openai_compatible_messages_json(vec![LanguageModelMessage::User(
+            LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(
+                    LanguageModelTextPart::new("Hello from part 1").with_provider_options(
+                        test_provider_options(json!({
+                            "openaiCompatible": {
+                                "sentiment": "positive"
+                            },
+                            "leftoverKey": {
+                                "foo": "some leftover data"
+                            }
+                        })),
+                    ),
+                ),
+                LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("AAECAw==".to_string()),
+                        },
+                        "image/png",
+                    )
+                    .with_provider_options(test_provider_options(json!({
+                        "openaiCompatible": {
+                            "alt_text": "A sample image"
+                        }
+                    }))),
+                ),
+            ])
+            .with_provider_options(test_provider_options(json!({
+                "openaiCompatible": {
+                    "priority": "high"
+                }
+            }))),
+        )]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "user",
+                    "priority": "high",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Hello from part 1",
+                            "sentiment": "positive"
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "data:image/png;base64,AAECAw=="
+                            },
+                            "alt_text": "A sample image"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_handle_user_message_with_multiple_text_parts_flattening_disabled() {
+        let result = openai_compatible_messages_json(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_text_prompt_part("Part 1"),
+            openai_compatible_text_prompt_part("Part 2"),
+        ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "Part 1" },
+                        { "type": "text", "text": "Part 2" }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_handle_assistant_message_with_text_plus_multiple_tool_calls() {
+        let result =
+            openai_compatible_messages_json(vec![openai_compatible_assistant_prompt(vec![
+                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                    "Checking that now...",
+                )),
+                LanguageModelAssistantContentPart::ToolCall(
+                    LanguageModelToolCallPart::new(
+                        "call1",
+                        "searchTool",
+                        json!({ "query": "Weather" }),
+                    )
+                    .with_provider_options(test_provider_options(json!({
+                        "openaiCompatible": {
+                            "function_call_reason": "user request"
+                        }
+                    }))),
+                ),
+                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                    "Almost there...",
+                )),
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call2",
+                    "mapsTool",
+                    json!({ "location": "Paris" }),
+                )),
+            ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "assistant",
+                    "content": "Checking that now...Almost there...",
+                    "tool_calls": [
+                        {
+                            "id": "call1",
+                            "type": "function",
+                            "function": {
+                                "name": "searchTool",
+                                "arguments": "{\"query\":\"Weather\"}"
+                            },
+                            "function_call_reason": "user request"
+                        },
+                        {
+                            "id": "call2",
+                            "type": "function",
+                            "function": {
+                                "name": "mapsTool",
+                                "arguments": "{\"location\":\"Paris\"}"
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_handle_single_tool_role_message_with_multiple_tool_result_parts() {
+        let result = openai_compatible_messages_json(vec![LanguageModelMessage::Tool(
+            LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call123",
+                    "calculator",
+                    LanguageModelToolResultOutput::json(json!({
+                        "stepOne": "data chunk 1"
+                    })),
+                )),
+                LanguageModelToolContentPart::ToolResult(
+                    LanguageModelToolResultPart::new(
+                        "call123",
+                        "calculator",
+                        LanguageModelToolResultOutput::json(json!({
+                            "stepTwo": "data chunk 2"
+                        })),
+                    )
+                    .with_provider_options(test_provider_options(json!({
+                        "openaiCompatible": {
+                            "partial": true
+                        }
+                    }))),
+                ),
+            ])
+            .with_provider_options(test_provider_options(json!({
+                "openaiCompatible": {
+                    "responseTier": "detailed"
+                }
+            }))),
+        )]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "tool",
+                    "tool_call_id": "call123",
+                    "content": "{\"stepOne\":\"data chunk 1\"}"
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call123",
+                    "content": "{\"stepTwo\":\"data chunk 2\"}",
+                    "partial": true
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_handle_multiple_content_parts_with_multiple_metadata_layers() {
+        let result = openai_compatible_messages_json(vec![LanguageModelMessage::User(
+            LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(
+                    LanguageModelTextPart::new("Part A").with_provider_options(
+                        test_provider_options(json!({
+                            "openaiCompatible": {
+                                "textPartLevel": "localized"
+                            },
+                            "leftoverForText": {
+                                "info": "text leftover"
+                            }
+                        })),
+                    ),
+                ),
+                LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("CQgHBg==".to_string()),
+                        },
+                        "image/png",
+                    )
+                    .with_provider_options(test_provider_options(json!({
+                        "openaiCompatible": {
+                            "imagePartLevel": "image-data"
+                        }
+                    }))),
+                ),
+            ])
+            .with_provider_options(test_provider_options(json!({
+                "openaiCompatible": {
+                    "messageLevel": "global-metadata"
+                },
+                "leftoverForMessage": {
+                    "x": 123
+                }
+            }))),
+        )]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "user",
+                    "messageLevel": "global-metadata",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Part A",
+                            "textPartLevel": "localized"
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "data:image/png;base64,CQgHBg=="
+                            },
+                            "imagePartLevel": "image-data"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_handle_different_tool_metadata_vs_message_level_metadata() {
+        let result = openai_compatible_messages_json(vec![LanguageModelMessage::Assistant(
+            LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                    "Initiating tool calls...",
+                )),
+                LanguageModelAssistantContentPart::ToolCall(
+                    LanguageModelToolCallPart::new(
+                        "callXYZ",
+                        "awesomeTool",
+                        json!({ "param": "someValue" }),
+                    )
+                    .with_provider_options(test_provider_options(json!({
+                        "openaiCompatible": {
+                            "toolPriority": "critical"
+                        }
+                    }))),
+                ),
+            ])
+            .with_provider_options(test_provider_options(json!({
+                "openaiCompatible": {
+                    "globalPriority": "high"
+                }
+            }))),
+        )]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "assistant",
+                    "globalPriority": "high",
+                    "content": "Initiating tool calls...",
+                    "tool_calls": [
+                        {
+                            "id": "callXYZ",
+                            "type": "function",
+                            "function": {
+                                "name": "awesomeTool",
+                                "arguments": "{\"param\":\"someValue\"}"
+                            },
+                            "toolPriority": "critical"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_handle_metadata_collisions_and_overwrites_in_tool_calls() {
+        let result = openai_compatible_messages_json(vec![LanguageModelMessage::Assistant(
+            LanguageModelAssistantMessage::new(vec![LanguageModelAssistantContentPart::ToolCall(
+                LanguageModelToolCallPart::new(
+                    "collisionToolCall",
+                    "collider",
+                    json!({ "num": 42 }),
+                )
+                .with_provider_options(test_provider_options(json!({
+                    "openaiCompatible": {
+                        "cacheControl": { "type": "ephemeral" },
+                        "sharedKey": "toolLevel"
+                    }
+                }))),
+            )])
+            .with_provider_options(test_provider_options(json!({
+                "openaiCompatible": {
+                    "cacheControl": { "type": "default" },
+                    "sharedKey": "assistantLevel"
+                }
+            }))),
+        )]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "assistant",
+                    "cacheControl": { "type": "default" },
+                    "sharedKey": "assistantLevel",
+                    "content": null,
+                    "tool_calls": [
+                        {
+                            "id": "collisionToolCall",
+                            "type": "function",
+                            "function": {
+                                "name": "collider",
+                                "arguments": "{\"num\":42}"
+                            },
+                            "cacheControl": { "type": "ephemeral" },
+                            "sharedKey": "toolLevel"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_serialize_thought_signature_to_extra_content_for_single_tool_call() {
+        let result =
+            openai_compatible_messages_json(vec![openai_compatible_assistant_prompt(vec![
+                LanguageModelAssistantContentPart::ToolCall(
+                    LanguageModelToolCallPart::new(
+                        "function-call-1",
+                        "check_flight",
+                        json!({ "flight": "AA100" }),
+                    )
+                    .with_provider_options(test_provider_options(json!({
+                        "google": {
+                            "thoughtSignature": "<Signature A>"
+                        }
+                    }))),
+                ),
+            ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        {
+                            "id": "function-call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "check_flight",
+                                "arguments": "{\"flight\":\"AA100\"}"
+                            },
+                            "extra_content": {
+                                "google": {
+                                    "thought_signature": "<Signature A>"
+                                }
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_handle_sequential_tool_calls_with_separate_signatures() {
+        let result = openai_compatible_messages_json(vec![
+            openai_compatible_user_prompt(vec![openai_compatible_text_prompt_part(
+                "Check flight status for AA100 and book a taxi 2 hours before if delayed.",
+            )]),
+            openai_compatible_assistant_prompt(vec![LanguageModelAssistantContentPart::ToolCall(
+                LanguageModelToolCallPart::new(
+                    "function-call-1",
+                    "check_flight",
+                    json!({ "flight": "AA100" }),
+                )
+                .with_provider_options(test_provider_options(json!({
+                    "google": {
+                        "thoughtSignature": "<Signature A>"
+                    }
+                }))),
+            )]),
+            openai_compatible_tool_prompt(vec![LanguageModelToolContentPart::ToolResult(
+                LanguageModelToolResultPart::new(
+                    "function-call-1",
+                    "check_flight",
+                    LanguageModelToolResultOutput::json(json!({
+                        "status": "delayed",
+                        "departure_time": "12 PM"
+                    })),
+                ),
+            )]),
+            openai_compatible_assistant_prompt(vec![LanguageModelAssistantContentPart::ToolCall(
+                LanguageModelToolCallPart::new(
+                    "function-call-2",
+                    "book_taxi",
+                    json!({ "time": "10 AM" }),
+                )
+                .with_provider_options(test_provider_options(json!({
+                    "google": {
+                        "thoughtSignature": "<Signature B>"
+                    }
+                }))),
+            )]),
+            openai_compatible_tool_prompt(vec![LanguageModelToolContentPart::ToolResult(
+                LanguageModelToolResultPart::new(
+                    "function-call-2",
+                    "book_taxi",
+                    LanguageModelToolResultOutput::json(json!({
+                        "booking_status": "success"
+                    })),
+                ),
+            )]),
+        ]);
+
+        assert_eq!(
+            result[1],
+            json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [
+                    {
+                        "id": "function-call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "check_flight",
+                            "arguments": "{\"flight\":\"AA100\"}"
+                        },
+                        "extra_content": {
+                            "google": {
+                                "thought_signature": "<Signature A>"
+                            }
+                        }
+                    }
+                ]
+            })
+        );
+        assert_eq!(
+            result[3],
+            json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [
+                    {
+                        "id": "function-call-2",
+                        "type": "function",
+                        "function": {
+                            "name": "book_taxi",
+                            "arguments": "{\"time\":\"10 AM\"}"
+                        },
+                        "extra_content": {
+                            "google": {
+                                "thought_signature": "<Signature B>"
+                            }
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_handle_parallel_tool_calls_with_signature_only_on_first_call() {
+        let result =
+            openai_compatible_messages_json(vec![openai_compatible_assistant_prompt(vec![
+                LanguageModelAssistantContentPart::ToolCall(
+                    LanguageModelToolCallPart::new(
+                        "function-call-paris",
+                        "get_current_temperature",
+                        json!({ "location": "Paris" }),
+                    )
+                    .with_provider_options(test_provider_options(json!({
+                        "google": {
+                            "thoughtSignature": "<Signature A>"
+                        }
+                    }))),
+                ),
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "function-call-london",
+                    "get_current_temperature",
+                    json!({ "location": "London" }),
+                )),
+            ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        {
+                            "id": "function-call-paris",
+                            "type": "function",
+                            "function": {
+                                "name": "get_current_temperature",
+                                "arguments": "{\"location\":\"Paris\"}"
+                            },
+                            "extra_content": {
+                                "google": {
+                                    "thought_signature": "<Signature A>"
+                                }
+                            }
+                        },
+                        {
+                            "id": "function-call-london",
+                            "type": "function",
+                            "function": {
+                                "name": "get_current_temperature",
+                                "arguments": "{\"location\":\"London\"}"
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_not_include_extra_content_when_no_thought_signature_is_present() {
+        let result =
+            openai_compatible_messages_json(vec![openai_compatible_assistant_prompt(vec![
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call-1",
+                    "some_tool",
+                    json!({ "param": "value" }),
+                )),
+            ])]);
+
+        assert_eq!(
+            result,
+            json!([
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "some_tool",
+                                "arguments": "{\"param\":\"value\"}"
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_compatible_passes_full_image_png_through_unchanged_for_inline_data() {
+        let result = openai_compatible_messages_json(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_data_file_prompt_part(
+                FileDataContent::Base64("iVBORw0KGgo=".to_string()),
+                "image/png",
+            ),
+        ])]);
+
+        assert_eq!(
+            result[0]["content"][0],
+            json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": "data:image/png;base64,iVBORw0KGgo="
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_detects_image_subtype_from_inline_bytes_for_top_level_image() {
+        let result = openai_compatible_messages_json(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_data_file_prompt_part(
+                FileDataContent::Base64("iVBORw0KGgo=".to_string()),
+                "image",
+            ),
+        ])]);
+
+        assert_eq!(
+            result[0]["content"][0],
+            json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": "data:image/png;base64,iVBORw0KGgo="
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_passes_through_url_source_for_top_level_only_image() {
+        let result = openai_compatible_messages_json(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_url_file_prompt_part("https://example.com/x.png", "image"),
+        ])]);
+
+        assert_eq!(
+            result[0]["content"][0],
+            json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": "https://example.com/x.png"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_normalizes_image_wildcard_via_detection() {
+        let result = openai_compatible_messages_json(vec![openai_compatible_user_prompt(vec![
+            openai_compatible_data_file_prompt_part(
+                FileDataContent::Base64("iVBORw0KGgo=".to_string()),
+                "image/*",
+            ),
+        ])]);
+
+        assert_eq!(
+            result[0]["content"][0],
+            json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": "data:image/png;base64,iVBORw0KGgo="
+                }
+            })
+        );
     }
 
     fn openai_compatible_prepare_tools_for_test(
