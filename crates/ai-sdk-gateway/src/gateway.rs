@@ -6291,6 +6291,52 @@ mod tests {
     }
 
     #[test]
+    fn gateway_provider_language_model_handles_model_specification_errors() {
+        let provider = create_gateway(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-key"),
+        );
+
+        let model = provider.language_model("test-model");
+
+        assert_eq!(model.provider(), "gateway");
+        assert_eq!(model.model_id(), "test-model");
+        assert_eq!(model.specification_version(), SpecificationVersion::V4);
+        assert_eq!(gateway_base_url(&model.settings), "https://api.example.com");
+    }
+
+    #[test]
+    fn gateway_provider_language_model_accepts_any_model_id() {
+        let provider = create_gateway(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-key"),
+        );
+
+        let model = provider.language_model("any-model-id");
+
+        assert_eq!(model.provider(), "gateway");
+        assert_eq!(model.model_id(), "any-model-id");
+        assert_eq!(gateway_base_url(&model.settings), "https://api.example.com");
+    }
+
+    #[test]
+    fn gateway_provider_language_model_accepts_non_existent_model_id() {
+        let provider = create_gateway(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-key"),
+        );
+
+        let model = provider.language_model("non-existent-model");
+
+        assert_eq!(model.provider(), "gateway");
+        assert_eq!(model.model_id(), "non-existent-model");
+        assert_eq!(gateway_base_url(&model.settings), "https://api.example.com");
+    }
+
+    #[test]
     fn create_gateway_embedding_model_returns_gateway_embedding_model() {
         let provider =
             create_gateway(GatewayProviderSettings::new().with_base_url("https://api.example.com"));
@@ -7812,6 +7858,68 @@ mod tests {
         assert_eq!(rate_limit_error.status_code(), 429);
         assert_eq!(rate_limit_error.message(), "Rate limit exceeded");
         assert!(rate_limit_error.is_retryable());
+    }
+
+    #[test]
+    fn gateway_provider_metadata_fetch_errors_convert_to_gateway_errors() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                500,
+                "Internal Server Error",
+                json!({
+                    "error": {
+                        "message": "Database connection failed",
+                        "type": "internal_server_error"
+                    }
+                })
+                .to_string(),
+            ))))
+        });
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-key"),
+        )
+        .with_transport(transport);
+
+        let error =
+            poll_ready(provider.get_available_models()).expect_err("metadata request fails");
+        let internal_error = error
+            .as_internal_server()
+            .expect("metadata errors map to Gateway internal server errors");
+
+        assert_eq!(internal_error.name(), "GatewayInternalServerError");
+        assert_eq!(internal_error.message(), "Database connection failed");
+        assert_eq!(internal_error.status_code(), 500);
+    }
+
+    #[test]
+    fn gateway_provider_metadata_gateway_errors_are_not_double_wrapped() {
+        let transport: GatewayTransport = Arc::new(|_request| -> GatewayTransportFuture {
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                401,
+                "Unauthorized",
+                json!({
+                    "error": {
+                        "message": "Invalid token",
+                        "type": "authentication_error"
+                    }
+                })
+                .to_string(),
+            ))))
+        });
+        let provider = GatewayProvider::from_settings(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-key"),
+        )
+        .with_transport(transport);
+
+        let error =
+            poll_ready(provider.get_available_models()).expect_err("metadata request fails");
+
+        assert!(error.as_authentication().is_some());
+        assert!(error.as_response().is_none());
     }
 
     #[test]
