@@ -92,6 +92,10 @@ test-for-test or case-for-case, or explicitly documented as JavaScript-only.
 This is a named upstream-test inventory requirement, not a raw count
 comparison: every original TypeScript test is assumed required, every portable
 case must exist in Rust, and Rust may only add tests on top.
+Read that as a hard no-less-tests rule for future work: EVERY test from the
+original TypeScript package exists in Rust, potentially more Rust tests may be
+added, but never less mapped upstream test coverage than the original
+TypeScript package.
 
 ## Required Parity Ledger
 

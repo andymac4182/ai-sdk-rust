@@ -32,6 +32,11 @@ complete until the full original TypeScript test inventory is represented in
 Rust, test-for-test or case-for-case, or explicitly documented as
 JavaScript-only.
 
+Future iterations must read that literally: EVERY test from the original
+TypeScript package must exist in Rust, Rust may add potentially more tests, but
+there must never be less mapped upstream test coverage than the original
+TypeScript package.
+
 ## Crate Boundary Gate
 
 Full parity requires a strict 1:1 mapping between upstream TypeScript packages
