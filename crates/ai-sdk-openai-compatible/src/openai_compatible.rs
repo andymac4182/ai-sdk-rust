@@ -34,16 +34,19 @@ use ai_sdk_provider::language_model::{
     LanguageModelTool, LanguageModelToolCall, LanguageModelToolChoice, LanguageModelUsage,
     OutputTokenUsage,
 };
-use ai_sdk_provider::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
+use ai_sdk_provider::provider::{
+    ApiCallError, ProviderMetadata, ProviderOptions, SpecificationVersion,
+};
 use ai_sdk_provider::warning::Warning;
 use ai_sdk_provider_utils::{
     ConvertToFormDataOptions, FetchErrorInfo, FormDataInputValue, FormDataValue, GetFromApiOptions,
-    HandledFetchError, InjectJsonInstructionIntoMessagesOptions, ParseJsonResult,
-    PostFormDataToApiOptions, PostJsonToApiOptions, ProviderApiRequest, ProviderApiRequestBody,
-    ProviderApiRequestMethod, ProviderApiResponse, ProviderApiResponseHandlerError,
-    RuntimeEnvironment, StreamingToolCallDelta, StreamingToolCallDeltaFunction,
-    StreamingToolCallTracker, combine_headers, convert_base64_to_bytes, convert_to_base64,
-    convert_to_form_data, create_event_source_response_handler, create_json_error_response_handler,
+    HandledFetchError, InjectJsonInstructionIntoMessagesOptions, JsonErrorResponseHandlerOptions,
+    ParseJsonResult, PostFormDataToApiOptions, PostJsonToApiOptions, ProviderApiRequest,
+    ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
+    ProviderApiResponseHandlerError, ResponseHandlerResult, RuntimeEnvironment,
+    StreamingToolCallDelta, StreamingToolCallDeltaFunction, StreamingToolCallTracker,
+    combine_headers, convert_base64_to_bytes, convert_to_base64, convert_to_form_data,
+    create_event_source_response_handler, create_json_error_response_handler,
     create_json_response_handler, detect_media_type, generate_id, get_from_api,
     inject_json_instruction_into_messages, post_form_data_to_api, post_json_to_api,
     with_user_agent_suffix, without_trailing_slash,
@@ -69,7 +72,47 @@ type OpenAICompatibleCreateStreamMetadataExtractorCallback =
 type OpenAICompatibleProcessStreamMetadataChunkCallback = dyn Fn(&JsonValue) + Send + Sync;
 type OpenAICompatibleBuildStreamMetadataCallback =
     dyn Fn() -> Option<ProviderMetadata> + Send + Sync;
+type OpenAICompatibleErrorToMessageCallback = dyn Fn(&JsonValue) -> Option<String> + Send + Sync;
+type OpenAICompatibleDateProvider = Arc<dyn Fn() -> OffsetDateTime + Send + Sync>;
 type OpenAICompatibleTransformRequestBodyCallback = dyn Fn(JsonValue) -> JsonValue + Send + Sync;
+
+/// Provider-specific error message extraction for OpenAI-compatible providers.
+#[derive(Clone)]
+pub struct OpenAICompatibleErrorToMessage {
+    error_to_message: Arc<OpenAICompatibleErrorToMessageCallback>,
+}
+
+impl OpenAICompatibleErrorToMessage {
+    /// Creates an error message extractor from a parsed JSON error payload.
+    pub fn new<F>(error_to_message: F) -> Self
+    where
+        F: Fn(&JsonValue) -> Option<String> + Send + Sync + 'static,
+    {
+        Self {
+            error_to_message: Arc::new(error_to_message),
+        }
+    }
+
+    fn error_message(&self, error: &JsonValue) -> Option<String> {
+        (self.error_to_message)(error)
+    }
+}
+
+impl fmt::Debug for OpenAICompatibleErrorToMessage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpenAICompatibleErrorToMessage")
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for OpenAICompatibleErrorToMessage {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.error_to_message, &other.error_to_message)
+    }
+}
+
+impl Eq for OpenAICompatibleErrorToMessage {}
 
 /// Chat request body transformer for OpenAI-compatible proxy providers.
 #[derive(Clone)]
@@ -299,6 +342,10 @@ pub struct OpenAICompatibleProviderSettings {
     /// Chat-only metadata extraction callbacks.
     #[serde(skip)]
     pub metadata_extractor: Option<OpenAICompatibleMetadataExtractor>,
+
+    /// Provider-specific error message extraction callback.
+    #[serde(skip)]
+    pub error_to_message: Option<OpenAICompatibleErrorToMessage>,
 }
 
 impl OpenAICompatibleProviderSettings {
@@ -317,6 +364,7 @@ impl OpenAICompatibleProviderSettings {
             user_agent_suffix: None,
             transform_request_body: None,
             metadata_extractor: None,
+            error_to_message: None,
         }
     }
 
@@ -393,6 +441,15 @@ impl OpenAICompatibleProviderSettings {
         metadata_extractor: OpenAICompatibleMetadataExtractor,
     ) -> Self {
         self.metadata_extractor = Some(metadata_extractor);
+        self
+    }
+
+    /// Sets provider-specific error message extraction from parsed JSON error payloads.
+    pub fn with_error_to_message<F>(mut self, error_to_message: F) -> Self
+    where
+        F: Fn(&JsonValue) -> Option<String> + Send + Sync + 'static,
+    {
+        self.error_to_message = Some(OpenAICompatibleErrorToMessage::new(error_to_message));
         self
     }
 }
@@ -495,6 +552,7 @@ impl OpenAICompatibleModelListResponse {
 pub struct OpenAICompatibleProvider {
     settings: OpenAICompatibleProviderSettings,
     transport: OpenAICompatibleTransport,
+    current_date: OpenAICompatibleDateProvider,
 }
 
 impl OpenAICompatibleProvider {
@@ -503,12 +561,22 @@ impl OpenAICompatibleProvider {
         Self {
             settings,
             transport: default_openai_compatible_transport(),
+            current_date: default_openai_compatible_date_provider(),
         }
     }
 
     /// Replaces the HTTP transport. This is primarily useful for tests.
     pub fn with_transport(mut self, transport: OpenAICompatibleTransport) -> Self {
         self.transport = transport;
+        self
+    }
+
+    /// Replaces the response timestamp provider. This is primarily useful for tests.
+    pub fn with_current_date<F>(mut self, current_date: F) -> Self
+    where
+        F: Fn() -> OffsetDateTime + Send + Sync + 'static,
+    {
+        self.current_date = Arc::new(current_date);
         self
     }
 
@@ -521,7 +589,12 @@ impl OpenAICompatibleProvider {
     pub fn chat_model(&self, model_id: impl Into<String>) -> OpenAICompatibleChatLanguageModel {
         OpenAICompatibleChatLanguageModel::new(
             model_id,
-            openai_compatible_model_config("chat", &self.settings, &self.transport),
+            openai_compatible_model_config(
+                "chat",
+                &self.settings,
+                &self.transport,
+                &self.current_date,
+            ),
         )
     }
 
@@ -532,7 +605,12 @@ impl OpenAICompatibleProvider {
     ) -> OpenAICompatibleCompletionLanguageModel {
         OpenAICompatibleCompletionLanguageModel::new(
             model_id,
-            openai_compatible_model_config("completion", &self.settings, &self.transport),
+            openai_compatible_model_config(
+                "completion",
+                &self.settings,
+                &self.transport,
+                &self.current_date,
+            ),
         )
     }
 
@@ -540,7 +618,12 @@ impl OpenAICompatibleProvider {
     pub fn embedding_model(&self, model_id: impl Into<String>) -> OpenAICompatibleEmbeddingModel {
         OpenAICompatibleEmbeddingModel::new(
             model_id,
-            openai_compatible_model_config("embedding", &self.settings, &self.transport),
+            openai_compatible_model_config(
+                "embedding",
+                &self.settings,
+                &self.transport,
+                &self.current_date,
+            ),
         )
     }
 
@@ -556,7 +639,12 @@ impl OpenAICompatibleProvider {
     pub fn image_model(&self, model_id: impl Into<String>) -> OpenAICompatibleImageModel {
         OpenAICompatibleImageModel::new(
             model_id,
-            openai_compatible_model_config("image", &self.settings, &self.transport),
+            openai_compatible_model_config(
+                "image",
+                &self.settings,
+                &self.transport,
+                &self.current_date,
+            ),
         )
     }
 
@@ -586,11 +674,9 @@ impl OpenAICompatibleProvider {
                 .map_err(ProviderApiResponseHandlerError::from)
             },
             |request, response| {
-                Ok(create_json_error_response_handler(
+                Ok(create_openai_compatible_json_error_response_handler(
+                    &self.settings,
                     response.json_error_response_handler_options(request),
-                    clone_json_value,
-                    openai_compatible_error_message,
-                    |_, _| None,
                 ))
             },
         )
@@ -625,11 +711,9 @@ impl OpenAICompatibleProvider {
                 .map_err(ProviderApiResponseHandlerError::from)
             },
             |request, response| {
-                Ok(create_json_error_response_handler(
+                Ok(create_openai_compatible_json_error_response_handler(
+                    &self.settings,
                     response.json_error_response_handler_options(request),
-                    clone_json_value,
-                    openai_compatible_error_message,
-                    |_, _| None,
                 ))
             },
         )
@@ -650,12 +734,14 @@ struct OpenAICompatibleModelConfig {
     provider: String,
     settings: OpenAICompatibleProviderSettings,
     transport: OpenAICompatibleTransport,
+    current_date: OpenAICompatibleDateProvider,
 }
 
 fn openai_compatible_model_config(
     model_type: &str,
     settings: &OpenAICompatibleProviderSettings,
     transport: &OpenAICompatibleTransport,
+    current_date: &OpenAICompatibleDateProvider,
 ) -> OpenAICompatibleModelConfig {
     let provider = settings
         .model_provider_names
@@ -675,6 +761,7 @@ fn openai_compatible_model_config(
         provider,
         settings: model_settings,
         transport: Arc::clone(transport),
+        current_date: Arc::clone(current_date),
     }
 }
 
@@ -761,11 +848,9 @@ impl OpenAICompatibleChatLanguageModel {
                 .map_err(ProviderApiResponseHandlerError::from)
             },
             |request, response| {
-                Ok(create_json_error_response_handler(
+                Ok(create_openai_compatible_json_error_response_handler(
+                    &self.config.settings,
                     response.json_error_response_handler_options(request),
-                    clone_json_value,
-                    openai_compatible_error_message,
-                    |_, _| None,
                 ))
             },
         )
@@ -838,11 +923,9 @@ impl OpenAICompatibleChatLanguageModel {
                 .map_err(|error| ProviderApiResponseHandlerError::other(error.to_string()))
             },
             |request, response| {
-                Ok(create_json_error_response_handler(
+                Ok(create_openai_compatible_json_error_response_handler(
+                    &self.config.settings,
                     response.json_error_response_handler_options(request),
-                    clone_json_value,
-                    openai_compatible_error_message,
-                    |_, _| None,
                 ))
             },
         )
@@ -1094,11 +1177,9 @@ impl OpenAICompatibleCompletionLanguageModel {
                 .map_err(ProviderApiResponseHandlerError::from)
             },
             |request, response| {
-                Ok(create_json_error_response_handler(
+                Ok(create_openai_compatible_json_error_response_handler(
+                    &self.config.settings,
                     response.json_error_response_handler_options(request),
-                    clone_json_value,
-                    openai_compatible_error_message,
-                    |_, _| None,
                 ))
             },
         )
@@ -1167,11 +1248,9 @@ impl OpenAICompatibleCompletionLanguageModel {
                 .map_err(|error| ProviderApiResponseHandlerError::other(error.to_string()))
             },
             |request, response| {
-                Ok(create_json_error_response_handler(
+                Ok(create_openai_compatible_json_error_response_handler(
+                    &self.config.settings,
                     response.json_error_response_handler_options(request),
-                    clone_json_value,
-                    openai_compatible_error_message,
-                    |_, _| None,
                 ))
             },
         )
@@ -1397,11 +1476,9 @@ impl OpenAICompatibleEmbeddingModel {
                 .map_err(ProviderApiResponseHandlerError::from)
             },
             |request, response| {
-                Ok(create_json_error_response_handler(
+                Ok(create_openai_compatible_json_error_response_handler(
+                    &self.config.settings,
                     response.json_error_response_handler_options(request),
-                    clone_json_value,
-                    openai_compatible_error_message,
-                    |_, _| None,
                 ))
             },
         )
@@ -1505,7 +1582,17 @@ impl OpenAICompatibleImageModel {
         &self.config.provider
     }
 
+    /// Returns a copy of this model that uses the supplied timestamp provider.
+    pub fn with_current_date<F>(mut self, current_date: F) -> Self
+    where
+        F: Fn() -> OffsetDateTime + Send + Sync + 'static,
+    {
+        self.config.current_date = Arc::new(current_date);
+        self
+    }
+
     async fn do_generate_result(&self, options: ImageModelCallOptions) -> ImageModelResult {
+        let timestamp = (self.config.current_date)();
         let mut warnings = openai_compatible_image_warnings(&options);
         let provider_options = openai_compatible_image_provider_options(
             &self.config.provider,
@@ -1532,6 +1619,7 @@ impl OpenAICompatibleImageModel {
                     response,
                     response_headers,
                     warnings,
+                    timestamp,
                 )
             }
             Err((error, warnings)) => openai_compatible_image_result_from_error(
@@ -1539,6 +1627,7 @@ impl OpenAICompatibleImageModel {
                 &self.config.settings.name,
                 error,
                 warnings,
+                timestamp,
             ),
         }
     }
@@ -1586,11 +1675,9 @@ impl OpenAICompatibleImageModel {
                 .map_err(ProviderApiResponseHandlerError::from)
             },
             |request, response| {
-                Ok(create_json_error_response_handler(
+                Ok(create_openai_compatible_json_error_response_handler(
+                    &self.config.settings,
                     response.json_error_response_handler_options(request),
-                    clone_json_value,
-                    openai_compatible_error_message,
-                    |_, _| None,
                 ))
             },
         )
@@ -1641,11 +1728,9 @@ impl OpenAICompatibleImageModel {
                 .map_err(ProviderApiResponseHandlerError::from)
             },
             |request, response| {
-                Ok(create_json_error_response_handler(
+                Ok(create_openai_compatible_json_error_response_handler(
+                    &self.config.settings,
                     response.json_error_response_handler_options(request),
-                    clone_json_value,
-                    openai_compatible_error_message,
-                    |_, _| None,
                 ))
             },
         )
@@ -3989,6 +4074,7 @@ fn openai_compatible_image_result_from_response(
     response: OpenAICompatibleImageResponse,
     response_headers: Option<Headers>,
     warnings: Vec<Warning>,
+    timestamp: OffsetDateTime,
 ) -> ImageModelResult {
     let mut result = ImageModelResult::new(
         response
@@ -3996,7 +4082,7 @@ fn openai_compatible_image_result_from_response(
             .into_iter()
             .map(|image| FileDataContent::Base64(image.b64_json))
             .collect(),
-        openai_compatible_image_response_metadata(model_id, response_headers),
+        openai_compatible_image_response_metadata(model_id, response_headers, timestamp),
     );
 
     for warning in warnings {
@@ -4011,6 +4097,7 @@ fn openai_compatible_image_result_from_error(
     provider_name: &str,
     error: HandledFetchError,
     warnings: Vec<Warning>,
+    timestamp: OffsetDateTime,
 ) -> ImageModelResult {
     let (message, headers) = match error {
         HandledFetchError::Original { error } => (error.message().to_string(), None),
@@ -4021,7 +4108,7 @@ fn openai_compatible_image_result_from_error(
     };
     let mut result = ImageModelResult::new(
         Vec::new(),
-        openai_compatible_image_response_metadata(model_id, headers),
+        openai_compatible_image_response_metadata(model_id, headers, timestamp),
     )
     .with_provider_metadata(openai_compatible_image_error_metadata(
         provider_name,
@@ -4038,8 +4125,9 @@ fn openai_compatible_image_result_from_error(
 fn openai_compatible_image_response_metadata(
     model_id: &str,
     headers: Option<Headers>,
+    timestamp: OffsetDateTime,
 ) -> ImageModelResponse {
-    let mut response = ImageModelResponse::new(OffsetDateTime::now_utc(), model_id);
+    let mut response = ImageModelResponse::new(timestamp, model_id);
 
     if let Some(headers) = headers {
         response = with_image_response_headers(response, headers);
@@ -4239,6 +4327,24 @@ fn openai_compatible_error_message(error: &JsonValue) -> String {
         .map_or_else(|| error.to_string(), String::from)
 }
 
+fn create_openai_compatible_json_error_response_handler(
+    settings: &OpenAICompatibleProviderSettings,
+    options: JsonErrorResponseHandlerOptions,
+) -> ResponseHandlerResult<ApiCallError> {
+    let error_to_message = settings.error_to_message.clone();
+    create_json_error_response_handler(
+        options,
+        clone_json_value,
+        move |error| {
+            error_to_message
+                .as_ref()
+                .and_then(|extractor| extractor.error_message(error))
+                .unwrap_or_else(|| openai_compatible_error_message(error))
+        },
+        |_, _| None,
+    )
+}
+
 fn clone_json_value(value: &JsonValue) -> Result<JsonValue, &'static str> {
     Ok(value.clone())
 }
@@ -4338,6 +4444,10 @@ fn default_openai_compatible_transport() -> OpenAICompatibleTransport {
     Arc::new(|request| Box::pin(ready(execute_openai_compatible_request(request))))
 }
 
+fn default_openai_compatible_date_provider() -> OpenAICompatibleDateProvider {
+    Arc::new(OffsetDateTime::now_utc)
+}
+
 fn execute_openai_compatible_request(
     request: ProviderApiRequest,
 ) -> Result<ProviderApiResponse, FetchErrorInfo> {
@@ -4418,7 +4528,7 @@ fn provider_api_response(
 mod tests {
     use super::{
         OpenAICompatibleCompletionLanguageModel, OpenAICompatibleEmbeddingModel,
-        OpenAICompatibleMetadataExtractor, OpenAICompatibleProvider,
+        OpenAICompatibleImageModel, OpenAICompatibleMetadataExtractor, OpenAICompatibleProvider,
         OpenAICompatibleProviderSettings, OpenAICompatibleStreamMetadataExtractor,
         OpenAICompatibleTransport, OpenAICompatibleTransportFuture, create_openai_compatible,
         openai_compatible_prepare_tools, openai_compatible_provider_options_name,
@@ -4441,10 +4551,10 @@ mod tests {
         LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultOutput,
         LanguageModelToolResultPart, LanguageModelUserContentPart, LanguageModelUserMessage,
     };
-    use ai_sdk_provider::provider::{ProviderMetadata, ProviderOptions};
+    use ai_sdk_provider::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
     use ai_sdk_provider::warning::Warning;
     use ai_sdk_provider_utils::{
-        ProviderApiRequest, ProviderApiRequestMethod, ProviderApiResponse,
+        FormData, FormDataValue, ProviderApiRequest, ProviderApiRequestMethod, ProviderApiResponse,
     };
     use serde_json::json;
     use std::future::{Future, ready};
@@ -4848,6 +4958,132 @@ mod tests {
             .and_then(|body| body.as_text().map(str::to_string))
             .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok())
             .expect("request body is JSON")
+    }
+
+    fn openai_compatible_image_response_body(images: &[&str]) -> JsonValue {
+        json!({
+            "data": images
+                .iter()
+                .map(|image| json!({ "b64_json": image }))
+                .collect::<Vec<_>>()
+        })
+    }
+
+    fn openai_compatible_default_image_options() -> ImageModelCallOptions {
+        ImageModelCallOptions::new(1)
+            .with_prompt("A photorealistic astronaut riding a horse")
+            .with_size("1024x1024")
+    }
+
+    fn openai_compatible_image_test_model(
+        response_body: JsonValue,
+        response_headers: Headers,
+    ) -> (
+        OpenAICompatibleImageModel,
+        Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) {
+        openai_compatible_image_test_model_with_settings(
+            OpenAICompatibleProviderSettings::new(
+                "openai-compatible",
+                "https://api.example.com/dall-e-3",
+            )
+            .with_api_key("test-key")
+            .with_model_provider_name("image", "openai-compatible"),
+            "dall-e-3",
+            response_body,
+            response_headers,
+        )
+    }
+
+    fn openai_compatible_image_test_model_without_headers() -> (
+        OpenAICompatibleImageModel,
+        Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) {
+        openai_compatible_image_test_model(
+            openai_compatible_image_response_body(&["test1234", "test5678"]),
+            Headers::new(),
+        )
+    }
+
+    fn openai_compatible_image_test_model_with_settings(
+        settings: OpenAICompatibleProviderSettings,
+        model_id: &str,
+        response_body: JsonValue,
+        response_headers: Headers,
+    ) -> (
+        OpenAICompatibleImageModel,
+        Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+                let response_body = response_body.clone();
+                let response_headers = response_headers.clone();
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    response_body.to_string(),
+                )
+                .with_headers(response_headers))))
+            });
+        let model = OpenAICompatibleProvider::from_settings(settings)
+            .with_transport(transport)
+            .image_model(model_id);
+
+        (model, captured_request)
+    }
+
+    fn openai_compatible_image_error_model(
+        settings: OpenAICompatibleProviderSettings,
+        status: u16,
+        status_text: &'static str,
+        response_body: JsonValue,
+    ) -> OpenAICompatibleImageModel {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |_request| -> OpenAICompatibleTransportFuture {
+                let response_body = response_body.clone();
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    status,
+                    status_text,
+                    response_body.to_string(),
+                ))))
+            });
+
+        OpenAICompatibleProvider::from_settings(settings)
+            .with_transport(transport)
+            .image_model("dall-e-3")
+    }
+
+    fn captured_openai_compatible_image_request_body(
+        captured_request: &Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) -> JsonValue {
+        captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .and_then(|body| body.as_text().map(str::to_string))
+            .and_then(|body| serde_json::from_str::<JsonValue>(&body).ok())
+            .expect("request body is JSON")
+    }
+
+    fn captured_openai_compatible_image_form_data(
+        captured_request: &Arc<Mutex<Option<ProviderApiRequest>>>,
+    ) -> FormData {
+        captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .body
+            .and_then(|body| body.as_form_data().cloned())
+            .expect("request body is form data")
     }
 
     fn openai_compatible_embedding_test_values() -> Vec<String> {
@@ -6918,6 +7154,585 @@ mod tests {
             .clone()
             .expect("request is captured");
         assert_request_tracks_abort_signal(&request, &abort_controller);
+    }
+
+    #[test]
+    fn openai_compatible_image_constructor_exposes_provider_and_model_information() {
+        let (model, _captured_request) = openai_compatible_image_test_model_without_headers();
+
+        assert_eq!(model.provider(), "openai-compatible");
+        assert_eq!(model.model_id(), "dall-e-3");
+        assert_eq!(model.specification_version(), SpecificationVersion::V4);
+        assert_eq!(poll_ready(model.max_images_per_call()), Some(10));
+    }
+
+    #[test]
+    fn openai_compatible_image_generate_passes_correct_parameters() {
+        let (model, captured_request) = openai_compatible_image_test_model_without_headers();
+        let provider_options = test_provider_options(json!({
+            "openaiCompatible": {
+                "quality": "hd"
+            }
+        }));
+
+        let result = poll_ready(
+            model.do_generate(
+                openai_compatible_default_image_options()
+                    .with_provider_options(provider_options)
+                    .with_header("ignored", "false"),
+            ),
+        );
+
+        assert_eq!(result.images.len(), 2);
+        assert_eq!(
+            captured_openai_compatible_image_request_body(&captured_request),
+            json!({
+                "model": "dall-e-3",
+                "prompt": "A photorealistic astronaut riding a horse",
+                "n": 1,
+                "size": "1024x1024",
+                "quality": "hd",
+                "response_format": "b64_json"
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_image_uses_provider_name_from_config_for_provider_options_key() {
+        let (model, captured_request) = openai_compatible_image_test_model_with_settings(
+            OpenAICompatibleProviderSettings::new("recraft", "https://external.api.recraft.ai/v1")
+                .with_api_key("test-key")
+                .with_model_provider_name("image", "recraft.image"),
+            "recraft-v3",
+            openai_compatible_image_response_body(&["recraft-test-image"]),
+            Headers::new(),
+        );
+        let provider_options = test_provider_options(json!({
+            "recraft": {
+                "style": "vector_illustration"
+            }
+        }));
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A beautiful sunset")
+                    .with_size("1024x1024")
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        assert_eq!(
+            result.images,
+            vec![FileDataContent::Base64("recraft-test-image".to_string())]
+        );
+        assert_eq!(
+            captured_openai_compatible_image_request_body(&captured_request),
+            json!({
+                "model": "recraft-v3",
+                "prompt": "A beautiful sunset",
+                "n": 1,
+                "size": "1024x1024",
+                "style": "vector_illustration",
+                "response_format": "b64_json"
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_image_emits_deprecated_warning_for_raw_hyphenated_provider_options_key() {
+        let (model, _captured_request) = openai_compatible_image_test_model_with_settings(
+            OpenAICompatibleProviderSettings::new(
+                "black-forest-labs",
+                "https://api.example.com/dall-e-3",
+            )
+            .with_api_key("test-key")
+            .with_model_provider_name("image", "black-forest-labs.image"),
+            "dall-e-3",
+            openai_compatible_image_response_body(&["test1234"]),
+            Headers::new(),
+        );
+        let provider_options = test_provider_options(json!({
+            "black-forest-labs": {
+                "quality": "hd"
+            }
+        }));
+
+        let result = poll_ready(model.do_generate(
+            openai_compatible_default_image_options().with_provider_options(provider_options),
+        ));
+
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Deprecated {
+                setting: "providerOptions key 'black-forest-labs'".to_string(),
+                message: "Use 'blackForestLabs' instead.".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn openai_compatible_image_does_not_warn_for_camel_case_provider_options_key() {
+        let (model, _captured_request) = openai_compatible_image_test_model_with_settings(
+            OpenAICompatibleProviderSettings::new(
+                "black-forest-labs",
+                "https://api.example.com/dall-e-3",
+            )
+            .with_api_key("test-key")
+            .with_model_provider_name("image", "black-forest-labs.image"),
+            "dall-e-3",
+            openai_compatible_image_response_body(&["test1234"]),
+            Headers::new(),
+        );
+        let provider_options = test_provider_options(json!({
+            "blackForestLabs": {
+                "quality": "hd"
+            }
+        }));
+
+        let result = poll_ready(model.do_generate(
+            openai_compatible_default_image_options().with_provider_options(provider_options),
+        ));
+
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_compatible_image_adds_warnings_for_unsupported_settings() {
+        let (model, _captured_request) = openai_compatible_image_test_model_without_headers();
+
+        let result = poll_ready(
+            model.do_generate(
+                openai_compatible_default_image_options()
+                    .with_aspect_ratio("16:9")
+                    .with_seed(123),
+            ),
+        );
+
+        assert_eq!(
+            result.warnings,
+            vec![
+                Warning::Unsupported {
+                    feature: "aspectRatio".to_string(),
+                    details: Some(
+                        "This model does not support aspect ratio. Use `size` instead.".to_string()
+                    )
+                },
+                Warning::Unsupported {
+                    feature: "seed".to_string(),
+                    details: None
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn openai_compatible_image_passes_headers() {
+        let (model, captured_request) = openai_compatible_image_test_model_with_settings(
+            OpenAICompatibleProviderSettings::new(
+                "openai-compatible",
+                "https://api.example.com/dall-e-3",
+            )
+            .with_header("Custom-Provider-Header", "provider-header-value")
+            .with_model_provider_name("image", "openai-compatible"),
+            "dall-e-3",
+            openai_compatible_image_response_body(&["test1234"]),
+            Headers::new(),
+        );
+
+        poll_ready(
+            model.do_generate(
+                openai_compatible_default_image_options()
+                    .with_header("Custom-Request-Header", "request-header-value"),
+            ),
+        );
+
+        let headers = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured")
+            .headers;
+        assert_eq!(
+            headers.get("custom-provider-header").map(String::as_str),
+            Some("provider-header-value")
+        );
+        assert_eq!(
+            headers.get("custom-request-header").map(String::as_str),
+            Some("request-header-value")
+        );
+        assert_eq!(
+            headers.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+    }
+
+    #[test]
+    fn openai_compatible_image_handles_api_errors_with_custom_error_structure() {
+        let model = openai_compatible_image_error_model(
+            OpenAICompatibleProviderSettings::new(
+                "openai-compatible",
+                "https://api.example.com/dall-e-3",
+            )
+            .with_api_key("test-key")
+            .with_model_provider_name("image", "openai-compatible")
+            .with_error_to_message(|error| {
+                let details = error.get("details")?;
+                let code = details.get("errorCode")?.as_u64()?;
+                let message = details.get("errorMessage")?.as_str()?;
+                Some(format!("Error {code}: {message}"))
+            }),
+            400,
+            "Bad Request",
+            json!({
+                "status": "error",
+                "details": {
+                    "errorMessage": "Custom provider error format",
+                    "errorCode": 1234
+                }
+            }),
+        );
+
+        let result = poll_ready(model.do_generate(openai_compatible_default_image_options()));
+
+        assert!(result.images.is_empty());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("openai-compatible"))
+                .map(|metadata| &metadata.extra)
+                .and_then(|extra| extra.get("errorMessage"))
+                .and_then(JsonValue::as_str),
+            Some("Error 1234: Custom provider error format")
+        );
+    }
+
+    #[test]
+    fn openai_compatible_image_handles_api_errors_with_default_error_structure() {
+        let model = openai_compatible_image_error_model(
+            OpenAICompatibleProviderSettings::new(
+                "openai-compatible",
+                "https://api.example.com/dall-e-3",
+            )
+            .with_api_key("test-key")
+            .with_model_provider_name("image", "openai-compatible"),
+            400,
+            "Bad Request",
+            json!({
+                "error": {
+                    "message": "Invalid prompt content",
+                    "type": "invalid_request_error",
+                    "param": null,
+                    "code": null
+                }
+            }),
+        );
+
+        let result = poll_ready(model.do_generate(openai_compatible_default_image_options()));
+
+        assert!(result.images.is_empty());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("openai-compatible"))
+                .map(|metadata| &metadata.extra)
+                .and_then(|extra| extra.get("errorMessage"))
+                .and_then(JsonValue::as_str),
+            Some("Invalid prompt content")
+        );
+    }
+
+    #[test]
+    fn openai_compatible_image_returns_raw_b64_json_content() {
+        let (model, _captured_request) = openai_compatible_image_test_model_without_headers();
+
+        let result = poll_ready(model.do_generate(openai_compatible_default_image_options()));
+
+        assert_eq!(
+            result.images,
+            vec![
+                FileDataContent::Base64("test1234".to_string()),
+                FileDataContent::Base64("test5678".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn openai_compatible_image_response_metadata_includes_timestamp_headers_and_model_id() {
+        let test_date =
+            time::OffsetDateTime::from_unix_timestamp(1_704_067_200).expect("timestamp is valid");
+        let mut headers = Headers::new();
+        headers.insert("x-response-id".to_string(), "response-1".to_string());
+        let (model, _captured_request) = openai_compatible_image_test_model(
+            openai_compatible_image_response_body(&["test1234"]),
+            headers,
+        );
+        let model = model.with_current_date(move || test_date);
+
+        let result = poll_ready(model.do_generate(openai_compatible_default_image_options()));
+
+        assert_eq!(result.response.timestamp, test_date);
+        assert_eq!(result.response.model_id, "dall-e-3");
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-response-id"))
+                .map(String::as_str),
+            Some("response-1")
+        );
+    }
+
+    #[test]
+    fn openai_compatible_image_uses_real_date_when_no_custom_date_provider_is_specified() {
+        let before_date = time::OffsetDateTime::now_utc();
+        let (model, _captured_request) = openai_compatible_image_test_model_without_headers();
+
+        let result = poll_ready(model.do_generate(openai_compatible_default_image_options()));
+        let after_date = time::OffsetDateTime::now_utc();
+
+        assert!(result.response.timestamp >= before_date);
+        assert!(result.response.timestamp <= after_date);
+        assert_eq!(result.response.model_id, "dall-e-3");
+    }
+
+    #[test]
+    fn openai_compatible_image_passes_user_setting_in_request() {
+        let (model, captured_request) = openai_compatible_image_test_model_without_headers();
+        let provider_options = test_provider_options(json!({
+            "openaiCompatible": {
+                "user": "test-user-id"
+            }
+        }));
+
+        poll_ready(model.do_generate(
+            openai_compatible_default_image_options().with_provider_options(provider_options),
+        ));
+
+        assert_eq!(
+            captured_openai_compatible_image_request_body(&captured_request),
+            json!({
+                "model": "dall-e-3",
+                "prompt": "A photorealistic astronaut riding a horse",
+                "n": 1,
+                "size": "1024x1024",
+                "user": "test-user-id",
+                "response_format": "b64_json"
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_image_omits_user_field_when_not_set_via_provider_options() {
+        let (model, captured_request) = openai_compatible_image_test_model_without_headers();
+        let provider_options = test_provider_options(json!({
+            "openaiCompatible": {}
+        }));
+
+        poll_ready(model.do_generate(
+            openai_compatible_default_image_options().with_provider_options(provider_options),
+        ));
+
+        let request_body = captured_openai_compatible_image_request_body(&captured_request);
+        assert_eq!(
+            request_body,
+            json!({
+                "model": "dall-e-3",
+                "prompt": "A photorealistic astronaut riding a horse",
+                "n": 1,
+                "size": "1024x1024",
+                "response_format": "b64_json"
+            })
+        );
+        assert!(request_body.get("user").is_none());
+    }
+
+    #[test]
+    fn openai_compatible_image_edit_sends_request_with_files() {
+        let (model, captured_request) = openai_compatible_image_test_model(
+            openai_compatible_image_response_body(&["edited-image-base64"]),
+            Headers::new(),
+        );
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Turn the cat into a dog")
+                    .with_size("1024x1024")
+                    .with_files(vec![ImageModelFile::file(
+                        "image/png",
+                        FileDataContent::Bytes(vec![137, 80, 78, 71]),
+                    )]),
+            ),
+        );
+
+        assert_eq!(
+            result.images,
+            vec![FileDataContent::Base64("edited-image-base64".to_string())]
+        );
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.url, "https://api.example.com/dall-e-3/images/edits");
+        assert_eq!(
+            captured_openai_compatible_image_form_data(&captured_request).get_all("image"),
+            vec![&FormDataValue::Bytes {
+                value: vec![137, 80, 78, 71]
+            }]
+        );
+    }
+
+    #[test]
+    fn openai_compatible_image_edit_sends_request_with_files_and_mask() {
+        let (model, captured_request) = openai_compatible_image_test_model(
+            openai_compatible_image_response_body(&["edited-image-base64"]),
+            Headers::new(),
+        );
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Add a flamingo to the pool")
+                    .with_size("1024x1024")
+                    .with_files(vec![ImageModelFile::file(
+                        "image/png",
+                        FileDataContent::Bytes(vec![137, 80, 78, 71]),
+                    )])
+                    .with_mask(ImageModelFile::file(
+                        "image/png",
+                        FileDataContent::Bytes(vec![137, 80, 78, 71]),
+                    )),
+            ),
+        );
+
+        assert_eq!(
+            result.images,
+            vec![FileDataContent::Base64("edited-image-base64".to_string())]
+        );
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.url, "https://api.example.com/dall-e-3/images/edits");
+        let form_data = captured_openai_compatible_image_form_data(&captured_request);
+        assert_eq!(form_data.get_all("image").len(), 1);
+        assert_eq!(
+            form_data.get("mask"),
+            Some(&FormDataValue::Bytes {
+                value: vec![137, 80, 78, 71]
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_image_edit_sends_request_with_uint8_array_data() {
+        let (model, captured_request) = openai_compatible_image_test_model(
+            openai_compatible_image_response_body(&["edited-image-base64"]),
+            Headers::new(),
+        );
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Edit this image")
+                    .with_size("1024x1024")
+                    .with_files(vec![ImageModelFile::file(
+                        "image/png",
+                        FileDataContent::Bytes(vec![104, 101, 108, 108, 111]),
+                    )]),
+            ),
+        );
+
+        assert_eq!(
+            result.images,
+            vec![FileDataContent::Base64("edited-image-base64".to_string())]
+        );
+        assert_eq!(
+            captured_openai_compatible_image_form_data(&captured_request).get("image"),
+            Some(&FormDataValue::Bytes {
+                value: vec![104, 101, 108, 108, 111]
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_image_edit_sends_request_with_multiple_images() {
+        let (model, captured_request) = openai_compatible_image_test_model(
+            openai_compatible_image_response_body(&["edited-image-base64"]),
+            Headers::new(),
+        );
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Combine these images")
+                    .with_size("1024x1024")
+                    .with_files(vec![
+                        ImageModelFile::file(
+                            "image/png",
+                            FileDataContent::Bytes(vec![137, 80, 78, 71]),
+                        ),
+                        ImageModelFile::file(
+                            "image/png",
+                            FileDataContent::Bytes(vec![137, 80, 78, 71]),
+                        ),
+                    ]),
+            ),
+        );
+
+        assert_eq!(
+            result.images,
+            vec![FileDataContent::Base64("edited-image-base64".to_string())]
+        );
+        assert_eq!(
+            captured_openai_compatible_image_form_data(&captured_request)
+                .get_all("image[]")
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn openai_compatible_image_edit_response_metadata_includes_timestamp_headers_and_model_id() {
+        let test_date =
+            time::OffsetDateTime::from_unix_timestamp(1_704_067_200).expect("timestamp is valid");
+        let mut headers = Headers::new();
+        headers.insert("x-response-id".to_string(), "edit-response-1".to_string());
+        let (model, _captured_request) = openai_compatible_image_test_model(
+            openai_compatible_image_response_body(&["edited-image-base64"]),
+            headers,
+        );
+        let model = model.with_current_date(move || test_date);
+
+        let result = poll_ready(
+            model.do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Edit this image")
+                    .with_size("1024x1024")
+                    .with_files(vec![ImageModelFile::file(
+                        "image/png",
+                        FileDataContent::Bytes(vec![137, 80, 78, 71]),
+                    )]),
+            ),
+        );
+
+        assert_eq!(result.response.timestamp, test_date);
+        assert_eq!(result.response.model_id, "dall-e-3");
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-response-id"))
+                .map(String::as_str),
+            Some("edit-response-1")
+        );
     }
 
     #[test]
