@@ -7748,6 +7748,17 @@ mod tests {
         body: JsonValue,
         options: LanguageModelCallOptions,
     ) -> LanguageModelGenerateResult {
+        open_responses_generate_result_from_body_with_provider_options(
+            "openai", model_id, body, options,
+        )
+    }
+
+    fn open_responses_generate_result_from_body_with_provider_options(
+        provider_name: &str,
+        model_id: &str,
+        body: JsonValue,
+        options: LanguageModelCallOptions,
+    ) -> LanguageModelGenerateResult {
         let transport: OpenResponsesTransport =
             Arc::new(move |_request| -> OpenResponsesTransportFuture {
                 Box::pin(ready(Ok(ProviderApiResponse::text(
@@ -7757,8 +7768,11 @@ mod tests {
                 ))))
             });
         let provider = create_open_responses(
-            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
-                .with_api_key("test-api-key"),
+            OpenResponsesProviderSettings::new(
+                provider_name,
+                format!("https://api.{provider_name}.test/v1/responses"),
+            )
+            .with_api_key("test-api-key"),
         )
         .with_transport(transport);
         let model = provider.language_model(model_id);
@@ -18926,6 +18940,107 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_uses_azure_metadata_key_for_text_result() {
+        let result = open_responses_generate_result_from_body_with_provider_options(
+            "azure",
+            "gpt-4o",
+            json!({
+                "id": "resp_provider_metadata_azure",
+                "object": "response",
+                "created_at": 1234567890,
+                "status": "completed",
+                "error": null,
+                "incomplete_details": null,
+                "input": [],
+                "instructions": null,
+                "max_output_tokens": null,
+                "model": "gpt-4o",
+                "parallel_tool_calls": true,
+                "previous_response_id": null,
+                "reasoning": {
+                    "effort": null,
+                    "summary": null
+                },
+                "store": true,
+                "temperature": 0,
+                "text": {
+                    "format": {
+                        "type": "text"
+                    }
+                },
+                "tool_choice": "auto",
+                "tools": [],
+                "top_p": 1,
+                "truncation": "disabled",
+                "usage": {
+                    "input_tokens": 10,
+                    "input_tokens_details": {
+                        "cached_tokens": 0
+                    },
+                    "output_tokens": 5,
+                    "output_tokens_details": {
+                        "reasoning_tokens": 0
+                    },
+                    "total_tokens": 15
+                },
+                "user": null,
+                "metadata": {},
+                "output": [
+                    {
+                        "id": "msg_azure_text",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "Hello from Azure!",
+                                "annotations": []
+                            }
+                        ]
+                    }
+                ]
+            }),
+            LanguageModelCallOptions::new(open_responses_hello_prompt()),
+        );
+
+        assert!(result.provider_metadata.as_ref().is_some_and(|metadata| {
+            metadata.contains_key("azure") && !metadata.contains_key("openai")
+        }));
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("azure"))
+                .and_then(|metadata| metadata.get("responseId"))
+                .and_then(JsonValue::as_str),
+            Some("resp_provider_metadata_azure")
+        );
+        let text = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::Text(text) => Some(text),
+                _ => None,
+            })
+            .expect("content includes Azure text part");
+        assert_eq!(text.text, "Hello from Azure!");
+        assert_eq!(
+            text.provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("azure"))
+                .and_then(|metadata| metadata.get("itemId"))
+                .and_then(JsonValue::as_str),
+            Some("msg_azure_text")
+        );
+        assert!(
+            text.provider_metadata
+                .as_ref()
+                .is_some_and(|metadata| !metadata.contains_key("openai"))
+        );
+    }
+
+    #[test]
     fn open_responses_provider_uses_openai_metadata_key_for_text_result() {
         let result = open_responses_generate_result_from_body(
             "gpt-4o",
@@ -25710,6 +25825,7 @@ mod tests {
         let result = poll_ready(model.do_generate(options));
 
         assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert!(result.warnings.is_empty());
         captured_open_responses_request_body(&captured_request)
     }
 
