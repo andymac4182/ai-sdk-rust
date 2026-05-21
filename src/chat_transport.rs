@@ -3558,6 +3558,62 @@ mod tests {
     }
 
     #[test]
+    fn convert_ui_messages_maps_dynamic_tool_with_trailing_user_message() {
+        let messages = convert_ui_messages_to_model_messages_with_options(
+            &[
+                UiMessage::new("msg-1", UiMessageRole::Assistant)
+                    .with_part(json!({ "type": "step-start" }))
+                    .with_part(json!({
+                        "type": "dynamic-tool",
+                        "toolName": "screenshot",
+                        "state": "output-available",
+                        "toolCallId": "call-1",
+                        "input": { "value": "value-1" },
+                        "output": "result-1"
+                    })),
+                UiMessage::new("msg-2", UiMessageRole::User)
+                    .with_part(json!({ "type": "text", "text": "Thanks!" })),
+            ],
+            ConvertUiMessagesToModelMessagesOptions::new().with_ignore_incomplete_tool_calls(true),
+        )
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-1",
+                            "toolName": "screenshot",
+                            "input": { "value": "value-1" }
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-1",
+                            "toolName": "screenshot",
+                            "output": { "type": "text", "value": "result-1" }
+                        }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "Thanks!" }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn convert_ui_messages_preserves_step_start_blocks_as_assistant_tool_pairs() {
         let messages = convert_ui_messages_to_model_messages(&[UiMessage::new(
             "msg-1",
@@ -3630,6 +3686,77 @@ mod tests {
                             "toolName": "calculator",
                             "output": { "type": "text", "value": "3" }
                         }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_ui_messages_maps_provider_executed_dynamic_tool_with_trailing_user_message() {
+        let messages = convert_ui_messages_to_model_messages_with_options(
+            &[
+                UiMessage::new("msg-1", UiMessageRole::Assistant)
+                    .with_part(json!({ "type": "step-start" }))
+                    .with_part(json!({
+                        "type": "dynamic-tool",
+                        "toolName": "screenshot",
+                        "state": "output-available",
+                        "toolCallId": "call-1",
+                        "input": { "value": "value-1" },
+                        "output": "result-1",
+                        "providerExecuted": true,
+                        "callProviderMetadata": {
+                            "test-provider": {
+                                "key-a": "test-value-1",
+                                "key-b": "test-value-2"
+                            }
+                        }
+                    })),
+                UiMessage::new("msg-2", UiMessageRole::User)
+                    .with_part(json!({ "type": "text", "text": "Thanks!" })),
+            ],
+            ConvertUiMessagesToModelMessagesOptions::new().with_ignore_incomplete_tool_calls(true),
+        )
+        .expect("messages convert");
+
+        assert_eq!(
+            serde_json::to_value(messages).expect("messages serialize"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call-1",
+                            "toolName": "screenshot",
+                            "input": { "value": "value-1" },
+                            "providerExecuted": true,
+                            "providerOptions": {
+                                "test-provider": {
+                                    "key-a": "test-value-1",
+                                    "key-b": "test-value-2"
+                                }
+                            }
+                        },
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "call-1",
+                            "toolName": "screenshot",
+                            "output": { "type": "text", "value": "result-1" },
+                            "providerOptions": {
+                                "test-provider": {
+                                    "key-a": "test-value-1",
+                                    "key-b": "test-value-2"
+                                }
+                            }
+                        }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "Thanks!" }
                     ]
                 }
             ])
@@ -4134,28 +4261,31 @@ mod tests {
 
     #[test]
     fn convert_ui_messages_marks_provider_executed_denied_approval_response() {
-        let messages = convert_ui_messages_to_model_messages(&[
-            UiMessage::new("msg-1", UiMessageRole::Assistant)
-                .with_part(json!({ "type": "step-start" }))
-                .with_part(json!({
-                    "type": "dynamic-tool",
-                    "toolName": "screenshot",
-                    "state": "approval-responded",
-                    "toolCallId": "call-1",
-                    "input": { "value": "value-1" },
-                    "providerExecuted": true,
-                    "callProviderMetadata": {
-                        "test-provider": { "key-a": "test-value-1" }
-                    },
-                    "approval": {
-                        "id": "approval-1",
-                        "approved": false,
-                        "reason": "User denied the request"
-                    }
-                })),
-            UiMessage::new("msg-2", UiMessageRole::User)
-                .with_part(json!({ "type": "text", "text": "Thanks!" })),
-        ])
+        let messages = convert_ui_messages_to_model_messages_with_options(
+            &[
+                UiMessage::new("msg-1", UiMessageRole::Assistant)
+                    .with_part(json!({ "type": "step-start" }))
+                    .with_part(json!({
+                        "type": "dynamic-tool",
+                        "toolName": "screenshot",
+                        "state": "approval-responded",
+                        "toolCallId": "call-1",
+                        "input": { "value": "value-1" },
+                        "providerExecuted": true,
+                        "callProviderMetadata": {
+                            "test-provider": { "key-a": "test-value-1" }
+                        },
+                        "approval": {
+                            "id": "approval-1",
+                            "approved": false,
+                            "reason": "User denied the request"
+                        }
+                    })),
+                UiMessage::new("msg-2", UiMessageRole::User)
+                    .with_part(json!({ "type": "text", "text": "Thanks!" })),
+            ],
+            ConvertUiMessagesToModelMessagesOptions::new().with_ignore_incomplete_tool_calls(true),
+        )
         .expect("messages convert");
 
         assert_eq!(
