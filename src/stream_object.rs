@@ -483,6 +483,38 @@ pub struct StreamObjectResult {
 }
 
 impl StreamObjectResult {
+    /// Deserializes the final object into a caller-provided Rust type.
+    pub fn object_as<T>(&self) -> Result<Option<T>, serde_json::Error>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        self.object.clone().map(serde_json::from_value).transpose()
+    }
+
+    /// Deserializes partial object stream entries into a caller-provided Rust type.
+    pub fn partial_objects_as<T>(&self) -> Result<Vec<T>, serde_json::Error>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        self.partial_object_stream
+            .iter()
+            .cloned()
+            .map(serde_json::from_value)
+            .collect()
+    }
+
+    /// Deserializes array output elements into a caller-provided Rust type.
+    pub fn elements_as<T>(&self) -> Result<Vec<T>, serde_json::Error>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        self.element_stream
+            .iter()
+            .cloned()
+            .map(serde_json::from_value)
+            .collect()
+    }
+
     /// Creates a text-stream response from the collected object text stream.
     pub fn to_text_stream_response(&self, init: TextStreamResponseInit) -> TextStreamResponse {
         create_text_stream_response(TextStreamResponseOptions::from_init(
@@ -1316,6 +1348,28 @@ mod tests {
         })
     }
 
+    fn number_schema() -> Schema {
+        json_schema(
+            serde_json::from_value::<JsonSchema>(json!({
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "properties": {
+                    "number": { "type": "number" }
+                },
+                "required": ["number"],
+                "additionalProperties": false
+            }))
+            .expect("schema should be an object"),
+        )
+        .with_validator(|value| {
+            if value.get("number").is_some_and(JsonValue::is_number) {
+                ValidationResult::success(value.clone())
+            } else {
+                ValidationResult::failure("number must be numeric")
+            }
+        })
+    }
+
     fn enum_response_schema(enum_values: &[&str]) -> JsonSchema {
         serde_json::from_value(json!({
             "$schema": "http://json-schema.org/draft-07/schema#",
@@ -1330,6 +1384,16 @@ mod tests {
             "additionalProperties": false,
         }))
         .expect("enum response schema is a JSON object")
+    }
+
+    #[derive(Debug, serde::Deserialize, PartialEq)]
+    struct NumberObject {
+        number: u64,
+    }
+
+    #[derive(Debug, serde::Deserialize, PartialEq)]
+    struct ContentObject {
+        content: String,
     }
 
     fn object_stream() -> Vec<LanguageModelStreamPart> {
@@ -2141,6 +2205,151 @@ mod tests {
 
         assert_eq!(result.object, Some(json!({"content": "Hello, world!"})));
         assert_eq!(result.finish_reason, FinishReason::Stop);
+    }
+
+    #[test]
+    fn stream_object_type_counterpart_finish_reason_property_has_finish_reason_type() {
+        let model = MockLanguageModel::new()
+            .with_stream_result(LanguageModelStreamResult::new(object_stream()));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
+        let finish_reason: FinishReason = result.finish_reason.clone();
+
+        assert_eq!(finish_reason, FinishReason::Stop);
+    }
+
+    #[test]
+    fn stream_object_type_counterpart_supports_schema_types() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "{\"number\":42}",
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(number_schema()),
+        ));
+        let object: Option<NumberObject> = result.object_as().expect("object is typed");
+
+        assert_eq!(object, Some(NumberObject { number: 42 }));
+    }
+
+    #[test]
+    fn stream_object_type_counterpart_supports_no_schema_output_mode() {
+        let model = MockLanguageModel::new()
+            .with_stream_result(LanguageModelStreamResult::new(object_stream()));
+
+        let result = poll_ready(stream_object(StreamObjectOptions::new(&model, prompt())));
+        let object: Option<JsonValue> = result.object_as().expect("object is JSON");
+
+        assert_eq!(object, Some(json!({"content": "Hello, world!"})));
+    }
+
+    #[test]
+    fn stream_object_type_counterpart_supports_enum_types() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "{\"result\":\"green\"}",
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_enum_values(["red", "green"]),
+        ));
+        let object: Option<String> = result.object_as().expect("enum object is typed");
+        let partials: Vec<String> = result
+            .partial_objects_as()
+            .expect("enum partials are typed");
+
+        assert_eq!(object, Some("green".to_string()));
+        assert_eq!(partials, vec!["green".to_string()]);
+    }
+
+    #[test]
+    fn stream_object_type_counterpart_supports_array_output_mode() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "{\"elements\":[",
+                )),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "{\"content\":\"one\"},",
+                )),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "{\"content\":\"two\"}",
+                )),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "]}")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_array_schema(answer_schema()),
+        ));
+        let object: Option<Vec<ContentObject>> = result.object_as().expect("array is typed");
+        let partials: Vec<Vec<ContentObject>> = result
+            .partial_objects_as()
+            .expect("array partials are typed");
+        let elements: Vec<ContentObject> = result.elements_as().expect("elements are typed");
+
+        assert_eq!(
+            object,
+            Some(vec![
+                ContentObject {
+                    content: "one".to_string()
+                },
+                ContentObject {
+                    content: "two".to_string()
+                }
+            ])
+        );
+        assert_eq!(
+            partials,
+            vec![
+                vec![],
+                vec![ContentObject {
+                    content: "one".to_string()
+                }],
+                vec![
+                    ContentObject {
+                        content: "one".to_string()
+                    },
+                    ContentObject {
+                        content: "two".to_string()
+                    }
+                ]
+            ]
+        );
+        assert_eq!(
+            elements,
+            vec![
+                ContentObject {
+                    content: "one".to_string()
+                },
+                ContentObject {
+                    content: "two".to_string()
+                }
+            ]
+        );
     }
 
     #[test]
