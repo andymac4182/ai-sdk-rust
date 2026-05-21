@@ -11,6 +11,10 @@ Rust-specific failures, but it must never have fewer mapped original TypeScript
 tests. A package with even one missing portable upstream test/case is not
 parity-complete.
 
+Handoff note for future iterations: EVERY test from the original TypeScript
+package must exist in Rust. Rust can have potentially more tests, but never
+less mapped original upstream test coverage.
+
 Future-iteration test note: the matching Rust crate must contain EVERY portable
 test/case from the original TypeScript package as a named Rust counterpart.
 Rust may include potentially more tests for Rust-specific proof, but never
