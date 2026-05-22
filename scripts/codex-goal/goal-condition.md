@@ -18,6 +18,11 @@ First build/update `docs/upstream-parity.md`: record upstream commit/package
 inventory, every provider package, every core/helper/library package, public
 APIs, examples, tests, and feature status. Do not mark the goal complete while
 any ledger row is unported, unverified, or undocumented. Re-scan upstream often.
+Maintain `docs/package-progress-estimates.tsv` for every package you touch while
+it remains `in-progress`, then run
+`scripts/package-progress-table.sh >/tmp/ai-sdk-rust-package-progress.md` and
+use that generated table for progress reporting. Do not hand-maintain package
+progress summaries; keep the ledger and estimate TSV current.
 
 Non-negotiable test floor: EVERY portable original upstream TypeScript test/case
 must exist as an equivalent Rust test in the matching 1:1 crate. Rust may add
@@ -100,10 +105,12 @@ receiver or a local collector, and once root telemetry wiring exists pair
 provider live tests with that telemetry export assertion.
 
 Work in coherent slices. For each slice: rebase on latest main, implement,
-test, update the parity ledger, commit, then merge yourself back to `main`
-using the serialized `/tmp/ai-sdk-rust-main-merge.lock` protocol in the full
-brief, validate again on `main`, and push `main`. Repeat until the parity
-ledger proves full upstream coverage or a real blocker appears.
+test, update the parity ledger and package progress estimates, run the package
+progress table generator, commit, then merge yourself back to `main` using the
+serialized `/tmp/ai-sdk-rust-main-merge.lock` protocol in the full brief,
+validate again on `main`, and push `main`. Repeat until the parity ledger and
+generated progress table prove full upstream coverage or a real blocker
+appears.
 
 Use Codex agent/team/background-worker features if available to parallelize
 upstream research, ledger updates, implementation, and verification. Integrate
@@ -111,5 +118,6 @@ the work yourself before committing.
 
 Run the strongest available gates: `cargo fmt --all --check`, `cargo clippy
 --all-targets --all-features -- -D warnings`, `scripts/check-naming-conventions.sh`,
-and `cargo test --all-features`. Stop instead of forcing state if main is
-dirty, merge conflicts are ambiguous, or validation cannot be made green.
+`scripts/package-progress-table.sh >/tmp/ai-sdk-rust-package-progress.md`, and
+`cargo test --all-features`. Stop instead of forcing state if main is dirty,
+merge conflicts are ambiguous, or validation cannot be made green.

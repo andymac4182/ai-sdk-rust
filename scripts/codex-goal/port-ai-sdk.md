@@ -130,6 +130,21 @@ The ledger must include:
    requirement: EVERY portable original TypeScript test/case must exist in the
    matching Rust crate, Rust may add extra tests on top, and a crate with fewer
    mapped original tests than upstream is incomplete.
+8. Package-level progress estimates in `docs/package-progress-estimates.tsv`.
+   Keep estimates conservative and update the row for any package touched by a
+   slice. These are estimates only for `in-progress` package rows; the generator
+   forces `verified` and `js-only-documented` rows to 100%, and `not-started`
+   rows to 0%.
+
+After updating package status or estimates, run:
+
+```sh
+scripts/package-progress-table.sh >/tmp/ai-sdk-rust-package-progress.md
+```
+
+Use that generated table when reporting migration progress. Do not hand-maintain
+progress tables in prose; keep the ledger and TSV current so the table is
+reproducible.
 
 Re-scan upstream often with `npx opensrc@latest path github:vercel/ai`. If the
 upstream inventory changes, update the ledger and continue. Do not stop while
@@ -345,6 +360,7 @@ Run the strongest relevant validation you can before each commit:
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 scripts/check-naming-conventions.sh
+scripts/package-progress-table.sh >/tmp/ai-sdk-rust-package-progress.md
 cargo test --all-features
 ```
 
@@ -381,6 +397,9 @@ Repeat this loop until the goal is complete or you hit a real blocker:
    closed.
 4. Implement it with tests and docs/examples where useful.
 5. Update `docs/upstream-parity.md` with status, evidence, and next queue.
+   Update `docs/package-progress-estimates.tsv` for any touched `in-progress`
+   package, then run `scripts/package-progress-table.sh` and inspect the
+   generated table for stale or misleading percentages.
 6. Run validation.
 7. Commit the slice.
 8. Merge the slice back to `main` using the protocol below.
@@ -420,6 +439,7 @@ git rebase origin/main
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 scripts/check-naming-conventions.sh
+scripts/package-progress-table.sh >/tmp/ai-sdk-rust-package-progress.md
 cargo test --all-features
 
 git -C "$main_repo" checkout main
@@ -439,6 +459,7 @@ git -C "$main_repo" merge --no-ff "$branch" -m "Merge ai-sdk-rust parity slice"
   cargo fmt --all --check
   cargo clippy --all-targets --all-features -- -D warnings
   scripts/check-naming-conventions.sh
+  scripts/package-progress-table.sh >/tmp/ai-sdk-rust-package-progress.md
   cargo test --all-features
 )
 git -C "$main_repo" push origin main
@@ -466,9 +487,11 @@ You are done only when:
 1. `docs/upstream-parity.md` lists every upstream `vercel/ai` package,
    provider, public API, example, testable behavior, and feature.
 2. Every ledger item is `verified` or `js-only-documented`.
-3. The Rust crate/workspace has validated equivalents for all portable
+3. `scripts/package-progress-table.sh` reports 100% completion for every
+   package row, with no remaining `in-progress` or `not-started` packages.
+4. The Rust crate/workspace has validated equivalents for all portable
    upstream surfaces.
-4. Every portable test from the original upstream TypeScript packages exists as
+5. Every portable test from the original upstream TypeScript packages exists as
    an equivalent Rust test in the matching crate. The unit is each original
    upstream test/case, including table rows, fixtures, snapshots, streaming
    cases, error paths, provider options, and portable type-level assertions.
@@ -480,13 +503,13 @@ You are done only when:
    No package passes completion by having "enough" Rust-native coverage. It
    passes only when every original portable TypeScript test/case exists in the
    matching Rust crate, with any additional Rust tests counted strictly on top.
-5. The Rust workspace has a strict 1:1 crate mapping for every portable
+6. The Rust workspace has a strict 1:1 crate mapping for every portable
    upstream TypeScript package: one matching Rust crate per package, no Rust
    crate owning APIs from multiple upstream packages, and the root crate limited
    to the `packages/ai` facade plus aggregate re-exports and compatibility
    shims. Existing root-crate package debt must be extracted before completion.
    Until then it is incomplete and cannot count as verified parity.
-6. The full validation suite passes.
-7. The final complete slice is merged to `main` and pushed.
+7. The full validation suite passes.
+8. The final complete slice is merged to `main` and pushed.
 
 If any ledger item remains `not-started` or `in-progress`, keep working.

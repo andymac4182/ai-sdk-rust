@@ -37,6 +37,18 @@ working until every upstream package, provider, public API, example, testable
 behavior, and portable feature is verified or explicitly documented as
 JavaScript-only.
 
+Package progress reporting is generated, not hand-maintained:
+
+```sh
+scripts/package-progress-table.sh >/tmp/ai-sdk-rust-package-progress.md
+```
+
+The generator reads `docs/upstream-parity.md` and
+`docs/package-progress-estimates.tsv`. Future `/goal` slices should update the
+estimate TSV for packages they touch while those packages remain `in-progress`;
+verified and JavaScript-only rows are forced to 100%, and not-started rows are
+forced to 0%.
+
 Non-negotiable test floor: EVERY portable original upstream TypeScript test/case
 must exist as an equivalent Rust test in the matching 1:1 crate. Rust may add
 more tests, but never fewer mapped original TypeScript tests; a package with even

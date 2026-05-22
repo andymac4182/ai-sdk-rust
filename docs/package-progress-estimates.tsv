@@ -1,0 +1,32 @@
+# Package directory	Estimate %	Estimate basis / remaining work
+# These estimates are used only for rows that are still `in-progress` in
+# docs/upstream-parity.md. The generator forces `verified` and
+# `js-only-documented` rows to 100%, and `not-started` rows to 0%.
+ai	78	Core surface is broad; remaining stream/UI/agent edge cases and root/package boundary cleanup.
+provider	75	Provider-v4 contracts are largely represented; v2/v3 compatibility and exact stream abstractions remain.
+provider-utils	82	Most runtime helpers and many type-contract cases are mapped; browser stream/fetch parity and remaining type-level/Zod cases remain.
+openai	65	OpenAI/Open Responses foundations exist; broader Responses, files, speech, transcription, and provider surfaces remain.
+open-responses	88	Most fixture, tool, prompt, request, metadata, and stream slices are mapped; remaining structured-output/tools/streaming matrices remain.
+assemblyai	45	Initial provider crate exists; full upstream test and live-provider parity remain.
+azure	45	Initial provider crate exists; full upstream test and live-provider parity remain.
+baseten	35	Initial provider wrapper exists; broader package behavior and live proof remain.
+black-forest-labs	45	Initial provider crate exists; full upstream test and live-provider parity remain.
+bytedance	45	Initial provider crate exists; full upstream test and live-provider parity remain.
+cerebras	45	Initial provider wrapper exists; broader package behavior and live proof remain.
+deepgram	40	Initial provider crate exists; full upstream test and live-provider parity remain.
+deepinfra	45	Initial provider wrapper exists; broader package behavior and live proof remain.
+deepseek	45	Initial provider crate exists; full upstream test and live-provider parity remain.
+huggingface	40	Initial provider wrapper exists; SSE/tool parity and broader package behavior remain.
+hume	40	Initial provider crate exists; full upstream test and live-provider parity remain.
+lmnt	45	Initial provider crate exists; full upstream test and live-provider parity remain.
+luma	45	Initial provider crate exists; full upstream test and live-provider parity remain.
+mistral	45	Initial provider crate exists; full upstream test and live-provider parity remain.
+moonshotai	45	Initial provider crate exists; full upstream test and live-provider parity remain.
+perplexity	45	Initial provider crate exists; full upstream test and live-provider parity remain.
+revai	45	Initial provider crate exists; full upstream test and live-provider parity remain.
+togetherai	45	Initial provider wrapper exists; broader package behavior and live proof remain.
+vercel	40	Construction wrapper exists; live validation and full package test parity remain.
+voyage	45	Initial provider wrapper exists; broader package behavior and live proof remain.
+mcp	90	Protocol, transports, OAuth, examples, and Gateway tool bridge are broad; protected live auth validation and hosted auth examples remain.
+otel	82	Package helpers, span lifecycle, local OTLP export, and Gateway live telemetry proof exist; broader provider live telemetry remains.
+workflow	72	WorkflowAgent and iterator callback/continuation coverage is substantial; real model execution, HTTP/SSE adapters, and JSON Schema validation remain.
