@@ -7038,6 +7038,22 @@ mod tests {
         include_str!("fixtures/openai-mcp-tool.1.json");
     const OPEN_RESPONSES_MCP_TOOL_CHUNKS_FIXTURE: &str =
         include_str!("fixtures/openai-mcp-tool.1.chunks.txt");
+    const OPEN_RESPONSES_MCP_TOOL_APPROVAL_1_JSON_FIXTURE: &str =
+        include_str!("fixtures/openai-mcp-tool-approval.1.json");
+    const OPEN_RESPONSES_MCP_TOOL_APPROVAL_1_CHUNKS_FIXTURE: &str =
+        include_str!("fixtures/openai-mcp-tool-approval.1.chunks.txt");
+    const OPEN_RESPONSES_MCP_TOOL_APPROVAL_2_JSON_FIXTURE: &str =
+        include_str!("fixtures/openai-mcp-tool-approval.2.json");
+    const OPEN_RESPONSES_MCP_TOOL_APPROVAL_2_CHUNKS_FIXTURE: &str =
+        include_str!("fixtures/openai-mcp-tool-approval.2.chunks.txt");
+    const OPEN_RESPONSES_MCP_TOOL_APPROVAL_3_JSON_FIXTURE: &str =
+        include_str!("fixtures/openai-mcp-tool-approval.3.json");
+    const OPEN_RESPONSES_MCP_TOOL_APPROVAL_3_CHUNKS_FIXTURE: &str =
+        include_str!("fixtures/openai-mcp-tool-approval.3.chunks.txt");
+    const OPEN_RESPONSES_MCP_TOOL_APPROVAL_4_JSON_FIXTURE: &str =
+        include_str!("fixtures/openai-mcp-tool-approval.4.json");
+    const OPEN_RESPONSES_MCP_TOOL_APPROVAL_4_CHUNKS_FIXTURE: &str =
+        include_str!("fixtures/openai-mcp-tool-approval.4.chunks.txt");
     const OPEN_RESPONSES_WEB_SEARCH_TOOL_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-web-search-tool.1.json");
     const OPEN_RESPONSES_WEB_SEARCH_TOOL_CHUNKS_FIXTURE: &str =
@@ -33570,21 +33586,13 @@ mod tests {
     #[test]
     fn open_responses_provider_generates_mcp_approval_request_fixture_turn_1() {
         const RESPONSE_ID: &str = "resp_04f6b17429cf2b02006949a66d56088196a2d1b86e820556ce";
-        const LIST_TOOLS_ID: &str = "mcpl_04f6b17429cf2b02006949a66d64188196993ab2bed8e07268";
         const REASONING_ID: &str = "rs_04f6b17429cf2b02006949a66f4df88196a44362d8a21f9cea";
         const APPROVAL_ID: &str = "mcpr_04f6b17429cf2b02006949a6712b1081968b3c7a72dec695d8";
 
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let provider = open_responses_mcp_approval_fixture_provider(
             Arc::clone(&captured_request),
-            open_responses_mcp_approval_generate_request_body(
-                RESPONSE_ID,
-                1_766_434_413,
-                LIST_TOOLS_ID,
-                REASONING_ID,
-                APPROVAL_ID,
-                (422, 104, 64),
-            ),
+            OPEN_RESPONSES_MCP_TOOL_APPROVAL_1_JSON_FIXTURE.to_string(),
         );
         let result = poll_ready(
             provider.language_model("gpt-5-mini").do_generate(
@@ -33614,7 +33622,6 @@ mod tests {
     #[test]
     fn open_responses_provider_generates_mcp_approval_denial_fixture_turn_2() {
         const RESPONSE_ID: &str = "resp_04f6b17429cf2b02006949a673effc8196bc0d00ce027d3bdc";
-        const LIST_TOOLS_ID: &str = "mcpl_04f6b17429cf2b02006949a673fd08819695f8f57cdb9bed6f";
         const REASONING_ID: &str = "rs_04f6b17429cf2b02006949a67543c88196ad1f56cb7c8fe476";
         const MESSAGE_ID: &str = "msg_04f6b17429cf2b02006949a679f35c81968e9b234489fa32b8";
         const APPROVAL_ID: &str = "mcpr_04f6b17429cf2b02006949a6712b1081968b3c7a72dec695d8";
@@ -33629,15 +33636,7 @@ mod tests {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let provider = open_responses_mcp_approval_fixture_provider(
             Arc::clone(&captured_request),
-            open_responses_mcp_approval_generate_text_body(
-                RESPONSE_ID,
-                1_766_434_419,
-                LIST_TOOLS_ID,
-                REASONING_ID,
-                MESSAGE_ID,
-                FINAL_TEXT,
-                (592, 421, 320),
-            ),
+            OPEN_RESPONSES_MCP_TOOL_APPROVAL_2_JSON_FIXTURE.to_string(),
         );
         let result = poll_ready(
             provider.language_model("gpt-5-mini").do_generate(
@@ -33673,7 +33672,6 @@ mod tests {
     #[test]
     fn open_responses_provider_generates_mcp_approval_retry_fixture_turn_3() {
         const RESPONSE_ID: &str = "resp_04f6b17429cf2b02006949a688b32881968e0f3ec6a9efe2da";
-        const LIST_TOOLS_ID: &str = "mcpl_04f6b17429cf2b02006949a688cc6481969f74af86ec648d15";
         const REASONING_ID: &str = "rs_04f6b17429cf2b02006949a68a9c7c8196b850018869363b06";
         const FIRST_APPROVAL_ID: &str = "mcpr_04f6b17429cf2b02006949a6712b1081968b3c7a72dec695d8";
         const SECOND_APPROVAL_ID: &str = "mcpr_04f6b17429cf2b02006949a68bf5808196b6f2008a315c9aa4";
@@ -33681,14 +33679,7 @@ mod tests {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let provider = open_responses_mcp_approval_fixture_provider(
             Arc::clone(&captured_request),
-            open_responses_mcp_approval_generate_request_body(
-                RESPONSE_ID,
-                1_766_434_440,
-                LIST_TOOLS_ID,
-                REASONING_ID,
-                SECOND_APPROVAL_ID,
-                (587, 104, 64),
-            ),
+            OPEN_RESPONSES_MCP_TOOL_APPROVAL_3_JSON_FIXTURE.to_string(),
         );
         let result = poll_ready(
             provider.language_model("gpt-5-mini").do_generate(
@@ -33723,7 +33714,6 @@ mod tests {
     #[test]
     fn open_responses_provider_generates_mcp_approval_result_fixture_turn_4() {
         const RESPONSE_ID: &str = "resp_04f6b17429cf2b02006949a68dcefc81969600243221f290a7";
-        const LIST_TOOLS_ID: &str = "mcpl_04f6b17429cf2b02006949a68ebc288196ad7b23d6c452775a";
         const MCP_CALL_ID: &str = "mcp_04f6b17429cf2b02006949a6908fc4819686c02f71f7faecc6";
         const MESSAGE_ID: &str = "msg_04f6b17429cf2b02006949a6930b308196a3ad4f35aa6e0b1b";
         const APPROVAL_ID: &str = "mcpr_04f6b17429cf2b02006949a68bf5808196b6f2008a315c9aa4";
@@ -33746,17 +33736,7 @@ mod tests {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let provider = open_responses_mcp_approval_fixture_provider(
             Arc::clone(&captured_request),
-            open_responses_mcp_approval_generate_result_body(
-                RESPONSE_ID,
-                1_766_434_446,
-                LIST_TOOLS_ID,
-                MCP_CALL_ID,
-                APPROVAL_ID,
-                MESSAGE_ID,
-                TOOL_OUTPUT,
-                FINAL_TEXT,
-                (765, 74, 0),
-            ),
+            OPEN_RESPONSES_MCP_TOOL_APPROVAL_4_JSON_FIXTURE.to_string(),
         );
         let result = poll_ready(
             provider.language_model("gpt-5-mini").do_generate(
@@ -33793,21 +33773,14 @@ mod tests {
     #[test]
     fn open_responses_provider_streams_mcp_approval_request_fixture_turn_1() {
         const RESPONSE_ID: &str = "resp_04a97b4fce127879006949a837a3a48195b37f26ae73f550c0";
-        const LIST_TOOLS_ID: &str = "mcpl_04a97b4fce127879006949a837ada08195abf62939840a3d5c";
         const REASONING_ID: &str = "rs_04a97b4fce127879006949a83904c88195977de6cc3f06064a";
         const APPROVAL_ID: &str = "mcpr_04a97b4fce127879006949a83ac9308195a7f7b69ea82e91fe";
 
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let provider = open_responses_mcp_approval_fixture_provider(
             Arc::clone(&captured_request),
-            open_responses_mcp_approval_request_sse(
-                RESPONSE_ID,
-                1_766_434_871,
-                LIST_TOOLS_ID,
-                REASONING_ID,
-                APPROVAL_ID,
-                422,
-                48,
+            open_responses_sse_from_fixture_lines(
+                OPEN_RESPONSES_MCP_TOOL_APPROVAL_1_CHUNKS_FIXTURE,
             ),
         );
         let result = poll_ready(
@@ -33834,7 +33807,6 @@ mod tests {
     #[test]
     fn open_responses_provider_streams_mcp_approval_denial_fixture_turn_2() {
         const RESPONSE_ID: &str = "resp_04a97b4fce127879006949a855fa68819598a2a379fd5b6c38";
-        const LIST_TOOLS_ID: &str = "mcpl_04a97b4fce127879006949a856328881959cdd5fda3bc888e8";
         const REASONING_ID: &str = "rs_04a97b4fce127879006949a857b7c88195818dab6d25ff091d";
         const MESSAGE_ID: &str = "msg_04a97b4fce127879006949a85c36b08195b7527e9fb2f8569e";
         const APPROVAL_ID: &str = "mcpr_04a97b4fce127879006949a83ac9308195a7f7b69ea82e91fe";
@@ -33850,16 +33822,8 @@ mod tests {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let provider = open_responses_mcp_approval_fixture_provider(
             Arc::clone(&captured_request),
-            open_responses_mcp_approval_text_sse(
-                RESPONSE_ID,
-                1_766_434_902,
-                LIST_TOOLS_ID,
-                REASONING_ID,
-                MESSAGE_ID,
-                FINAL_TEXT,
-                553,
-                371,
-                256,
+            open_responses_sse_from_fixture_lines(
+                OPEN_RESPONSES_MCP_TOOL_APPROVAL_2_CHUNKS_FIXTURE,
             ),
         );
         let result = poll_ready(
@@ -33891,7 +33855,6 @@ mod tests {
     #[test]
     fn open_responses_provider_streams_mcp_approval_retry_fixture_turn_3() {
         const RESPONSE_ID: &str = "resp_04a97b4fce127879006949a864795c8195a77efd798149326b";
-        const LIST_TOOLS_ID: &str = "mcpl_04a97b4fce127879006949a8648d5c8195b329dc93c3bad534";
         const REASONING_ID: &str = "rs_04a97b4fce127879006949a8660eec81959dfbe2481a912faf";
         const FIRST_APPROVAL_ID: &str = "mcpr_04a97b4fce127879006949a83ac9308195a7f7b69ea82e91fe";
         const SECOND_APPROVAL_ID: &str = "mcpr_04a97b4fce127879006949a8672ac081959f95aa8ceedb7cd9";
@@ -33899,14 +33862,8 @@ mod tests {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let provider = open_responses_mcp_approval_fixture_provider(
             Arc::clone(&captured_request),
-            open_responses_mcp_approval_request_sse(
-                RESPONSE_ID,
-                1_766_434_916,
-                LIST_TOOLS_ID,
-                REASONING_ID,
-                SECOND_APPROVAL_ID,
-                609,
-                48,
+            open_responses_sse_from_fixture_lines(
+                OPEN_RESPONSES_MCP_TOOL_APPROVAL_3_CHUNKS_FIXTURE,
             ),
         );
         let result = poll_ready(
@@ -33946,11 +33903,17 @@ mod tests {
     #[test]
     fn open_responses_provider_streams_mcp_approval_result_fixture_turn_4() {
         const RESPONSE_ID: &str = "resp_04a97b4fce127879006949a87ab0cc8195b3175edc260d6a88";
-        const LIST_TOOLS_ID: &str = "mcpl_04a97b4fce127879006949a87ac9388195b0d86b0d1f24176b";
         const MCP_CALL_ID: &str = "mcp_04a97b4fce127879006949a87c14248195ac23dfe0854c03d3";
         const MESSAGE_ID: &str = "msg_04a97b4fce127879006949a87d97e081959020140d5b07b7b5";
         const APPROVAL_ID: &str = "mcpr_04a97b4fce127879006949a8672ac081959f95aa8ceedb7cd9";
-        const TOOL_OUTPUT: &str = "Short URL created: https://zip1.io/UDKvlw\nGenerated code: UDKvlw\nMax clicks: 100\nDescription: Shortened link for ai-sdk.dev\nOriginal URL: https://ai-sdk.dev/\n\nView stats: https://zip1.io/stats/UDKvlw";
+        const TOOL_OUTPUT: &str = concat!(
+            "\u{2705} Short URL created: https://zip1.io/UDKvlw\n",
+            "\u{1f524} Generated code: UDKvlw\n",
+            "\u{1f522} Max clicks: 100\n",
+            "\u{1f4c4} Description: Shortened link for ai-sdk.dev\n",
+            "\u{1f517} Original URL: https://ai-sdk.dev/\n\n",
+            "\u{1f4ca} View stats: https://zip1.io/stats/UDKvlw"
+        );
         const FINAL_TEXT: &str = concat!(
             "Done \u{2014} here\u{2019}s your shortened link:\n\n",
             "https://zip1.io/UDKvlw\n\n",
@@ -33964,15 +33927,8 @@ mod tests {
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let provider = open_responses_mcp_approval_fixture_provider(
             Arc::clone(&captured_request),
-            open_responses_mcp_approval_result_sse(
-                RESPONSE_ID,
-                1_766_434_938,
-                LIST_TOOLS_ID,
-                MCP_CALL_ID,
-                APPROVAL_ID,
-                MESSAGE_ID,
-                TOOL_OUTPUT,
-                FINAL_TEXT,
+            open_responses_sse_from_fixture_lines(
+                OPEN_RESPONSES_MCP_TOOL_APPROVAL_4_CHUNKS_FIXTURE,
             ),
         );
         let result = poll_ready(
@@ -36496,558 +36452,6 @@ mod tests {
         }
 
         prompt
-    }
-
-    fn open_responses_fixture_sse(events: Vec<JsonValue>) -> String {
-        let mut sse = events
-            .into_iter()
-            .map(|event| format!("data: {event}"))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        sse.push_str("\n\ndata: [DONE]\n");
-        sse
-    }
-
-    fn open_responses_mcp_list_tools_item(list_tools_id: &str) -> JsonValue {
-        json!({
-            "id": list_tools_id,
-            "type": "mcp_list_tools",
-            "server_label": "zip1",
-            "tools": [
-                {
-                    "name": "create_short_url",
-                    "description": "Create a shortened link",
-                    "input_schema": {
-                        "type": "object"
-                    }
-                }
-            ]
-        })
-    }
-
-    fn open_responses_mcp_approval_request_item(approval_id: &str) -> JsonValue {
-        json!({
-            "id": approval_id,
-            "type": "mcp_approval_request",
-            "server_label": "zip1",
-            "name": "create_short_url",
-            "arguments": open_responses_mcp_approval_arguments(),
-            "approval_request_id": approval_id
-        })
-    }
-
-    fn open_responses_mcp_approval_generate_request_item(approval_id: &str) -> JsonValue {
-        json!({
-            "id": approval_id,
-            "type": "mcp_approval_request",
-            "server_label": "zip1",
-            "name": "create_short_url",
-            "arguments": open_responses_mcp_approval_generate_arguments()
-        })
-    }
-
-    fn open_responses_mcp_reasoning_item(reasoning_id: &str) -> JsonValue {
-        json!({
-            "id": reasoning_id,
-            "type": "reasoning",
-            "summary": []
-        })
-    }
-
-    fn open_responses_mcp_approval_generate_body(
-        response_id: &str,
-        created_at: i64,
-        output: Vec<JsonValue>,
-        usage: (u64, u64, u64),
-    ) -> String {
-        json!({
-            "id": response_id,
-            "object": "response",
-            "created_at": created_at,
-            "status": "completed",
-            "model": "gpt-5-mini-2025-08-07",
-            "output": output,
-            "service_tier": "default",
-            "usage": {
-                "input_tokens": usage.0,
-                "input_tokens_details": {
-                    "cached_tokens": 0
-                },
-                "output_tokens": usage.1,
-                "output_tokens_details": {
-                    "reasoning_tokens": usage.2
-                },
-                "total_tokens": usage.0 + usage.1
-            }
-        })
-        .to_string()
-    }
-
-    fn open_responses_mcp_approval_generate_request_body(
-        response_id: &str,
-        created_at: i64,
-        list_tools_id: &str,
-        reasoning_id: &str,
-        approval_id: &str,
-        usage: (u64, u64, u64),
-    ) -> String {
-        open_responses_mcp_approval_generate_body(
-            response_id,
-            created_at,
-            vec![
-                open_responses_mcp_list_tools_item(list_tools_id),
-                open_responses_mcp_reasoning_item(reasoning_id),
-                open_responses_mcp_approval_generate_request_item(approval_id),
-            ],
-            usage,
-        )
-    }
-
-    fn open_responses_mcp_approval_generate_text_body(
-        response_id: &str,
-        created_at: i64,
-        list_tools_id: &str,
-        reasoning_id: &str,
-        message_id: &str,
-        final_text: &str,
-        usage: (u64, u64, u64),
-    ) -> String {
-        open_responses_mcp_approval_generate_body(
-            response_id,
-            created_at,
-            vec![
-                open_responses_mcp_list_tools_item(list_tools_id),
-                open_responses_mcp_reasoning_item(reasoning_id),
-                open_responses_mcp_message_item(message_id, final_text),
-            ],
-            usage,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn open_responses_mcp_approval_generate_result_body(
-        response_id: &str,
-        created_at: i64,
-        list_tools_id: &str,
-        mcp_call_id: &str,
-        approval_id: &str,
-        message_id: &str,
-        tool_output: &str,
-        final_text: &str,
-        usage: (u64, u64, u64),
-    ) -> String {
-        open_responses_mcp_approval_generate_body(
-            response_id,
-            created_at,
-            vec![
-                open_responses_mcp_list_tools_item(list_tools_id),
-                json!({
-                    "id": mcp_call_id,
-                    "type": "mcp_call",
-                    "status": "completed",
-                    "approval_request_id": approval_id,
-                    "arguments": open_responses_mcp_approval_generate_arguments(),
-                    "error": null,
-                    "name": "create_short_url",
-                    "output": tool_output,
-                    "server_label": "zip1"
-                }),
-                open_responses_mcp_message_item(message_id, final_text),
-            ],
-            usage,
-        )
-    }
-
-    fn open_responses_mcp_message_item(message_id: &str, final_text: &str) -> JsonValue {
-        json!({
-            "id": message_id,
-            "type": "message",
-            "status": "completed",
-            "content": [
-                {
-                    "type": "output_text",
-                    "annotations": [],
-                    "logprobs": [],
-                    "text": final_text
-                }
-            ],
-            "role": "assistant"
-        })
-    }
-
-    fn open_responses_mcp_approval_request_sse(
-        response_id: &str,
-        created_at: i64,
-        list_tools_id: &str,
-        reasoning_id: &str,
-        approval_id: &str,
-        input_tokens: u64,
-        output_tokens: u64,
-    ) -> String {
-        let list_tools = open_responses_mcp_list_tools_item(list_tools_id);
-        let reasoning = open_responses_mcp_reasoning_item(reasoning_id);
-        let approval = open_responses_mcp_approval_request_item(approval_id);
-        open_responses_fixture_sse(vec![
-            json!({
-                "type": "response.created",
-                "sequence_number": 0,
-                "response": {
-                    "id": response_id,
-                    "object": "response",
-                    "created_at": created_at,
-                    "status": "in_progress",
-                    "model": "gpt-5-mini-2025-08-07",
-                    "output": []
-                }
-            }),
-            json!({
-                "type": "response.output_item.done",
-                "sequence_number": 5,
-                "output_index": 0,
-                "item": list_tools
-            }),
-            json!({
-                "type": "response.output_item.done",
-                "sequence_number": 7,
-                "output_index": 1,
-                "item": reasoning
-            }),
-            json!({
-                "type": "response.output_item.done",
-                "sequence_number": 13,
-                "output_index": 2,
-                "item": approval
-            }),
-            json!({
-                "type": "response.completed",
-                "sequence_number": 14,
-                "response": {
-                    "id": response_id,
-                    "object": "response",
-                    "created_at": created_at,
-                    "status": "completed",
-                    "model": "gpt-5-mini-2025-08-07",
-                    "output": [
-                        open_responses_mcp_list_tools_item(list_tools_id),
-                        open_responses_mcp_reasoning_item(reasoning_id),
-                        open_responses_mcp_approval_request_item(approval_id)
-                    ],
-                    "service_tier": "default",
-                    "usage": {
-                        "input_tokens": input_tokens,
-                        "input_tokens_details": {
-                            "cached_tokens": 0
-                        },
-                        "output_tokens": output_tokens,
-                        "output_tokens_details": {
-                            "reasoning_tokens": 0
-                        },
-                        "total_tokens": input_tokens + output_tokens
-                    }
-                }
-            }),
-        ])
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn open_responses_mcp_approval_text_sse(
-        response_id: &str,
-        created_at: i64,
-        list_tools_id: &str,
-        reasoning_id: &str,
-        message_id: &str,
-        final_text: &str,
-        input_tokens: u64,
-        output_tokens: u64,
-        reasoning_tokens: u64,
-    ) -> String {
-        let list_tools = open_responses_mcp_list_tools_item(list_tools_id);
-        let reasoning = open_responses_mcp_reasoning_item(reasoning_id);
-        let message = json!({
-            "id": message_id,
-            "type": "message",
-            "status": "completed",
-            "content": [
-                {
-                    "type": "output_text",
-                    "annotations": [],
-                    "logprobs": [],
-                    "text": final_text
-                }
-            ],
-            "role": "assistant"
-        });
-        open_responses_fixture_sse(vec![
-            json!({
-                "type": "response.created",
-                "sequence_number": 0,
-                "response": {
-                    "id": response_id,
-                    "object": "response",
-                    "created_at": created_at,
-                    "status": "in_progress",
-                    "model": "gpt-5-mini-2025-08-07",
-                    "output": []
-                }
-            }),
-            json!({
-                "type": "response.output_item.done",
-                "sequence_number": 5,
-                "output_index": 0,
-                "item": list_tools
-            }),
-            json!({
-                "type": "response.output_item.done",
-                "sequence_number": 7,
-                "output_index": 1,
-                "item": reasoning
-            }),
-            json!({
-                "type": "response.output_item.added",
-                "sequence_number": 8,
-                "output_index": 2,
-                "item": {
-                    "id": message_id,
-                    "type": "message",
-                    "status": "in_progress",
-                    "content": [],
-                    "role": "assistant"
-                }
-            }),
-            json!({
-                "type": "response.content_part.added",
-                "sequence_number": 9,
-                "item_id": message_id,
-                "output_index": 2,
-                "content_index": 0,
-                "part": {
-                    "type": "output_text",
-                    "annotations": [],
-                    "logprobs": [],
-                    "text": ""
-                }
-            }),
-            json!({
-                "type": "response.output_text.delta",
-                "sequence_number": 10,
-                "item_id": message_id,
-                "output_index": 2,
-                "content_index": 0,
-                "delta": final_text,
-                "logprobs": []
-            }),
-            json!({
-                "type": "response.output_text.done",
-                "sequence_number": 11,
-                "item_id": message_id,
-                "output_index": 2,
-                "content_index": 0,
-                "text": final_text,
-                "logprobs": []
-            }),
-            json!({
-                "type": "response.content_part.done",
-                "sequence_number": 12,
-                "item_id": message_id,
-                "output_index": 2,
-                "content_index": 0,
-                "part": {
-                    "type": "output_text",
-                    "annotations": [],
-                    "logprobs": [],
-                    "text": final_text
-                }
-            }),
-            json!({
-                "type": "response.output_item.done",
-                "sequence_number": 13,
-                "output_index": 2,
-                "item": message
-            }),
-            json!({
-                "type": "response.completed",
-                "sequence_number": 14,
-                "response": {
-                    "id": response_id,
-                    "object": "response",
-                    "created_at": created_at,
-                    "status": "completed",
-                    "model": "gpt-5-mini-2025-08-07",
-                    "output": [
-                        open_responses_mcp_list_tools_item(list_tools_id),
-                        open_responses_mcp_reasoning_item(reasoning_id),
-                        message
-                    ],
-                    "service_tier": "default",
-                    "usage": {
-                        "input_tokens": input_tokens,
-                        "input_tokens_details": {
-                            "cached_tokens": 0
-                        },
-                        "output_tokens": output_tokens,
-                        "output_tokens_details": {
-                            "reasoning_tokens": reasoning_tokens
-                        },
-                        "total_tokens": input_tokens + output_tokens
-                    }
-                }
-            }),
-        ])
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn open_responses_mcp_approval_result_sse(
-        response_id: &str,
-        created_at: i64,
-        list_tools_id: &str,
-        mcp_call_id: &str,
-        approval_id: &str,
-        message_id: &str,
-        tool_output: &str,
-        final_text: &str,
-    ) -> String {
-        let list_tools = open_responses_mcp_list_tools_item(list_tools_id);
-        let mcp_call = json!({
-            "id": mcp_call_id,
-            "type": "mcp_call",
-            "status": "completed",
-            "approval_request_id": approval_id,
-            "arguments": open_responses_mcp_approval_arguments(),
-            "name": "create_short_url",
-            "server_label": "zip1",
-            "output": tool_output
-        });
-        let message = json!({
-            "id": message_id,
-            "type": "message",
-            "status": "completed",
-            "content": [
-                {
-                    "type": "output_text",
-                    "annotations": [],
-                    "logprobs": [],
-                    "text": final_text
-                }
-            ],
-            "role": "assistant"
-        });
-
-        open_responses_fixture_sse(vec![
-            json!({
-                "type": "response.created",
-                "sequence_number": 0,
-                "response": {
-                    "id": response_id,
-                    "object": "response",
-                    "created_at": created_at,
-                    "status": "in_progress",
-                    "model": "gpt-5-mini-2025-08-07",
-                    "output": []
-                }
-            }),
-            json!({
-                "type": "response.output_item.done",
-                "sequence_number": 5,
-                "output_index": 0,
-                "item": list_tools
-            }),
-            json!({
-                "type": "response.output_item.done",
-                "sequence_number": 7,
-                "output_index": 1,
-                "item": mcp_call
-            }),
-            json!({
-                "type": "response.output_item.added",
-                "sequence_number": 8,
-                "output_index": 2,
-                "item": {
-                    "id": message_id,
-                    "type": "message",
-                    "status": "in_progress",
-                    "content": [],
-                    "role": "assistant"
-                }
-            }),
-            json!({
-                "type": "response.content_part.added",
-                "sequence_number": 9,
-                "item_id": message_id,
-                "output_index": 2,
-                "content_index": 0,
-                "part": {
-                    "type": "output_text",
-                    "annotations": [],
-                    "logprobs": [],
-                    "text": ""
-                }
-            }),
-            json!({
-                "type": "response.output_text.delta",
-                "sequence_number": 10,
-                "item_id": message_id,
-                "output_index": 2,
-                "content_index": 0,
-                "delta": final_text,
-                "logprobs": []
-            }),
-            json!({
-                "type": "response.output_text.done",
-                "sequence_number": 11,
-                "item_id": message_id,
-                "output_index": 2,
-                "content_index": 0,
-                "text": final_text,
-                "logprobs": []
-            }),
-            json!({
-                "type": "response.content_part.done",
-                "sequence_number": 12,
-                "item_id": message_id,
-                "output_index": 2,
-                "content_index": 0,
-                "part": {
-                    "type": "output_text",
-                    "annotations": [],
-                    "logprobs": [],
-                    "text": final_text
-                }
-            }),
-            json!({
-                "type": "response.output_item.done",
-                "sequence_number": 13,
-                "output_index": 2,
-                "item": message
-            }),
-            json!({
-                "type": "response.completed",
-                "sequence_number": 14,
-                "response": {
-                    "id": response_id,
-                    "object": "response",
-                    "created_at": created_at,
-                    "status": "completed",
-                    "model": "gpt-5-mini-2025-08-07",
-                    "output": [
-                        open_responses_mcp_list_tools_item(list_tools_id),
-                        mcp_call,
-                        message
-                    ],
-                    "service_tier": "default",
-                    "usage": {
-                        "input_tokens": 779,
-                        "input_tokens_details": {
-                            "cached_tokens": 0
-                        },
-                        "output_tokens": 69,
-                        "output_tokens_details": {
-                            "reasoning_tokens": 0
-                        },
-                        "total_tokens": 848
-                    }
-                }
-            }),
-        ])
     }
 
     fn open_responses_assert_mcp_approval_generate_request_content(
