@@ -4197,7 +4197,7 @@ mod tests {
 
     use super::*;
     use crate::file_data::{FileData, FileDataContent};
-    use crate::generate_text::{ToolApprovalStatusKind, has_tool_call};
+    use crate::generate_text::{GenerateTextContentPart, ToolApprovalStatusKind, has_tool_call};
     use crate::json::NonNullJsonValue;
     use crate::language_model::{
         FinishReason, InputTokenUsage, LanguageModelAssistantContentPart,
@@ -4993,6 +4993,124 @@ mod tests {
         assert_eq!(
             stream_calls[0].tool_choice.as_ref(),
             Some(&LanguageModelToolChoice::Required)
+        );
+    }
+
+    #[test]
+    fn stream_text_result_full_stream_refines_tool_input_before_execution_parts_and_callbacks() {
+        let model_call_end_inputs = Arc::new(Mutex::new(Vec::<JsonValue>::new()));
+        let tool_execution_start_inputs = Arc::new(Mutex::new(Vec::<JsonValue>::new()));
+        let model_call_end_inputs_for_callback = Arc::clone(&model_call_end_inputs);
+        let tool_execution_start_inputs_for_callback = Arc::clone(&tool_execution_start_inputs);
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string" }
+            },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "tool1",
+                    r#"{ "value": " raw " }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    LanguageModelFinishReason {
+                        unified: FinishReason::ToolCalls,
+                        raw: None,
+                    },
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(Tool::new("tool1", input_schema).with_execute(
+                    |input, _options| async move {
+                        let value = input["value"].as_str().expect("value is a string");
+                        Ok(json!(format!("result:{value}")))
+                    },
+                ))
+                .with_tool_input_refinement("tool1", |mut input| async move {
+                    let value = input["value"]
+                        .as_str()
+                        .expect("value is a string")
+                        .trim()
+                        .to_string();
+                    input["value"] = json!(value);
+                    Ok(input)
+                })
+                .with_experimental_on_language_model_call_end(move |event| {
+                    let model_call_end_inputs = Arc::clone(&model_call_end_inputs_for_callback);
+                    async move {
+                        let input = match event.content.first() {
+                            Some(GenerateTextContentPart::ToolCall(tool_call)) => {
+                                tool_call.input.clone()
+                            }
+                            _ => json!(null),
+                        };
+                        model_call_end_inputs
+                            .lock()
+                            .expect("model call end inputs lock")
+                            .push(input);
+                    }
+                })
+                .with_on_tool_execution_start(move |event| {
+                    let tool_execution_start_inputs =
+                        Arc::clone(&tool_execution_start_inputs_for_callback);
+                    async move {
+                        tool_execution_start_inputs
+                            .lock()
+                            .expect("tool execution start inputs lock")
+                            .push(event.tool_call.input);
+                    }
+                }),
+        ));
+
+        let tool_call_part = result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TextStreamPart::ToolCall(part) => Some(part),
+                _ => None,
+            })
+            .expect("full stream includes tool-call");
+        assert_eq!(tool_call_part.input, json!({ "value": "raw" }));
+
+        let tool_result_part = result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TextStreamPart::ToolResult(part) => Some(part),
+                _ => None,
+            })
+            .expect("full stream includes tool-result");
+        assert_eq!(tool_result_part.input, json!({ "value": "raw" }));
+        assert_eq!(tool_result_part.output, json!("result:raw"));
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].input, json!({ "value": "raw" }));
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].input, json!({ "value": "raw" }));
+        assert_eq!(result.tool_results[0].output, json!("result:raw"));
+        assert_eq!(
+            model_call_end_inputs
+                .lock()
+                .expect("inputs lock")
+                .as_slice(),
+            [json!({ "value": "raw" })]
+        );
+        assert_eq!(
+            tool_execution_start_inputs
+                .lock()
+                .expect("inputs lock")
+                .as_slice(),
+            [json!({ "value": "raw" })]
         );
     }
 
