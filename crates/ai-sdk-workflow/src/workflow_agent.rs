@@ -175,7 +175,8 @@ impl WorkflowAgent {
             .unwrap_or_default();
         let tool_choice = options.tool_choice.or_else(|| self.tool_choice.clone());
         let prepare_step = options.prepare_step.or_else(|| self.prepare_step.clone());
-        let on_finish = options.on_finish.or_else(|| self.on_finish.clone());
+        let constructor_on_finish = self.on_finish.clone();
+        let stream_on_finish = options.on_finish;
 
         let mut iterator = StreamTextIterator::from_runtime_tools(
             options.prompt,
@@ -245,7 +246,10 @@ impl WorkflowAgent {
             missing_provider_executed_tool_results,
         };
 
-        if let Some(on_finish) = on_finish {
+        if let Some(on_finish) = constructor_on_finish {
+            on_finish.call(WorkflowAgentFinishInfo::from(&result));
+        }
+        if let Some(on_finish) = stream_on_finish {
             on_finish.call(WorkflowAgentFinishInfo::from(&result));
         }
 
@@ -336,7 +340,7 @@ pub struct WorkflowAgentStreamOptions<E> {
     /// Stream-level prepare-step callback that overrides constructor defaults.
     pub prepare_step: Option<WorkflowPrepareStepCallback>,
 
-    /// Stream-level finish callback that overrides constructor defaults.
+    /// Stream-level finish callback that runs after any constructor callback.
     pub on_finish: Option<WorkflowAgentOnFinishCallback>,
 }
 
@@ -1155,6 +1159,87 @@ mod tests {
         assert_eq!(info.tool_calls[0].tool_call_id, "ask-id");
         assert!(info.tool_results.is_empty());
         assert!(!info.messages.is_empty());
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_call_on_finish_from_constructor() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_constructor = Arc::clone(&calls);
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_on_finish(
+            WorkflowAgentOnFinishCallback::new(move |_| {
+                calls_for_constructor
+                    .lock()
+                    .expect("calls lock succeeds")
+                    .push("constructor".to_string());
+            }),
+        ));
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+            .expect("agent stream succeeds");
+
+        assert_eq!(
+            *calls.lock().expect("calls lock succeeds"),
+            vec!["constructor".to_string()]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_call_on_finish_from_stream_method() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_method = Arc::clone(&calls);
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_on_finish(
+                WorkflowAgentOnFinishCallback::new(move |_| {
+                    calls_for_method
+                        .lock()
+                        .expect("calls lock succeeds")
+                        .push("method".to_string());
+                }),
+            ),
+        ))
+        .expect("agent stream succeeds");
+
+        assert_eq!(
+            *calls.lock().expect("calls lock succeeds"),
+            vec!["method".to_string()]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_call_both_constructor_and_method_on_finish_in_correct_order() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_constructor = Arc::clone(&calls);
+        let calls_for_method = Arc::clone(&calls);
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_on_finish(
+            WorkflowAgentOnFinishCallback::new(move |_| {
+                calls_for_constructor
+                    .lock()
+                    .expect("calls lock succeeds")
+                    .push("constructor".to_string());
+            }),
+        ));
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_on_finish(
+                WorkflowAgentOnFinishCallback::new(move |_| {
+                    calls_for_method
+                        .lock()
+                        .expect("calls lock succeeds")
+                        .push("method".to_string());
+                }),
+            ),
+        ))
+        .expect("agent stream succeeds");
+
+        assert_eq!(
+            *calls.lock().expect("calls lock succeeds"),
+            vec!["constructor".to_string(), "method".to_string()]
+        );
     }
 
     #[test]
