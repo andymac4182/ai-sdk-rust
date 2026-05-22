@@ -1741,6 +1741,12 @@ focused tests for each portable behavior before changing rows to `verified`.
   `openai-custom-tool.1.json` and `openai-custom-tool.1.chunks.txt`, deriving
   response metadata, custom-tool ids, input deltas, final input, and usage from
   the fixtures instead of reconstructed JSON/SSE literals.
+- 2026-05-22: OpenAI Responses client tool-search streaming fixture parity
+  hardened the client tool-search stream tests to consume byte-matched local
+  copies of upstream `openai-client-tool-search.1.chunks.txt` and
+  `openai-client-tool-search.2.chunks.txt`, deriving provisional/final
+  tool-search call ids, item ids, arguments, and follow-up function-call input
+  from the fixtures instead of reconstructed SSE literals.
 - 2026-05-20: OpenAI Responses code-interpreter annotation stream fixture
   parity added
   `open_responses_provider_streams_code_interpreter_results_with_annotations`
