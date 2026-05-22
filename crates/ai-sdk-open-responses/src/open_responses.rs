@@ -21102,6 +21102,102 @@ mod tests {
     }
 
     #[test]
+    fn open_responses_provider_converts_single_system_message_to_instructions() {
+        let request_body =
+            open_responses_generic_prompt_request_body(LanguageModelCallOptions::new(vec![
+                LanguageModelMessage::System(LanguageModelSystemMessage::new(
+                    "You are a helpful assistant.",
+                )),
+            ]));
+
+        assert_eq!(request_body["instructions"], "You are a helpful assistant.");
+        assert_eq!(request_body["input"], json!([]));
+    }
+
+    #[test]
+    fn open_responses_provider_joins_system_messages_with_newlines_for_input_conversion() {
+        let request_body =
+            open_responses_generic_prompt_request_body(LanguageModelCallOptions::new(vec![
+                LanguageModelMessage::System(LanguageModelSystemMessage::new(
+                    "You are a helpful assistant.",
+                )),
+                LanguageModelMessage::System(LanguageModelSystemMessage::new("Always be concise.")),
+            ]));
+
+        assert_eq!(
+            request_body["instructions"],
+            "You are a helpful assistant.\nAlways be concise."
+        );
+        assert_eq!(request_body["input"], json!([]));
+    }
+
+    #[test]
+    fn open_responses_provider_returns_no_instructions_without_system_messages() {
+        let request_body = open_responses_generic_user_content_request_body(vec![
+            LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
+        ]);
+
+        assert!(request_body.get("instructions").is_none());
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Hello"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_handles_system_message_with_user_and_assistant_messages() {
+        let request_body =
+            open_responses_generic_prompt_request_body(LanguageModelCallOptions::new(vec![
+                LanguageModelMessage::System(LanguageModelSystemMessage::new(
+                    "You are a helpful assistant.",
+                )),
+                LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                    LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
+                ])),
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "Hi there!",
+                    )),
+                ])),
+            ]));
+
+        assert_eq!(request_body["instructions"], "You are a helpful assistant.");
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Hello"
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Hi there!"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn open_responses_provider_converts_user_text_part_to_input_text() {
         let request_body = open_responses_openai_user_content_request_body(vec![
             LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
