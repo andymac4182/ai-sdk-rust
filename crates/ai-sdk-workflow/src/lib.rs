@@ -27,10 +27,11 @@ pub use stream_text_iterator::{
 };
 pub use workflow_agent::{
     WorkflowAgent, WorkflowAgentError, WorkflowAgentFinishInfo, WorkflowAgentOnFinishCallback,
-    WorkflowAgentOnStepFinishCallback, WorkflowAgentOnToolExecutionEndCallback,
-    WorkflowAgentOnToolExecutionStartCallback, WorkflowAgentOptions, WorkflowAgentStreamOptions,
-    WorkflowAgentStreamResult, WorkflowAgentToolExecutionEndInfo,
-    WorkflowAgentToolExecutionStartInfo,
+    WorkflowAgentOnStartCallback, WorkflowAgentOnStepFinishCallback,
+    WorkflowAgentOnStepStartCallback, WorkflowAgentOnToolExecutionEndCallback,
+    WorkflowAgentOnToolExecutionStartCallback, WorkflowAgentOptions, WorkflowAgentStartInfo,
+    WorkflowAgentStepStartInfo, WorkflowAgentStreamOptions, WorkflowAgentStreamResult,
+    WorkflowAgentToolExecutionEndInfo, WorkflowAgentToolExecutionStartInfo,
 };
 
 use ai_sdk_provider::json::{JsonObject, JsonSchema, JsonValue};

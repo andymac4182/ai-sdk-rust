@@ -44,6 +44,12 @@ pub struct WorkflowAgentOptions {
     /// Default prepare-step callback.
     pub prepare_step: Option<WorkflowPrepareStepCallback>,
 
+    /// Default stream-start callback.
+    pub on_start: Option<WorkflowAgentOnStartCallback>,
+
+    /// Default step-start callback.
+    pub on_step_start: Option<WorkflowAgentOnStepStartCallback>,
+
     /// Default step-finish callback.
     pub on_step_finish: Option<WorkflowAgentOnStepFinishCallback>,
 
@@ -68,6 +74,8 @@ impl WorkflowAgentOptions {
             active_tools: None,
             tool_choice: None,
             prepare_step: None,
+            on_start: None,
+            on_step_start: None,
             on_step_finish: None,
             on_tool_execution_start: None,
             on_tool_execution_end: None,
@@ -121,6 +129,18 @@ impl WorkflowAgentOptions {
         self
     }
 
+    /// Sets a constructor-level stream-start callback.
+    pub fn with_on_start(mut self, on_start: WorkflowAgentOnStartCallback) -> Self {
+        self.on_start = Some(on_start);
+        self
+    }
+
+    /// Sets a constructor-level step-start callback.
+    pub fn with_on_step_start(mut self, on_step_start: WorkflowAgentOnStepStartCallback) -> Self {
+        self.on_step_start = Some(on_step_start);
+        self
+    }
+
     /// Sets a constructor-level step-finish callback.
     pub fn with_on_step_finish(
         mut self,
@@ -165,6 +185,8 @@ pub struct WorkflowAgent {
     active_tools: Option<Vec<String>>,
     tool_choice: Option<JsonValue>,
     prepare_step: Option<WorkflowPrepareStepCallback>,
+    on_start: Option<WorkflowAgentOnStartCallback>,
+    on_step_start: Option<WorkflowAgentOnStepStartCallback>,
     on_step_finish: Option<WorkflowAgentOnStepFinishCallback>,
     on_tool_execution_start: Option<WorkflowAgentOnToolExecutionStartCallback>,
     on_tool_execution_end: Option<WorkflowAgentOnToolExecutionEndCallback>,
@@ -182,6 +204,8 @@ impl WorkflowAgent {
             active_tools: options.active_tools,
             tool_choice: options.tool_choice,
             prepare_step: options.prepare_step,
+            on_start: options.on_start,
+            on_step_start: options.on_step_start,
             on_step_finish: options.on_step_finish,
             on_tool_execution_start: options.on_tool_execution_start,
             on_tool_execution_end: options.on_tool_execution_end,
@@ -221,6 +245,10 @@ impl WorkflowAgent {
             .unwrap_or_default();
         let tool_choice = options.tool_choice.or_else(|| self.tool_choice.clone());
         let prepare_step = options.prepare_step.or_else(|| self.prepare_step.clone());
+        let constructor_on_start = self.on_start.clone();
+        let stream_on_start = options.on_start;
+        let constructor_on_step_start = self.on_step_start.clone();
+        let stream_on_step_start = options.on_step_start;
         let constructor_on_step_finish = self.on_step_finish.clone();
         let stream_on_step_finish = options.on_step_finish;
         let constructor_on_tool_execution_start = self.on_tool_execution_start.clone();
@@ -230,13 +258,17 @@ impl WorkflowAgent {
         let constructor_on_finish = self.on_finish.clone();
         let stream_on_finish = options.on_finish;
 
+        let initial_prompt = options.prompt.clone();
+        let initial_runtime_context = options.runtime_context.clone();
+        let initial_tools_context = options.tools_context.clone();
+
         let mut iterator = StreamTextIterator::from_runtime_tools(
             options.prompt,
             self.tools.values().cloned(),
             options.executor,
         )
         .with_model(self.model.clone())
-        .with_generation_settings(generation_settings)
+        .with_generation_settings(generation_settings.clone())
         .with_runtime_context(options.runtime_context)
         .with_tools_context(options.tools_context);
 
@@ -250,19 +282,49 @@ impl WorkflowAgent {
             iterator = iterator.with_prepare_step(prepare_step);
         }
 
+        call_start_callbacks(
+            &constructor_on_start,
+            &stream_on_start,
+            &WorkflowAgentStartInfo {
+                model: self.model.clone(),
+                messages: initial_prompt.clone(),
+                generation_settings: generation_settings.clone(),
+                runtime_context: initial_runtime_context.clone(),
+                tools_context: initial_tools_context.clone(),
+            },
+        );
+
         let mut pending_tool_results = None;
         let mut steps = Vec::new();
         let mut messages = iterator.prompt().to_vec();
-        let mut runtime_context = WorkflowRuntimeContext::new();
-        let mut tools_context = WorkflowToolsContext::new();
+        let mut runtime_context = initial_runtime_context;
+        let mut tools_context = initial_tools_context;
         let mut last_tool_calls = Vec::new();
         let mut last_tool_results = Vec::new();
         let mut missing_provider_executed_tool_results = Vec::new();
 
-        while let Some(yield_value) = iterator
-            .next(pending_tool_results.take())
-            .map_err(WorkflowAgentError::Stream)?
-        {
+        loop {
+            call_step_start_callbacks(
+                &constructor_on_step_start,
+                &stream_on_step_start,
+                &WorkflowAgentStepStartInfo {
+                    model: self.model.clone(),
+                    step_number: steps.len(),
+                    steps: steps.clone(),
+                    messages: messages.clone(),
+                    generation_settings: generation_settings.clone(),
+                    runtime_context: runtime_context.clone(),
+                    tools_context: tools_context.clone(),
+                },
+            );
+
+            let Some(yield_value) = iterator
+                .next(pending_tool_results.take())
+                .map_err(WorkflowAgentError::Stream)?
+            else {
+                break;
+            };
+
             steps.push(yield_value.step.clone());
             messages = yield_value.messages.clone();
             runtime_context = yield_value.runtime_context.clone();
@@ -276,7 +338,7 @@ impl WorkflowAgent {
                     &stream_on_step_finish,
                     &yield_value.step,
                 );
-                continue;
+                break;
             }
 
             let execution = self
@@ -445,6 +507,12 @@ pub struct WorkflowAgentStreamOptions<E> {
     /// Stream-level prepare-step callback that overrides constructor defaults.
     pub prepare_step: Option<WorkflowPrepareStepCallback>,
 
+    /// Stream-level start callback that runs after any constructor callback.
+    pub on_start: Option<WorkflowAgentOnStartCallback>,
+
+    /// Stream-level step-start callback that runs after any constructor callback.
+    pub on_step_start: Option<WorkflowAgentOnStepStartCallback>,
+
     /// Stream-level step-finish callback that runs after any constructor callback.
     pub on_step_finish: Option<WorkflowAgentOnStepFinishCallback>,
 
@@ -470,6 +538,8 @@ impl<E> WorkflowAgentStreamOptions<E> {
             active_tools: None,
             tool_choice: None,
             prepare_step: None,
+            on_start: None,
+            on_step_start: None,
             on_step_finish: None,
             on_tool_execution_start: None,
             on_tool_execution_end: None,
@@ -516,6 +586,18 @@ impl<E> WorkflowAgentStreamOptions<E> {
         self
     }
 
+    /// Sets a stream-level start callback.
+    pub fn with_on_start(mut self, on_start: WorkflowAgentOnStartCallback) -> Self {
+        self.on_start = Some(on_start);
+        self
+    }
+
+    /// Sets a stream-level step-start callback.
+    pub fn with_on_step_start(mut self, on_step_start: WorkflowAgentOnStepStartCallback) -> Self {
+        self.on_step_start = Some(on_step_start);
+        self
+    }
+
     /// Sets a stream-level step-finish callback.
     pub fn with_on_step_finish(
         mut self,
@@ -548,6 +630,112 @@ impl<E> WorkflowAgentStreamOptions<E> {
         self.on_finish = Some(on_finish);
         self
     }
+}
+
+/// Callback invoked before [`WorkflowAgent::stream`] starts iterating steps.
+#[derive(Clone)]
+pub struct WorkflowAgentOnStartCallback {
+    callback: Arc<dyn Fn(WorkflowAgentStartInfo) + Send + Sync + 'static>,
+}
+
+impl WorkflowAgentOnStartCallback {
+    /// Creates a start callback from a synchronous Rust function.
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(WorkflowAgentStartInfo) + Send + Sync + 'static,
+    {
+        Self {
+            callback: Arc::new(callback),
+        }
+    }
+
+    fn call(&self, info: WorkflowAgentStartInfo) {
+        (self.callback)(info);
+    }
+}
+
+impl fmt::Debug for WorkflowAgentOnStartCallback {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkflowAgentOnStartCallback")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Callback invoked before each [`WorkflowAgent`] stream step starts.
+#[derive(Clone)]
+pub struct WorkflowAgentOnStepStartCallback {
+    callback: Arc<dyn Fn(WorkflowAgentStepStartInfo) + Send + Sync + 'static>,
+}
+
+impl WorkflowAgentOnStepStartCallback {
+    /// Creates a step-start callback from a synchronous Rust function.
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(WorkflowAgentStepStartInfo) + Send + Sync + 'static,
+    {
+        Self {
+            callback: Arc::new(callback),
+        }
+    }
+
+    fn call(&self, info: WorkflowAgentStepStartInfo) {
+        (self.callback)(info);
+    }
+}
+
+impl fmt::Debug for WorkflowAgentOnStepStartCallback {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkflowAgentOnStepStartCallback")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Information passed when a workflow agent stream starts.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowAgentStartInfo {
+    /// Model identity configured for the stream.
+    pub model: WorkflowModelInfo,
+
+    /// Initial prompt messages.
+    pub messages: WorkflowPrompt,
+
+    /// Generation settings active at stream start.
+    pub generation_settings: WorkflowGenerationSettings,
+
+    /// Runtime context supplied at stream start.
+    pub runtime_context: WorkflowRuntimeContext,
+
+    /// Tool contexts supplied at stream start.
+    pub tools_context: WorkflowToolsContext,
+}
+
+/// Information passed before a workflow agent stream step starts.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowAgentStepStartInfo {
+    /// Model identity configured for the stream.
+    pub model: WorkflowModelInfo,
+
+    /// Zero-based step number about to run.
+    pub step_number: usize,
+
+    /// Steps completed before this step.
+    pub steps: Vec<WorkflowStreamStep>,
+
+    /// Current conversation messages before this step starts.
+    pub messages: WorkflowPrompt,
+
+    /// Generation settings active for this stream.
+    pub generation_settings: WorkflowGenerationSettings,
+
+    /// Current runtime context.
+    pub runtime_context: WorkflowRuntimeContext,
+
+    /// Current tool contexts.
+    pub tools_context: WorkflowToolsContext,
 }
 
 /// Callback invoked after each [`WorkflowAgent`] stream step completes.
@@ -815,6 +1003,32 @@ impl fmt::Display for WorkflowAgentError {
 }
 
 impl Error for WorkflowAgentError {}
+
+fn call_start_callbacks(
+    constructor_on_start: &Option<WorkflowAgentOnStartCallback>,
+    stream_on_start: &Option<WorkflowAgentOnStartCallback>,
+    info: &WorkflowAgentStartInfo,
+) {
+    if let Some(on_start) = constructor_on_start {
+        on_start.call(info.clone());
+    }
+    if let Some(on_start) = stream_on_start {
+        on_start.call(info.clone());
+    }
+}
+
+fn call_step_start_callbacks(
+    constructor_on_step_start: &Option<WorkflowAgentOnStepStartCallback>,
+    stream_on_step_start: &Option<WorkflowAgentOnStepStartCallback>,
+    info: &WorkflowAgentStepStartInfo,
+) {
+    if let Some(on_step_start) = constructor_on_step_start {
+        on_step_start.call(info.clone());
+    }
+    if let Some(on_step_start) = stream_on_step_start {
+        on_step_start.call(info.clone());
+    }
+}
 
 fn call_step_finish_callbacks(
     constructor_on_step_finish: &Option<WorkflowAgentOnStepFinishCallback>,
@@ -1597,6 +1811,259 @@ mod tests {
             *calls.lock().expect("calls lock succeeds"),
             vec!["constructor".to_string(), "method".to_string()]
         );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_call_experimental_on_start_from_constructor() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_constructor = Arc::clone(&calls);
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_on_start(
+            WorkflowAgentOnStartCallback::new(move |_| {
+                calls_for_constructor
+                    .lock()
+                    .expect("calls lock succeeds")
+                    .push("constructor".to_string());
+            }),
+        ));
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+            .expect("agent stream succeeds");
+
+        assert_eq!(
+            *calls.lock().expect("calls lock succeeds"),
+            vec!["constructor".to_string()]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_call_experimental_on_start_from_stream_method() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_method = Arc::clone(&calls);
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_on_start(
+                WorkflowAgentOnStartCallback::new(move |_| {
+                    calls_for_method
+                        .lock()
+                        .expect("calls lock succeeds")
+                        .push("method".to_string());
+                }),
+            ),
+        ))
+        .expect("agent stream succeeds");
+
+        assert_eq!(
+            *calls.lock().expect("calls lock succeeds"),
+            vec!["method".to_string()]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_call_both_constructor_and_method_experimental_on_start_in_correct_order()
+     {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_constructor = Arc::clone(&calls);
+        let calls_for_method = Arc::clone(&calls);
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_on_start(
+            WorkflowAgentOnStartCallback::new(move |_| {
+                calls_for_constructor
+                    .lock()
+                    .expect("calls lock succeeds")
+                    .push("constructor".to_string());
+            }),
+        ));
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_on_start(
+                WorkflowAgentOnStartCallback::new(move |_| {
+                    calls_for_method
+                        .lock()
+                        .expect("calls lock succeeds")
+                        .push("method".to_string());
+                }),
+            ),
+        ))
+        .expect("agent stream succeeds");
+
+        assert_eq!(
+            *calls.lock().expect("calls lock succeeds"),
+            vec!["constructor".to_string(), "method".to_string()]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_pass_experimental_on_start_event_information() {
+        let captured_event = Arc::new(Mutex::new(None));
+        let captured_event_for_callback = Arc::clone(&captured_event);
+        let runtime_context: WorkflowRuntimeContext = serde_json::from_value(json!({
+            "userId": "test-user"
+        }))
+        .expect("runtime context");
+        let generation_settings = WorkflowGenerationSettings {
+            temperature: Some(0.7),
+            max_output_tokens: Some(500),
+            ..WorkflowGenerationSettings::default()
+        };
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model())
+                .with_generation_settings(generation_settings.clone()),
+        );
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(
+            agent.stream(
+                WorkflowAgentStreamOptions::new(user_prompt(), executor)
+                    .with_runtime_context(runtime_context.clone())
+                    .with_on_start(WorkflowAgentOnStartCallback::new(move |info| {
+                        *captured_event_for_callback
+                            .lock()
+                            .expect("captured event lock succeeds") = Some(info);
+                    })),
+            ),
+        )
+        .expect("agent stream succeeds");
+
+        let event = captured_event
+            .lock()
+            .expect("captured event lock succeeds")
+            .clone()
+            .expect("event was captured");
+        assert_eq!(event.model, model());
+        assert_eq!(event.messages, user_prompt());
+        assert_eq!(event.generation_settings, generation_settings);
+        assert_eq!(event.runtime_context, runtime_context);
+        assert!(event.tools_context.is_empty());
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_call_experimental_on_step_start_from_constructor() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_constructor = Arc::clone(&calls);
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_on_step_start(
+            WorkflowAgentOnStepStartCallback::new(move |_| {
+                calls_for_constructor
+                    .lock()
+                    .expect("calls lock succeeds")
+                    .push("constructor".to_string());
+            }),
+        ));
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+            .expect("agent stream succeeds");
+
+        assert_eq!(
+            *calls.lock().expect("calls lock succeeds"),
+            vec!["constructor".to_string()]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_call_experimental_on_step_start_from_stream_method() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_method = Arc::clone(&calls);
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_on_step_start(
+                WorkflowAgentOnStepStartCallback::new(move |_| {
+                    calls_for_method
+                        .lock()
+                        .expect("calls lock succeeds")
+                        .push("method".to_string());
+                }),
+            ),
+        ))
+        .expect("agent stream succeeds");
+
+        assert_eq!(
+            *calls.lock().expect("calls lock succeeds"),
+            vec!["method".to_string()]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_call_both_constructor_and_method_experimental_on_step_start_in_correct_order()
+     {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_constructor = Arc::clone(&calls);
+        let calls_for_method = Arc::clone(&calls);
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_on_step_start(
+            WorkflowAgentOnStepStartCallback::new(move |_| {
+                calls_for_constructor
+                    .lock()
+                    .expect("calls lock succeeds")
+                    .push("constructor".to_string());
+            }),
+        ));
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_on_step_start(
+                WorkflowAgentOnStepStartCallback::new(move |_| {
+                    calls_for_method
+                        .lock()
+                        .expect("calls lock succeeds")
+                        .push("method".to_string());
+                }),
+            ),
+        ))
+        .expect("agent stream succeeds");
+
+        assert_eq!(
+            *calls.lock().expect("calls lock succeeds"),
+            vec!["constructor".to_string(), "method".to_string()]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_pass_experimental_on_step_start_event_information() {
+        let captured_event = Arc::new(Mutex::new(None));
+        let captured_event_for_callback = Arc::clone(&captured_event);
+        let runtime_context: WorkflowRuntimeContext = serde_json::from_value(json!({
+            "userId": "test-user"
+        }))
+        .expect("runtime context");
+        let generation_settings = WorkflowGenerationSettings {
+            temperature: Some(0.7),
+            ..WorkflowGenerationSettings::default()
+        };
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model())
+                .with_generation_settings(generation_settings.clone()),
+        );
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(
+            agent.stream(
+                WorkflowAgentStreamOptions::new(user_prompt(), executor)
+                    .with_runtime_context(runtime_context.clone())
+                    .with_on_step_start(WorkflowAgentOnStepStartCallback::new(move |info| {
+                        *captured_event_for_callback
+                            .lock()
+                            .expect("captured event lock succeeds") = Some(info);
+                    })),
+            ),
+        )
+        .expect("agent stream succeeds");
+
+        let event = captured_event
+            .lock()
+            .expect("captured event lock succeeds")
+            .clone()
+            .expect("event was captured");
+        assert_eq!(event.model, model());
+        assert_eq!(event.step_number, 0);
+        assert!(event.steps.is_empty());
+        assert_eq!(event.messages, user_prompt());
+        assert_eq!(event.generation_settings, generation_settings);
+        assert_eq!(event.runtime_context, runtime_context);
+        assert!(event.tools_context.is_empty());
     }
 
     #[test]
