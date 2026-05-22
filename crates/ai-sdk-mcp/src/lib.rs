@@ -2284,6 +2284,7 @@ fn parse_json_rpc_sse_body_with_last_event_id(body: &str) -> McpClientResult<Par
 pub struct SseMcpTransport {
     url: String,
     headers: BTreeMap<String, String>,
+    auth_provider: Option<SharedOAuthClientProvider>,
     endpoint: Option<String>,
     protocol_version: Option<String>,
     started: bool,
@@ -2296,6 +2297,7 @@ impl SseMcpTransport {
         Self {
             url: url.into(),
             headers: BTreeMap::new(),
+            auth_provider: None,
             endpoint: None,
             protocol_version: None,
             started: false,
@@ -2324,6 +2326,15 @@ impl SseMcpTransport {
         self
     }
 
+    /// Adds an OAuth provider used to attach bearer tokens and refresh on 401 responses.
+    pub fn with_auth_provider<P>(mut self, provider: P) -> Self
+    where
+        P: OAuthClientProvider + Send + 'static,
+    {
+        self.auth_provider = Some(SharedOAuthClientProvider::new(provider));
+        self
+    }
+
     /// Returns the endpoint advertised by the SSE server.
     pub fn endpoint(&self) -> Option<&str> {
         self.endpoint.as_deref()
@@ -2339,7 +2350,7 @@ impl SseMcpTransport {
     fn common_headers(
         &self,
         base: impl IntoIterator<Item = (&'static str, &'static str)>,
-    ) -> BTreeMap<String, String> {
+    ) -> McpClientResult<BTreeMap<String, String>> {
         let mut headers = self.headers.clone();
         for (key, value) in base {
             headers.insert(key.to_string(), value.to_string());
@@ -2348,18 +2359,78 @@ impl SseMcpTransport {
             "mcp-protocol-version".to_string(),
             self.protocol_version().to_string(),
         );
+        if let Some(access_token) = self.oauth_access_token()? {
+            headers.insert(
+                "Authorization".to_string(),
+                format!("Bearer {access_token}"),
+            );
+        }
 
-        with_user_agent_suffix(
+        Ok(with_user_agent_suffix(
             Some(headers.into_iter().map(|(key, value)| (key, Some(value)))),
             [format!("ai-sdk/{}", env!("CARGO_PKG_VERSION"))],
         )
         .into_iter()
-        .collect()
+        .collect())
+    }
+
+    fn oauth_access_token(&self) -> McpClientResult<Option<String>> {
+        let Some(provider) = &self.auth_provider else {
+            return Ok(None);
+        };
+        let provider = provider.0.lock().map_err(|_| {
+            McpClientError::new("MCP SSE Transport Error: OAuth provider lock poisoned")
+        })?;
+        let tokens = provider.tokens().map_err(|error| {
+            McpClientError::new(format!(
+                "MCP SSE Transport Error: failed to load OAuth tokens: {error}"
+            ))
+        })?;
+        Ok(tokens
+            .map(|tokens| tokens.access_token)
+            .filter(|access_token| !access_token.is_empty()))
+    }
+
+    fn authorize_after_unauthorized_response(
+        &mut self,
+        response: &ureq::http::Response<ureq::Body>,
+    ) -> McpClientResult<bool> {
+        let Some(provider) = &self.auth_provider else {
+            return Ok(false);
+        };
+
+        let mut options = AuthOptions::new(self.url.clone());
+        if let Some(resource_metadata_url) = response
+            .headers()
+            .get("www-authenticate")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| extract_resource_metadata_url(Some(value)))
+        {
+            options = options.with_resource_metadata_url(resource_metadata_url.to_string());
+        }
+
+        let mut provider = provider.0.lock().map_err(|_| {
+            McpClientError::new("MCP SSE Transport Error: OAuth provider lock poisoned")
+        })?;
+        match auth(provider.as_mut(), options).map_err(|error| {
+            McpClientError::new(format!(
+                "MCP SSE Transport Error: OAuth authorization failed: {error}"
+            ))
+        })? {
+            AuthResult::Authorized => Ok(true),
+            AuthResult::Redirect => Err(McpClientError::new(
+                "MCP SSE Transport Error: OAuth authorization required",
+            )),
+        }
     }
 
     fn connect(&mut self) -> McpClientResult<()> {
+        self.connect_with_auth_retry(false)
+    }
+
+    fn connect_with_auth_retry(&mut self, tried_auth: bool) -> McpClientResult<()> {
         let mut builder = ureq::get(&self.url);
-        for (name, value) in self.common_headers([("Accept", "text/event-stream")]) {
+        for (name, value) in self.common_headers([("Accept", "text/event-stream")])? {
             builder = builder.header(name.as_str(), value.as_str());
         }
         let mut response = builder
@@ -2371,6 +2442,10 @@ impl SseMcpTransport {
                 McpClientError::new(format!("MCP SSE Transport Error: fetch failed: {error}"))
             })?;
         let status = response.status().as_u16();
+        if status == 401 && !tried_auth && self.authorize_after_unauthorized_response(&response)? {
+            return self.connect_with_auth_retry(true);
+        }
+
         let body = response.body_mut().read_to_string().map_err(|error| {
             McpClientError::new(format!(
                 "MCP SSE Transport Error: failed to read response body: {error}"
@@ -2401,19 +2476,32 @@ impl SseMcpTransport {
         let body = serde_json::to_string(message).map_err(|error| {
             McpClientError::new(format!("Failed to serialize MCP message: {error}"))
         })?;
-        let mut builder = ureq::post(&endpoint);
-        for (name, value) in self.common_headers([("Content-Type", "application/json")]) {
+        self.post_message_with_auth_retry(&endpoint, body, false)
+    }
+
+    fn post_message_with_auth_retry(
+        &mut self,
+        endpoint: &str,
+        body: String,
+        tried_auth: bool,
+    ) -> McpClientResult<Vec<JsonRpcMessage>> {
+        let mut builder = ureq::post(endpoint);
+        for (name, value) in self.common_headers([("Content-Type", "application/json")])? {
             builder = builder.header(name.as_str(), value.as_str());
         }
         let mut response = builder
             .config()
             .http_status_as_error(false)
             .build()
-            .send(body)
+            .send(body.clone())
             .map_err(|error| {
                 McpClientError::new(format!("MCP SSE Transport Error: fetch failed: {error}"))
             })?;
         let status = response.status().as_u16();
+        if status == 401 && !tried_auth && self.authorize_after_unauthorized_response(&response)? {
+            return self.post_message_with_auth_retry(endpoint, body, true);
+        }
+
         let content_type = response
             .headers()
             .get("content-type")
@@ -4097,6 +4185,156 @@ mod tests {
                 .message
                 .contains("MCP SSE Transport Error: POSTing to endpoint (HTTP 500): failed")
         );
+    }
+
+    #[test]
+    fn mcp_sse_transport_refreshes_oauth_tokens_for_unauthorized_connect() {
+        let server = LocalHttpServer::new(Vec::new());
+        let transport_url = format!("{}/sse", server.url());
+        server.set_responses(vec![
+            LocalHttpResponse::new(
+                401,
+                [
+                    ("content-type".to_string(), "text/plain".to_string()),
+                    (
+                        "www-authenticate".to_string(),
+                        format!(
+                            "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource\"",
+                            server.url()
+                        ),
+                    ),
+                ],
+                "Unauthorized",
+            ),
+            LocalHttpResponse::json(oauth_protected_resource_metadata_json(
+                &server.url(),
+                &transport_url,
+            )),
+            LocalHttpResponse::json(oauth_authorization_server_metadata_json(&server.url())),
+            LocalHttpResponse::json(json!({
+                "access_token": "fresh-mcp-token",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "refresh_token": "next-refresh-token"
+            })),
+            LocalHttpResponse::new(
+                200,
+                [("content-type", "text/event-stream")],
+                "event: endpoint\ndata: /messages\n\n",
+            ),
+        ]);
+        let provider = HttpTransportOAuthProviderStub::with_refresh_token();
+        let mut transport =
+            SseMcpTransport::new(transport_url).with_auth_provider(provider.clone());
+
+        transport
+            .start()
+            .expect("OAuth refresh retries SSE connection");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 5);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].path, "/sse");
+        assert_eq!(
+            requests[0].headers.get("authorization"),
+            Some(&"Bearer expired-mcp-token".to_string())
+        );
+        assert_eq!(requests[1].path, "/.well-known/oauth-protected-resource");
+        assert_eq!(requests[2].path, "/.well-known/oauth-authorization-server");
+        assert_eq!(requests[3].path, "/token");
+        assert_eq!(requests[4].method, "GET");
+        assert_eq!(
+            requests[4].headers.get("authorization"),
+            Some(&"Bearer fresh-mcp-token".to_string())
+        );
+        assert_eq!(
+            transport.endpoint(),
+            Some(format!("{}/messages", server.url()).as_str())
+        );
+        assert_eq!(provider.access_token().as_deref(), Some("fresh-mcp-token"));
+    }
+
+    #[test]
+    fn mcp_sse_transport_refreshes_oauth_tokens_and_retries_unauthorized_post() {
+        let server = LocalHttpServer::new(Vec::new());
+        let transport_url = format!("{}/sse", server.url());
+        server.set_responses(vec![
+            LocalHttpResponse::new(
+                200,
+                [("content-type", "text/event-stream")],
+                "event: endpoint\ndata: /messages\n\n",
+            ),
+            LocalHttpResponse::new(
+                401,
+                [
+                    ("content-type".to_string(), "text/plain".to_string()),
+                    (
+                        "www-authenticate".to_string(),
+                        format!(
+                            "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource\"",
+                            server.url()
+                        ),
+                    ),
+                ],
+                "Unauthorized",
+            ),
+            LocalHttpResponse::json(oauth_protected_resource_metadata_json(
+                &server.url(),
+                &transport_url,
+            )),
+            LocalHttpResponse::json(oauth_authorization_server_metadata_json(&server.url())),
+            LocalHttpResponse::json(json!({
+                "access_token": "fresh-mcp-token",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "refresh_token": "next-refresh-token"
+            })),
+            LocalHttpResponse::json(json!({
+                "jsonrpc": "2.0",
+                "id": 12,
+                "result": { "tools": [] }
+            })),
+        ]);
+        let provider = HttpTransportOAuthProviderStub::with_refresh_token();
+        let mut transport =
+            SseMcpTransport::new(transport_url).with_auth_provider(provider.clone());
+
+        transport.start().expect("SSE transport starts");
+        let messages = transport
+            .send(JsonRpcMessage::Request(JsonRpcRequest::new(
+                json!(12),
+                "tools/list",
+            )))
+            .expect("OAuth refresh retries SSE POST");
+
+        assert_eq!(
+            serde_json::to_value(&messages).expect("messages serialize"),
+            json!([{ "jsonrpc": "2.0", "id": 12, "result": { "tools": [] } }])
+        );
+        let requests = server.requests();
+        assert_eq!(requests.len(), 6);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(
+            requests[0].headers.get("authorization"),
+            Some(&"Bearer expired-mcp-token".to_string())
+        );
+        assert_eq!(requests[1].method, "POST");
+        assert_eq!(requests[1].path, "/messages");
+        assert_eq!(requests[1].body["method"], "tools/list");
+        assert_eq!(
+            requests[1].headers.get("authorization"),
+            Some(&"Bearer expired-mcp-token".to_string())
+        );
+        assert_eq!(requests[2].path, "/.well-known/oauth-protected-resource");
+        assert_eq!(requests[3].path, "/.well-known/oauth-authorization-server");
+        assert_eq!(requests[4].path, "/token");
+        assert_eq!(requests[5].method, "POST");
+        assert_eq!(requests[5].path, "/messages");
+        assert_eq!(
+            requests[5].headers.get("authorization"),
+            Some(&"Bearer fresh-mcp-token".to_string())
+        );
+        assert_eq!(provider.access_token().as_deref(), Some("fresh-mcp-token"));
     }
 
     #[test]
