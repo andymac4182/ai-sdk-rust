@@ -1723,6 +1723,12 @@ focused tests for each portable behavior before changing rows to `verified`.
   upstream `openai-file-search-tool.1` and `openai-file-search-tool.2`
   JSON/chunks fixtures, deriving ids, text, usage, query arrays, and result
   payloads from the fixtures instead of shortened reconstructed bodies.
+- 2026-05-22: OpenAI Responses image-generation streaming fixture parity
+  hardened `open_responses_provider_streams_image_generation_fixture_results`
+  to consume a byte-matched local copy of upstream
+  `openai-image-generation-tool.1.chunks.txt`, deriving the image item id,
+  preliminary/final image payloads, and empty assistant message id from the
+  fixture instead of reconstructed SSE literals.
 - 2026-05-20: OpenAI Responses code-interpreter annotation stream fixture
   parity added
   `open_responses_provider_streams_code_interpreter_results_with_annotations`
