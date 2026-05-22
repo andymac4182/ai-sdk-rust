@@ -1126,6 +1126,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   assertions continue to map to the root logger deterministic record tests, and
   the JavaScript callback-throws assertion remains a JS exception/promise
   behavior rather than a Rust panic-unwind contract.
+- 2026-05-22: `streamObject` callback correlation parity added
+  `stream_object_callbacks_correlate_all_events_with_same_call_id` in
+  `src/stream_object.rs`, mapping the upstream `callback ordering` case that
+  requires `onStart`, `onStepStart`, `onStepFinish`, and `onFinish` to share a
+  single generated `callId`.
 - 2026-05-21: `streamObject` repair-text parity completed the upstream
   `options.experimental_repairText` block with
   `stream_object_repair_text_repairs_json_parse_error`,
@@ -2570,7 +2575,9 @@ focused tests for each portable behavior before changing rows to `verified`.
    `embed`, `embedMany`, and `rerank` now have named Rust counterparts.
    The portable `stream-object.test-d.ts` result-type assertions now have typed
    Rust accessor counterparts for finish reason, schema, no-schema, enum, and
-   array output.
+   array output. The upstream `callback ordering` call-id correlation case now
+   has the named Rust counterpart
+   `stream_object_callbacks_correlate_all_events_with_same_call_id`.
 9. Continue native Gateway provider test parity from upstream
    `gateway-provider.test.ts` and any remaining Gateway provider package tests
    before returning to unrelated providers. The portable
