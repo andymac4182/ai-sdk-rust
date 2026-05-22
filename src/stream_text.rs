@@ -2487,6 +2487,10 @@ where
             &tool_approvals,
         );
         apply_generate_text_response_metadata(&mut generate_step);
+        apply_stream_text_response_identity(
+            &mut collected_step.response,
+            generate_step.response.as_ref(),
+        );
 
         parts.push(TextStreamPart::FinishStep(TextStreamFinishStepPart::new(
             collected_step.response.clone(),
@@ -4056,6 +4060,31 @@ fn language_model_response_from_stream_metadata(
     }
 }
 
+fn apply_stream_text_response_identity(
+    response: &mut StreamTextResponseMetadata,
+    generate_response: Option<&LanguageModelResponse>,
+) {
+    let Some(generate_response) = generate_response else {
+        return;
+    };
+
+    if response.id.is_none() {
+        response.id = generate_response.id.clone();
+    }
+
+    if response.timestamp.is_none() {
+        response.timestamp = generate_response.timestamp;
+    }
+
+    if response.model_id.is_none() {
+        response.model_id = generate_response.model_id.clone();
+    }
+
+    if response.headers.is_none() {
+        response.headers = generate_response.headers.clone();
+    }
+}
+
 fn add_stream_text_step_usage(steps: &[StreamTextStep]) -> LanguageModelUsage {
     steps
         .iter()
@@ -4772,6 +4801,62 @@ mod tests {
         assert_eq!(finish.finish_reason, FinishReason::Stop);
         assert_eq!(finish.raw_finish_reason, Some("stop".to_string()));
         assert_eq!(finish.total_usage, usage());
+    }
+
+    #[test]
+    fn stream_text_result_full_stream_uses_fallback_response_metadata_when_response_metadata_missing()
+     {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", ", ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("test-input")],
+        )));
+
+        let finish_step = result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TextStreamPart::FinishStep(part) => Some(part),
+                _ => None,
+            })
+            .expect("full stream includes finish-step");
+
+        let response_id = finish_step
+            .response
+            .id
+            .as_deref()
+            .expect("fallback response id is generated");
+        assert_eq!(response_id.len(), 16);
+        assert_eq!(
+            finish_step.response.model_id.as_deref(),
+            Some("mock-model-id")
+        );
+        assert!(
+            finish_step.response.timestamp.is_some(),
+            "fallback response timestamp is generated"
+        );
+        assert_eq!(finish_step.response.headers, None);
+        assert_eq!(finish_step.usage, usage());
+        assert_eq!(finish_step.finish_reason, FinishReason::Stop);
+        assert_eq!(finish_step.raw_finish_reason.as_deref(), Some("stop"));
+
+        assert_eq!(result.text_stream, vec!["Hello", ", ", "world!"]);
+        assert_eq!(result.text, "Hello, world!");
+        assert_eq!(result.response, finish_step.response);
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.steps[0].response, finish_step.response);
     }
 
     #[test]
