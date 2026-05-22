@@ -1025,6 +1025,12 @@ focused tests for each portable behavior before changing rows to `verified`.
   nested structures, and regression fixtures. Existing grouped Rust fix-json
   tests remain additive coverage only. The existing `parse_partial_json_*` tests
   already cover every portable upstream `util/parse-partial-json.test.ts` case.
+- 2026-05-22: `streamObject` object-stream schema metadata parity added
+  `stream_object_object_stream_uses_schema_name_and_description` in
+  `src/stream_object.rs`, mapping upstream `output = "object" >
+  result.objectStream > should use name and description` by proving the Rust
+  call preserves the schema name, schema description, user prompt, and object
+  delta stream.
 - 2026-05-21: `streamObject` full-stream result parity added
   `stream_object_result_full_stream_matches_upstream_object_chunks` in
   `src/stream_object.rs`, mapping upstream `result.fullStream` object-output
@@ -2588,6 +2594,9 @@ focused tests for each portable behavior before changing rows to `verified`.
    The upstream `partialObjectStream` provider-error suppression case now has
    the named Rust counterpart
    `stream_object_partial_object_stream_suppresses_provider_errors`.
+   The upstream object-stream `schemaName`/`schemaDescription` case now has the
+   named Rust counterpart
+   `stream_object_object_stream_uses_schema_name_and_description`.
 9. Continue native Gateway provider test parity from upstream
    `gateway-provider.test.ts` and any remaining Gateway provider package tests
    before returning to unrelated providers. The portable
