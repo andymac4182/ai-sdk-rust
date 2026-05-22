@@ -1772,6 +1772,12 @@ focused tests for each portable behavior before changing rows to `verified`.
   metadata, reasoning ids, MCP call ids/names/arguments/output payloads, final
   message text, and usage from the fixture instead of reconstructed SSE
   literals.
+- 2026-05-22: OpenAI Responses shell streaming fixture parity hardened
+  `open_responses_provider_streams_shell_fixture_multiresponse` to consume a
+  byte-matched local copy of upstream `openai-shell-tool.1.chunks.txt`,
+  deriving both streamed response metadata records, shell call id/action,
+  final message text, and usage from the fixture instead of reconstructed SSE
+  literals.
 - 2026-05-20: OpenAI Responses code-interpreter annotation stream fixture
   parity added
   `open_responses_provider_streams_code_interpreter_results_with_annotations`
