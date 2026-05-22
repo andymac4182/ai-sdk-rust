@@ -1,15 +1,16 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 
 use ai_sdk_provider::json::{JsonObject, JsonValue};
 use ai_sdk_provider::{
     FinishReason, LanguageModelAssistantContentPart, LanguageModelAssistantMessage,
     LanguageModelFinishReason, LanguageModelMessage, LanguageModelResponseMetadata,
-    LanguageModelStreamPart, LanguageModelStreamResponseMetadata, LanguageModelTextPart,
-    LanguageModelToolCall, LanguageModelToolCallPart, LanguageModelToolContentPart,
-    LanguageModelToolMessage, LanguageModelToolResultPart, LanguageModelUsage, ProviderMetadata,
-    ProviderOptions, Warning,
+    LanguageModelStreamPart, LanguageModelStreamResponseMetadata, LanguageModelSystemMessage,
+    LanguageModelTextPart, LanguageModelToolCall, LanguageModelToolCallPart,
+    LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelToolResultPart,
+    LanguageModelUsage, ProviderMetadata, ProviderOptions, Warning,
 };
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +43,12 @@ impl WorkflowModelInfo {
             provider: provider.into(),
             model_id: model_id.into(),
         }
+    }
+}
+
+impl Default for WorkflowModelInfo {
+    fn default() -> Self {
+        Self::new("unknown", "unknown")
     }
 }
 
@@ -225,6 +232,10 @@ pub struct WorkflowStreamStep {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DoStreamStepOptions {
+    /// Current model identity for this workflow step.
+    #[serde(default)]
+    pub model: WorkflowModelInfo,
+
     /// Generation settings that survive the workflow step boundary.
     pub generation_settings: WorkflowGenerationSettings,
 
@@ -357,9 +368,144 @@ pub struct StreamTextIteratorYieldValue {
     pub provider_executed_tool_results: BTreeMap<String, ProviderExecutedToolResult>,
 }
 
+/// Callback invoked before each workflow stream-text step.
+#[derive(Clone)]
+pub struct WorkflowPrepareStepCallback {
+    callback:
+        Arc<dyn Fn(WorkflowPrepareStepInfo) -> WorkflowPrepareStepResult + Send + Sync + 'static>,
+}
+
+impl WorkflowPrepareStepCallback {
+    /// Creates a prepare-step callback from a synchronous Rust function.
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(WorkflowPrepareStepInfo) -> WorkflowPrepareStepResult + Send + Sync + 'static,
+    {
+        Self {
+            callback: Arc::new(callback),
+        }
+    }
+
+    fn call(&self, info: WorkflowPrepareStepInfo) -> WorkflowPrepareStepResult {
+        (self.callback)(info)
+    }
+}
+
+impl fmt::Debug for WorkflowPrepareStepCallback {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkflowPrepareStepCallback")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Information passed to a workflow prepare-step callback.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorkflowPrepareStepInfo {
+    /// Current model identity.
+    pub model: WorkflowModelInfo,
+
+    /// Zero-based workflow step number.
+    pub step_number: usize,
+
+    /// Completed steps before the current step.
+    pub steps: Vec<WorkflowStreamStep>,
+
+    /// Messages that will be sent to the model.
+    pub messages: WorkflowPrompt,
+
+    /// Current runtime context.
+    pub runtime_context: WorkflowRuntimeContext,
+
+    /// Current per-tool context.
+    pub tools_context: WorkflowToolsContext,
+}
+
+/// Prepare-step overrides for the current and subsequent workflow steps.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WorkflowPrepareStepResult {
+    /// Override the model identity for this step.
+    pub model: Option<WorkflowModelInfo>,
+
+    /// Override or prepend the system message for this step.
+    pub system: Option<String>,
+
+    /// Override the messages for this step.
+    pub messages: Option<WorkflowPrompt>,
+
+    /// Generation settings to merge into the current settings.
+    pub generation_settings: WorkflowGenerationSettings,
+
+    /// Override the active tools for this and subsequent steps.
+    pub active_tools: Option<Vec<String>>,
+
+    /// Override the serialized tool choice for this and subsequent steps.
+    pub tool_choice: Option<JsonValue>,
+
+    /// Override the runtime context for this and subsequent steps.
+    pub runtime_context: Option<WorkflowRuntimeContext>,
+
+    /// Override the per-tool context for this and subsequent steps.
+    pub tools_context: Option<WorkflowToolsContext>,
+}
+
+impl WorkflowPrepareStepResult {
+    /// Sets the model override.
+    pub fn with_model(mut self, model: WorkflowModelInfo) -> Self {
+        self.model = Some(model);
+        self
+    }
+
+    /// Sets the system message override.
+    pub fn with_system(mut self, system: impl Into<String>) -> Self {
+        self.system = Some(system.into());
+        self
+    }
+
+    /// Sets the message override.
+    pub fn with_messages(mut self, messages: WorkflowPrompt) -> Self {
+        self.messages = Some(messages);
+        self
+    }
+
+    /// Sets generation setting overrides.
+    pub fn with_generation_settings(
+        mut self,
+        generation_settings: WorkflowGenerationSettings,
+    ) -> Self {
+        self.generation_settings = generation_settings;
+        self
+    }
+
+    /// Sets active tool overrides.
+    pub fn with_active_tools(mut self, active_tools: impl IntoIterator<Item = String>) -> Self {
+        self.active_tools = Some(active_tools.into_iter().collect());
+        self
+    }
+
+    /// Sets the tool-choice override.
+    pub fn with_tool_choice(mut self, tool_choice: impl Into<JsonValue>) -> Self {
+        self.tool_choice = Some(tool_choice.into());
+        self
+    }
+
+    /// Sets the runtime context override.
+    pub fn with_runtime_context(mut self, runtime_context: WorkflowRuntimeContext) -> Self {
+        self.runtime_context = Some(runtime_context);
+        self
+    }
+
+    /// Sets the per-tool context override.
+    pub fn with_tools_context(mut self, tools_context: WorkflowToolsContext) -> Self {
+        self.tools_context = Some(tools_context);
+        self
+    }
+}
+
 /// Deterministic Rust equivalent of upstream `streamTextIterator`.
 pub struct StreamTextIterator<E> {
     executor: E,
+    model: WorkflowModelInfo,
     prompt: WorkflowPrompt,
     tools: SerializableToolSet,
     generation_settings: WorkflowGenerationSettings,
@@ -367,6 +513,7 @@ pub struct StreamTextIterator<E> {
     tools_context: WorkflowToolsContext,
     active_tools: Option<Vec<String>>,
     tool_choice: Option<JsonValue>,
+    prepare_step: Option<WorkflowPrepareStepCallback>,
     include_raw_chunks: bool,
     response_format: Option<JsonValue>,
     steps: Vec<WorkflowStreamStep>,
@@ -380,6 +527,7 @@ impl<E> StreamTextIterator<E> {
     pub fn new(prompt: WorkflowPrompt, tools: SerializableToolSet, executor: E) -> Self {
         Self {
             executor,
+            model: WorkflowModelInfo::default(),
             prompt,
             tools,
             generation_settings: WorkflowGenerationSettings::default(),
@@ -387,6 +535,7 @@ impl<E> StreamTextIterator<E> {
             tools_context: WorkflowToolsContext::new(),
             active_tools: None,
             tool_choice: None,
+            prepare_step: None,
             include_raw_chunks: false,
             response_format: None,
             steps: Vec::new(),
@@ -414,6 +563,12 @@ impl<E> StreamTextIterator<E> {
         self
     }
 
+    /// Sets the current model identity.
+    pub fn with_model(mut self, model: WorkflowModelInfo) -> Self {
+        self.model = model;
+        self
+    }
+
     /// Sets current runtime context.
     pub fn with_runtime_context(mut self, runtime_context: WorkflowRuntimeContext) -> Self {
         self.runtime_context = runtime_context;
@@ -435,6 +590,12 @@ impl<E> StreamTextIterator<E> {
     /// Sets serialized tool choice data.
     pub fn with_tool_choice(mut self, tool_choice: impl Into<JsonValue>) -> Self {
         self.tool_choice = Some(tool_choice.into());
+        self
+    }
+
+    /// Sets a prepare-step callback.
+    pub fn with_prepare_step(mut self, prepare_step: WorkflowPrepareStepCallback) -> Self {
+        self.prepare_step = Some(prepare_step);
         self
     }
 
@@ -463,6 +624,44 @@ impl<E> StreamTextIterator<E> {
     /// Returns completed steps.
     pub fn steps(&self) -> &[WorkflowStreamStep] {
         &self.steps
+    }
+
+    fn apply_prepare_step(&mut self) {
+        let Some(prepare_step) = self.prepare_step.clone() else {
+            return;
+        };
+
+        let result = prepare_step.call(WorkflowPrepareStepInfo {
+            model: self.model.clone(),
+            step_number: self.step_number,
+            steps: self.steps.clone(),
+            messages: self.prompt.clone(),
+            runtime_context: self.runtime_context.clone(),
+            tools_context: self.tools_context.clone(),
+        });
+
+        if let Some(model) = result.model {
+            self.model = model;
+        }
+        if let Some(messages) = result.messages {
+            self.prompt = messages;
+        }
+        if let Some(system) = result.system {
+            apply_system_message(&mut self.prompt, system);
+        }
+        if let Some(runtime_context) = result.runtime_context {
+            self.runtime_context = runtime_context;
+        }
+        if let Some(tools_context) = result.tools_context {
+            self.tools_context = tools_context;
+        }
+        if let Some(active_tools) = result.active_tools {
+            self.active_tools = Some(active_tools);
+        }
+        merge_generation_settings(&mut self.generation_settings, result.generation_settings);
+        if let Some(tool_choice) = result.tool_choice {
+            self.tool_choice = Some(tool_choice);
+        }
     }
 }
 
@@ -496,8 +695,11 @@ impl<E: WorkflowStreamTextStepExecutor> StreamTextIterator<E> {
             return Err(WorkflowStreamTextError::UnexpectedToolResults);
         }
 
+        self.apply_prepare_step();
+
         let tools = self.effective_tools();
         let options = DoStreamStepOptions {
+            model: self.model.clone(),
             generation_settings: self.generation_settings.clone(),
             tool_choice: self.tool_choice.clone(),
             include_raw_chunks: self.include_raw_chunks,
@@ -839,6 +1041,54 @@ pub fn sanitize_provider_metadata_for_tool_call(
     }
 }
 
+fn apply_system_message(prompt: &mut WorkflowPrompt, system: String) {
+    let system_message = LanguageModelMessage::System(LanguageModelSystemMessage::new(system));
+    if matches!(prompt.first(), Some(LanguageModelMessage::System(_))) {
+        prompt[0] = system_message;
+    } else {
+        prompt.insert(0, system_message);
+    }
+}
+
+fn merge_generation_settings(
+    settings: &mut WorkflowGenerationSettings,
+    updates: WorkflowGenerationSettings,
+) {
+    if updates.max_output_tokens.is_some() {
+        settings.max_output_tokens = updates.max_output_tokens;
+    }
+    if updates.temperature.is_some() {
+        settings.temperature = updates.temperature;
+    }
+    if updates.top_p.is_some() {
+        settings.top_p = updates.top_p;
+    }
+    if updates.top_k.is_some() {
+        settings.top_k = updates.top_k;
+    }
+    if updates.presence_penalty.is_some() {
+        settings.presence_penalty = updates.presence_penalty;
+    }
+    if updates.frequency_penalty.is_some() {
+        settings.frequency_penalty = updates.frequency_penalty;
+    }
+    if updates.stop_sequences.is_some() {
+        settings.stop_sequences = updates.stop_sequences;
+    }
+    if updates.seed.is_some() {
+        settings.seed = updates.seed;
+    }
+    if updates.max_retries.is_some() {
+        settings.max_retries = updates.max_retries;
+    }
+    if updates.headers.is_some() {
+        settings.headers = updates.headers;
+    }
+    if updates.provider_options.is_some() {
+        settings.provider_options = updates.provider_options;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -930,6 +1180,22 @@ mod tests {
         })
     }
 
+    fn user_text_message(text: &str) -> LanguageModelMessage {
+        LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+            LanguageModelUserContentPart::Text(LanguageModelTextPart::new(text)),
+        ]))
+    }
+
+    fn serializable_tool() -> crate::SerializableToolDef {
+        crate::SerializableToolDef::function(
+            serde_json::from_value(json!({
+                "type": "object",
+                "additionalProperties": true
+            }))
+            .expect("schema is an object"),
+        )
+    }
+
     #[test]
     fn stream_text_iterator_maps_provider_metadata_to_provider_options_for_continuation() {
         let tool_call = LanguageModelToolCall::new("call-1", "weatherTool", r#"{"city":"NYC"}"#)
@@ -979,6 +1245,217 @@ mod tests {
                     "thoughtSignature": "sig_weather_123"
                 }
             }))))
+        );
+    }
+
+    #[test]
+    fn stream_text_iterator_upstream_should_allow_prepare_step_to_modify_messages() {
+        let injected_message = user_text_message("injected message");
+        let prepare_injected_message = injected_message.clone();
+        let executor = ScriptedStreamTextStepExecutor::new([output_from_parts(
+            [finish(FinishReason::Stop)],
+            0,
+        )]);
+        let mut iterator =
+            StreamTextIterator::new(user_prompt(), SerializableToolSet::new(), executor)
+                .with_prepare_step(WorkflowPrepareStepCallback::new(move |info| {
+                    let mut messages = info.messages;
+                    messages.push(prepare_injected_message.clone());
+                    WorkflowPrepareStepResult::default().with_messages(messages)
+                }));
+
+        iterator
+            .next(None)
+            .expect("step succeeds")
+            .expect("yield exists");
+
+        let call_prompt = &iterator.executor().calls()[0].prompt;
+        assert_eq!(call_prompt.len(), 2);
+        assert_eq!(call_prompt[1], injected_message);
+    }
+
+    #[test]
+    fn stream_text_iterator_upstream_should_apply_prepare_step_system_after_messages_override() {
+        let executor = ScriptedStreamTextStepExecutor::new([output_from_parts(
+            [finish(FinishReason::Stop)],
+            0,
+        )]);
+        let mut iterator =
+            StreamTextIterator::new(user_prompt(), SerializableToolSet::new(), executor)
+                .with_prepare_step(WorkflowPrepareStepCallback::new(|_| {
+                    WorkflowPrepareStepResult::default()
+                        .with_messages(vec![user_text_message("replacement")])
+                        .with_system("Use concise answers.")
+                }));
+
+        iterator
+            .next(None)
+            .expect("step succeeds")
+            .expect("yield exists");
+
+        let call_prompt = &iterator.executor().calls()[0].prompt;
+        assert_eq!(
+            call_prompt[0],
+            LanguageModelMessage::System(LanguageModelSystemMessage::new("Use concise answers."))
+        );
+        assert_eq!(call_prompt[1], user_text_message("replacement"));
+    }
+
+    #[test]
+    fn stream_text_iterator_upstream_should_allow_prepare_step_to_change_model_dynamically() {
+        let executor = ScriptedStreamTextStepExecutor::new([
+            output_from_parts(
+                [
+                    LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                        "call-1",
+                        "weatherTool",
+                        "{}",
+                    )),
+                    finish(FinishReason::ToolCalls),
+                ],
+                0,
+            ),
+            output_from_parts([finish(FinishReason::Stop)], 1),
+        ]);
+        let mut iterator =
+            StreamTextIterator::new(user_prompt(), SerializableToolSet::new(), executor)
+                .with_model(WorkflowModelInfo::new("test", "first-model"))
+                .with_prepare_step(WorkflowPrepareStepCallback::new(|info| {
+                    if info.step_number == 0 {
+                        WorkflowPrepareStepResult::default()
+                    } else {
+                        WorkflowPrepareStepResult::default()
+                            .with_model(WorkflowModelInfo::new("anthropic", "claude-sonnet-4.5"))
+                            .with_generation_settings(WorkflowGenerationSettings {
+                                temperature: Some(0.2),
+                                max_output_tokens: Some(128),
+                                ..WorkflowGenerationSettings::default()
+                            })
+                    }
+                }));
+
+        iterator.next(None).expect("first step succeeds");
+        iterator
+            .next(Some(vec![tool_result(
+                "call-1",
+                "weatherTool",
+                json!({ "ok": true }),
+            )]))
+            .expect("second step succeeds");
+
+        assert_eq!(
+            iterator.executor().calls()[0].options.model,
+            WorkflowModelInfo::new("test", "first-model")
+        );
+        assert_eq!(
+            iterator.executor().calls()[1].options.model,
+            WorkflowModelInfo::new("anthropic", "claude-sonnet-4.5")
+        );
+        assert_eq!(
+            iterator.executor().calls()[1]
+                .options
+                .generation_settings
+                .temperature,
+            Some(0.2)
+        );
+        assert_eq!(
+            iterator.executor().calls()[1]
+                .options
+                .generation_settings
+                .max_output_tokens,
+            Some(128)
+        );
+    }
+
+    #[test]
+    fn stream_text_iterator_upstream_should_allow_prepare_step_to_set_active_tools_and_tool_choice()
+    {
+        let tools = SerializableToolSet::from([
+            ("weather".to_string(), serializable_tool()),
+            ("calculator".to_string(), serializable_tool()),
+        ]);
+        let executor = ScriptedStreamTextStepExecutor::new([output_from_parts(
+            [finish(FinishReason::Stop)],
+            0,
+        )]);
+        let mut iterator = StreamTextIterator::new(user_prompt(), tools, executor)
+            .with_prepare_step(WorkflowPrepareStepCallback::new(|_| {
+                WorkflowPrepareStepResult::default()
+                    .with_active_tools(["weather".to_string()])
+                    .with_tool_choice(json!({
+                        "type": "tool",
+                        "toolName": "weather"
+                    }))
+            }));
+
+        iterator
+            .next(None)
+            .expect("step succeeds")
+            .expect("yield exists");
+
+        let call = &iterator.executor().calls()[0];
+        assert_eq!(call.tools.len(), 1);
+        assert!(call.tools.contains_key("weather"));
+        assert_eq!(
+            call.options.tool_choice,
+            Some(json!({
+                "type": "tool",
+                "toolName": "weather"
+            }))
+        );
+    }
+
+    #[test]
+    fn stream_text_iterator_upstream_should_update_runtime_and_tools_context_from_prepare_step() {
+        let executor = ScriptedStreamTextStepExecutor::new([output_from_parts(
+            [finish(FinishReason::Stop)],
+            0,
+        )]);
+        let mut iterator =
+            StreamTextIterator::new(user_prompt(), SerializableToolSet::new(), executor)
+                .with_runtime_context(
+                    serde_json::from_value(json!({
+                        "tenantId": "tenant_123"
+                    }))
+                    .expect("runtime context is an object"),
+                )
+                .with_prepare_step(WorkflowPrepareStepCallback::new(|info| {
+                    let mut runtime_context = info.runtime_context;
+                    runtime_context.insert("lastStep".to_string(), json!(info.step_number));
+                    let mut tools_context = WorkflowToolsContext::new();
+                    tools_context.insert(
+                        "weather".to_string(),
+                        Some(
+                            serde_json::from_value(json!({
+                                "region": "us"
+                            }))
+                            .expect("tool context is an object"),
+                        ),
+                    );
+                    WorkflowPrepareStepResult::default()
+                        .with_runtime_context(runtime_context)
+                        .with_tools_context(tools_context)
+                }));
+
+        let result = iterator
+            .next(None)
+            .expect("step succeeds")
+            .expect("yield exists");
+
+        assert_eq!(result.runtime_context["tenantId"], json!("tenant_123"));
+        assert_eq!(result.runtime_context["lastStep"], json!(0));
+        assert_eq!(
+            result.tools_context["weather"]
+                .clone()
+                .expect("tool context"),
+            serde_json::from_value(json!({
+                "region": "us"
+            }))
+            .expect("tool context is an object")
+        );
+        assert_eq!(
+            iterator.executor().calls()[0].options.runtime_context,
+            result.runtime_context
         );
     }
 
