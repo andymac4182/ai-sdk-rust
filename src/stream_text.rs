@@ -8930,6 +8930,159 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_invokes_finish_callback_when_error_chunk_occurs_mid_stream() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ResponseMetadata(
+                    LanguageModelStreamResponseMetadata::new()
+                        .with_id("id-0")
+                        .with_model_id("mock-model-id")
+                        .with_timestamp(time::OffsetDateTime::UNIX_EPOCH),
+                ),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "Hello")),
+                LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(
+                    json!({"message": "chunk error"}),
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    LanguageModelFinishReason {
+                        unified: FinishReason::Error,
+                        raw: None,
+                    },
+                )),
+            ]));
+        let callback_errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let finish_events = Arc::new(Mutex::new(Vec::<GenerateTextFinishEvent>::new()));
+        let errors = Arc::clone(&callback_errors);
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_on_error(move |event| {
+                    let errors = Arc::clone(&errors);
+                    async move {
+                        errors.lock().expect("errors lock").push(
+                            event.error["message"]
+                                .as_str()
+                                .expect("message is a string")
+                                .to_string(),
+                        );
+                    }
+                })
+                .with_on_finish(move |event| {
+                    let finish_events = Arc::clone(&finish_events_for_callback);
+                    async move {
+                        finish_events
+                            .lock()
+                            .expect("finish events lock")
+                            .push(event);
+                    }
+                }),
+        ));
+
+        assert_eq!(result.text, "Hello");
+        assert_eq!(result.finish_reason, FinishReason::Error);
+        assert_eq!(
+            callback_errors.lock().expect("errors lock").as_slice(),
+            ["chunk error"]
+        );
+
+        let error_index = result
+            .parts
+            .iter()
+            .position(|part| matches!(part, TextStreamPart::Error(_)))
+            .expect("full stream includes error part");
+        let finish_step_index = result
+            .parts
+            .iter()
+            .position(|part| matches!(part, TextStreamPart::FinishStep(_)))
+            .expect("full stream includes finish-step");
+        let finish_index = result
+            .parts
+            .iter()
+            .position(|part| matches!(part, TextStreamPart::Finish(_)))
+            .expect("full stream includes finish");
+        assert!(error_index < finish_step_index);
+        assert!(finish_step_index < finish_index);
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert_eq!(finish_events[0].finish_reason, FinishReason::Error);
+        assert_eq!(finish_events[0].text, "Hello");
+        assert_eq!(finish_events[0].usage, usage());
+        assert_eq!(finish_events[0].total_usage, usage());
+    }
+
+    #[test]
+    fn stream_text_invokes_error_callback_when_error_occurs_in_second_step() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ResponseMetadata(
+                    LanguageModelStreamResponseMetadata::new()
+                        .with_id("id-0")
+                        .with_model_id("mock-model-id")
+                        .with_timestamp(time::OffsetDateTime::UNIX_EPOCH),
+                ),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "tool1",
+                    r#"{ "value": "value" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    LanguageModelFinishReason {
+                        unified: FinishReason::ToolCalls,
+                        raw: None,
+                    },
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![LanguageModelStreamPart::Error(
+                LanguageModelErrorStreamPart::new(json!({"message": "test error"})),
+            )]),
+        ]);
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string" }
+            },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let callback_errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let errors = Arc::clone(&callback_errors);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(
+                    Tool::new("tool1", input_schema)
+                        .with_execute(|_input, _options| async move { Ok(json!("result1")) }),
+                )
+                .with_max_steps(3)
+                .with_on_error(move |event| {
+                    let errors = Arc::clone(&errors);
+                    async move {
+                        errors.lock().expect("errors lock").push(
+                            event.error["message"]
+                                .as_str()
+                                .expect("message is a string")
+                                .to_string(),
+                        );
+                    }
+                }),
+        ));
+
+        assert_eq!(model.stream_calls().len(), 2);
+        assert_eq!(result.finish_reason, FinishReason::Error);
+        assert_eq!(
+            callback_errors.lock().expect("errors lock").as_slice(),
+            ["test error"]
+        );
+    }
+
+    #[test]
     fn stream_text_retries_retryable_pre_stream_errors() {
         let retryable_error = LanguageModelStreamResult::new(vec![LanguageModelStreamPart::Error(
             LanguageModelErrorStreamPart::new(json!({
