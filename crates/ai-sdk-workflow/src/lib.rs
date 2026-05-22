@@ -4,6 +4,7 @@
 
 pub mod chat_transport;
 pub mod stream_text_iterator;
+pub mod workflow_agent;
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -22,6 +23,10 @@ pub use stream_text_iterator::{
     WorkflowRuntimeContext, WorkflowStreamStep, WorkflowStreamStepContent, WorkflowStreamTextError,
     WorkflowStreamTextStepExecutor, WorkflowToolsContext, do_stream_step_from_parts,
     sanitize_provider_metadata_for_tool_call,
+};
+pub use workflow_agent::{
+    WorkflowAgent, WorkflowAgentError, WorkflowAgentOptions, WorkflowAgentStreamOptions,
+    WorkflowAgentStreamResult,
 };
 
 use ai_sdk_provider::json::{JsonObject, JsonSchema, JsonValue};
