@@ -8719,7 +8719,7 @@ mod tests {
             ])),
         ])));
 
-        assert_eq!(result.finish_reason.unified, FinishReason::ToolCalls);
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
 
         let request = captured_request
             .lock()
@@ -21068,6 +21068,29 @@ mod tests {
         ]))
     }
 
+    fn open_responses_generic_prompt_request_body(options: LanguageModelCallOptions) -> JsonValue {
+        let (result, request_body) = open_responses_prompt_request_body_for_settings(
+            OpenResponsesProviderSettings::new(
+                "openResponses",
+                "https://api.openresponses.test/v1/responses",
+            )
+            .with_api_key("test-api-key"),
+            options,
+        );
+
+        assert!(result.warnings.is_empty());
+        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        request_body.expect("request body is captured")
+    }
+
+    fn open_responses_generic_user_content_request_body(
+        content: Vec<LanguageModelUserContentPart>,
+    ) -> JsonValue {
+        open_responses_generic_prompt_request_body(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(content)),
+        ]))
+    }
+
     fn open_responses_provider_reference(entries: &[(&str, &str)]) -> ProviderReference {
         ProviderReference::try_from(
             entries
@@ -21246,6 +21269,89 @@ mod tests {
                     ]
                 }
             ])
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_passes_full_image_png_through_unchanged_for_inline_data() {
+        let png_base64 = "iVBORw0KGgo=";
+        let request_body = open_responses_generic_user_content_request_body(vec![
+            LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                FileData::Data {
+                    data: FileDataContent::Base64(png_base64.to_string()),
+                },
+                "image/png",
+            )),
+        ]);
+
+        assert_eq!(
+            request_body["input"][0]["content"][0],
+            json!({
+                "type": "input_image",
+                "image_url": "data:image/png;base64,iVBORw0KGgo="
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_detects_image_subtype_from_inline_bytes_for_top_level_image() {
+        let png_base64 = "iVBORw0KGgo=";
+        let request_body = open_responses_generic_user_content_request_body(vec![
+            LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                FileData::Data {
+                    data: FileDataContent::Base64(png_base64.to_string()),
+                },
+                "image",
+            )),
+        ]);
+
+        assert_eq!(
+            request_body["input"][0]["content"][0],
+            json!({
+                "type": "input_image",
+                "image_url": "data:image/png;base64,iVBORw0KGgo="
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_passes_through_url_source_for_top_level_only_image() {
+        let request_body = open_responses_generic_user_content_request_body(vec![
+            LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                FileData::Url {
+                    url: Url::parse("https://example.com/x.png").expect("URL parses"),
+                },
+                "image",
+            )),
+        ]);
+
+        assert_eq!(
+            request_body["input"][0]["content"][0],
+            json!({
+                "type": "input_image",
+                "image_url": "https://example.com/x.png"
+            })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_normalizes_image_wildcard_via_detection() {
+        let png_base64 = "iVBORw0KGgo=";
+        let request_body = open_responses_generic_user_content_request_body(vec![
+            LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                FileData::Data {
+                    data: FileDataContent::Base64(png_base64.to_string()),
+                },
+                "image/*",
+            )),
+        ]);
+
+        assert_eq!(
+            request_body["input"][0]["content"][0],
+            json!({
+                "type": "input_image",
+                "image_url": "data:image/png;base64,iVBORw0KGgo="
+            })
         );
     }
 
