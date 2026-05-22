@@ -5204,6 +5204,257 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_result_full_stream_sends_files() {
+        let first_file = LanguageModelFile::new(
+            "text/plain",
+            LanguageModelFileData::Data {
+                data: FileDataContent::Base64("Hello World".to_string()),
+            },
+        );
+        let second_file = LanguageModelFile::new(
+            "image/jpeg",
+            LanguageModelFileData::Data {
+                data: FileDataContent::Base64("QkFVRw==".to_string()),
+            },
+        );
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::File(first_file.clone()),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::File(second_file.clone()),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("prompt")],
+        )));
+
+        let part_names = result
+            .parts
+            .iter()
+            .map(|part| match part {
+                TextStreamPart::Start(_) => "start",
+                TextStreamPart::StartStep(_) => "start-step",
+                TextStreamPart::File(_) => "file",
+                TextStreamPart::TextStart(_) => "text-start",
+                TextStreamPart::TextDelta(_) => "text-delta",
+                TextStreamPart::TextEnd(_) => "text-end",
+                TextStreamPart::FinishStep(_) => "finish-step",
+                TextStreamPart::Finish(_) => "finish",
+                _ => "other",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            part_names,
+            vec![
+                "start",
+                "start-step",
+                "file",
+                "text-start",
+                "text-delta",
+                "text-end",
+                "file",
+                "finish-step",
+                "finish",
+            ]
+        );
+
+        let file_parts = result
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::File(part) => {
+                    Some((part.file.clone(), part.provider_metadata.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            file_parts,
+            vec![(first_file.clone(), None), (second_file.clone(), None),]
+        );
+        assert_eq!(result.files, vec![first_file, second_file]);
+        assert_eq!(result.text_stream, vec!["Hello!"]);
+        assert_eq!(result.text, "Hello!");
+    }
+
+    #[test]
+    fn stream_text_result_full_stream_sends_files_with_provider_metadata() {
+        let provider_metadata = ProviderMetadata::from([(
+            "testProvider".to_string(),
+            Map::from_iter([("signature".to_string(), json!("sig-1"))]),
+        )]);
+        let first_file = LanguageModelFile::new(
+            "text/plain",
+            LanguageModelFileData::Data {
+                data: FileDataContent::Base64("Hello World".to_string()),
+            },
+        )
+        .with_provider_metadata(provider_metadata.clone());
+        let second_file = LanguageModelFile::new(
+            "image/jpeg",
+            LanguageModelFileData::Data {
+                data: FileDataContent::Base64("QkFVRw==".to_string()),
+            },
+        );
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::File(first_file.clone()),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::File(second_file.clone()),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("prompt")],
+        )));
+
+        let file_parts = result
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::File(part) => {
+                    Some((part.file.clone(), part.provider_metadata.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            file_parts,
+            vec![
+                (first_file.clone(), Some(provider_metadata)),
+                (second_file.clone(), None),
+            ]
+        );
+        assert_eq!(result.files, vec![first_file, second_file]);
+    }
+
+    #[test]
+    fn stream_text_result_full_stream_sends_reasoning_files() {
+        let provider_metadata = ProviderMetadata::from([(
+            "testProvider".to_string(),
+            Map::from_iter([("signature".to_string(), json!("rf-sig-1"))]),
+        )]);
+        let first_reasoning_file = LanguageModelReasoningFile::new(
+            "image/png",
+            LanguageModelFileData::Data {
+                data: FileDataContent::Base64("reasoning-file-data-1".to_string()),
+            },
+        );
+        let second_reasoning_file = LanguageModelReasoningFile::new(
+            "image/jpeg",
+            LanguageModelFileData::Data {
+                data: FileDataContent::Base64("reasoning-file-data-2".to_string()),
+            },
+        )
+        .with_provider_metadata(provider_metadata.clone());
+        let response_metadata = LanguageModelStreamResponseMetadata::new()
+            .with_id("id-0")
+            .with_model_id("mock-model-id")
+            .with_timestamp(time::OffsetDateTime::UNIX_EPOCH);
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ResponseMetadata(response_metadata),
+                LanguageModelStreamPart::ReasoningFile(first_reasoning_file.clone()),
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "1",
+                    "Some reasoning text.",
+                )),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+                LanguageModelStreamPart::ReasoningFile(second_reasoning_file.clone()),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("prompt")],
+        )));
+
+        let part_names = result
+            .parts
+            .iter()
+            .map(|part| match part {
+                TextStreamPart::Start(_) => "start",
+                TextStreamPart::StartStep(_) => "start-step",
+                TextStreamPart::ReasoningFile(_) => "reasoning-file",
+                TextStreamPart::ReasoningStart(_) => "reasoning-start",
+                TextStreamPart::ReasoningDelta(_) => "reasoning-delta",
+                TextStreamPart::ReasoningEnd(_) => "reasoning-end",
+                TextStreamPart::TextStart(_) => "text-start",
+                TextStreamPart::TextDelta(_) => "text-delta",
+                TextStreamPart::TextEnd(_) => "text-end",
+                TextStreamPart::FinishStep(_) => "finish-step",
+                TextStreamPart::Finish(_) => "finish",
+                _ => "other",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            part_names,
+            vec![
+                "start",
+                "start-step",
+                "reasoning-file",
+                "reasoning-start",
+                "reasoning-delta",
+                "reasoning-end",
+                "reasoning-file",
+                "text-start",
+                "text-delta",
+                "text-end",
+                "finish-step",
+                "finish",
+            ]
+        );
+
+        let reasoning_file_parts = result
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::ReasoningFile(part) => {
+                    Some((part.file.clone(), part.provider_metadata.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reasoning_file_parts,
+            vec![
+                (first_reasoning_file.clone(), None),
+                (second_reasoning_file.clone(), Some(provider_metadata)),
+            ]
+        );
+        assert_eq!(
+            result.reasoning_files,
+            vec![first_reasoning_file, second_reasoning_file]
+        );
+        assert_eq!(
+            result.reasoning_text,
+            Some("Some reasoning text.".to_string())
+        );
+        assert_eq!(result.text_stream, vec!["Hello!"]);
+        assert_eq!(result.text, "Hello!");
+    }
+
+    #[test]
     fn stream_text_smooth_stream_transforms_chunks_before_callbacks() {
         let chunks = Arc::new(Mutex::new(Vec::new()));
         let chunks_for_callback = Arc::clone(&chunks);
