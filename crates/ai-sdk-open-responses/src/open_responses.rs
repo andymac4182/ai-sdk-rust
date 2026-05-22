@@ -7016,6 +7016,8 @@ mod tests {
         include_str!("fixtures/openai-local-shell-tool.1.chunks.txt");
     const OPEN_RESPONSES_SHELL_TOOL_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-shell-tool.1.json");
+    const OPEN_RESPONSES_SHELL_TOOL_CHUNKS_FIXTURE: &str =
+        include_str!("fixtures/openai-shell-tool.1.chunks.txt");
     const OPEN_RESPONSES_SHELL_CONTAINER_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-shell-container.1.json");
     const OPEN_RESPONSES_SHELL_CONTAINER_MULTITURN_JSON_FIXTURE: &str =
@@ -31831,74 +31833,78 @@ mod tests {
 
     #[test]
     fn open_responses_provider_streams_shell_fixture_multiresponse() {
-        const FIRST_RESPONSE_ID: &str = "resp_0434d6d64b12b08900692f639c40408195a50fd07b77ce08a7";
-        const SECOND_RESPONSE_ID: &str = "resp_0434d6d64b12b08900692f639d784481959af65f985b9c13e2";
-        const SHELL_ITEM_ID: &str = "sh_0434d6d64b12b08900692f639c9f0481959c30e03ca0bb2ef8";
-        const SHELL_CALL_ID: &str = "call_pbxjNs1tMJUahLZKAS9qLtvw";
-        const MESSAGE_ID: &str = "msg_0434d6d64b12b08900692f639dc53c819594ea97586113d73b";
-        const FINAL_TEXT: &str = "Here are the files and folders in your `~/Desktop` directory:\n\n- .\n- ..\n- .DS_Store\n- test-server";
+        let created_events = OPEN_RESPONSES_SHELL_TOOL_CHUNKS_FIXTURE
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<JsonValue>(line).expect("fixture event parses"))
+            .filter(|event| event["type"].as_str() == Some("response.created"))
+            .collect::<Vec<_>>();
+        let completed_events = OPEN_RESPONSES_SHELL_TOOL_CHUNKS_FIXTURE
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<JsonValue>(line).expect("fixture event parses"))
+            .filter(|event| event["type"].as_str() == Some("response.completed"))
+            .collect::<Vec<_>>();
+        let shell_done_event =
+            open_responses_fixture_chunk_event(OPEN_RESPONSES_SHELL_TOOL_CHUNKS_FIXTURE, |event| {
+                event["type"].as_str() == Some("response.output_item.done")
+                    && event["item"]["type"].as_str() == Some("shell_call")
+            });
+        let message_done_event =
+            open_responses_fixture_chunk_event(OPEN_RESPONSES_SHELL_TOOL_CHUNKS_FIXTURE, |event| {
+                event["type"].as_str() == Some("response.output_item.done")
+                    && event["item"]["type"].as_str() == Some("message")
+            });
+        let final_completed_response = &completed_events
+            .last()
+            .expect("fixture includes completed response")["response"];
+        let usage = &final_completed_response["usage"];
+        let input_tokens = usage["input_tokens"].as_u64();
+        let cached_tokens = usage["input_tokens_details"]["cached_tokens"].as_u64();
+        let input_no_cache = input_tokens
+            .zip(cached_tokens)
+            .map(|(total, cached)| total - cached);
+        let output_tokens = usage["output_tokens"].as_u64();
+        let reasoning_tokens = usage["output_tokens_details"]["reasoning_tokens"].as_u64();
+        let output_text_tokens = output_tokens
+            .zip(reasoning_tokens)
+            .map(|(total, reasoning)| total - reasoning);
+        let final_response_id = final_completed_response["id"]
+            .as_str()
+            .expect("final response id is set");
+        let service_tier = final_completed_response["service_tier"]
+            .as_str()
+            .expect("service tier is set");
+        let shell_call = &shell_done_event["item"];
+        let shell_item_id = shell_call["id"].as_str().expect("shell item id is set");
+        let shell_call_id = shell_call["call_id"]
+            .as_str()
+            .expect("shell call id is set");
+        let message = &message_done_event["item"];
+        let message_id = message["id"].as_str().expect("message id is set");
+        let final_text_part = message["content"]
+            .as_array()
+            .expect("message content is an array")
+            .iter()
+            .find(|part| part["type"].as_str() == Some("output_text"))
+            .expect("fixture message includes output text");
+        let final_text = final_text_part["text"]
+            .as_str()
+            .expect("message text is set");
 
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
-        let transport: OpenResponsesTransport = Arc::new(
-            move |request| -> OpenResponsesTransportFuture {
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
                 *captured_request_for_transport
                     .lock()
                     .expect("captured request mutex is not poisoned") = Some(request.clone());
 
-                let sse = [
-                    r#"data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_0434d6d64b12b08900692f639c40408195a50fd07b77ce08a7","object":"response","created_at":1764713372,"status":"in_progress","background":false,"error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5.1-2025-11-13","output":[],"parallel_tool_calls":true,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"none","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"shell"}],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":null,"user":null,"metadata":{}}}"#,
-                    "",
-                    r#"data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_0434d6d64b12b08900692f639c40408195a50fd07b77ce08a7","object":"response","created_at":1764713372,"status":"in_progress","background":false,"error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5.1-2025-11-13","output":[],"parallel_tool_calls":true,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"none","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"shell"}],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":null,"user":null,"metadata":{}}}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"sh_0434d6d64b12b08900692f639c9f0481959c30e03ca0bb2ef8","type":"shell_call","status":"in_progress","action":{"commands":[],"max_output_length":null,"timeout_ms":null},"call_id":"call_pbxjNs1tMJUahLZKAS9qLtvw"}}"#,
-                    "",
-                    r#"data: {"type":"response.shell_call_command.added","sequence_number":3,"output_index":0,"command_index":0,"command":""}"#,
-                    "",
-                    r#"data: {"type":"response.shell_call_command.delta","sequence_number":4,"output_index":0,"command_index":0,"delta":"ls","obfuscation":"MqLFIoYeoXYWld"}"#,
-                    "",
-                    r#"data: {"type":"response.shell_call_command.delta","sequence_number":5,"output_index":0,"command_index":0,"delta":" -","obfuscation":"wC9C8WrfqTnmmt"}"#,
-                    "",
-                    r#"data: {"type":"response.shell_call_command.delta","sequence_number":6,"output_index":0,"command_index":0,"delta":"a","obfuscation":"QI5dEpZ4Riq8k4Y"}"#,
-                    "",
-                    r#"data: {"type":"response.shell_call_command.delta","sequence_number":7,"output_index":0,"command_index":0,"delta":" ~/","obfuscation":"f4XrgYSKAsglr"}"#,
-                    "",
-                    r#"data: {"type":"response.shell_call_command.delta","sequence_number":8,"output_index":0,"command_index":0,"delta":"Desktop","obfuscation":"hqHnUp5jX"}"#,
-                    "",
-                    r#"data: {"type":"response.shell_call_command.done","sequence_number":9,"output_index":0,"command_index":0,"command":"ls -a ~/Desktop"}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.done","sequence_number":10,"output_index":0,"item":{"id":"sh_0434d6d64b12b08900692f639c9f0481959c30e03ca0bb2ef8","type":"shell_call","status":"completed","action":{"commands":["ls -a ~/Desktop"],"max_output_length":8912,"timeout_ms":null},"call_id":"call_pbxjNs1tMJUahLZKAS9qLtvw"}}"#,
-                    "",
-                    r#"data: {"type":"response.completed","sequence_number":11,"response":{"id":"resp_0434d6d64b12b08900692f639c40408195a50fd07b77ce08a7","object":"response","created_at":1764713372,"status":"completed","background":false,"error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5.1-2025-11-13","output":[{"id":"sh_0434d6d64b12b08900692f639c9f0481959c30e03ca0bb2ef8","type":"shell_call","status":"completed","action":{"commands":["ls -a ~/Desktop"],"max_output_length":8912,"timeout_ms":null},"call_id":"call_pbxjNs1tMJUahLZKAS9qLtvw"}],"parallel_tool_calls":true,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"none","summary":null},"safety_identifier":null,"service_tier":"default","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"shell"}],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":{"input_tokens":145,"input_tokens_details":{"cached_tokens":0},"output_tokens":41,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":186},"user":null,"metadata":{}}}"#,
-                    "",
-                    r#"data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_0434d6d64b12b08900692f639d784481959af65f985b9c13e2","object":"response","created_at":1764713373,"status":"in_progress","background":false,"error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5.1-2025-11-13","output":[],"parallel_tool_calls":true,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"none","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"shell"}],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":null,"user":null,"metadata":{}}}"#,
-                    "",
-                    r#"data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_0434d6d64b12b08900692f639d784481959af65f985b9c13e2","object":"response","created_at":1764713373,"status":"in_progress","background":false,"error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5.1-2025-11-13","output":[],"parallel_tool_calls":true,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"none","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"shell"}],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":null,"user":null,"metadata":{}}}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"msg_0434d6d64b12b08900692f639dc53c819594ea97586113d73b","type":"message","status":"in_progress","content":[],"role":"assistant"}}"#,
-                    "",
-                    r#"data: {"type":"response.content_part.added","sequence_number":3,"item_id":"msg_0434d6d64b12b08900692f639dc53c819594ea97586113d73b","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.delta","sequence_number":4,"item_id":"msg_0434d6d64b12b08900692f639dc53c819594ea97586113d73b","output_index":0,"content_index":0,"delta":"Here are the files and folders in your `~/Desktop` directory:\n\n","logprobs":[],"obfuscation":"J4mkASepgs2g"}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.delta","sequence_number":5,"item_id":"msg_0434d6d64b12b08900692f639dc53c819594ea97586113d73b","output_index":0,"content_index":0,"delta":"- .\n- ..\n- .DS_Store\n- test-server","logprobs":[],"obfuscation":"8u29nzVgDXst"}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.done","sequence_number":6,"item_id":"msg_0434d6d64b12b08900692f639dc53c819594ea97586113d73b","output_index":0,"content_index":0,"text":"Here are the files and folders in your `~/Desktop` directory:\n\n- .\n- ..\n- .DS_Store\n- test-server","logprobs":[]}"#,
-                    "",
-                    r#"data: {"type":"response.content_part.done","sequence_number":7,"item_id":"msg_0434d6d64b12b08900692f639dc53c819594ea97586113d73b","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":"Here are the files and folders in your `~/Desktop` directory:\n\n- .\n- ..\n- .DS_Store\n- test-server"}}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.done","sequence_number":8,"output_index":0,"item":{"id":"msg_0434d6d64b12b08900692f639dc53c819594ea97586113d73b","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":"Here are the files and folders in your `~/Desktop` directory:\n\n- .\n- ..\n- .DS_Store\n- test-server"}],"role":"assistant"}}"#,
-                    "",
-                    r#"data: {"type":"response.completed","sequence_number":9,"response":{"id":"resp_0434d6d64b12b08900692f639d784481959af65f985b9c13e2","object":"response","created_at":1764713373,"status":"completed","background":false,"error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5.1-2025-11-13","output":[{"id":"msg_0434d6d64b12b08900692f639dc53c819594ea97586113d73b","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":"Here are the files and folders in your `~/Desktop` directory:\n\n- .\n- ..\n- .DS_Store\n- test-server"}],"role":"assistant"}],"parallel_tool_calls":true,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"none","summary":null},"safety_identifier":null,"service_tier":"default","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"shell"}],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":{"input_tokens":331,"input_tokens_details":{"cached_tokens":0},"output_tokens":166,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":497},"user":null,"metadata":{}}}"#,
-                    "",
-                    "data: [DONE]",
-                    "",
-                ]
-                .join("\n");
+                let sse =
+                    open_responses_sse_from_fixture_lines(OPEN_RESPONSES_SHELL_TOOL_CHUNKS_FIXTURE);
 
                 Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
-            },
-        );
+            });
         let provider = create_open_responses(
             OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
                 .with_api_key("test-api-key"),
@@ -31916,23 +31922,21 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(metadata.len(), 2);
-        assert_eq!(metadata[0].id.as_deref(), Some(FIRST_RESPONSE_ID));
-        assert_eq!(metadata[0].model_id.as_deref(), Some("gpt-5.1-2025-11-13"));
-        assert_eq!(
-            metadata[0]
-                .timestamp
-                .map(|timestamp| timestamp.unix_timestamp()),
-            Some(1_764_713_372)
-        );
-        assert_eq!(metadata[1].id.as_deref(), Some(SECOND_RESPONSE_ID));
-        assert_eq!(metadata[1].model_id.as_deref(), Some("gpt-5.1-2025-11-13"));
-        assert_eq!(
-            metadata[1]
-                .timestamp
-                .map(|timestamp| timestamp.unix_timestamp()),
-            Some(1_764_713_373)
-        );
+        assert_eq!(metadata.len(), created_events.len());
+        for (index, created_event) in created_events.iter().enumerate() {
+            let response = &created_event["response"];
+            assert_eq!(metadata[index].id.as_deref(), response["id"].as_str());
+            assert_eq!(
+                metadata[index].model_id.as_deref(),
+                response["model"].as_str()
+            );
+            assert_eq!(
+                metadata[index]
+                    .timestamp
+                    .map(|timestamp| timestamp.unix_timestamp()),
+                response["created_at"].as_i64()
+            );
+        }
 
         let tool_calls = result
             .stream
@@ -31943,27 +31947,27 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(tool_calls.len(), 1);
-        assert_eq!(tool_calls[0].tool_call_id, SHELL_CALL_ID);
+        assert_eq!(tool_calls[0].tool_call_id, shell_call_id);
         assert_eq!(tool_calls[0].tool_name, "shell");
         assert_eq!(tool_calls[0].provider_executed, None);
         assert_eq!(
             serde_json::from_str::<JsonValue>(&tool_calls[0].input).expect("shell input parses"),
             json!({
                 "action": {
-                    "commands": ["ls -a ~/Desktop"]
+                    "commands": shell_call["action"]["commands"].clone()
                 }
             })
         );
         assert_eq!(
             openai_metadata_value(&tool_calls[0].provider_metadata, "itemId")
                 .and_then(JsonValue::as_str),
-            Some(SHELL_ITEM_ID)
+            Some(shell_item_id)
         );
         assert!(!result.stream.iter().any(|part| {
             matches!(
                 part,
                 LanguageModelStreamPart::ToolResult(tool_result)
-                    if tool_result.tool_call_id == SHELL_CALL_ID
+                    if tool_result.tool_call_id == shell_call_id
             )
         }));
 
@@ -31971,40 +31975,38 @@ mod tests {
             .stream
             .iter()
             .find_map(|part| match part {
-                LanguageModelStreamPart::TextStart(start) => Some(start),
+                LanguageModelStreamPart::TextStart(start) if start.id == message_id => Some(start),
                 _ => None,
             })
             .expect("stream includes text start");
-        assert_eq!(text_start.id, MESSAGE_ID);
         assert_eq!(
             openai_metadata_value(&text_start.provider_metadata, "itemId")
                 .and_then(JsonValue::as_str),
-            Some(MESSAGE_ID)
+            Some(message_id)
         );
         let streamed_text = result
             .stream
             .iter()
             .filter_map(|part| match part {
-                LanguageModelStreamPart::TextDelta(delta) if delta.id == MESSAGE_ID => {
+                LanguageModelStreamPart::TextDelta(delta) if delta.id == message_id => {
                     Some(delta.delta.as_str())
                 }
                 _ => None,
             })
             .collect::<String>();
-        assert_eq!(streamed_text, FINAL_TEXT);
+        assert_eq!(streamed_text, final_text);
         let text_end = result
             .stream
             .iter()
             .find_map(|part| match part {
-                LanguageModelStreamPart::TextEnd(end) => Some(end),
+                LanguageModelStreamPart::TextEnd(end) if end.id == message_id => Some(end),
                 _ => None,
             })
             .expect("stream includes text end");
-        assert_eq!(text_end.id, MESSAGE_ID);
         assert_eq!(
             openai_metadata_value(&text_end.provider_metadata, "itemId")
                 .and_then(JsonValue::as_str),
-            Some(MESSAGE_ID)
+            Some(message_id)
         );
 
         let finish = result
@@ -32016,21 +32018,21 @@ mod tests {
             })
             .expect("stream includes finish");
         assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
-        assert_eq!(finish.usage.input_tokens.total, Some(331));
-        assert_eq!(finish.usage.input_tokens.no_cache, Some(331));
-        assert_eq!(finish.usage.input_tokens.cache_read, Some(0));
-        assert_eq!(finish.usage.output_tokens.total, Some(166));
-        assert_eq!(finish.usage.output_tokens.text, Some(166));
-        assert_eq!(finish.usage.output_tokens.reasoning, Some(0));
+        assert_eq!(finish.usage.input_tokens.total, input_tokens);
+        assert_eq!(finish.usage.input_tokens.no_cache, input_no_cache);
+        assert_eq!(finish.usage.input_tokens.cache_read, cached_tokens);
+        assert_eq!(finish.usage.output_tokens.total, output_tokens);
+        assert_eq!(finish.usage.output_tokens.text, output_text_tokens);
+        assert_eq!(finish.usage.output_tokens.reasoning, reasoning_tokens);
         assert_eq!(
             openai_metadata_value(&finish.provider_metadata, "responseId")
                 .and_then(JsonValue::as_str),
-            Some(SECOND_RESPONSE_ID)
+            Some(final_response_id)
         );
         assert_eq!(
             openai_metadata_value(&finish.provider_metadata, "serviceTier")
                 .and_then(JsonValue::as_str),
-            Some("default")
+            Some(service_tier)
         );
 
         let request_body = captured_open_responses_request_body(&captured_request);
