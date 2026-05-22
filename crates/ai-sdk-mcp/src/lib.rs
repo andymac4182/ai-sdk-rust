@@ -863,6 +863,27 @@ pub trait McpTransport: Send {
     fn set_protocol_version(&mut self, _protocol_version: String) {}
 }
 
+impl<T> McpTransport for Box<T>
+where
+    T: McpTransport + ?Sized,
+{
+    fn start(&mut self) -> McpClientResult<()> {
+        (**self).start()
+    }
+
+    fn send(&mut self, message: JsonRpcMessage) -> McpClientResult<Vec<JsonRpcMessage>> {
+        (**self).send(message)
+    }
+
+    fn close(&mut self) -> McpClientResult<()> {
+        (**self).close()
+    }
+
+    fn set_protocol_version(&mut self, protocol_version: String) {
+        (**self).set_protocol_version(protocol_version);
+    }
+}
+
 /// Configuration for an MCP stdio child process transport.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StdioConfig {
@@ -1058,6 +1079,11 @@ impl McpClientConfig {
             version: None,
             capabilities: None,
         }
+    }
+
+    /// Creates a client configuration from an upstream-shaped transport config.
+    pub fn from_transport_config(config: McpTransportConfig) -> Self {
+        Self::new(create_mcp_transport(config))
     }
 
     /// Sets the client name advertised during initialization.
@@ -1751,11 +1777,204 @@ impl SharedOAuthClientProvider {
     }
 }
 
+/// Redirect handling mode for HTTP-based MCP transports.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum McpRedirectMode {
+    /// Reject redirect responses, matching upstream's default transport config.
+    #[default]
+    Error,
+    /// Follow redirects using the HTTP client's default limit.
+    Follow,
+}
+
+impl McpRedirectMode {
+    fn max_redirects(self) -> u32 {
+        match self {
+            Self::Error => 0,
+            Self::Follow => 10,
+        }
+    }
+}
+
+/// Upstream-shaped MCP transport configuration.
+#[derive(Clone, Debug)]
+pub enum McpTransportConfig {
+    Http(McpHttpTransportConfig),
+    Sse(SseMcpTransportConfig),
+}
+
+impl McpTransportConfig {
+    /// Creates Streamable HTTP MCP transport configuration.
+    pub fn http(url: impl Into<String>) -> Self {
+        Self::Http(McpHttpTransportConfig::new(url))
+    }
+
+    /// Creates standalone SSE MCP transport configuration.
+    pub fn sse(url: impl Into<String>) -> Self {
+        Self::Sse(SseMcpTransportConfig::new(url))
+    }
+
+    /// Adds a request header sent with transport requests.
+    pub fn with_header(self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        match self {
+            Self::Http(config) => Self::Http(config.with_header(name, value)),
+            Self::Sse(config) => Self::Sse(config.with_header(name, value)),
+        }
+    }
+
+    /// Adds request headers sent with transport requests.
+    pub fn with_headers<K, V, I>(self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        match self {
+            Self::Http(config) => Self::Http(config.with_headers(headers)),
+            Self::Sse(config) => Self::Sse(config.with_headers(headers)),
+        }
+    }
+
+    /// Adds an OAuth provider used for bearer tokens and one-shot 401 auth retry.
+    pub fn with_auth_provider<P>(self, provider: P) -> Self
+    where
+        P: OAuthClientProvider + Send + 'static,
+    {
+        match self {
+            Self::Http(config) => Self::Http(config.with_auth_provider(provider)),
+            Self::Sse(config) => Self::Sse(config.with_auth_provider(provider)),
+        }
+    }
+
+    /// Sets redirect handling for HTTP requests.
+    pub fn with_redirect_mode(self, redirect_mode: McpRedirectMode) -> Self {
+        match self {
+            Self::Http(config) => Self::Http(config.with_redirect_mode(redirect_mode)),
+            Self::Sse(config) => Self::Sse(config.with_redirect_mode(redirect_mode)),
+        }
+    }
+}
+
+/// Configuration for a Streamable HTTP MCP transport.
+#[derive(Clone, Debug)]
+pub struct McpHttpTransportConfig {
+    pub url: String,
+    pub headers: BTreeMap<String, String>,
+    pub redirect_mode: McpRedirectMode,
+    auth_provider: Option<SharedOAuthClientProvider>,
+}
+
+impl McpHttpTransportConfig {
+    /// Creates Streamable HTTP MCP transport configuration.
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            headers: BTreeMap::new(),
+            redirect_mode: McpRedirectMode::default(),
+            auth_provider: None,
+        }
+    }
+
+    /// Adds a request header sent with transport requests.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(name.into(), value.into());
+        self
+    }
+
+    /// Adds request headers sent with transport requests.
+    pub fn with_headers<K, V, I>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.headers.extend(
+            headers
+                .into_iter()
+                .map(|(key, value)| (key.into(), value.into())),
+        );
+        self
+    }
+
+    /// Adds an OAuth provider used for bearer tokens and one-shot 401 auth retry.
+    pub fn with_auth_provider<P>(mut self, provider: P) -> Self
+    where
+        P: OAuthClientProvider + Send + 'static,
+    {
+        self.auth_provider = Some(SharedOAuthClientProvider::new(provider));
+        self
+    }
+
+    /// Sets redirect handling for HTTP requests.
+    pub fn with_redirect_mode(mut self, redirect_mode: McpRedirectMode) -> Self {
+        self.redirect_mode = redirect_mode;
+        self
+    }
+}
+
+/// Configuration for a standalone SSE MCP transport.
+#[derive(Clone, Debug)]
+pub struct SseMcpTransportConfig {
+    pub url: String,
+    pub headers: BTreeMap<String, String>,
+    pub redirect_mode: McpRedirectMode,
+    auth_provider: Option<SharedOAuthClientProvider>,
+}
+
+impl SseMcpTransportConfig {
+    /// Creates standalone SSE MCP transport configuration.
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            headers: BTreeMap::new(),
+            redirect_mode: McpRedirectMode::default(),
+            auth_provider: None,
+        }
+    }
+
+    /// Adds a request header sent with transport requests.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(name.into(), value.into());
+        self
+    }
+
+    /// Adds request headers sent with transport requests.
+    pub fn with_headers<K, V, I>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.headers.extend(
+            headers
+                .into_iter()
+                .map(|(key, value)| (key.into(), value.into())),
+        );
+        self
+    }
+
+    /// Adds an OAuth provider used for bearer tokens and one-shot 401 auth retry.
+    pub fn with_auth_provider<P>(mut self, provider: P) -> Self
+    where
+        P: OAuthClientProvider + Send + 'static,
+    {
+        self.auth_provider = Some(SharedOAuthClientProvider::new(provider));
+        self
+    }
+
+    /// Sets redirect handling for HTTP requests.
+    pub fn with_redirect_mode(mut self, redirect_mode: McpRedirectMode) -> Self {
+        self.redirect_mode = redirect_mode;
+        self
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct McpHttpTransport {
     url: String,
     headers: BTreeMap<String, String>,
     auth_provider: Option<SharedOAuthClientProvider>,
+    redirect_mode: McpRedirectMode,
     session_id: Option<String>,
     protocol_version: Option<String>,
     last_inbound_event_id: Option<String>,
@@ -1796,6 +2015,7 @@ impl McpHttpTransport {
             url: url.into(),
             headers: BTreeMap::new(),
             auth_provider: None,
+            redirect_mode: McpRedirectMode::default(),
             session_id: None,
             protocol_version: None,
             last_inbound_event_id: None,
@@ -1833,6 +2053,17 @@ impl McpHttpTransport {
         P: OAuthClientProvider + Send + 'static,
     {
         self.auth_provider = Some(SharedOAuthClientProvider::new(provider));
+        self
+    }
+
+    fn with_shared_auth_provider(mut self, provider: SharedOAuthClientProvider) -> Self {
+        self.auth_provider = Some(provider);
+        self
+    }
+
+    /// Sets redirect handling for HTTP requests.
+    pub fn with_redirect_mode(mut self, redirect_mode: McpRedirectMode) -> Self {
+        self.redirect_mode = redirect_mode;
         self
     }
 
@@ -2000,6 +2231,8 @@ impl McpHttpTransport {
         let mut response = builder
             .config()
             .http_status_as_error(false)
+            .max_redirects(self.redirect_mode.max_redirects())
+            .max_redirects_will_error(true)
             .build()
             .call()
             .map_err(|_error| InboundSseAttemptError::Retriable)?;
@@ -2086,6 +2319,8 @@ impl McpHttpTransport {
         let response = builder
             .config()
             .http_status_as_error(false)
+            .max_redirects(self.redirect_mode.max_redirects())
+            .max_redirects_will_error(true)
             .build()
             .send(body.clone())
             .map_err(|error| {
@@ -2194,7 +2429,13 @@ impl McpTransport for McpHttpTransport {
                 builder = builder.header(name.as_str(), value.as_str());
             }
             builder = builder.header("mcp-session-id", session_id.as_str());
-            let _ = builder.config().http_status_as_error(false).build().call();
+            let _ = builder
+                .config()
+                .http_status_as_error(false)
+                .max_redirects(self.redirect_mode.max_redirects())
+                .max_redirects_will_error(true)
+                .build()
+                .call();
         }
         self.started = false;
         Ok(())
@@ -2285,6 +2526,7 @@ pub struct SseMcpTransport {
     url: String,
     headers: BTreeMap<String, String>,
     auth_provider: Option<SharedOAuthClientProvider>,
+    redirect_mode: McpRedirectMode,
     endpoint: Option<String>,
     protocol_version: Option<String>,
     started: bool,
@@ -2298,6 +2540,7 @@ impl SseMcpTransport {
             url: url.into(),
             headers: BTreeMap::new(),
             auth_provider: None,
+            redirect_mode: McpRedirectMode::default(),
             endpoint: None,
             protocol_version: None,
             started: false,
@@ -2332,6 +2575,17 @@ impl SseMcpTransport {
         P: OAuthClientProvider + Send + 'static,
     {
         self.auth_provider = Some(SharedOAuthClientProvider::new(provider));
+        self
+    }
+
+    fn with_shared_auth_provider(mut self, provider: SharedOAuthClientProvider) -> Self {
+        self.auth_provider = Some(provider);
+        self
+    }
+
+    /// Sets redirect handling for HTTP requests.
+    pub fn with_redirect_mode(mut self, redirect_mode: McpRedirectMode) -> Self {
+        self.redirect_mode = redirect_mode;
         self
     }
 
@@ -2436,6 +2690,8 @@ impl SseMcpTransport {
         let mut response = builder
             .config()
             .http_status_as_error(false)
+            .max_redirects(self.redirect_mode.max_redirects())
+            .max_redirects_will_error(true)
             .build()
             .call()
             .map_err(|error| {
@@ -2492,6 +2748,8 @@ impl SseMcpTransport {
         let mut response = builder
             .config()
             .http_status_as_error(false)
+            .max_redirects(self.redirect_mode.max_redirects())
+            .max_redirects_will_error(true)
             .build()
             .send(body.clone())
             .map_err(|error| {
@@ -2563,6 +2821,30 @@ impl McpTransport for SseMcpTransport {
 
     fn set_protocol_version(&mut self, protocol_version: String) {
         self.protocol_version = Some(protocol_version);
+    }
+}
+
+/// Creates an MCP transport from upstream-shaped configuration.
+pub fn create_mcp_transport(config: McpTransportConfig) -> Box<dyn McpTransport> {
+    match config {
+        McpTransportConfig::Http(config) => {
+            let mut transport = McpHttpTransport::new(config.url)
+                .with_headers(config.headers)
+                .with_redirect_mode(config.redirect_mode);
+            if let Some(provider) = config.auth_provider {
+                transport = transport.with_shared_auth_provider(provider);
+            }
+            Box::new(transport)
+        }
+        McpTransportConfig::Sse(config) => {
+            let mut transport = SseMcpTransport::new(config.url)
+                .with_headers(config.headers)
+                .with_redirect_mode(config.redirect_mode);
+            if let Some(provider) = config.auth_provider {
+                transport = transport.with_shared_auth_provider(provider);
+            }
+            Box::new(transport)
+        }
     }
 }
 
@@ -4031,6 +4313,114 @@ mod tests {
     }
 
     #[test]
+    fn mcp_transport_config_http_builds_authenticated_transport() {
+        let server = LocalHttpServer::new(Vec::new());
+        let transport_url = format!("{}/mcp", server.url());
+        server.set_responses(vec![
+            LocalHttpResponse::empty(405),
+            LocalHttpResponse::new(
+                401,
+                [
+                    ("content-type".to_string(), "text/plain".to_string()),
+                    (
+                        "www-authenticate".to_string(),
+                        format!(
+                            "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource\"",
+                            server.url()
+                        ),
+                    ),
+                ],
+                "Unauthorized",
+            ),
+            LocalHttpResponse::json(oauth_protected_resource_metadata_json(
+                &server.url(),
+                &transport_url,
+            )),
+            LocalHttpResponse::json(oauth_authorization_server_metadata_json(&server.url())),
+            LocalHttpResponse::json(json!({
+                "access_token": "fresh-mcp-token",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "refresh_token": "next-refresh-token"
+            })),
+            LocalHttpResponse::json(json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "result": {
+                    "protocolVersion": LATEST_PROTOCOL_VERSION,
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "configured-http-mcp-server", "version": "1.0.0" }
+                }
+            }))
+            .with_header("mcp-session-id", "configured-session-1"),
+            LocalHttpResponse::empty(200),
+            LocalHttpResponse::empty(200),
+        ]);
+        let provider = HttpTransportOAuthProviderStub::with_refresh_token();
+        let client = create_mcp_client(
+            McpClientConfig::from_transport_config(
+                McpTransportConfig::http(transport_url)
+                    .with_header("x-hosted-auth", "config")
+                    .with_auth_provider(provider.clone()),
+            )
+            .with_client_name("configured-http-auth-test-client"),
+        )
+        .expect("client initializes from HTTP transport config");
+
+        assert_eq!(
+            client.server_info().expect("server info").name,
+            "configured-http-mcp-server"
+        );
+        client.close().expect("client closes authenticated session");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 8);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(
+            requests[0].headers.get("x-hosted-auth"),
+            Some(&"config".to_string())
+        );
+        assert_eq!(
+            requests[1].headers.get("authorization"),
+            Some(&"Bearer expired-mcp-token".to_string())
+        );
+        assert_eq!(
+            requests[5].headers.get("authorization"),
+            Some(&"Bearer fresh-mcp-token".to_string())
+        );
+        assert_eq!(
+            requests[5].headers.get("x-hosted-auth"),
+            Some(&"config".to_string())
+        );
+        assert_eq!(requests[7].method, "DELETE");
+        assert_eq!(
+            requests[7].headers.get("authorization"),
+            Some(&"Bearer fresh-mcp-token".to_string())
+        );
+    }
+
+    #[test]
+    fn mcp_http_transport_rejects_redirects_by_default() {
+        let server = LocalHttpServer::new(Vec::new());
+        server.set_responses(vec![
+            LocalHttpResponse::empty(405),
+            LocalHttpResponse::new(302, [("location", server.url())], ""),
+        ]);
+        let mut transport = McpHttpTransport::new(format!("{}/mcp", server.url()));
+        transport.start().expect("transport starts");
+
+        let error = transport
+            .send(JsonRpcMessage::Request(JsonRpcRequest::new(
+                json!(1),
+                "initialize",
+            )))
+            .expect_err("redirect response is rejected");
+
+        assert!(error.message.contains("POSTing to endpoint (HTTP 302)"));
+        assert_eq!(server.requests().len(), 2);
+    }
+
+    #[test]
     fn mcp_sse_transport_connects_to_endpoint_and_posts_messages() {
         let server = LocalHttpServer::new(vec![
             LocalHttpResponse::new(
@@ -4328,6 +4718,90 @@ mod tests {
         assert_eq!(requests[2].path, "/.well-known/oauth-protected-resource");
         assert_eq!(requests[3].path, "/.well-known/oauth-authorization-server");
         assert_eq!(requests[4].path, "/token");
+        assert_eq!(requests[5].method, "POST");
+        assert_eq!(requests[5].path, "/messages");
+        assert_eq!(
+            requests[5].headers.get("authorization"),
+            Some(&"Bearer fresh-mcp-token".to_string())
+        );
+        assert_eq!(provider.access_token().as_deref(), Some("fresh-mcp-token"));
+    }
+
+    #[test]
+    fn mcp_transport_config_sse_builds_authenticated_transport() {
+        let server = LocalHttpServer::new(Vec::new());
+        let transport_url = format!("{}/sse", server.url());
+        server.set_responses(vec![
+            LocalHttpResponse::new(
+                401,
+                [
+                    ("content-type".to_string(), "text/plain".to_string()),
+                    (
+                        "www-authenticate".to_string(),
+                        format!(
+                            "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource\"",
+                            server.url()
+                        ),
+                    ),
+                ],
+                "Unauthorized",
+            ),
+            LocalHttpResponse::json(oauth_protected_resource_metadata_json(
+                &server.url(),
+                &transport_url,
+            )),
+            LocalHttpResponse::json(oauth_authorization_server_metadata_json(&server.url())),
+            LocalHttpResponse::json(json!({
+                "access_token": "fresh-mcp-token",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "refresh_token": "next-refresh-token"
+            })),
+            LocalHttpResponse::new(
+                200,
+                [("content-type", "text/event-stream")],
+                "event: endpoint\ndata: /messages\n\n",
+            ),
+            LocalHttpResponse::json(json!({
+                "jsonrpc": "2.0",
+                "id": 12,
+                "result": { "tools": [] }
+            })),
+        ]);
+        let provider = HttpTransportOAuthProviderStub::with_refresh_token();
+        let mut transport = create_mcp_transport(
+            McpTransportConfig::sse(transport_url)
+                .with_header("x-hosted-auth", "config")
+                .with_auth_provider(provider.clone()),
+        );
+
+        transport.start().expect("SSE transport config starts");
+        let messages = transport
+            .send(JsonRpcMessage::Request(JsonRpcRequest::new(
+                json!(12),
+                "tools/list",
+            )))
+            .expect("SSE transport config sends message");
+
+        assert_eq!(
+            serde_json::to_value(&messages).expect("messages serialize"),
+            json!([{ "jsonrpc": "2.0", "id": 12, "result": { "tools": [] } }])
+        );
+        let requests = server.requests();
+        assert_eq!(requests.len(), 6);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(
+            requests[0].headers.get("authorization"),
+            Some(&"Bearer expired-mcp-token".to_string())
+        );
+        assert_eq!(
+            requests[4].headers.get("authorization"),
+            Some(&"Bearer fresh-mcp-token".to_string())
+        );
+        assert_eq!(
+            requests[4].headers.get("x-hosted-auth"),
+            Some(&"config".to_string())
+        );
         assert_eq!(requests[5].method, "POST");
         assert_eq!(requests[5].path, "/messages");
         assert_eq!(
