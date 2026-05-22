@@ -5051,6 +5051,159 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_result_full_stream_sends_sources() {
+        let first_metadata = ProviderMetadata::from([(
+            "provider".to_string(),
+            Map::from_iter([("custom".to_string(), json!("value"))]),
+        )]);
+        let second_metadata = ProviderMetadata::from([(
+            "provider".to_string(),
+            Map::from_iter([("custom".to_string(), json!("value2"))]),
+        )]);
+        let first_source = LanguageModelSource::Url(
+            LanguageModelUrlSource::new("123", "https://example.com")
+                .with_title("Example")
+                .with_provider_metadata(first_metadata),
+        );
+        let second_source = LanguageModelSource::Url(
+            LanguageModelUrlSource::new("456", "https://example.com/2")
+                .with_title("Example 2")
+                .with_provider_metadata(second_metadata),
+        );
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::Source(first_source.clone()),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Source(second_source.clone()),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("prompt")],
+        )));
+
+        let part_names = result
+            .parts
+            .iter()
+            .map(|part| match part {
+                TextStreamPart::Start(_) => "start",
+                TextStreamPart::StartStep(_) => "start-step",
+                TextStreamPart::Source(_) => "source",
+                TextStreamPart::TextStart(_) => "text-start",
+                TextStreamPart::TextDelta(_) => "text-delta",
+                TextStreamPart::TextEnd(_) => "text-end",
+                TextStreamPart::FinishStep(_) => "finish-step",
+                TextStreamPart::Finish(_) => "finish",
+                _ => "other",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            part_names,
+            vec![
+                "start",
+                "start-step",
+                "source",
+                "text-start",
+                "text-delta",
+                "text-end",
+                "source",
+                "finish-step",
+                "finish",
+            ]
+        );
+
+        let source_parts = result
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::Source(part) => Some(part.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            source_parts,
+            vec![first_source.clone(), second_source.clone()]
+        );
+        assert_eq!(result.sources, vec![first_source, second_source]);
+        assert_eq!(result.text_stream, vec!["Hello!"]);
+        assert_eq!(result.text, "Hello!");
+    }
+
+    #[test]
+    fn stream_text_result_full_stream_sends_custom_parts() {
+        let provider_metadata = ProviderMetadata::from([(
+            "openai".to_string(),
+            Map::from_iter([("itemId".to_string(), json!("cmp_123"))]),
+        )]);
+        let custom_part = LanguageModelCustomContent::new("openai.compaction")
+            .with_provider_metadata(provider_metadata);
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Custom(custom_part.clone()),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("prompt")],
+        )));
+
+        let part_names = result
+            .parts
+            .iter()
+            .map(|part| match part {
+                TextStreamPart::Start(_) => "start",
+                TextStreamPart::StartStep(_) => "start-step",
+                TextStreamPart::TextStart(_) => "text-start",
+                TextStreamPart::TextDelta(_) => "text-delta",
+                TextStreamPart::TextEnd(_) => "text-end",
+                TextStreamPart::Custom(_) => "custom",
+                TextStreamPart::FinishStep(_) => "finish-step",
+                TextStreamPart::Finish(_) => "finish",
+                _ => "other",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            part_names,
+            vec![
+                "start",
+                "start-step",
+                "text-start",
+                "text-delta",
+                "text-end",
+                "custom",
+                "finish-step",
+                "finish",
+            ]
+        );
+
+        let custom_parts = result
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::Custom(part) => Some(part.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(custom_parts, vec![custom_part.clone()]);
+        assert_eq!(result.custom_parts, vec![custom_part]);
+        assert_eq!(result.text_stream, vec!["Hello!"]);
+        assert_eq!(result.text, "Hello!");
+    }
+
+    #[test]
     fn stream_text_smooth_stream_transforms_chunks_before_callbacks() {
         let chunks = Arc::new(Mutex::new(Vec::new()));
         let chunks_for_callback = Arc::clone(&chunks);
