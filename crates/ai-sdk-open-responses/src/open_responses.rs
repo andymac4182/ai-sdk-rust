@@ -6974,6 +6974,8 @@ mod tests {
         include_str!("fixtures/openai-reasoning-encrypted-content.1.chunks.txt");
     const OPEN_RESPONSES_CODE_INTERPRETER_TOOL_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-code-interpreter-tool.1.json");
+    const OPEN_RESPONSES_CODE_INTERPRETER_TOOL_CHUNKS_FIXTURE: &str =
+        include_str!("fixtures/openai-code-interpreter-tool.1.chunks.txt");
     const OPEN_RESPONSES_IMAGE_GENERATION_TOOL_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-image-generation-tool.1.json");
     const OPEN_RESPONSES_IMAGE_GENERATION_TOOL_CHUNKS_FIXTURE: &str =
@@ -30548,60 +30550,86 @@ mod tests {
 
     #[test]
     fn open_responses_provider_streams_code_interpreter_results_with_annotations() {
-        const CONTAINER_ID: &str = "cntr_68c2e6f380d881908a57a82d394434ff02f484f5344062e9";
-        const CODE_CALL_ID: &str = "ci_68c2e6fd57948193aa93df6bdb00a86d02d3a5742c7ddae9";
-        const FILE_ID: &str = "cfile_68c2e7084ab48191a67824aa1f4c90f1";
-        const FILENAME: &str = "roll2dice_sums_10000.csv";
-        const CODE: &str = "import csv, pathlib\npath = pathlib.Path('/mnt/data/roll2dice_sums_10000.csv')\nwith open(path, 'w', newline='') as f:\n    writer = csv.writer(f)\n    writer.writerow(['sum'])\n    for val in sums:\n        writer.writerow([val])\npath, path.exists(), len(sums)\n";
-        const TEXT: &str = "Full data\n- You can download all sums as a CSV file here: [Download the sums CSV](sandbox:/mnt/data/roll2dice_sums_10000.csv)";
+        let response_created_event = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_CODE_INTERPRETER_TOOL_CHUNKS_FIXTURE,
+            |event| event["type"].as_str() == Some("response.created"),
+        );
+        let response_completed_event = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_CODE_INTERPRETER_TOOL_CHUNKS_FIXTURE,
+            |event| event["type"].as_str() == Some("response.completed"),
+        );
+        let code_done_events = OPEN_RESPONSES_CODE_INTERPRETER_TOOL_CHUNKS_FIXTURE
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<JsonValue>(line).expect("fixture event parses"))
+            .filter(|event| {
+                event["type"].as_str() == Some("response.output_item.done")
+                    && event["item"]["type"].as_str() == Some("code_interpreter_call")
+            })
+            .collect::<Vec<_>>();
+        let message_done_event = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_CODE_INTERPRETER_TOOL_CHUNKS_FIXTURE,
+            |event| {
+                event["type"].as_str() == Some("response.output_item.done")
+                    && event["item"]["type"].as_str() == Some("message")
+            },
+        );
+        let response = &response_created_event["response"];
+        let completed_response = &response_completed_event["response"];
+        let usage = &completed_response["usage"];
+        let final_message = &message_done_event["item"];
+        let final_text_part = final_message["content"]
+            .as_array()
+            .expect("message content is an array")
+            .iter()
+            .find(|part| part["type"].as_str() == Some("output_text"))
+            .expect("fixture message includes output text");
+        let annotation = final_text_part["annotations"]
+            .as_array()
+            .expect("message annotations are an array")
+            .iter()
+            .find(|annotation| annotation["type"].as_str() == Some("container_file_citation"))
+            .expect("fixture includes container file citation");
+        let response_id = response["id"].as_str().expect("response id is set");
+        let model_id = response["model"].as_str().expect("model id is set");
+        let created_at = response["created_at"].as_i64().expect("created_at is set");
+        let input_tokens = usage["input_tokens"].as_u64();
+        let cached_tokens = usage["input_tokens_details"]["cached_tokens"].as_u64();
+        let input_no_cache = input_tokens
+            .zip(cached_tokens)
+            .map(|(total, cached)| total - cached);
+        let output_tokens = usage["output_tokens"].as_u64();
+        let reasoning_tokens = usage["output_tokens_details"]["reasoning_tokens"].as_u64();
+        let output_text_tokens = output_tokens
+            .zip(reasoning_tokens)
+            .map(|(total, reasoning)| total - reasoning);
+        let service_tier = completed_response["service_tier"]
+            .as_str()
+            .expect("service tier is set");
+        let message_id = final_message["id"].as_str().expect("message id is set");
+        let text = final_text_part["text"]
+            .as_str()
+            .expect("message text is set");
+        let filename = annotation["filename"].as_str().expect("filename is set");
+        let file_id = annotation["file_id"].as_str().expect("file id is set");
+        let container_id = annotation["container_id"]
+            .as_str()
+            .expect("container id is set");
 
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
-        let transport: OpenResponsesTransport = Arc::new(
-            move |request| -> OpenResponsesTransportFuture {
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
                 *captured_request_for_transport
                     .lock()
                     .expect("captured request mutex is not poisoned") = Some(request.clone());
 
-                let sse = [
-                    r#"data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_68c2e6efa238819383d5f52a2c2a3baa02d3a5742c7ddae9","object":"response","created_at":1757603567,"status":"in_progress","model":"gpt-5-nano-2025-08-07","output":[],"parallel_tool_calls":true,"reasoning":{"effort":"medium","summary":null},"store":true,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"code_interpreter","container":{"type":"auto"}}],"usage":null,"metadata":{}}}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.added","sequence_number":86,"output_index":3,"item":{"id":"ci_68c2e6fd57948193aa93df6bdb00a86d02d3a5742c7ddae9","type":"code_interpreter_call","status":"in_progress","code":"","container_id":"cntr_68c2e6f380d881908a57a82d394434ff02f484f5344062e9","outputs":[]}}"#,
-                    "",
-                    r#"data: {"type":"response.code_interpreter_call.in_progress","sequence_number":87,"output_index":3,"item_id":"ci_68c2e6fd57948193aa93df6bdb00a86d02d3a5742c7ddae9"}"#,
-                    "",
-                    r#"data: {"type":"response.code_interpreter_call_code.delta","sequence_number":88,"output_index":3,"item_id":"ci_68c2e6fd57948193aa93df6bdb00a86d02d3a5742c7ddae9","delta":"import csv, pathlib\npath = pathlib.Path('/mnt/data/roll2dice_sums_10000.csv')\nwith open(path, 'w', newline='') as f:\n    writer = csv.writer(f)\n    writer.writerow(['sum'])\n    for val in sums:\n        writer.writerow([val])\npath, path.exists(), len(sums)\n"}"#,
-                    "",
-                    r#"data: {"type":"response.code_interpreter_call_code.done","sequence_number":158,"output_index":3,"item_id":"ci_68c2e6fd57948193aa93df6bdb00a86d02d3a5742c7ddae9","code":"import csv, pathlib\npath = pathlib.Path('/mnt/data/roll2dice_sums_10000.csv')\nwith open(path, 'w', newline='') as f:\n    writer = csv.writer(f)\n    writer.writerow(['sum'])\n    for val in sums:\n        writer.writerow([val])\npath, path.exists(), len(sums)\n"}"#,
-                    "",
-                    r#"data: {"type":"response.code_interpreter_call.completed","sequence_number":160,"output_index":3,"item_id":"ci_68c2e6fd57948193aa93df6bdb00a86d02d3a5742c7ddae9"}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.done","sequence_number":161,"output_index":3,"item":{"id":"ci_68c2e6fd57948193aa93df6bdb00a86d02d3a5742c7ddae9","type":"code_interpreter_call","status":"completed","code":"import csv, pathlib\npath = pathlib.Path('/mnt/data/roll2dice_sums_10000.csv')\nwith open(path, 'w', newline='') as f:\n    writer = csv.writer(f)\n    writer.writerow(['sum'])\n    for val in sums:\n        writer.writerow([val])\npath, path.exists(), len(sums)\n","container_id":"cntr_68c2e6f380d881908a57a82d394434ff02f484f5344062e9","outputs":[{"type":"logs","logs":"(PosixPath('/mnt/data/roll2dice_sums_10000.csv'), True, 10000)"}]}}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.added","sequence_number":177,"output_index":7,"item":{"id":"msg_68c2e7054ae481938354ab3e4e77abad02d3a5742c7ddae9","type":"message","status":"in_progress","content":[],"role":"assistant"}}"#,
-                    "",
-                    r#"data: {"type":"response.content_part.added","sequence_number":178,"item_id":"msg_68c2e7054ae481938354ab3e4e77abad02d3a5742c7ddae9","output_index":7,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.delta","sequence_number":179,"item_id":"msg_68c2e7054ae481938354ab3e4e77abad02d3a5742c7ddae9","output_index":7,"content_index":0,"delta":"Full data\n- You can download all sums as a CSV file here: [Download the sums CSV](sandbox:/mnt/data/roll2dice_sums_10000.csv)","logprobs":[]}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.annotation.added","sequence_number":388,"item_id":"msg_68c2e7054ae481938354ab3e4e77abad02d3a5742c7ddae9","output_index":7,"content_index":0,"annotation_index":0,"annotation":{"type":"container_file_citation","container_id":"cntr_68c2e6f380d881908a57a82d394434ff02f484f5344062e9","end_index":126,"file_id":"cfile_68c2e7084ab48191a67824aa1f4c90f1","filename":"roll2dice_sums_10000.csv","start_index":84}}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.done","sequence_number":389,"item_id":"msg_68c2e7054ae481938354ab3e4e77abad02d3a5742c7ddae9","output_index":7,"content_index":0,"text":"Full data\n- You can download all sums as a CSV file here: [Download the sums CSV](sandbox:/mnt/data/roll2dice_sums_10000.csv)","logprobs":[]}"#,
-                    "",
-                    r#"data: {"type":"response.content_part.done","sequence_number":390,"item_id":"msg_68c2e7054ae481938354ab3e4e77abad02d3a5742c7ddae9","output_index":7,"content_index":0,"part":{"type":"output_text","annotations":[{"type":"container_file_citation","container_id":"cntr_68c2e6f380d881908a57a82d394434ff02f484f5344062e9","end_index":126,"file_id":"cfile_68c2e7084ab48191a67824aa1f4c90f1","filename":"roll2dice_sums_10000.csv","start_index":84}],"logprobs":[],"text":"Full data\n- You can download all sums as a CSV file here: [Download the sums CSV](sandbox:/mnt/data/roll2dice_sums_10000.csv)"}}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.done","sequence_number":391,"output_index":7,"item":{"id":"msg_68c2e7054ae481938354ab3e4e77abad02d3a5742c7ddae9","type":"message","status":"completed","content":[{"type":"output_text","annotations":[{"type":"container_file_citation","container_id":"cntr_68c2e6f380d881908a57a82d394434ff02f484f5344062e9","end_index":126,"file_id":"cfile_68c2e7084ab48191a67824aa1f4c90f1","filename":"roll2dice_sums_10000.csv","start_index":84}],"logprobs":[],"text":"Full data\n- You can download all sums as a CSV file here: [Download the sums CSV](sandbox:/mnt/data/roll2dice_sums_10000.csv)"}],"role":"assistant"}}"#,
-                    "",
-                    r#"data: {"type":"response.completed","sequence_number":392,"response":{"id":"resp_68c2e6efa238819383d5f52a2c2a3baa02d3a5742c7ddae9","object":"response","created_at":1757603567,"status":"completed","model":"gpt-5-nano-2025-08-07","output":[],"parallel_tool_calls":true,"reasoning":{"effort":"medium","summary":null},"store":true,"text":{"format":{"type":"text"},"verbosity":"medium"},"usage":{"input_tokens":6047,"input_tokens_details":{"cached_tokens":2944},"output_tokens":1623,"output_tokens_details":{"reasoning_tokens":1408},"total_tokens":7670}}}"#,
-                    "",
-                    "data: [DONE]",
-                    "",
-                ]
-                .join("\n");
+                let sse = open_responses_sse_from_fixture_lines(
+                    OPEN_RESPONSES_CODE_INTERPRETER_TOOL_CHUNKS_FIXTURE,
+                );
 
                 Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
-            },
-        );
+            });
         let provider = create_open_responses(
             OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
                 .with_api_key("test-api-key"),
@@ -30611,52 +30639,75 @@ mod tests {
 
         let result = poll_ready(model.do_stream(open_responses_code_interpreter_call_options()));
 
-        let tool_call = result
+        let metadata = result
             .stream
             .iter()
             .find_map(|part| match part {
+                LanguageModelStreamPart::ResponseMetadata(metadata) => Some(metadata),
+                _ => None,
+            })
+            .expect("stream includes response metadata");
+        assert_eq!(metadata.id.as_deref(), Some(response_id));
+        assert_eq!(metadata.model_id.as_deref(), Some(model_id));
+        assert_eq!(
+            metadata
+                .timestamp
+                .map(|timestamp| timestamp.unix_timestamp()),
+            Some(created_at)
+        );
+        assert_eq!(completed_response["id"].as_str(), Some(response_id));
+        assert_eq!(completed_response["model"].as_str(), Some(model_id));
+        assert_eq!(completed_response["created_at"].as_i64(), Some(created_at));
+
+        let tool_calls = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
                 LanguageModelStreamPart::ToolCall(tool_call)
-                    if tool_call.tool_call_id == CODE_CALL_ID =>
+                    if tool_call.tool_name == "codeExecution" =>
                 {
                     Some(tool_call)
                 }
                 _ => None,
             })
-            .expect("stream includes code interpreter tool call");
-        assert_eq!(tool_call.tool_name, "codeExecution");
-        assert_eq!(tool_call.provider_executed, Some(true));
-        assert_eq!(
-            serde_json::from_str::<JsonValue>(&tool_call.input).expect("tool input is JSON"),
-            json!({
-                "code": CODE,
-                "containerId": CONTAINER_ID
-            })
-        );
-
-        let tool_result = result
+            .collect::<Vec<_>>();
+        let tool_results = result
             .stream
             .iter()
-            .find_map(|part| match part {
+            .filter_map(|part| match part {
                 LanguageModelStreamPart::ToolResult(tool_result)
-                    if tool_result.tool_call_id == CODE_CALL_ID =>
+                    if tool_result.tool_name == "codeExecution" =>
                 {
                     Some(tool_result)
                 }
                 _ => None,
             })
-            .expect("stream includes code interpreter tool result");
-        assert_eq!(tool_result.tool_name, "codeExecution");
-        assert_eq!(
-            tool_result.result.as_value(),
-            &json!({
-                "outputs": [
-                    {
-                        "type": "logs",
-                        "logs": "(PosixPath('/mnt/data/roll2dice_sums_10000.csv'), True, 10000)"
-                    }
-                ]
-            })
-        );
+            .collect::<Vec<_>>();
+        assert_eq!(tool_calls.len(), code_done_events.len());
+        assert_eq!(tool_results.len(), code_done_events.len());
+        for (index, code_done_event) in code_done_events.iter().enumerate() {
+            let code_call = &code_done_event["item"];
+            let expected_call_id = code_call["id"].as_str().expect("code call id is set");
+            assert_eq!(tool_calls[index].tool_call_id, expected_call_id);
+            assert_eq!(tool_calls[index].tool_name, "codeExecution");
+            assert_eq!(tool_calls[index].provider_executed, Some(true));
+            assert_eq!(
+                serde_json::from_str::<JsonValue>(&tool_calls[index].input)
+                    .expect("tool input is JSON"),
+                json!({
+                    "code": code_call["code"].clone(),
+                    "containerId": code_call["container_id"].clone()
+                })
+            );
+            assert_eq!(tool_results[index].tool_call_id, expected_call_id);
+            assert_eq!(tool_results[index].tool_name, "codeExecution");
+            assert_eq!(
+                tool_results[index].result.as_value(),
+                &json!({
+                    "outputs": code_call["outputs"].clone()
+                })
+            );
+        }
 
         let source = result
             .stream
@@ -30669,30 +30720,31 @@ mod tests {
             })
             .expect("stream includes citation source");
         assert_eq!(source.id, "source-0");
-        assert_eq!(source.title, FILENAME);
-        assert_eq!(source.filename.as_deref(), Some(FILENAME));
+        assert_eq!(source.title, filename);
+        assert_eq!(source.filename.as_deref(), Some(filename));
         assert_eq!(source.media_type, "text/plain");
         let source_openai = source
             .provider_metadata
             .as_ref()
             .and_then(|metadata| metadata.get("openai"))
             .expect("source includes OpenAI metadata");
-        assert_eq!(source_openai["type"], "container_file_citation");
-        assert_eq!(source_openai["fileId"], FILE_ID);
-        assert_eq!(source_openai["containerId"], CONTAINER_ID);
+        assert_eq!(
+            source_openai["type"].as_str(),
+            Some("container_file_citation")
+        );
+        assert_eq!(source_openai["fileId"].as_str(), Some(file_id));
+        assert_eq!(source_openai["containerId"].as_str(), Some(container_id));
 
         let text_end = result
             .stream
             .iter()
             .find_map(|part| match part {
-                LanguageModelStreamPart::TextEnd(text_end) => Some(text_end),
+                LanguageModelStreamPart::TextEnd(text_end) if text_end.id == message_id => {
+                    Some(text_end)
+                }
                 _ => None,
             })
             .expect("stream includes text end");
-        assert_eq!(
-            text_end.id,
-            "msg_68c2e7054ae481938354ab3e4e77abad02d3a5742c7ddae9"
-        );
         let streamed_text = result
             .stream
             .iter()
@@ -30703,19 +30755,53 @@ mod tests {
                 _ => None,
             })
             .collect::<String>();
-        assert_eq!(streamed_text, TEXT);
-        let annotations = text_end
-            .provider_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("openai"))
-            .and_then(|openai| openai.get("annotations"))
-            .and_then(JsonValue::as_array)
-            .expect("text end includes OpenAI annotations");
-        assert_eq!(annotations.len(), 1);
-        assert_eq!(annotations[0]["type"], "container_file_citation");
-        assert_eq!(annotations[0]["file_id"], FILE_ID);
-        assert_eq!(annotations[0]["container_id"], CONTAINER_ID);
-        assert_eq!(annotations[0]["filename"], FILENAME);
+        assert_eq!(streamed_text, text);
+        assert_eq!(
+            openai_metadata_value(&text_end.provider_metadata, "annotations"),
+            Some(&final_text_part["annotations"])
+        );
+        let text_end_annotations =
+            openai_metadata_value(&text_end.provider_metadata, "annotations")
+                .and_then(JsonValue::as_array)
+                .expect("text end includes OpenAI annotations");
+        assert_eq!(text_end_annotations.len(), 1);
+        assert_eq!(
+            text_end_annotations[0]["type"].as_str(),
+            Some("container_file_citation")
+        );
+        assert_eq!(text_end_annotations[0]["file_id"].as_str(), Some(file_id));
+        assert_eq!(
+            text_end_annotations[0]["container_id"].as_str(),
+            Some(container_id)
+        );
+        assert_eq!(text_end_annotations[0]["filename"].as_str(), Some(filename));
+
+        let finish = result
+            .stream
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelStreamPart::Finish(finish) => Some(finish),
+                _ => None,
+            })
+            .expect("stream includes finish");
+        assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(finish.finish_reason.raw, None);
+        assert_eq!(finish.usage.input_tokens.total, input_tokens);
+        assert_eq!(finish.usage.input_tokens.no_cache, input_no_cache);
+        assert_eq!(finish.usage.input_tokens.cache_read, cached_tokens);
+        assert_eq!(finish.usage.output_tokens.total, output_tokens);
+        assert_eq!(finish.usage.output_tokens.text, output_text_tokens);
+        assert_eq!(finish.usage.output_tokens.reasoning, reasoning_tokens);
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some(response_id)
+        );
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "serviceTier")
+                .and_then(JsonValue::as_str),
+            Some(service_tier)
+        );
 
         let request_body = captured_open_responses_request_body(&captured_request);
         assert_eq!(
