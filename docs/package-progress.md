@@ -4,7 +4,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 
 - Displayed package rows: 56
 - Average estimated completion: 50.2%
-- Portable package average: 39.3%
+- Portable package average: 39.4%
 - Closed package rows: 13 / 56
 - Strict portable verified rows: 3 / 46
 - In-progress rows: 28
@@ -32,7 +32,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
-| `ai` | 86% | In progress | core package | Core surface is broad; remaining stream/UI/agent edge cases and root/package boundary cleanup. |
+| `ai` | 87% | In progress | core package | Core surface is broad; remaining stream/UI/agent edge cases and root/package boundary cleanup. |
 | `@ai-sdk/provider` | 75% | In progress | provider contracts | Provider-v4 contracts are largely represented; v2/v3 compatibility and exact stream abstractions remain. |
 | `@ai-sdk/provider-utils` | 82% | In progress | provider support library | Most runtime helpers and many type-contract cases are mapped; browser stream/fetch parity and remaining type-level/Zod... |
 | `@ai-sdk/openai` | 65% | In progress | provider package | OpenAI/Open Responses foundations exist; broader Responses, files, speech, transcription, and provider surfaces remain. |
