@@ -1243,15 +1243,35 @@ mod tests {
     }
 
     #[test]
-    fn get_potential_start_index_matches_complete_or_partial_prefixes() {
+    fn get_potential_start_index_should_return_null_when_searched_text_is_empty() {
         assert_eq!(get_potential_start_index("1234567890", ""), None);
+    }
+
+    #[test]
+    fn get_potential_start_index_should_return_null_when_searched_text_is_not_in_text() {
         assert_eq!(get_potential_start_index("1234567890", "a"), None);
+    }
+
+    #[test]
+    fn get_potential_start_index_should_return_index_when_searched_text_is_in_text() {
         assert_eq!(
             get_potential_start_index("1234567890", "1234567890"),
             Some(0)
         );
+    }
+
+    #[test]
+    fn get_potential_start_index_should_return_index_when_searched_text_might_start_in_text() {
         assert_eq!(get_potential_start_index("1234567890", "0123"), Some(9));
+    }
+
+    #[test]
+    fn get_potential_start_index_should_return_index_for_longer_possible_overlap() {
         assert_eq!(get_potential_start_index("1234567890", "90123"), Some(8));
+    }
+
+    #[test]
+    fn get_potential_start_index_should_return_index_for_longest_possible_overlap() {
         assert_eq!(get_potential_start_index("1234567890", "890123"), Some(7));
     }
 
