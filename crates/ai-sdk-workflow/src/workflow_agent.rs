@@ -634,6 +634,18 @@ mod tests {
         }
     }
 
+    fn tool_message_from_prompt(
+        prompt: &[LanguageModelMessage],
+    ) -> &ai_sdk_provider::LanguageModelToolMessage {
+        prompt
+            .iter()
+            .find_map(|message| match message {
+                LanguageModelMessage::Tool(message) => Some(message),
+                _ => None,
+            })
+            .expect("tool result message is appended")
+    }
+
     #[test]
     fn workflow_agent_upstream_should_expose_id_when_provided_in_constructor() {
         let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_id("my-agent"));
@@ -806,6 +818,82 @@ mod tests {
     }
 
     #[test]
+    fn workflow_agent_upstream_should_handle_mixed_provider_executed_and_local_tools() {
+        let local_execute_calls = Arc::new(Mutex::new(0usize));
+        let local_execute_calls_for_tool = Arc::clone(&local_execute_calls);
+        let local_tool = Tool::new("localTool", object_schema()).with_execute(move |_, _| {
+            let local_execute_calls = Arc::clone(&local_execute_calls_for_tool);
+            async move {
+                *local_execute_calls.lock().expect("counter lock succeeds") += 1;
+                Ok(json!({ "local": "result" }))
+            }
+        });
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_tool(local_tool));
+        let mut first = output_from_parts(
+            [
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "local-call-id",
+                    "localTool",
+                    "{}",
+                )),
+                LanguageModelStreamPart::ToolCall(
+                    LanguageModelToolCall::new(
+                        "provider-call-id",
+                        "WebSearch",
+                        r#"{"query":"test"}"#,
+                    )
+                    .with_provider_executed(true),
+                ),
+                finish(FinishReason::ToolCalls),
+            ],
+            0,
+        );
+        first.provider_executed_tool_results.insert(
+            "provider-call-id".to_string(),
+            ProviderExecutedToolResult {
+                tool_call_id: "provider-call-id".to_string(),
+                tool_name: "WebSearch".to_string(),
+                result: json!({ "searchResults": ["result1", "result2"] }),
+                is_error: Some(false),
+            },
+        );
+        let executor = ScriptedStreamTextStepExecutor::new([first, stop_step()]);
+
+        let result =
+            poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+                .expect("agent stream succeeds");
+
+        assert_eq!(
+            *local_execute_calls.lock().expect("counter lock succeeds"),
+            1
+        );
+        let tool_message = tool_message_from_prompt(&result.messages);
+        assert_eq!(tool_message.content.len(), 2);
+        let local_result = match &tool_message.content[0] {
+            ai_sdk_provider::LanguageModelToolContentPart::ToolResult(tool_result) => tool_result,
+            ai_sdk_provider::LanguageModelToolContentPart::ToolApprovalResponse(_) => {
+                panic!("expected local tool result")
+            }
+        };
+        let provider_result = match &tool_message.content[1] {
+            ai_sdk_provider::LanguageModelToolContentPart::ToolResult(tool_result) => tool_result,
+            ai_sdk_provider::LanguageModelToolContentPart::ToolApprovalResponse(_) => {
+                panic!("expected provider tool result")
+            }
+        };
+        assert_eq!(
+            local_result.output,
+            LanguageModelToolResultOutput::json(json!({ "local": "result" }))
+        );
+        assert_eq!(
+            provider_result.output,
+            LanguageModelToolResultOutput::json(json!({
+                "searchResults": ["result1", "result2"]
+            }))
+        );
+    }
+
+    #[test]
     fn workflow_agent_upstream_should_return_empty_result_when_provider_executed_tool_result_is_missing()
      {
         let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
@@ -853,6 +941,83 @@ mod tests {
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].tool_call_id, "ask-user-call-id");
         assert!(result.tool_results.is_empty());
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_handle_mixed_executable_and_client_side_tools_in_same_step() {
+        let server_tool = Tool::new("serverTool", object_schema())
+            .with_execute(|_, _| async { Ok(json!({ "data": "from-server" })) });
+        let client_tool = Tool::new("clientTool", object_schema());
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model()).with_tools([server_tool, client_tool]),
+        );
+        let executor = ScriptedStreamTextStepExecutor::new([output_from_parts(
+            [
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "server-call-id",
+                    "serverTool",
+                    "{}",
+                )),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "client-call-id",
+                    "clientTool",
+                    r#"{"prompt":"confirm action"}"#,
+                )),
+                finish(FinishReason::ToolCalls),
+            ],
+            0,
+        )]);
+
+        let result =
+            poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+                .expect("agent stream succeeds");
+
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.tool_calls.len(), 2);
+        assert_eq!(result.tool_calls[0].tool_call_id, "server-call-id");
+        assert_eq!(result.tool_calls[1].tool_call_id, "client-call-id");
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_call_id, "server-call-id");
+        assert_eq!(
+            result.tool_results[0].output,
+            LanguageModelToolResultOutput::json(json!({ "data": "from-server" }))
+        );
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_keep_invalid_tool_calls_on_error_path_without_executing() {
+        let execute_calls = Arc::new(Mutex::new(0usize));
+        let execute_calls_for_tool = Arc::clone(&execute_calls);
+        let tool = Tool::new("testTool", object_schema()).with_execute(move |_, _| {
+            let execute_calls = Arc::clone(&execute_calls_for_tool);
+            async move {
+                *execute_calls.lock().expect("counter lock succeeds") += 1;
+                Ok(json!("should-not-run"))
+            }
+        });
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_tool(tool));
+        let mut first = tool_call_step(LanguageModelToolCall::new(
+            "invalid-call-id",
+            "testTool",
+            r#"{"cities":"San Francisco"}"#,
+        ));
+        first.tool_calls[0].invalid = Some(true);
+        first.tool_calls[0].error = Some("Invalid input for tool testTool".to_string());
+        let executor = ScriptedStreamTextStepExecutor::new([first, stop_step()]);
+
+        let result =
+            poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+                .expect("agent stream succeeds");
+
+        assert_eq!(*execute_calls.lock().expect("counter lock succeeds"), 0);
+        let tool_message = tool_message_from_prompt(&result.messages);
+        let tool_result = first_tool_result(tool_message);
+        assert_eq!(tool_result.tool_call_id, "invalid-call-id");
+        assert_eq!(tool_result.tool_name, "testTool");
+        assert_eq!(
+            tool_result.output,
+            LanguageModelToolResultOutput::error_text("Invalid input for tool testTool")
+        );
     }
 
     #[test]
