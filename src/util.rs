@@ -1,5 +1,8 @@
+use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
-use crate::provider_utils::{ParseJsonResult, convert_base64_to_bytes, safe_parse_json};
+use crate::provider_utils::{
+    ParseJsonResult, convert_base64_to_bytes, normalize_headers, safe_parse_json,
+};
 
 /// Error returned when text cannot be extracted from a data URL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -170,6 +173,25 @@ impl ParsePartialJsonResult {
 /// not apply to [`JsonValue`].
 pub fn is_deep_equal_data(left: &JsonValue, right: &JsonValue) -> bool {
     left == right
+}
+
+/// Applies default headers without overwriting existing values.
+///
+/// This mirrors upstream `packages/ai` `prepareHeaders` for Rust header maps:
+/// input header names are normalized case-insensitively, and default headers
+/// only fill keys that are not already present.
+pub fn prepare_headers(headers: Option<Headers>, default_headers: Headers) -> Headers {
+    let mut response_headers = normalize_headers(
+        headers.map(|headers| headers.into_iter().map(|(key, value)| (key, Some(value)))),
+    );
+
+    for (key, value) in default_headers {
+        response_headers
+            .entry(key.to_ascii_lowercase())
+            .or_insert(value);
+    }
+
+    response_headers
 }
 
 /// Deeply merges two JSON object values.
@@ -720,8 +742,9 @@ mod tests {
     use super::{
         DataUrlTextError, InvalidArgumentError, cosine_similarity, fix_json,
         get_potential_start_index, get_text_from_data_url, is_deep_equal_data, merge_objects,
-        parse_partial_json, split_array,
+        parse_partial_json, prepare_headers, split_array,
     };
+    use crate::headers::Headers;
 
     fn assert_close(actual: f64, expected: f64) {
         assert!(
@@ -766,6 +789,78 @@ mod tests {
             &json!({ "0": "one", "1": "two", "length": 2 }),
             &json!(["one", "two"])
         ));
+    }
+
+    #[test]
+    fn prepare_headers_should_set_content_type_header_if_not_present() {
+        let headers = prepare_headers(Some(Headers::new()), content_type_default_headers());
+
+        assert_eq!(
+            headers.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+    }
+
+    #[test]
+    fn prepare_headers_should_not_overwrite_existing_content_type_header() {
+        let headers = prepare_headers(
+            Some(Headers::from([(
+                "Content-Type".to_string(),
+                "text/html".to_string(),
+            )])),
+            content_type_default_headers(),
+        );
+
+        assert_eq!(
+            headers.get("content-type").map(String::as_str),
+            Some("text/html")
+        );
+    }
+
+    #[test]
+    fn prepare_headers_should_handle_undefined_init() {
+        let headers = prepare_headers(None, content_type_default_headers());
+
+        assert_eq!(
+            headers.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+    }
+
+    #[test]
+    fn prepare_headers_should_handle_init_headers_as_headers_object() {
+        let headers = prepare_headers(
+            Some(Headers::from([("init".to_string(), "foo".to_string())])),
+            content_type_default_headers(),
+        );
+
+        assert_eq!(headers.get("init").map(String::as_str), Some("foo"));
+        assert_eq!(
+            headers.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+    }
+
+    #[test]
+    fn prepare_headers_should_handle_response_object_headers() {
+        let headers = prepare_headers(
+            Some(Headers::from([
+                ("init".to_string(), "foo".to_string()),
+                ("extra".to_string(), "bar".to_string()),
+            ])),
+            content_type_default_headers(),
+        );
+
+        assert_eq!(headers.get("init").map(String::as_str), Some("foo"));
+        assert_eq!(headers.get("extra").map(String::as_str), Some("bar"));
+        assert_eq!(
+            headers.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+    }
+
+    fn content_type_default_headers() -> Headers {
+        Headers::from([("content-type".to_string(), "application/json".to_string())])
     }
 
     #[test]
