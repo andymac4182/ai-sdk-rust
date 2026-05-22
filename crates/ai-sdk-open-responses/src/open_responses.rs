@@ -7024,6 +7024,8 @@ mod tests {
         include_str!("fixtures/openai-shell-container.1.chunks.txt");
     const OPEN_RESPONSES_SHELL_CONTAINER_MULTITURN_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-shell-container-multiturn.1.json");
+    const OPEN_RESPONSES_SHELL_CONTAINER_MULTITURN_CHUNKS_FIXTURE: &str =
+        include_str!("fixtures/openai-shell-container-multiturn.1.chunks.txt");
     const OPEN_RESPONSES_SHELL_LOCAL_MULTITURN_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-shell-local-multiturn.1.json");
     const OPEN_RESPONSES_MCP_TOOL_JSON_FIXTURE: &str =
@@ -7199,6 +7201,19 @@ mod tests {
             .map(|line| serde_json::from_str::<JsonValue>(line).expect("fixture event parses"))
             .find(predicate)
             .expect("fixture chunk event exists")
+    }
+
+    fn open_responses_fixture_text_deltas(fixture: &str, item_id: &str) -> String {
+        fixture
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<JsonValue>(line).expect("fixture event parses"))
+            .filter(|event| {
+                event["type"].as_str() == Some("response.output_text.delta")
+                    && event["item_id"].as_str() == Some(item_id)
+            })
+            .filter_map(|event| event["delta"].as_str().map(str::to_owned))
+            .collect()
     }
 
     fn open_responses_test_custom_tool() -> LanguageModelTool {
@@ -32273,79 +32288,66 @@ mod tests {
 
     #[test]
     fn open_responses_provider_streams_shell_container_multiturn_fixture() {
-        const RESPONSE_ID: &str = "resp_07226f71de51f72b006994e63fe86881a3ac247b9463ce4550";
         const SHELL_ITEM_ID: &str = "sh_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e50";
         const PRIOR_MESSAGE_ID: &str = "msg_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e52";
-        const MESSAGE_ID: &str = "msg_07226f71de51f72b006994e641127c81a3ba3d54eedadff969";
         const SHELL_CALL_ID: &str = "call_abc123def456ghi789jkl012";
         const STDOUT: &str = "Linux container-host 6.1.0 #1 SMP x86_64 GNU/Linux\n";
-        const FINAL_TEXT: &str = "The architecture is **x86_64** (64-bit Intel/AMD).";
+
+        let response_created_event = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_SHELL_CONTAINER_MULTITURN_CHUNKS_FIXTURE,
+            |event| event["type"].as_str() == Some("response.created"),
+        );
+        let response_completed_event = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_SHELL_CONTAINER_MULTITURN_CHUNKS_FIXTURE,
+            |event| event["type"].as_str() == Some("response.completed"),
+        );
+        let message_done_event = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_SHELL_CONTAINER_MULTITURN_CHUNKS_FIXTURE,
+            |event| {
+                event["type"].as_str() == Some("response.output_item.done")
+                    && event["item"]["type"].as_str() == Some("message")
+            },
+        );
+        let response = &response_created_event["response"];
+        let completed_response = &response_completed_event["response"];
+        let usage = &completed_response["usage"];
+        let response_id = response["id"].as_str().expect("response id is set");
+        let model_id = response["model"].as_str().expect("model id is set");
+        let created_at = response["created_at"].as_i64().expect("created_at is set");
+        let input_tokens = usage["input_tokens"].as_u64();
+        let cached_tokens = usage["input_tokens_details"]["cached_tokens"].as_u64();
+        let input_no_cache = input_tokens
+            .zip(cached_tokens)
+            .map(|(total, cached)| total - cached);
+        let output_tokens = usage["output_tokens"].as_u64();
+        let reasoning_tokens = usage["output_tokens_details"]["reasoning_tokens"].as_u64();
+        let output_text_tokens = output_tokens
+            .zip(reasoning_tokens)
+            .map(|(total, reasoning)| total - reasoning);
+        let service_tier = completed_response["service_tier"]
+            .as_str()
+            .expect("service tier is set");
+        let message = &message_done_event["item"];
+        let message_id = message["id"].as_str().expect("message id is set");
+        let expected_streamed_text = open_responses_fixture_text_deltas(
+            OPEN_RESPONSES_SHELL_CONTAINER_MULTITURN_CHUNKS_FIXTURE,
+            message_id,
+        );
 
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
-        let transport: OpenResponsesTransport = Arc::new(
-            move |request| -> OpenResponsesTransportFuture {
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
                 *captured_request_for_transport
                     .lock()
                     .expect("captured request mutex is not poisoned") = Some(request.clone());
 
-                let sse = [
-                    r#"data: {"type":"response.created","response":{"id":"resp_07226f71de51f72b006994e63fe86881a3ac247b9463ce4550","object":"response","created_at":1771365951,"status":"in_progress","background":false,"completed_at":null,"error":null,"frequency_penalty":0,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5.2-2025-12-11","output":[],"parallel_tool_calls":true,"presence_penalty":0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"none","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"shell","environment":{"type":"container_reference","container_id":"cntr_6994e63aaf7481919cc6cb2cc716c37d05c120fb1a4ecc88"}}],"top_logprobs":0,"top_p":0.98,"truncation":"disabled","usage":null,"user":null,"metadata":{}},"sequence_number":0}"#,
-                    "",
-                    r#"data: {"type":"response.in_progress","response":{"id":"resp_07226f71de51f72b006994e63fe86881a3ac247b9463ce4550","object":"response","created_at":1771365951,"status":"in_progress","background":false,"completed_at":null,"error":null,"frequency_penalty":0,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5.2-2025-12-11","output":[],"parallel_tool_calls":true,"presence_penalty":0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"none","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"shell","environment":{"type":"container_reference","container_id":"cntr_6994e63aaf7481919cc6cb2cc716c37d05c120fb1a4ecc88"}}],"top_logprobs":0,"top_p":0.98,"truncation":"disabled","usage":null,"user":null,"metadata":{}},"sequence_number":1}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.added","item":{"id":"msg_07226f71de51f72b006994e641127c81a3ba3d54eedadff969","type":"message","status":"in_progress","content":[],"role":"assistant"},"output_index":0,"sequence_number":2}"#,
-                    "",
-                    r#"data: {"type":"response.content_part.added","content_index":0,"item_id":"msg_07226f71de51f72b006994e641127c81a3ba3d54eedadff969","output_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""},"sequence_number":3}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":"The","item_id":"msg_07226f71de51f72b006994e641127c81a3ba3d54eedadff969","logprobs":[],"obfuscation":"3lyAwo7xvwAEV","output_index":0,"sequence_number":4}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":" architecture","item_id":"msg_07226f71de51f72b006994e641127c81a3ba3d54eedadff969","logprobs":[],"obfuscation":"wo8","output_index":0,"sequence_number":5}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":" is","item_id":"msg_07226f71de51f72b006994e641127c81a3ba3d54eedadff969","logprobs":[],"obfuscation":"QnxYsvS5oNOMd","output_index":0,"sequence_number":6}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":" **","item_id":"msg_07226f71de51f72b006994e641127c81a3ba3d54eedadff969","logprobs":[],"obfuscation":"dbF6IupwchkbB","output_index":0,"sequence_number":7}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":"x","item_id":"msg_07226f71de51f72b006994e641127c81a3ba3d54eedadff969","logprobs":[],"obfuscation":"pFddwsIHKwo5CTa","output_index":0,"sequence_number":8}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":"86","item_id":"msg_07226f71de51f72b006994e641127c81a3ba3d54eedadff969","logprobs":[],"obfuscation":"SOXY37ZGKtvces","output_index":0,"sequence_number":9}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":"_","item_id":"msg_07226f71de51f72b006994e641127c81a3ba3d54eedadff969","logprobs":[],"obfuscation":"vu5LChxk73M0pLY","output_index":0,"sequence_number":10}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":"64","item_id":"msg_07226f71de51f72b006994e641127c81a3ba3d54eedadff969","logprobs":[],"obfuscation":"4cBtiRWSJWzXV0","output_index":0,"sequence_number":11}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":"**","item_id":"msg_07226f71de51f72b006994e641127c81a3ba3d54eedadff969","logprobs":[],"obfuscation":"sUvxfWR4WrLxZe","output_index":0,"sequence_number":12}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":" (","item_id":"msg_07226f71de51f72b006994e641127c81a3ba3d54eedadff969","logprobs":[],"obfuscation":"ziJpBWy98myeij","output_index":0,"sequence_number":13}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":"64","item_id":"msg_07226f71de51f72b006994e641127c81a3ba3d54eedadff969","logprobs":[],"obfuscation":"dhPhs0uXZedDJg","output_index":0,"sequence_number":14}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":"-bit","item_id":"msg_07226f71de51f72b006994e641127c81a3ba3d54eedadff969","logprobs":[],"obfuscation":"PrFjyOKgJyEc","output_index":0,"sequence_number":15}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":" Intel","item_id":"msg_07226f71de51f72b006994e641127c81a3ba3d54eedadff969","logprobs":[],"obfuscation":"SzvJaqi2kK","output_index":0,"sequence_number":16}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":"/","item_id":"msg_07226f71de51f72b006994e641127c81a3ba3d54eedadff969","logprobs":[],"obfuscation":"oMDfzO13jSvkcDl","output_index":0,"sequence_number":17}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":"AMD","item_id":"msg_07226f71de51f72b006994e641127c81a3ba3d54eedadff969","logprobs":[],"obfuscation":"sMpnG9tScyoPH","output_index":0,"sequence_number":18}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":").","item_id":"msg_07226f71de51f72b006994e641127c81a3ba3d54eedadff969","logprobs":[],"obfuscation":"G787YQK4mjqL1l","output_index":0,"sequence_number":19}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.done","content_index":0,"item_id":"msg_07226f71de51f72b006994e641127c81a3ba3d54eedadff969","logprobs":[],"output_index":0,"sequence_number":20,"text":"The architecture is **x86_64** (64-bit Intel/AMD)."}"#,
-                    "",
-                    r#"data: {"type":"response.content_part.done","content_index":0,"item_id":"msg_07226f71de51f72b006994e641127c81a3ba3d54eedadff969","output_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":"The architecture is **x86_64** (64-bit Intel/AMD)."},"sequence_number":21}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.done","item":{"id":"msg_07226f71de51f72b006994e641127c81a3ba3d54eedadff969","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":"The architecture is **x86_64** (64-bit Intel/AMD)."}],"role":"assistant"},"output_index":0,"sequence_number":22}"#,
-                    "",
-                    r#"data: {"type":"response.completed","response":{"id":"resp_07226f71de51f72b006994e63fe86881a3ac247b9463ce4550","object":"response","created_at":1771365951,"status":"completed","background":false,"completed_at":1771365953,"error":null,"frequency_penalty":0,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5.2-2025-12-11","output":[{"id":"msg_07226f71de51f72b006994e641127c81a3ba3d54eedadff969","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":"The architecture is **x86_64** (64-bit Intel/AMD)."}],"role":"assistant"}],"parallel_tool_calls":true,"presence_penalty":0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"none","summary":null},"safety_identifier":null,"service_tier":"default","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"shell","environment":{"type":"container_reference","container_id":"cntr_6994e63aaf7481919cc6cb2cc716c37d05c120fb1a4ecc88"}}],"top_logprobs":0,"top_p":0.98,"truncation":"disabled","usage":{"input_tokens":802,"input_tokens_details":{"cached_tokens":0},"output_tokens":20,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":822},"user":null,"metadata":{}},"sequence_number":23}"#,
-                    "",
-                    "data: [DONE]",
-                    "",
-                ]
-                .join("\n");
+                let sse = open_responses_sse_from_fixture_lines(
+                    OPEN_RESPONSES_SHELL_CONTAINER_MULTITURN_CHUNKS_FIXTURE,
+                );
 
                 Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
-            },
-        );
+            });
         let provider = create_open_responses(
             OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
                 .with_api_key("test-api-key"),
@@ -32364,14 +32366,17 @@ mod tests {
                 _ => None,
             })
             .expect("stream includes response metadata");
-        assert_eq!(metadata.id.as_deref(), Some(RESPONSE_ID));
-        assert_eq!(metadata.model_id.as_deref(), Some("gpt-5.2-2025-12-11"));
+        assert_eq!(metadata.id.as_deref(), Some(response_id));
+        assert_eq!(metadata.model_id.as_deref(), Some(model_id));
         assert_eq!(
             metadata
                 .timestamp
                 .map(|timestamp| timestamp.unix_timestamp()),
-            Some(1_771_365_951)
+            Some(created_at)
         );
+        assert_eq!(completed_response["id"].as_str(), Some(response_id));
+        assert_eq!(completed_response["model"].as_str(), Some(model_id));
+        assert_eq!(completed_response["created_at"].as_i64(), Some(created_at));
 
         let text_start = result
             .stream
@@ -32381,23 +32386,23 @@ mod tests {
                 _ => None,
             })
             .expect("stream includes text start");
-        assert_eq!(text_start.id, MESSAGE_ID);
+        assert_eq!(text_start.id, message_id);
         assert_eq!(
             openai_metadata_value(&text_start.provider_metadata, "itemId")
                 .and_then(JsonValue::as_str),
-            Some(MESSAGE_ID)
+            Some(message_id)
         );
         let streamed_text = result
             .stream
             .iter()
             .filter_map(|part| match part {
-                LanguageModelStreamPart::TextDelta(delta) if delta.id == MESSAGE_ID => {
+                LanguageModelStreamPart::TextDelta(delta) if delta.id == message_id => {
                     Some(delta.delta.as_str())
                 }
                 _ => None,
             })
             .collect::<String>();
-        assert_eq!(streamed_text, FINAL_TEXT);
+        assert_eq!(streamed_text, expected_streamed_text);
 
         let finish = result
             .stream
@@ -32408,9 +32413,22 @@ mod tests {
             })
             .expect("stream includes finish");
         assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
-        assert_eq!(finish.usage.input_tokens.total, Some(802));
-        assert_eq!(finish.usage.output_tokens.total, Some(20));
-        assert_eq!(finish.usage.output_tokens.reasoning, Some(0));
+        assert_eq!(finish.usage.input_tokens.total, input_tokens);
+        assert_eq!(finish.usage.input_tokens.no_cache, input_no_cache);
+        assert_eq!(finish.usage.input_tokens.cache_read, cached_tokens);
+        assert_eq!(finish.usage.output_tokens.total, output_tokens);
+        assert_eq!(finish.usage.output_tokens.text, output_text_tokens);
+        assert_eq!(finish.usage.output_tokens.reasoning, reasoning_tokens);
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some(response_id)
+        );
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "serviceTier")
+                .and_then(JsonValue::as_str),
+            Some(service_tier)
+        );
 
         let request_body = captured_open_responses_request_body(&captured_request);
         assert_eq!(
