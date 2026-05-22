@@ -7020,6 +7020,8 @@ mod tests {
         include_str!("fixtures/openai-shell-tool.1.chunks.txt");
     const OPEN_RESPONSES_SHELL_CONTAINER_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-shell-container.1.json");
+    const OPEN_RESPONSES_SHELL_CONTAINER_CHUNKS_FIXTURE: &str =
+        include_str!("fixtures/openai-shell-container.1.chunks.txt");
     const OPEN_RESPONSES_SHELL_CONTAINER_MULTITURN_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-shell-container-multiturn.1.json");
     const OPEN_RESPONSES_SHELL_LOCAL_MULTITURN_JSON_FIXTURE: &str =
@@ -32046,88 +32048,87 @@ mod tests {
 
     #[test]
     fn open_responses_provider_streams_shell_container_fixture() {
-        const RESPONSE_ID: &str = "resp_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f";
-        const SHELL_ITEM_ID: &str = "sh_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e50";
-        const SHELL_CALL_ID: &str = "call_abc123def456ghi789jkl012";
-        const MESSAGE_ID: &str = "msg_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e52";
-        const STDOUT: &str =
-            "Hello from container!\nLinux container-host 6.1.0 #1 SMP x86_64 GNU/Linux\n";
+        let response_created_event = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_SHELL_CONTAINER_CHUNKS_FIXTURE,
+            |event| event["type"].as_str() == Some("response.created"),
+        );
+        let response_completed_event = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_SHELL_CONTAINER_CHUNKS_FIXTURE,
+            |event| event["type"].as_str() == Some("response.completed"),
+        );
+        let shell_done_event = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_SHELL_CONTAINER_CHUNKS_FIXTURE,
+            |event| {
+                event["type"].as_str() == Some("response.output_item.done")
+                    && event["item"]["type"].as_str() == Some("shell_call")
+            },
+        );
+        let shell_output_done_event = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_SHELL_CONTAINER_CHUNKS_FIXTURE,
+            |event| {
+                event["type"].as_str() == Some("response.output_item.done")
+                    && event["item"]["type"].as_str() == Some("shell_call_output")
+            },
+        );
+        let message_done_event = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_SHELL_CONTAINER_CHUNKS_FIXTURE,
+            |event| {
+                event["type"].as_str() == Some("response.output_item.done")
+                    && event["item"]["type"].as_str() == Some("message")
+            },
+        );
+        let response = &response_created_event["response"];
+        let completed_response = &response_completed_event["response"];
+        let usage = &completed_response["usage"];
+        let response_id = response["id"].as_str().expect("response id is set");
+        let model_id = response["model"].as_str().expect("model id is set");
+        let created_at = response["created_at"].as_i64().expect("created_at is set");
+        let input_tokens = usage["input_tokens"].as_u64();
+        let cached_tokens = usage["input_tokens_details"]["cached_tokens"].as_u64();
+        let input_no_cache = input_tokens
+            .zip(cached_tokens)
+            .map(|(total, cached)| total - cached);
+        let output_tokens = usage["output_tokens"].as_u64();
+        let reasoning_tokens = usage["output_tokens_details"]["reasoning_tokens"].as_u64();
+        let output_text_tokens = output_tokens
+            .zip(reasoning_tokens)
+            .map(|(total, reasoning)| total - reasoning);
+        let service_tier = completed_response["service_tier"]
+            .as_str()
+            .expect("service tier is set");
+        let shell_call = &shell_done_event["item"];
+        let shell_item_id = shell_call["id"].as_str().expect("shell item id is set");
+        let shell_call_id = shell_call["call_id"]
+            .as_str()
+            .expect("shell call id is set");
+        let shell_output = &shell_output_done_event["item"];
+        let message = &message_done_event["item"];
+        let message_id = message["id"].as_str().expect("message id is set");
+        let expected_streamed_text = OPEN_RESPONSES_SHELL_CONTAINER_CHUNKS_FIXTURE
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<JsonValue>(line).expect("fixture event parses"))
+            .filter(|event| {
+                event["type"].as_str() == Some("response.output_text.delta")
+                    && event["item_id"].as_str() == Some(message_id)
+            })
+            .filter_map(|event| event["delta"].as_str().map(str::to_owned))
+            .collect::<String>();
 
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
-        let transport: OpenResponsesTransport = Arc::new(
-            move |request| -> OpenResponsesTransportFuture {
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
                 *captured_request_for_transport
                     .lock()
                     .expect("captured request mutex is not poisoned") = Some(request.clone());
 
-                let sse = [
-                    r#"data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f","object":"response","created_at":1771009000,"status":"in_progress","background":false,"error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5.2-2025-12-11","output":[],"parallel_tool_calls":true,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"none","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"shell","environment":{"type":"container_reference","container_id":"cntr_aabbccdd11223344556677889900aabb"}}],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":null,"user":null,"metadata":{}}}"#,
-                    "",
-                    r#"data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f","object":"response","created_at":1771009000,"status":"in_progress","background":false,"error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5.2-2025-12-11","output":[],"parallel_tool_calls":true,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"none","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"shell","environment":{"type":"container_reference","container_id":"cntr_aabbccdd11223344556677889900aabb"}}],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":null,"user":null,"metadata":{}}}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.added","item":{"id":"sh_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e50","type":"shell_call","status":"in_progress","action":{"commands":[],"max_output_length":null,"timeout_ms":null},"call_id":"call_abc123def456ghi789jkl012","environment":{"type":"container_reference","container_id":"cntr_aabbccdd11223344556677889900aabb"}},"output_index":0,"sequence_number":2}"#,
-                    "",
-                    r#"data: {"type":"response.shell_call_command.added","command":"","command_index":0,"output_index":0,"sequence_number":3}"#,
-                    "",
-                    r#"data: {"type":"response.shell_call_command.delta","command_index":0,"delta":"echo","obfuscation":"kEEr7KRKL2XZg0","output_index":0,"sequence_number":4}"#,
-                    "",
-                    r#"data: {"type":"response.shell_call_command.delta","command_index":0,"delta":" '","obfuscation":"T0mAeelcz9I7To","output_index":0,"sequence_number":5}"#,
-                    "",
-                    r#"data: {"type":"response.shell_call_command.delta","command_index":0,"delta":"Hello","obfuscation":"shgPtvrsmEYNQNC","output_index":0,"sequence_number":6}"#,
-                    "",
-                    r#"data: {"type":"response.shell_call_command.delta","command_index":0,"delta":" from","obfuscation":"MQvyAgqWtPjZZE","output_index":0,"sequence_number":7}"#,
-                    "",
-                    r#"data: {"type":"response.shell_call_command.delta","command_index":0,"delta":" container","obfuscation":"7vql63BpKbpE","output_index":0,"sequence_number":8}"#,
-                    "",
-                    r#"data: {"type":"response.shell_call_command.delta","command_index":0,"delta":"!'","obfuscation":"6u5hzUmJvuxBzd","output_index":0,"sequence_number":9}"#,
-                    "",
-                    r#"data: {"type":"response.shell_call_command.delta","command_index":0,"delta":" && ","obfuscation":"PCb8nxzKnHWBDg","output_index":0,"sequence_number":10}"#,
-                    "",
-                    r#"data: {"type":"response.shell_call_command.delta","command_index":0,"delta":"uname","obfuscation":"xCiRH9Y7yuynWeI","output_index":0,"sequence_number":11}"#,
-                    "",
-                    r#"data: {"type":"response.shell_call_command.delta","command_index":0,"delta":" -a","obfuscation":"rQCcb0vC2a","output_index":0,"sequence_number":12}"#,
-                    "",
-                    r#"data: {"type":"response.shell_call_command.done","command":"echo 'Hello from container!' && uname -a","command_index":0,"output_index":0,"sequence_number":13}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.done","item":{"id":"sh_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e50","type":"shell_call","status":"completed","action":{"commands":["echo 'Hello from container!' && uname -a"],"max_output_length":null,"timeout_ms":null},"call_id":"call_abc123def456ghi789jkl012","environment":{"type":"container_reference","container_id":"cntr_aabbccdd11223344556677889900aabb"}},"output_index":0,"sequence_number":14}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.added","item":{"id":"sho_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e51","type":"shell_call_output","status":"completed","call_id":"call_abc123def456ghi789jkl012","max_output_length":null,"output":[]},"output_index":1,"sequence_number":15}"#,
-                    "",
-                    r#"data: {"type":"response.shell_call_output_content.delta","command_index":0,"delta":{"stdout":"Hello from container!\nLinux container-host 6.1.0 #1 SMP x86_64 GNU/Linux\n"},"item_id":"sho_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e51","output_index":1,"sequence_number":16}"#,
-                    "",
-                    r#"data: {"type":"response.shell_call_output_content.done","command_index":0,"item_id":"sho_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e51","output":[{"outcome":{"type":"exit","exit_code":0},"stderr":"","stdout":"Hello from container!\nLinux container-host 6.1.0 #1 SMP x86_64 GNU/Linux\n"}],"output_index":1,"sequence_number":17}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.done","item":{"id":"sho_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e51","type":"shell_call_output","status":"completed","call_id":"call_abc123def456ghi789jkl012","max_output_length":null,"output":[{"outcome":{"type":"exit","exit_code":0},"stderr":"","stdout":"Hello from container!\nLinux container-host 6.1.0 #1 SMP x86_64 GNU/Linux\n"}]},"output_index":1,"sequence_number":18}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.added","item":{"id":"msg_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e52","type":"message","status":"in_progress","content":[],"role":"assistant"},"output_index":2,"sequence_number":19}"#,
-                    "",
-                    r#"data: {"type":"response.content_part.added","content_index":0,"item_id":"msg_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e52","output_index":2,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""},"sequence_number":20}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":"The","item_id":"msg_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e52","logprobs":[],"obfuscation":"J4mkASepgs2g","output_index":2,"sequence_number":21}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":" command","item_id":"msg_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e52","logprobs":[],"obfuscation":"8u29nzVgDXst","output_index":2,"sequence_number":22}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":" ran","item_id":"msg_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e52","logprobs":[],"obfuscation":"RwyJIbCRCoa9","output_index":2,"sequence_number":23}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.delta","content_index":0,"delta":" successfully.","item_id":"msg_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e52","logprobs":[],"obfuscation":"KKsCBhbeR0","output_index":2,"sequence_number":24}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.done","content_index":0,"item_id":"msg_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e52","logprobs":[],"output_index":2,"sequence_number":25,"text":"The command ran successfully in the container. Here's the output:\n\n- The echo command printed: \"Hello from container!\"\n- The system is running Linux (kernel 6.1.0) on an x86_64 architecture."}"#,
-                    "",
-                    r#"data: {"type":"response.content_part.done","content_index":0,"item_id":"msg_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e52","output_index":2,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":"The command ran successfully in the container. Here's the output:\n\n- The echo command printed: \"Hello from container!\"\n- The system is running Linux (kernel 6.1.0) on an x86_64 architecture."},"sequence_number":26}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.done","item":{"id":"msg_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e52","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":"The command ran successfully in the container. Here's the output:\n\n- The echo command printed: \"Hello from container!\"\n- The system is running Linux (kernel 6.1.0) on an x86_64 architecture."}],"role":"assistant"},"output_index":2,"sequence_number":27}"#,
-                    "",
-                    r#"data: {"type":"response.completed","sequence_number":28,"response":{"id":"resp_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f","object":"response","created_at":1771009000,"status":"completed","background":false,"completed_at":1771009005,"error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-5.2-2025-12-11","output":[{"id":"sh_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e50","type":"shell_call","status":"completed","action":{"commands":["echo 'Hello from container!' && uname -a"],"max_output_length":null,"timeout_ms":null},"call_id":"call_abc123def456ghi789jkl012","environment":{"type":"container_reference","container_id":"cntr_aabbccdd11223344556677889900aabb"}},{"id":"sho_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e51","type":"shell_call_output","status":"completed","call_id":"call_abc123def456ghi789jkl012","max_output_length":null,"output":[{"outcome":{"type":"exit","exit_code":0},"stderr":"","stdout":"Hello from container!\nLinux container-host 6.1.0 #1 SMP x86_64 GNU/Linux\n"}]},{"id":"msg_0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e52","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":"The command ran successfully in the container. Here's the output:\n\n- The echo command printed: \"Hello from container!\"\n- The system is running Linux (kernel 6.1.0) on an x86_64 architecture."}],"role":"assistant"}],"parallel_tool_calls":true,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"none","summary":null},"safety_identifier":null,"service_tier":"default","store":true,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"shell","environment":{"type":"container_reference","container_id":"cntr_aabbccdd11223344556677889900aabb"}}],"top_logprobs":0,"top_p":1,"truncation":"disabled","usage":{"input_tokens":200,"input_tokens_details":{"cached_tokens":0},"output_tokens":120,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":320},"user":null,"metadata":{}}}"#,
-                    "",
-                    "data: [DONE]",
-                    "",
-                ]
-                .join("\n");
+                let sse = open_responses_sse_from_fixture_lines(
+                    OPEN_RESPONSES_SHELL_CONTAINER_CHUNKS_FIXTURE,
+                );
 
                 Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
-            },
-        );
+            });
         let provider = create_open_responses(
             OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
                 .with_api_key("test-api-key"),
@@ -32145,21 +32146,24 @@ mod tests {
                 _ => None,
             })
             .expect("stream includes response metadata");
-        assert_eq!(metadata.id.as_deref(), Some(RESPONSE_ID));
-        assert_eq!(metadata.model_id.as_deref(), Some("gpt-5.2-2025-12-11"));
+        assert_eq!(metadata.id.as_deref(), Some(response_id));
+        assert_eq!(metadata.model_id.as_deref(), Some(model_id));
         assert_eq!(
             metadata
                 .timestamp
                 .map(|timestamp| timestamp.unix_timestamp()),
-            Some(1_771_009_000)
+            Some(created_at)
         );
+        assert_eq!(completed_response["id"].as_str(), Some(response_id));
+        assert_eq!(completed_response["model"].as_str(), Some(model_id));
+        assert_eq!(completed_response["created_at"].as_i64(), Some(created_at));
 
         let tool_call = result
             .stream
             .iter()
             .find_map(|part| match part {
                 LanguageModelStreamPart::ToolCall(tool_call)
-                    if tool_call.tool_call_id == SHELL_CALL_ID =>
+                    if tool_call.tool_call_id == shell_call_id =>
                 {
                     Some(tool_call)
                 }
@@ -32172,14 +32176,14 @@ mod tests {
             serde_json::from_str::<JsonValue>(&tool_call.input).expect("shell input parses"),
             json!({
                 "action": {
-                    "commands": ["echo 'Hello from container!' && uname -a"]
+                    "commands": shell_call["action"]["commands"].clone()
                 }
             })
         );
         assert_eq!(
             openai_metadata_value(&tool_call.provider_metadata, "itemId")
                 .and_then(JsonValue::as_str),
-            Some(SHELL_ITEM_ID)
+            Some(shell_item_id)
         );
 
         let tool_result = result
@@ -32187,7 +32191,7 @@ mod tests {
             .iter()
             .find_map(|part| match part {
                 LanguageModelStreamPart::ToolResult(tool_result)
-                    if tool_result.tool_call_id == SHELL_CALL_ID =>
+                    if tool_result.tool_call_id == shell_call_id =>
                 {
                     Some(tool_result)
                 }
@@ -32200,12 +32204,12 @@ mod tests {
             &json!({
                 "output": [
                     {
-                        "stdout": STDOUT,
-                        "stderr": "",
                         "outcome": {
-                            "type": "exit",
-                            "exitCode": 0
-                        }
+                            "type": shell_output["output"][0]["outcome"]["type"].clone(),
+                            "exitCode": shell_output["output"][0]["outcome"]["exit_code"].clone()
+                        },
+                        "stderr": shell_output["output"][0]["stderr"].clone(),
+                        "stdout": shell_output["output"][0]["stdout"].clone()
                     }
                 ]
             })
@@ -32220,13 +32224,13 @@ mod tests {
             .stream
             .iter()
             .filter_map(|part| match part {
-                LanguageModelStreamPart::TextDelta(delta) if delta.id == MESSAGE_ID => {
+                LanguageModelStreamPart::TextDelta(delta) if delta.id == message_id => {
                     Some(delta.delta.as_str())
                 }
                 _ => None,
             })
             .collect::<String>();
-        assert_eq!(streamed_text, "The command ran successfully.");
+        assert_eq!(streamed_text, expected_streamed_text);
 
         let finish = result
             .stream
@@ -32237,13 +32241,22 @@ mod tests {
             })
             .expect("stream includes finish");
         assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
-        assert_eq!(finish.usage.input_tokens.total, Some(200));
-        assert_eq!(finish.usage.output_tokens.total, Some(120));
-        assert_eq!(finish.usage.output_tokens.reasoning, Some(0));
+        assert_eq!(finish.finish_reason.raw, None);
+        assert_eq!(finish.usage.input_tokens.total, input_tokens);
+        assert_eq!(finish.usage.input_tokens.no_cache, input_no_cache);
+        assert_eq!(finish.usage.input_tokens.cache_read, cached_tokens);
+        assert_eq!(finish.usage.output_tokens.total, output_tokens);
+        assert_eq!(finish.usage.output_tokens.text, output_text_tokens);
+        assert_eq!(finish.usage.output_tokens.reasoning, reasoning_tokens);
         assert_eq!(
             openai_metadata_value(&finish.provider_metadata, "responseId")
                 .and_then(JsonValue::as_str),
-            Some(RESPONSE_ID)
+            Some(response_id)
+        );
+        assert_eq!(
+            openai_metadata_value(&finish.provider_metadata, "serviceTier")
+                .and_then(JsonValue::as_str),
+            Some(service_tier)
         );
 
         let request_body = captured_open_responses_request_body(&captured_request);
