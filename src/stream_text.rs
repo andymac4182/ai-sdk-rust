@@ -4666,6 +4666,391 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_result_full_stream_sends_text_deltas() {
+        let timestamp = time::OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(5);
+        let response_metadata = LanguageModelStreamResponseMetadata::new()
+            .with_id("response-id")
+            .with_model_id("response-model-id")
+            .with_timestamp(timestamp);
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ResponseMetadata(response_metadata),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", ", ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("test-input")],
+        )));
+
+        let part_names = result
+            .parts
+            .iter()
+            .map(|part| match part {
+                TextStreamPart::Start(_) => "start",
+                TextStreamPart::StartStep(_) => "start-step",
+                TextStreamPart::TextStart(_) => "text-start",
+                TextStreamPart::TextDelta(_) => "text-delta",
+                TextStreamPart::TextEnd(_) => "text-end",
+                TextStreamPart::FinishStep(_) => "finish-step",
+                TextStreamPart::Finish(_) => "finish",
+                _ => "other",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            part_names,
+            vec![
+                "start",
+                "start-step",
+                "text-start",
+                "text-delta",
+                "text-delta",
+                "text-delta",
+                "text-end",
+                "finish-step",
+                "finish"
+            ]
+        );
+
+        let text_deltas = result
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::TextDelta(part) => Some((
+                    part.id.clone(),
+                    part.text.clone(),
+                    part.provider_metadata.clone(),
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            text_deltas,
+            vec![
+                ("1".to_string(), "Hello".to_string(), None),
+                ("1".to_string(), ", ".to_string(), None),
+                ("1".to_string(), "world!".to_string(), None),
+            ]
+        );
+        assert_eq!(result.text_stream, vec!["Hello", ", ", "world!"]);
+        assert_eq!(result.text, "Hello, world!");
+
+        let finish_step = result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TextStreamPart::FinishStep(part) => Some(part),
+                _ => None,
+            })
+            .expect("full stream includes finish-step");
+        assert_eq!(finish_step.response.id, Some("response-id".to_string()));
+        assert_eq!(
+            finish_step.response.model_id,
+            Some("response-model-id".to_string())
+        );
+        assert_eq!(finish_step.response.timestamp, Some(timestamp));
+        assert_eq!(finish_step.usage, usage());
+        assert_eq!(finish_step.finish_reason, FinishReason::Stop);
+        assert_eq!(finish_step.raw_finish_reason, Some("stop".to_string()));
+
+        let finish = result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TextStreamPart::Finish(part) => Some(part),
+                _ => None,
+            })
+            .expect("full stream includes finish");
+        assert_eq!(finish.finish_reason, FinishReason::Stop);
+        assert_eq!(finish.raw_finish_reason, Some("stop".to_string()));
+        assert_eq!(finish.total_usage, usage());
+    }
+
+    #[test]
+    fn stream_text_result_full_stream_sends_reasoning_deltas() {
+        let signature_metadata = ProviderMetadata::from([(
+            "testProvider".to_string(),
+            Map::from_iter([("signature".to_string(), json!("1234567890"))]),
+        )]);
+        let end_signature_metadata = ProviderMetadata::from([(
+            "testProvider".to_string(),
+            Map::from_iter([("signature".to_string(), json!("0987654321"))]),
+        )]);
+        let redacted_metadata = ProviderMetadata::from([(
+            "testProvider".to_string(),
+            Map::from_iter([("redactedData".to_string(), json!("redacted-reasoning-data"))]),
+        )]);
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "1",
+                    "I will open the conversation",
+                )),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "1",
+                    " with witty banter.",
+                )),
+                LanguageModelStreamPart::ReasoningDelta(
+                    LanguageModelReasoningDelta::new("1", "")
+                        .with_provider_metadata(signature_metadata.clone()),
+                ),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+                LanguageModelStreamPart::ReasoningStart(
+                    LanguageModelReasoningStart::new("2")
+                        .with_provider_metadata(redacted_metadata.clone()),
+                ),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("2")),
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("3")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "3",
+                    " Once the user has relaxed,",
+                )),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "3",
+                    " I will pry for valuable information.",
+                )),
+                LanguageModelStreamPart::ReasoningEnd(
+                    LanguageModelReasoningEnd::new("3")
+                        .with_provider_metadata(signature_metadata.clone()),
+                ),
+                LanguageModelStreamPart::ReasoningStart(
+                    LanguageModelReasoningStart::new("4")
+                        .with_provider_metadata(signature_metadata.clone()),
+                ),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "4",
+                    " I need to think about",
+                )),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "4",
+                    " this problem carefully.",
+                )),
+                LanguageModelStreamPart::ReasoningStart(
+                    LanguageModelReasoningStart::new("5")
+                        .with_provider_metadata(signature_metadata.clone()),
+                ),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "5",
+                    " The best solution",
+                )),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "5",
+                    " requires careful",
+                )),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "5",
+                    " consideration of all factors.",
+                )),
+                LanguageModelStreamPart::ReasoningEnd(
+                    LanguageModelReasoningEnd::new("4")
+                        .with_provider_metadata(end_signature_metadata.clone()),
+                ),
+                LanguageModelStreamPart::ReasoningEnd(
+                    LanguageModelReasoningEnd::new("5")
+                        .with_provider_metadata(end_signature_metadata.clone()),
+                ),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hi")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", " there!")),
+                LanguageModelStreamPart::TextEnd(
+                    LanguageModelTextEnd::new("1")
+                        .with_provider_metadata(end_signature_metadata.clone()),
+                ),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("test-input")],
+        )));
+
+        let part_names = result
+            .parts
+            .iter()
+            .map(|part| match part {
+                TextStreamPart::Start(_) => "start",
+                TextStreamPart::StartStep(_) => "start-step",
+                TextStreamPart::ReasoningStart(_) => "reasoning-start",
+                TextStreamPart::ReasoningDelta(_) => "reasoning-delta",
+                TextStreamPart::ReasoningEnd(_) => "reasoning-end",
+                TextStreamPart::TextStart(_) => "text-start",
+                TextStreamPart::TextDelta(_) => "text-delta",
+                TextStreamPart::TextEnd(_) => "text-end",
+                TextStreamPart::FinishStep(_) => "finish-step",
+                TextStreamPart::Finish(_) => "finish",
+                _ => "other",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            part_names,
+            vec![
+                "start",
+                "start-step",
+                "reasoning-start",
+                "reasoning-delta",
+                "reasoning-delta",
+                "reasoning-delta",
+                "reasoning-end",
+                "reasoning-start",
+                "reasoning-end",
+                "reasoning-start",
+                "reasoning-delta",
+                "reasoning-delta",
+                "reasoning-end",
+                "reasoning-start",
+                "reasoning-delta",
+                "reasoning-delta",
+                "reasoning-start",
+                "reasoning-delta",
+                "reasoning-delta",
+                "reasoning-delta",
+                "reasoning-end",
+                "reasoning-end",
+                "text-start",
+                "text-delta",
+                "text-delta",
+                "text-end",
+                "finish-step",
+                "finish",
+            ]
+        );
+
+        let reasoning_deltas = result
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::ReasoningDelta(part) => Some((
+                    part.id.clone(),
+                    part.text.clone(),
+                    part.provider_metadata.clone(),
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reasoning_deltas,
+            vec![
+                (
+                    "1".to_string(),
+                    "I will open the conversation".to_string(),
+                    None
+                ),
+                ("1".to_string(), " with witty banter.".to_string(), None),
+                (
+                    "1".to_string(),
+                    "".to_string(),
+                    Some(signature_metadata.clone())
+                ),
+                (
+                    "3".to_string(),
+                    " Once the user has relaxed,".to_string(),
+                    None
+                ),
+                (
+                    "3".to_string(),
+                    " I will pry for valuable information.".to_string(),
+                    None
+                ),
+                ("4".to_string(), " I need to think about".to_string(), None),
+                (
+                    "4".to_string(),
+                    " this problem carefully.".to_string(),
+                    None
+                ),
+                ("5".to_string(), " The best solution".to_string(), None),
+                ("5".to_string(), " requires careful".to_string(), None),
+                (
+                    "5".to_string(),
+                    " consideration of all factors.".to_string(),
+                    None
+                ),
+            ]
+        );
+
+        let reasoning_starts = result
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::ReasoningStart(part) => {
+                    Some((part.id.clone(), part.provider_metadata.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reasoning_starts,
+            vec![
+                ("1".to_string(), None),
+                ("2".to_string(), Some(redacted_metadata)),
+                ("3".to_string(), None),
+                ("4".to_string(), Some(signature_metadata.clone())),
+                ("5".to_string(), Some(signature_metadata.clone())),
+            ]
+        );
+
+        let reasoning_ends = result
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::ReasoningEnd(part) => {
+                    Some((part.id.clone(), part.provider_metadata.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reasoning_ends,
+            vec![
+                ("1".to_string(), None),
+                ("2".to_string(), None),
+                ("3".to_string(), Some(signature_metadata)),
+                ("4".to_string(), Some(end_signature_metadata.clone())),
+                ("5".to_string(), Some(end_signature_metadata.clone())),
+            ]
+        );
+
+        let text_end_metadata = result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TextStreamPart::TextEnd(part) => part.provider_metadata.clone(),
+                _ => None,
+            })
+            .expect("text-end provider metadata is preserved");
+        assert_eq!(text_end_metadata, end_signature_metadata);
+        assert_eq!(result.text_stream, vec!["Hi", " there!"]);
+        assert_eq!(result.text, "Hi there!");
+        assert_eq!(
+            result.reasoning_text,
+            Some(
+                concat!(
+                    "I will open the conversation with witty banter.",
+                    " Once the user has relaxed,",
+                    " I will pry for valuable information.",
+                    " I need to think about",
+                    " this problem carefully.",
+                    " The best solution",
+                    " requires careful",
+                    " consideration of all factors."
+                )
+                .to_string()
+            )
+        );
+    }
+
+    #[test]
     fn stream_text_smooth_stream_transforms_chunks_before_callbacks() {
         let chunks = Arc::new(Mutex::new(Vec::new()));
         let chunks_for_callback = Arc::clone(&chunks);
