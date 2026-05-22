@@ -1551,7 +1551,7 @@ mod tests {
     };
     use crate::mock_models::MockLanguageModel;
     use crate::prompt::Prompt;
-    use crate::provider::ProviderMetadata;
+    use crate::provider::{ProviderMetadata, ProviderOptions};
     use crate::provider_utils::{Schema, ValidationResult, json_schema};
     use crate::retry::DEFAULT_MAX_RETRIES;
     use crate::telemetry::{
@@ -1966,6 +1966,174 @@ mod tests {
         assert_eq!(
             headers.get("user-agent").map(String::as_str),
             Some(format!("ai/{VERSION}").as_str())
+        );
+    }
+
+    #[test]
+    fn generate_object_result_contains_request_information() {
+        let result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"answer\":42}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        )
+        .with_request(
+            crate::language_model::LanguageModelRequest::new().with_body(json!("test body")),
+        );
+        let model = StaticObjectModel::new(result);
+
+        let output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(
+            output.request,
+            GenerateObjectRequest::new().with_body(json!("test body"))
+        );
+    }
+
+    #[test]
+    fn generate_object_result_contains_response_information() {
+        let response_timestamp =
+            OffsetDateTime::from_unix_timestamp(10).expect("timestamp is valid");
+        let result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"answer\":42}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        )
+        .with_response(
+            LanguageModelResponse::new()
+                .with_id("test-id-from-model")
+                .with_timestamp(response_timestamp)
+                .with_model_id("test-response-model-id")
+                .with_header("custom-response-header", "response-header-value")
+                .with_header("user-agent", format!("ai/{VERSION}"))
+                .with_body(json!("test body")),
+        );
+        let model = StaticObjectModel::new(result);
+
+        let output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(
+            output.response,
+            GenerateObjectResponse::new()
+                .with_id("test-id-from-model")
+                .with_timestamp(response_timestamp)
+                .with_model_id("test-response-model-id")
+                .with_header("custom-response-header", "response-header-value")
+                .with_header("user-agent", format!("ai/{VERSION}"))
+                .with_body(json!("test body"))
+        );
+    }
+
+    #[test]
+    fn generate_object_result_contains_provider_metadata() {
+        let provider_metadata: ProviderMetadata = serde_json::from_value(json!({
+            "exampleProvider": {
+                "a": 10,
+                "b": 20
+            }
+        }))
+        .expect("provider metadata deserializes");
+        let result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"answer\":42}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        )
+        .with_provider_metadata(provider_metadata.clone());
+        let model = StaticObjectModel::new(result);
+
+        let output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(output.provider_metadata, Some(provider_metadata));
+    }
+
+    #[test]
+    fn generate_object_passes_headers_to_model() {
+        let result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"answer\":42}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        );
+        let model = StaticObjectModel::new(result);
+
+        let output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_header("custom-request-header", "request-header-value"),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(output.object, json!({ "answer": 42 }));
+        let calls = model.seen_options();
+        let headers = calls[0].headers.as_ref().expect("headers are captured");
+        assert_eq!(
+            headers.get("custom-request-header").map(String::as_str),
+            Some("request-header-value")
+        );
+        assert_eq!(
+            headers.get("user-agent").map(String::as_str),
+            Some(format!("ai/{VERSION}").as_str())
+        );
+    }
+
+    #[test]
+    fn generate_object_passes_provider_options_to_model() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "aProvider": {
+                "someKey": "someValue"
+            }
+        }))
+        .expect("provider options deserialize");
+        let result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"answer\":42}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        );
+        let model = StaticObjectModel::new(result);
+
+        let output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_provider_options(provider_options.clone()),
+        ))
+        .expect("object is generated");
+
+        assert_eq!(output.object, json!({ "answer": 42 }));
+        assert_eq!(
+            model.seen_options()[0].provider_options,
+            Some(provider_options)
         );
     }
 
