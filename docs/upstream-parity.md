@@ -1031,6 +1031,16 @@ focused tests for each portable behavior before changing rows to `verified`.
   object deltas` by proving the Rust partial object stream emits the same
   `{}`, partial text-field, and final object sequence while sending a JSON
   response format with no schema name or description.
+- 2026-05-22: `generateObject` result and request-option parity split added
+  `generate_object_result_contains_request_information`,
+  `generate_object_result_contains_response_information`,
+  `generate_object_result_contains_provider_metadata`,
+  `generate_object_passes_headers_to_model`, and
+  `generate_object_passes_provider_options_to_model` in
+  `src/generate_object.rs`, mapping upstream `result.request`,
+  `result.response`, `result.providerMetadata`, `options.headers`, and
+  `options.providerOptions` cases one-to-one while preserving the Rust AI
+  user-agent suffix behavior.
 - 2026-05-22: `streamObject` object-stream schema metadata parity added
   `stream_object_object_stream_uses_schema_name_and_description` in
   `src/stream_object.rs`, mapping upstream `output = "object" >
@@ -2592,6 +2602,9 @@ focused tests for each portable behavior before changing rows to `verified`.
    portable upstream test case. The deprecated `experimental_telemetry` alias
    cases for `generateObject`, `streamObject`, `generateText`, `streamText`,
    `embed`, `embedMany`, and `rerank` now have named Rust counterparts.
+   The upstream `generateObject` `result.request`, `result.response`,
+   `result.providerMetadata`, `options.headers`, and `options.providerOptions`
+   cases now have named Rust counterparts.
    The portable `stream-object.test-d.ts` result-type assertions now have typed
    Rust accessor counterparts for finish reason, schema, no-schema, enum, and
    array output. The upstream `callback ordering` call-id correlation case now
