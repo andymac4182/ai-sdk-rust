@@ -6976,6 +6976,8 @@ mod tests {
         include_str!("fixtures/openai-code-interpreter-tool.1.json");
     const OPEN_RESPONSES_IMAGE_GENERATION_TOOL_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-image-generation-tool.1.json");
+    const OPEN_RESPONSES_IMAGE_GENERATION_TOOL_CHUNKS_FIXTURE: &str =
+        include_str!("fixtures/openai-image-generation-tool.1.chunks.txt");
     const OPEN_RESPONSES_CLIENT_TOOL_SEARCH_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-client-tool-search.1.json");
     const OPEN_RESPONSES_TOOL_SEARCH_JSON_FIXTURE: &str =
@@ -30832,53 +30834,51 @@ mod tests {
 
     #[test]
     fn open_responses_provider_streams_image_generation_fixture_results() {
-        const IMAGE_CALL_ID: &str = "ig_0df93c0bb83a72f20068c979f589c0819e9f0fc2d1a27aa1b8";
-        const IMAGE_DATA: &str = "UklGRuIWGQBXRUJQVlA4TKAwGAAv/8X/ABlJbiNJkgRDwkID67D/P9gjl9nuEf2fgPyZzj1Jyu97SlIDX5iPbDv2F3U/+UU+JIlr+wVtEwKO7xiJr";
-        const MESSAGE_ID: &str = "msg_0df93c0bb83a72f20068c97a0b36f4819ea5906451007f95e2";
+        let image_partial_event = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_IMAGE_GENERATION_TOOL_CHUNKS_FIXTURE,
+            |event| event["type"].as_str() == Some("response.image_generation_call.partial_image"),
+        );
+        let image_done_event = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_IMAGE_GENERATION_TOOL_CHUNKS_FIXTURE,
+            |event| {
+                event["type"].as_str() == Some("response.output_item.done")
+                    && event["item"]["type"].as_str() == Some("image_generation_call")
+            },
+        );
+        let message_done_event = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_IMAGE_GENERATION_TOOL_CHUNKS_FIXTURE,
+            |event| {
+                event["type"].as_str() == Some("response.output_item.done")
+                    && event["item"]["type"].as_str() == Some("message")
+            },
+        );
+        let image_call_id = image_done_event["item"]["id"]
+            .as_str()
+            .expect("image call id is set");
+        let partial_image_data = image_partial_event["partial_image_b64"]
+            .as_str()
+            .expect("partial image is set");
+        let final_image_data = image_done_event["item"]["result"]
+            .as_str()
+            .expect("final image is set");
+        let message_id = message_done_event["item"]["id"]
+            .as_str()
+            .expect("message id is set");
 
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
-        let transport: OpenResponsesTransport = Arc::new(
-            move |request| -> OpenResponsesTransportFuture {
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
                 *captured_request_for_transport
                     .lock()
                     .expect("captured request mutex is not poisoned") = Some(request.clone());
 
-                let sse = [
-                    r#"data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_0df93c0bb83a72f20068c979db26ac819e8b5a444fad3f0d7f","object":"response","created_at":1758034395,"status":"in_progress","model":"gpt-5-2025-08-07","output":[],"parallel_tool_calls":true,"reasoning":{"effort":"medium","summary":null},"store":true,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"image_generation","background":"auto","moderation":"auto","n":1,"output_compression":100,"output_format":"webp","quality":"low","size":"auto"}],"usage":null,"metadata":{}}}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.added","sequence_number":4,"output_index":1,"item":{"id":"ig_0df93c0bb83a72f20068c979f589c0819e9f0fc2d1a27aa1b8","type":"image_generation_call","status":"in_progress"}}"#,
-                    "",
-                    r#"data: {"type":"response.image_generation_call.in_progress","sequence_number":5,"output_index":1,"item_id":"ig_0df93c0bb83a72f20068c979f589c0819e9f0fc2d1a27aa1b8"}"#,
-                    "",
-                    r#"data: {"type":"response.image_generation_call.generating","sequence_number":6,"output_index":1,"item_id":"ig_0df93c0bb83a72f20068c979f589c0819e9f0fc2d1a27aa1b8"}"#,
-                    "",
-                    r#"data: {"type":"response.image_generation_call.partial_image","sequence_number":7,"output_index":1,"item_id":"ig_0df93c0bb83a72f20068c979f589c0819e9f0fc2d1a27aa1b8","partial_image_index":0,"partial_image_b64":"UklGRuIWGQBXRUJQVlA4TKAwGAAv/8X/ABlJbiNJkgRDwkID67D/P9gjl9nuEf2fgPyZzj1Jyu97SlIDX5iPbDv2F3U/+UU+JIlr+wVtEwKO7xiJr","size":"1536x1024","quality":"low","background":"opaque","output_format":"webp"}"#,
-                    "",
-                    r#"data: {"type":"response.image_generation_call.completed","sequence_number":8,"output_index":1,"item_id":"ig_0df93c0bb83a72f20068c979f589c0819e9f0fc2d1a27aa1b8"}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.done","sequence_number":9,"output_index":1,"item":{"id":"ig_0df93c0bb83a72f20068c979f589c0819e9f0fc2d1a27aa1b8","type":"image_generation_call","status":"completed","background":"opaque","output_format":"webp","quality":"low","result":"UklGRuIWGQBXRUJQVlA4TKAwGAAv/8X/ABlJbiNJkgRDwkID67D/P9gjl9nuEf2fgPyZzj1Jyu97SlIDX5iPbDv2F3U/+UU+JIlr+wVtEwKO7xiJr","revised_prompt":"Create a high-resolution image.","size":"1536x1024"}}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.added","sequence_number":10,"output_index":2,"item":{"id":"msg_0df93c0bb83a72f20068c97a0b36f4819ea5906451007f95e2","type":"message","status":"in_progress","content":[],"role":"assistant"}}"#,
-                    "",
-                    r#"data: {"type":"response.content_part.added","sequence_number":11,"item_id":"msg_0df93c0bb83a72f20068c97a0b36f4819ea5906451007f95e2","output_index":2,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}"#,
-                    "",
-                    r#"data: {"type":"response.output_text.done","sequence_number":12,"item_id":"msg_0df93c0bb83a72f20068c97a0b36f4819ea5906451007f95e2","output_index":2,"content_index":0,"text":"","logprobs":[]}"#,
-                    "",
-                    r#"data: {"type":"response.content_part.done","sequence_number":13,"item_id":"msg_0df93c0bb83a72f20068c97a0b36f4819ea5906451007f95e2","output_index":2,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.done","sequence_number":14,"output_index":2,"item":{"id":"msg_0df93c0bb83a72f20068c97a0b36f4819ea5906451007f95e2","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}}"#,
-                    "",
-                    r#"data: {"type":"response.completed","sequence_number":15,"response":{"id":"resp_0df93c0bb83a72f20068c979db26ac819e8b5a444fad3f0d7f","object":"response","created_at":1758034395,"status":"completed","model":"gpt-5-2025-08-07","output":[],"parallel_tool_calls":true,"reasoning":{"effort":"medium","summary":null},"store":true,"text":{"format":{"type":"text"},"verbosity":"medium"},"usage":{"input_tokens":2941,"input_tokens_details":{"cached_tokens":1920},"output_tokens":1249,"output_tokens_details":{"reasoning_tokens":1024},"total_tokens":4190}}}"#,
-                    "",
-                    "data: [DONE]",
-                    "",
-                ]
-                .join("\n");
+                let sse = open_responses_sse_from_fixture_lines(
+                    OPEN_RESPONSES_IMAGE_GENERATION_TOOL_CHUNKS_FIXTURE,
+                );
 
                 Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
-            },
-        );
+            });
         let provider = create_open_responses(
             OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
                 .with_api_key("test-api-key"),
@@ -30893,7 +30893,7 @@ mod tests {
             .iter()
             .find_map(|part| match part {
                 LanguageModelStreamPart::ToolCall(tool_call)
-                    if tool_call.tool_call_id == IMAGE_CALL_ID =>
+                    if tool_call.tool_call_id == image_call_id =>
                 {
                     Some(tool_call)
                 }
@@ -30909,7 +30909,7 @@ mod tests {
             .iter()
             .filter_map(|part| match part {
                 LanguageModelStreamPart::ToolResult(tool_result)
-                    if tool_result.tool_call_id == IMAGE_CALL_ID =>
+                    if tool_result.tool_call_id == image_call_id =>
                 {
                     Some(tool_result)
                 }
@@ -30922,7 +30922,7 @@ mod tests {
         assert_eq!(
             tool_results[0].result.as_value(),
             &json!({
-                "result": IMAGE_DATA
+                "result": partial_image_data
             })
         );
         assert_eq!(tool_results[1].tool_name, "generateImage");
@@ -30930,7 +30930,7 @@ mod tests {
         assert_eq!(
             tool_results[1].result.as_value(),
             &json!({
-                "result": IMAGE_DATA
+                "result": final_image_data
             })
         );
 
@@ -30942,7 +30942,7 @@ mod tests {
                 _ => None,
             })
             .expect("stream includes empty text end");
-        assert_eq!(text_end.id, MESSAGE_ID);
+        assert_eq!(text_end.id, message_id);
         assert_eq!(
             text_end
                 .provider_metadata
@@ -30950,7 +30950,7 @@ mod tests {
                 .and_then(|metadata| metadata.get("openai"))
                 .and_then(|metadata| metadata.get("itemId"))
                 .and_then(JsonValue::as_str),
-            Some(MESSAGE_ID)
+            Some(message_id)
         );
 
         let request_body = captured_open_responses_request_body(&captured_request);
