@@ -6982,6 +6982,8 @@ mod tests {
         include_str!("fixtures/openai-image-generation-tool.1.chunks.txt");
     const OPEN_RESPONSES_CLIENT_TOOL_SEARCH_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-client-tool-search.1.json");
+    const OPEN_RESPONSES_CLIENT_TOOL_SEARCH_2_JSON_FIXTURE: &str =
+        include_str!("fixtures/openai-client-tool-search.2.json");
     const OPEN_RESPONSES_CLIENT_TOOL_SEARCH_1_CHUNKS_FIXTURE: &str =
         include_str!("fixtures/openai-client-tool-search.1.chunks.txt");
     const OPEN_RESPONSES_CLIENT_TOOL_SEARCH_2_CHUNKS_FIXTURE: &str =
@@ -8664,7 +8666,7 @@ mod tests {
             ])),
         ])));
 
-        assert_eq!(result.finish_reason.unified, FinishReason::Stop);
+        assert_eq!(result.finish_reason.unified, FinishReason::ToolCalls);
 
         let request = captured_request
             .lock()
@@ -25608,6 +25610,100 @@ mod tests {
         assert_eq!(
             parsed_input["call_id"].as_str(),
             Some("call_AEvXZ1rvYpxHh8QZb7wGlTGH")
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_generates_function_call_after_client_tool_search_output_fixture() {
+        let fixture: JsonValue =
+            serde_json::from_str(OPEN_RESPONSES_CLIENT_TOOL_SEARCH_2_JSON_FIXTURE)
+                .expect("fixture JSON parses");
+        let response_id = fixture["id"].as_str().expect("response id is set");
+        let model_id = fixture["model"].as_str().expect("model id is set");
+        let created_at = fixture["created_at"].as_i64().expect("created_at is set");
+        let usage = &fixture["usage"];
+        let input_tokens = usage["input_tokens"].as_u64();
+        let cached_tokens = usage["input_tokens_details"]["cached_tokens"].as_u64();
+        let output_tokens = usage["output_tokens"].as_u64();
+        let reasoning_tokens = usage["output_tokens_details"]["reasoning_tokens"].as_u64();
+        let service_tier = fixture["service_tier"]
+            .as_str()
+            .expect("service tier is set");
+        let function_call = fixture["output"]
+            .as_array()
+            .expect("fixture output is an array")
+            .iter()
+            .find(|item| item["type"].as_str() == Some("function_call"))
+            .expect("fixture includes function call");
+        let function_call_id = function_call["call_id"]
+            .as_str()
+            .expect("function call id is set");
+        let function_item_id = function_call["id"]
+            .as_str()
+            .expect("function item id is set");
+        let function_name = function_call["name"]
+            .as_str()
+            .expect("function name is set");
+        let function_arguments = function_call["arguments"]
+            .as_str()
+            .expect("function arguments are set");
+        let function_arguments_value: JsonValue =
+            serde_json::from_str(function_arguments).expect("function arguments parse");
+
+        let (result, _) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5.4",
+            OPEN_RESPONSES_CLIENT_TOOL_SEARCH_2_JSON_FIXTURE,
+            open_responses_client_tool_search_call_options(),
+        );
+
+        let tool_call = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::ToolCall(tool_call)
+                    if tool_call.tool_name == function_name =>
+                {
+                    Some(tool_call)
+                }
+                _ => None,
+            })
+            .expect("content includes function call");
+        assert_eq!(tool_call.tool_call_id, function_call_id);
+        assert_eq!(tool_call.provider_executed, None);
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&tool_call.input).expect("tool input is JSON"),
+            function_arguments_value
+        );
+        assert_eq!(
+            openai_metadata_value(&tool_call.provider_metadata, "itemId")
+                .and_then(JsonValue::as_str),
+            Some(function_item_id)
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::ToolCalls);
+        assert_eq!(result.usage.input_tokens.total, input_tokens);
+        assert_eq!(result.usage.input_tokens.cache_read, cached_tokens);
+        assert_eq!(result.usage.output_tokens.total, output_tokens);
+        assert_eq!(result.usage.output_tokens.reasoning, reasoning_tokens);
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "responseId")
+                .and_then(JsonValue::as_str),
+            Some(response_id)
+        );
+        assert_eq!(
+            openai_metadata_value(&result.provider_metadata, "serviceTier")
+                .and_then(JsonValue::as_str),
+            Some(service_tier)
+        );
+
+        let response = result.response.as_ref().expect("result includes response");
+        assert_eq!(response.id.as_deref(), Some(response_id));
+        assert_eq!(response.model_id.as_deref(), Some(model_id));
+        assert_eq!(
+            response
+                .timestamp
+                .map(|timestamp| timestamp.unix_timestamp()),
+            Some(created_at)
         );
     }
 
