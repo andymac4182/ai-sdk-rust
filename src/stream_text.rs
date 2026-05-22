@@ -2453,6 +2453,11 @@ where
             &collected_step.tool_calls,
             &step_tools,
         );
+        sync_stream_text_tool_parts(
+            &mut parts,
+            &collected_step.tool_calls,
+            &collected_step.tool_results,
+        );
         generate_step.tool_results = collected_step.tool_results.clone();
         refresh_tool_result_views(&mut generate_step);
         generate_step.performance.tool_execution_ms = tool_execution_ms;
@@ -4085,6 +4090,33 @@ fn apply_stream_text_response_identity(
     }
 }
 
+fn sync_stream_text_tool_parts(
+    parts: &mut [TextStreamPart],
+    tool_calls: &[GenerateTextToolCall],
+    tool_results: &[GenerateTextToolResult],
+) {
+    for part in parts {
+        match part {
+            TextStreamPart::ToolCall(part) => {
+                if let Some(tool_call) = tool_calls.iter().find(|tool_call| {
+                    tool_call.tool_call_id == part.tool_call_id && tool_call.invalid != Some(true)
+                }) {
+                    *part = tool_call.clone();
+                }
+            }
+            TextStreamPart::ToolResult(part) => {
+                if let Some(tool_result) = tool_results
+                    .iter()
+                    .find(|tool_result| tool_result.tool_call_id == part.tool_call_id)
+                {
+                    *part = tool_result.clone();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn add_stream_text_step_usage(steps: &[StreamTextStep]) -> LanguageModelUsage {
     steps
         .iter()
@@ -4857,6 +4889,111 @@ mod tests {
         assert_eq!(result.response, finish_step.response);
         assert_eq!(result.steps.len(), 1);
         assert_eq!(result.steps[0].response, finish_step.response);
+    }
+
+    #[test]
+    fn stream_text_result_full_stream_sends_tool_calls() {
+        let timestamp = time::OffsetDateTime::UNIX_EPOCH;
+        let response_metadata = LanguageModelStreamResponseMetadata::new()
+            .with_id("id-0")
+            .with_model_id("mock-model-id")
+            .with_timestamp(timestamp);
+        let provider_metadata = ProviderMetadata::from([(
+            "testProvider".to_string(),
+            Map::from_iter([("signature".to_string(), json!("sig"))]),
+        )]);
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string" }
+            },
+            "required": ["value"],
+            "additionalProperties": false
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ResponseMetadata(response_metadata),
+                LanguageModelStreamPart::ToolCall(
+                    LanguageModelToolCall::new("call-1", "tool1", r#"{ "value": "value" }"#)
+                        .with_provider_metadata(provider_metadata.clone()),
+                ),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(Tool::new("tool1", input_schema).with_title("Tool 1"))
+                .with_tool_choice(LanguageModelToolChoice::Required),
+        ));
+
+        let part_names = result
+            .parts
+            .iter()
+            .map(|part| match part {
+                TextStreamPart::Start(_) => "start",
+                TextStreamPart::StartStep(_) => "start-step",
+                TextStreamPart::ToolCall(_) => "tool-call",
+                TextStreamPart::FinishStep(_) => "finish-step",
+                TextStreamPart::Finish(_) => "finish",
+                _ => "other",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            part_names,
+            vec!["start", "start-step", "tool-call", "finish-step", "finish"]
+        );
+
+        let tool_call_part = result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TextStreamPart::ToolCall(part) => Some(part),
+                _ => None,
+            })
+            .expect("full stream includes tool-call");
+        assert_eq!(tool_call_part.tool_call_id, "call-1");
+        assert_eq!(tool_call_part.tool_name, "tool1");
+        assert_eq!(tool_call_part.input, json!({ "value": "value" }));
+        assert_eq!(tool_call_part.title.as_deref(), Some("Tool 1"));
+        assert_eq!(
+            tool_call_part.provider_metadata,
+            Some(provider_metadata.clone())
+        );
+        assert_eq!(tool_call_part.provider_executed, None);
+
+        let finish_step = result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TextStreamPart::FinishStep(part) => Some(part),
+                _ => None,
+            })
+            .expect("full stream includes finish-step");
+        assert_eq!(finish_step.response.id.as_deref(), Some("id-0"));
+        assert_eq!(
+            finish_step.response.model_id.as_deref(),
+            Some("mock-model-id")
+        );
+        assert_eq!(finish_step.response.timestamp, Some(timestamp));
+        assert_eq!(finish_step.finish_reason, FinishReason::Stop);
+        assert_eq!(finish_step.raw_finish_reason.as_deref(), Some("stop"));
+        assert_eq!(finish_step.usage, usage());
+
+        assert_eq!(result.tool_calls, vec![tool_call_part.clone()]);
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.steps[0].tool_calls, vec![tool_call_part.clone()]);
+        let stream_calls = model.stream_calls();
+        assert_eq!(stream_calls.len(), 1);
+        assert_eq!(
+            stream_calls[0].tool_choice.as_ref(),
+            Some(&LanguageModelToolChoice::Required)
+        );
     }
 
     #[test]
