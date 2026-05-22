@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 
 use ai_sdk_provider::json::JsonValue;
 use ai_sdk_provider::{
@@ -41,6 +42,9 @@ pub struct WorkflowAgentOptions {
 
     /// Default prepare-step callback.
     pub prepare_step: Option<WorkflowPrepareStepCallback>,
+
+    /// Default finish callback.
+    pub on_finish: Option<WorkflowAgentOnFinishCallback>,
 }
 
 impl WorkflowAgentOptions {
@@ -54,6 +58,7 @@ impl WorkflowAgentOptions {
             active_tools: None,
             tool_choice: None,
             prepare_step: None,
+            on_finish: None,
         }
     }
 
@@ -102,6 +107,12 @@ impl WorkflowAgentOptions {
         self.prepare_step = Some(prepare_step);
         self
     }
+
+    /// Sets a constructor-level finish callback.
+    pub fn with_on_finish(mut self, on_finish: WorkflowAgentOnFinishCallback) -> Self {
+        self.on_finish = Some(on_finish);
+        self
+    }
 }
 
 /// Deterministic Rust equivalent of upstream `WorkflowAgent`.
@@ -114,6 +125,7 @@ pub struct WorkflowAgent {
     active_tools: Option<Vec<String>>,
     tool_choice: Option<JsonValue>,
     prepare_step: Option<WorkflowPrepareStepCallback>,
+    on_finish: Option<WorkflowAgentOnFinishCallback>,
 }
 
 impl WorkflowAgent {
@@ -127,6 +139,7 @@ impl WorkflowAgent {
             active_tools: options.active_tools,
             tool_choice: options.tool_choice,
             prepare_step: options.prepare_step,
+            on_finish: options.on_finish,
         }
     }
 
@@ -162,6 +175,7 @@ impl WorkflowAgent {
             .unwrap_or_default();
         let tool_choice = options.tool_choice.or_else(|| self.tool_choice.clone());
         let prepare_step = options.prepare_step.or_else(|| self.prepare_step.clone());
+        let on_finish = options.on_finish.or_else(|| self.on_finish.clone());
 
         let mut iterator = StreamTextIterator::from_runtime_tools(
             options.prompt,
@@ -221,7 +235,7 @@ impl WorkflowAgent {
             pending_tool_results = Some(execution.tool_results);
         }
 
-        Ok(WorkflowAgentStreamResult {
+        let result = WorkflowAgentStreamResult {
             messages,
             steps,
             tool_calls: last_tool_calls,
@@ -229,7 +243,13 @@ impl WorkflowAgent {
             runtime_context,
             tools_context,
             missing_provider_executed_tool_results,
-        })
+        };
+
+        if let Some(on_finish) = on_finish {
+            on_finish.call(WorkflowAgentFinishInfo::from(&result));
+        }
+
+        Ok(result)
     }
 
     async fn execute_tool_calls(
@@ -315,6 +335,9 @@ pub struct WorkflowAgentStreamOptions<E> {
 
     /// Stream-level prepare-step callback that overrides constructor defaults.
     pub prepare_step: Option<WorkflowPrepareStepCallback>,
+
+    /// Stream-level finish callback that overrides constructor defaults.
+    pub on_finish: Option<WorkflowAgentOnFinishCallback>,
 }
 
 impl<E> WorkflowAgentStreamOptions<E> {
@@ -329,6 +352,7 @@ impl<E> WorkflowAgentStreamOptions<E> {
             active_tools: None,
             tool_choice: None,
             prepare_step: None,
+            on_finish: None,
         }
     }
 
@@ -369,6 +393,85 @@ impl<E> WorkflowAgentStreamOptions<E> {
     pub fn with_prepare_step(mut self, prepare_step: WorkflowPrepareStepCallback) -> Self {
         self.prepare_step = Some(prepare_step);
         self
+    }
+
+    /// Sets a stream-level finish callback.
+    pub fn with_on_finish(mut self, on_finish: WorkflowAgentOnFinishCallback) -> Self {
+        self.on_finish = Some(on_finish);
+        self
+    }
+}
+
+/// Callback invoked when [`WorkflowAgent::stream`] finishes successfully.
+#[derive(Clone)]
+pub struct WorkflowAgentOnFinishCallback {
+    callback: Arc<dyn Fn(WorkflowAgentFinishInfo) + Send + Sync + 'static>,
+}
+
+impl WorkflowAgentOnFinishCallback {
+    /// Creates a finish callback from a synchronous Rust function.
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(WorkflowAgentFinishInfo) + Send + Sync + 'static,
+    {
+        Self {
+            callback: Arc::new(callback),
+        }
+    }
+
+    fn call(&self, info: WorkflowAgentFinishInfo) {
+        (self.callback)(info);
+    }
+}
+
+impl fmt::Debug for WorkflowAgentOnFinishCallback {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkflowAgentOnFinishCallback")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Finish information passed to workflow-agent finish callbacks.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowAgentFinishInfo {
+    /// Final conversation messages observed by the agent loop.
+    pub messages: Vec<LanguageModelMessage>,
+
+    /// Completed stream steps.
+    pub steps: Vec<WorkflowStreamStep>,
+
+    /// Last unresolved or executed tool calls observed by the loop.
+    pub tool_calls: Vec<ParsedToolCall>,
+
+    /// Tool results generated by the last tool-call round.
+    pub tool_results: Vec<LanguageModelToolResultPart>,
+
+    /// Final runtime context.
+    pub runtime_context: WorkflowRuntimeContext,
+
+    /// Final per-tool context.
+    pub tools_context: WorkflowToolsContext,
+
+    /// Provider-executed tool calls that had no matching provider result.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_provider_executed_tool_results: Vec<String>,
+}
+
+impl From<&WorkflowAgentStreamResult> for WorkflowAgentFinishInfo {
+    fn from(result: &WorkflowAgentStreamResult) -> Self {
+        Self {
+            messages: result.messages.clone(),
+            steps: result.steps.clone(),
+            tool_calls: result.tool_calls.clone(),
+            tool_results: result.tool_results.clone(),
+            runtime_context: result.runtime_context.clone(),
+            tools_context: result.tools_context.clone(),
+            missing_provider_executed_tool_results: result
+                .missing_provider_executed_tool_results
+                .clone(),
+        }
     }
 }
 
@@ -1019,6 +1122,61 @@ mod tests {
             result.tool_results[0].output,
             LanguageModelToolResultOutput::json(json!({ "data": "from-server" }))
         );
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_call_on_finish_when_stopping_for_client_side_tools() {
+        let finish_info = Arc::new(Mutex::new(None));
+        let finish_info_for_callback = Arc::clone(&finish_info);
+        let tool = Tool::new("askUser", object_schema());
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_tool(tool));
+        let executor = ScriptedStreamTextStepExecutor::new([tool_call_step(
+            LanguageModelToolCall::new("ask-id", "askUser", r#"{"question":"confirm?"}"#),
+        )]);
+
+        poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_on_finish(
+                WorkflowAgentOnFinishCallback::new(move |info| {
+                    *finish_info_for_callback
+                        .lock()
+                        .expect("finish info lock succeeds") = Some(info);
+                }),
+            ),
+        ))
+        .expect("agent stream succeeds");
+
+        let info = finish_info
+            .lock()
+            .expect("finish info lock succeeds")
+            .clone()
+            .expect("on_finish was called");
+        assert_eq!(info.steps.len(), 1);
+        assert_eq!(info.tool_calls.len(), 1);
+        assert_eq!(info.tool_calls[0].tool_call_id, "ask-id");
+        assert!(info.tool_results.is_empty());
+        assert!(!info.messages.is_empty());
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_have_empty_tool_calls_when_all_tools_complete_normally() {
+        let tool = Tool::new("serverTool", object_schema())
+            .with_execute(|_, _| async { Ok(json!("result")) });
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_tool(tool));
+        let executor = ScriptedStreamTextStepExecutor::new([
+            tool_call_step(LanguageModelToolCall::new(
+                "server-call-id",
+                "serverTool",
+                "{}",
+            )),
+            stop_step(),
+        ]);
+
+        let result =
+            poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+                .expect("agent stream succeeds");
+
+        assert!(result.tool_calls.is_empty());
+        assert!(result.tool_results.is_empty());
     }
 
     #[test]
