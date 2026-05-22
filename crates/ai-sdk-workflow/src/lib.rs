@@ -27,7 +27,8 @@ pub use stream_text_iterator::{
 };
 pub use workflow_agent::{
     WorkflowAgent, WorkflowAgentError, WorkflowAgentFinishInfo, WorkflowAgentOnFinishCallback,
-    WorkflowAgentOptions, WorkflowAgentStreamOptions, WorkflowAgentStreamResult,
+    WorkflowAgentOnStepFinishCallback, WorkflowAgentOptions, WorkflowAgentStreamOptions,
+    WorkflowAgentStreamResult,
 };
 
 use ai_sdk_provider::json::{JsonObject, JsonSchema, JsonValue};

@@ -43,6 +43,9 @@ pub struct WorkflowAgentOptions {
     /// Default prepare-step callback.
     pub prepare_step: Option<WorkflowPrepareStepCallback>,
 
+    /// Default step-finish callback.
+    pub on_step_finish: Option<WorkflowAgentOnStepFinishCallback>,
+
     /// Default finish callback.
     pub on_finish: Option<WorkflowAgentOnFinishCallback>,
 }
@@ -58,6 +61,7 @@ impl WorkflowAgentOptions {
             active_tools: None,
             tool_choice: None,
             prepare_step: None,
+            on_step_finish: None,
             on_finish: None,
         }
     }
@@ -108,6 +112,15 @@ impl WorkflowAgentOptions {
         self
     }
 
+    /// Sets a constructor-level step-finish callback.
+    pub fn with_on_step_finish(
+        mut self,
+        on_step_finish: WorkflowAgentOnStepFinishCallback,
+    ) -> Self {
+        self.on_step_finish = Some(on_step_finish);
+        self
+    }
+
     /// Sets a constructor-level finish callback.
     pub fn with_on_finish(mut self, on_finish: WorkflowAgentOnFinishCallback) -> Self {
         self.on_finish = Some(on_finish);
@@ -125,6 +138,7 @@ pub struct WorkflowAgent {
     active_tools: Option<Vec<String>>,
     tool_choice: Option<JsonValue>,
     prepare_step: Option<WorkflowPrepareStepCallback>,
+    on_step_finish: Option<WorkflowAgentOnStepFinishCallback>,
     on_finish: Option<WorkflowAgentOnFinishCallback>,
 }
 
@@ -139,6 +153,7 @@ impl WorkflowAgent {
             active_tools: options.active_tools,
             tool_choice: options.tool_choice,
             prepare_step: options.prepare_step,
+            on_step_finish: options.on_step_finish,
             on_finish: options.on_finish,
         }
     }
@@ -175,6 +190,8 @@ impl WorkflowAgent {
             .unwrap_or_default();
         let tool_choice = options.tool_choice.or_else(|| self.tool_choice.clone());
         let prepare_step = options.prepare_step.or_else(|| self.prepare_step.clone());
+        let constructor_on_step_finish = self.on_step_finish.clone();
+        let stream_on_step_finish = options.on_step_finish;
         let constructor_on_finish = self.on_finish.clone();
         let stream_on_finish = options.on_finish;
 
@@ -219,6 +236,11 @@ impl WorkflowAgent {
             if yield_value.tool_calls.is_empty() {
                 last_tool_calls.clear();
                 last_tool_results.clear();
+                call_step_finish_callbacks(
+                    &constructor_on_step_finish,
+                    &stream_on_step_finish,
+                    &yield_value.step,
+                );
                 continue;
             }
 
@@ -228,6 +250,12 @@ impl WorkflowAgent {
 
             last_tool_calls = yield_value.tool_calls.clone();
             last_tool_results = execution.tool_results.clone();
+
+            call_step_finish_callbacks(
+                &constructor_on_step_finish,
+                &stream_on_step_finish,
+                &yield_value.step,
+            );
 
             if execution.has_unresolved_client_tools {
                 break;
@@ -340,6 +368,9 @@ pub struct WorkflowAgentStreamOptions<E> {
     /// Stream-level prepare-step callback that overrides constructor defaults.
     pub prepare_step: Option<WorkflowPrepareStepCallback>,
 
+    /// Stream-level step-finish callback that runs after any constructor callback.
+    pub on_step_finish: Option<WorkflowAgentOnStepFinishCallback>,
+
     /// Stream-level finish callback that runs after any constructor callback.
     pub on_finish: Option<WorkflowAgentOnFinishCallback>,
 }
@@ -356,6 +387,7 @@ impl<E> WorkflowAgentStreamOptions<E> {
             active_tools: None,
             tool_choice: None,
             prepare_step: None,
+            on_step_finish: None,
             on_finish: None,
         }
     }
@@ -399,10 +431,49 @@ impl<E> WorkflowAgentStreamOptions<E> {
         self
     }
 
+    /// Sets a stream-level step-finish callback.
+    pub fn with_on_step_finish(
+        mut self,
+        on_step_finish: WorkflowAgentOnStepFinishCallback,
+    ) -> Self {
+        self.on_step_finish = Some(on_step_finish);
+        self
+    }
+
     /// Sets a stream-level finish callback.
     pub fn with_on_finish(mut self, on_finish: WorkflowAgentOnFinishCallback) -> Self {
         self.on_finish = Some(on_finish);
         self
+    }
+}
+
+/// Callback invoked after each [`WorkflowAgent`] stream step completes.
+#[derive(Clone)]
+pub struct WorkflowAgentOnStepFinishCallback {
+    callback: Arc<dyn Fn(WorkflowStreamStep) + Send + Sync + 'static>,
+}
+
+impl WorkflowAgentOnStepFinishCallback {
+    /// Creates a step-finish callback from a synchronous Rust function.
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(WorkflowStreamStep) + Send + Sync + 'static,
+    {
+        Self {
+            callback: Arc::new(callback),
+        }
+    }
+
+    fn call(&self, step: WorkflowStreamStep) {
+        (self.callback)(step);
+    }
+}
+
+impl fmt::Debug for WorkflowAgentOnStepFinishCallback {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkflowAgentOnStepFinishCallback")
+            .finish_non_exhaustive()
     }
 }
 
@@ -538,6 +609,19 @@ impl fmt::Display for WorkflowAgentError {
 
 impl Error for WorkflowAgentError {}
 
+fn call_step_finish_callbacks(
+    constructor_on_step_finish: &Option<WorkflowAgentOnStepFinishCallback>,
+    stream_on_step_finish: &Option<WorkflowAgentOnStepFinishCallback>,
+    step: &WorkflowStreamStep,
+) {
+    if let Some(on_step_finish) = constructor_on_step_finish {
+        on_step_finish.call(step.clone());
+    }
+    if let Some(on_step_finish) = stream_on_step_finish {
+        on_step_finish.call(step.clone());
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct WorkflowAgentToolExecution {
     tool_results: Vec<LanguageModelToolResultPart>,
@@ -665,8 +749,9 @@ mod tests {
     use ai_sdk_provider::{
         FinishReason, LanguageModelAssistantContentPart, LanguageModelAssistantMessage,
         LanguageModelFinishReason, LanguageModelStreamFinish, LanguageModelStreamPart,
+        LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
         LanguageModelToolCall, LanguageModelUsage, LanguageModelUserContentPart,
-        LanguageModelUserMessage, OutputTokenUsage,
+        LanguageModelUserMessage, OutputTokenUsage, ProviderMetadata,
     };
     use ai_sdk_provider_utils::{Schema, ToolExecutionError, ValidationResult};
     use serde_json::json;
@@ -1239,6 +1324,148 @@ mod tests {
         assert_eq!(
             *calls.lock().expect("calls lock succeeds"),
             vec!["constructor".to_string(), "method".to_string()]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_call_on_step_finish_from_constructor() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_constructor = Arc::clone(&calls);
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_on_step_finish(
+            WorkflowAgentOnStepFinishCallback::new(move |_| {
+                calls_for_constructor
+                    .lock()
+                    .expect("calls lock succeeds")
+                    .push("constructor".to_string());
+            }),
+        ));
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+            .expect("agent stream succeeds");
+
+        assert_eq!(
+            *calls.lock().expect("calls lock succeeds"),
+            vec!["constructor".to_string()]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_call_on_step_finish_from_stream_method() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_method = Arc::clone(&calls);
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_on_step_finish(
+                WorkflowAgentOnStepFinishCallback::new(move |_| {
+                    calls_for_method
+                        .lock()
+                        .expect("calls lock succeeds")
+                        .push("method".to_string());
+                }),
+            ),
+        ))
+        .expect("agent stream succeeds");
+
+        assert_eq!(
+            *calls.lock().expect("calls lock succeeds"),
+            vec!["method".to_string()]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_call_both_constructor_and_method_on_step_finish_in_correct_order()
+     {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_constructor = Arc::clone(&calls);
+        let calls_for_method = Arc::clone(&calls);
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_on_step_finish(
+            WorkflowAgentOnStepFinishCallback::new(move |_| {
+                calls_for_constructor
+                    .lock()
+                    .expect("calls lock succeeds")
+                    .push("constructor".to_string());
+            }),
+        ));
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_on_step_finish(
+                WorkflowAgentOnStepFinishCallback::new(move |_| {
+                    calls_for_method
+                        .lock()
+                        .expect("calls lock succeeds")
+                        .push("method".to_string());
+                }),
+            ),
+        ))
+        .expect("agent stream succeeds");
+
+        assert_eq!(
+            *calls.lock().expect("calls lock succeeds"),
+            vec!["constructor".to_string(), "method".to_string()]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_pass_step_result_to_on_step_finish_callback() {
+        let captured_step = Arc::new(Mutex::new(None));
+        let captured_step_for_callback = Arc::clone(&captured_step);
+        let provider_metadata: ProviderMetadata = serde_json::from_value(json!({
+            "testProvider": {
+                "testKey": "testValue"
+            }
+        }))
+        .expect("provider metadata");
+        let step = output_from_parts(
+            [
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1", "Hello, ",
+                )),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "world!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(
+                    LanguageModelStreamFinish::new(
+                        usage(),
+                        LanguageModelFinishReason {
+                            unified: FinishReason::Stop,
+                            raw: Some("stop".to_string()),
+                        },
+                    )
+                    .with_provider_metadata(provider_metadata.clone()),
+                ),
+            ],
+            0,
+        );
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let executor = ScriptedStreamTextStepExecutor::new([step]);
+
+        poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_on_step_finish(
+                WorkflowAgentOnStepFinishCallback::new(move |step| {
+                    *captured_step_for_callback
+                        .lock()
+                        .expect("captured step lock succeeds") = Some(step);
+                }),
+            ),
+        ))
+        .expect("agent stream succeeds");
+
+        let captured_step = captured_step
+            .lock()
+            .expect("captured step lock succeeds")
+            .clone()
+            .expect("step was captured");
+        assert_eq!(captured_step.finish_reason, FinishReason::Stop);
+        assert_eq!(captured_step.step_number, 0);
+        assert_eq!(captured_step.text, "Hello, world!");
+        assert_eq!(captured_step.usage.output_tokens.total, Some(5));
+        assert_eq!(
+            captured_step.provider_metadata.as_ref(),
+            Some(&provider_metadata)
         );
     }
 
