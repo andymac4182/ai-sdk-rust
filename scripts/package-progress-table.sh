@@ -4,12 +4,13 @@ set -euo pipefail
 ledger="docs/upstream-parity.md"
 estimates="docs/package-progress-estimates.tsv"
 portable_only=0
+output=""
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/package-progress-table.sh [--ledger PATH] [--estimates PATH] [--portable-only]
+Usage: scripts/package-progress-table.sh [--ledger PATH] [--estimates PATH] [--portable-only] [--output PATH]
 
-Emits a Markdown package-completion table from docs/upstream-parity.md.
+Emits a Markdown package-completion report from docs/upstream-parity.md.
 For in-progress package rows, estimates come from docs/package-progress-estimates.tsv.
 Verified and JavaScript-only rows are always 100%; not-started rows are always 0%.
 USAGE
@@ -29,6 +30,10 @@ while [ "$#" -gt 0 ]; do
       portable_only=1
       shift
       ;;
+    --output)
+      output="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -46,8 +51,8 @@ if [ ! -f "$ledger" ]; then
   exit 1
 fi
 
-ruby - "$ledger" "$estimates" "$portable_only" <<'RUBY'
-ledger_path, estimates_path, portable_only_arg = ARGV
+ruby - "$ledger" "$estimates" "$portable_only" "$output" <<'RUBY'
+ledger_path, estimates_path, portable_only_arg, output_path = ARGV
 portable_only = portable_only_arg == "1"
 
 Estimate = Struct.new(:percent, :basis)
@@ -66,6 +71,41 @@ def short_text(value, limit = 120)
   return text if text.length <= limit
 
   text[0, limit - 1].sub(/\s+\S*\z/, "") + "..."
+end
+
+def status_label(status)
+  case status
+  when "verified"
+    "Verified"
+  when "js-only-documented"
+    "JavaScript-only"
+  when "in-progress"
+    "In progress"
+  when "not-started"
+    "Not started"
+  when "ported"
+    "Ported"
+  else
+    status
+  end
+end
+
+def package_table(rows, show_basis:)
+  output = []
+  if show_basis
+    output << "| Package | Est. completion | Status | Kind | Basis / remaining work |"
+    output << "| --- | ---: | --- | --- | --- |"
+    rows.each do |row|
+      output << "| `#{escape_markdown(row[:display_name])}` | #{row[:percent]}% | #{status_label(row[:status])} | #{escape_markdown(row[:kind])} | #{short_text(row[:basis])} |"
+    end
+  else
+    output << "| Package | Completion | Status | Kind |"
+    output << "| --- | ---: | --- | --- |"
+    rows.each do |row|
+      output << "| `#{escape_markdown(row[:display_name])}` | #{row[:percent]}% | #{status_label(row[:status])} | #{escape_markdown(row[:kind])} |"
+    end
+  end
+  output
 end
 
 estimates = {}
@@ -172,21 +212,40 @@ portable_verified_rows = portable_rows.count { |row| row[:status] == "verified" 
 in_progress_rows = rows.count { |row| row[:status] == "in-progress" }
 not_started_rows = rows.count { |row| row[:status] == "not-started" }
 
-puts "_Generated from `#{escape_markdown(ledger_path)}` and `#{escape_markdown(estimates_path)}`._"
-puts
-puts "| Metric | Value |"
-puts "| --- | ---: |"
-puts "| Displayed package rows | #{rows.length} |"
-puts "| Average estimated completion | #{format('%.1f%%', average(rows.map { |row| row[:percent] }))} |"
-puts "| Portable package average | #{format('%.1f%%', average(portable_rows.map { |row| row[:percent] }))} |"
-puts "| Closed package rows | #{closed_rows} / #{rows.length} |"
-puts "| Strict portable verified rows | #{portable_verified_rows} / #{portable_rows.length} |"
-puts "| In-progress rows | #{in_progress_rows} |"
-puts "| Not-started rows | #{not_started_rows} |"
-puts
-puts "| Package | Est. completion | Status | Kind | Basis / remaining work |"
-puts "| --- | ---: | --- | --- | --- |"
-rows.each do |row|
-  puts "| `#{escape_markdown(row[:display_name])}` | #{row[:percent]}% | `#{escape_markdown(row[:status])}` | #{escape_markdown(row[:kind])} | #{short_text(row[:basis])} |"
+closed = rows.select { |row| ["verified", "js-only-documented"].include?(row[:status]) }
+in_progress = rows.select { |row| row[:status] == "in-progress" }
+not_started = rows.select { |row| row[:status] == "not-started" }
+
+document = []
+document << "# AI SDK Rust Package Progress"
+document << ""
+document << "_Generated from `#{escape_markdown(ledger_path)}` and `#{escape_markdown(estimates_path)}`._"
+document << ""
+document << "- Displayed package rows: #{rows.length}"
+document << "- Average estimated completion: #{format('%.1f%%', average(rows.map { |row| row[:percent] }))}"
+document << "- Portable package average: #{format('%.1f%%', average(portable_rows.map { |row| row[:percent] }))}"
+document << "- Closed package rows: #{closed_rows} / #{rows.length}"
+document << "- Strict portable verified rows: #{portable_verified_rows} / #{portable_rows.length}"
+document << "- In-progress rows: #{in_progress_rows}"
+document << "- Not-started rows: #{not_started_rows}"
+document << ""
+document << "## 100% Closed"
+document << ""
+document.concat(package_table(closed, show_basis: false))
+document << ""
+document << "## In Progress"
+document << ""
+document.concat(package_table(in_progress, show_basis: true))
+document << ""
+document << "## Not Started"
+document << ""
+document.concat(package_table(not_started, show_basis: false))
+document << ""
+
+content = document.join("\n")
+if output_path && !output_path.empty?
+  File.write(output_path, content)
+else
+  puts content
 end
 RUBY

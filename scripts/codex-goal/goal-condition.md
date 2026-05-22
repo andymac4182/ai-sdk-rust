@@ -20,7 +20,7 @@ APIs, examples, tests, and feature status. Do not mark the goal complete while
 any ledger row is unported, unverified, or undocumented. Re-scan upstream often.
 Maintain `docs/package-progress-estimates.tsv` for every package you touch while
 it remains `in-progress`, then run
-`scripts/package-progress-table.sh >/tmp/ai-sdk-rust-package-progress.md` and
+`scripts/package-progress-table.sh --output docs/package-progress.md` and
 use that generated table for progress reporting. Do not hand-maintain package
 progress summaries; keep the ledger and estimate TSV current.
 
@@ -118,6 +118,6 @@ the work yourself before committing.
 
 Run the strongest available gates: `cargo fmt --all --check`, `cargo clippy
 --all-targets --all-features -- -D warnings`, `scripts/check-naming-conventions.sh`,
-`scripts/package-progress-table.sh >/tmp/ai-sdk-rust-package-progress.md`, and
+`scripts/package-progress-table.sh --output docs/package-progress.md`, and
 `cargo test --all-features`. Stop instead of forcing state if main is dirty,
 merge conflicts are ambiguous, or validation cannot be made green.

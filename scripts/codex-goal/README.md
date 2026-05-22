@@ -40,14 +40,16 @@ JavaScript-only.
 Package progress reporting is generated, not hand-maintained:
 
 ```sh
-scripts/package-progress-table.sh >/tmp/ai-sdk-rust-package-progress.md
+scripts/package-progress-table.sh --output docs/package-progress.md
 ```
 
 The generator reads `docs/upstream-parity.md` and
 `docs/package-progress-estimates.tsv`. Future `/goal` slices should update the
 estimate TSV for packages they touch while those packages remain `in-progress`;
 verified and JavaScript-only rows are forced to 100%, and not-started rows are
-forced to 0%.
+forced to 0%. The checked-in `docs/package-progress.md` report is intended for
+markdown viewers and should be regenerated whenever the ledger or estimate TSV
+changes.
 
 Non-negotiable test floor: EVERY portable original upstream TypeScript test/case
 must exist as an equivalent Rust test in the matching 1:1 crate. Rust may add

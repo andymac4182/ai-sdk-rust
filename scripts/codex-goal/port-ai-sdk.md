@@ -139,12 +139,14 @@ The ledger must include:
 After updating package status or estimates, run:
 
 ```sh
-scripts/package-progress-table.sh >/tmp/ai-sdk-rust-package-progress.md
+scripts/package-progress-table.sh --output docs/package-progress.md
 ```
 
 Use that generated table when reporting migration progress. Do not hand-maintain
 progress tables in prose; keep the ledger and TSV current so the table is
-reproducible.
+reproducible. The checked-in `docs/package-progress.md` report is intended for
+markdown viewers and must be regenerated whenever package status or progress
+estimates change.
 
 Re-scan upstream often with `npx opensrc@latest path github:vercel/ai`. If the
 upstream inventory changes, update the ledger and continue. Do not stop while
@@ -360,9 +362,10 @@ Run the strongest relevant validation you can before each commit:
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 scripts/check-naming-conventions.sh
-scripts/package-progress-table.sh >/tmp/ai-sdk-rust-package-progress.md
+scripts/package-progress-table.sh --output docs/package-progress.md
 cargo test --all-features
 ```
+The checked-in markdown file is the canonical human-readable progress report.
 
 If an optional integration test is added, make it opt-in and documented. It may
 load `.env.local`, but it must skip cleanly when the gateway key is absent.
@@ -398,8 +401,9 @@ Repeat this loop until the goal is complete or you hit a real blocker:
 4. Implement it with tests and docs/examples where useful.
 5. Update `docs/upstream-parity.md` with status, evidence, and next queue.
    Update `docs/package-progress-estimates.tsv` for any touched `in-progress`
-   package, then run `scripts/package-progress-table.sh` and inspect the
-   generated table for stale or misleading percentages.
+   package, then run
+   `scripts/package-progress-table.sh --output docs/package-progress.md` and
+   inspect the generated table for stale or misleading percentages.
 6. Run validation.
 7. Commit the slice.
 8. Merge the slice back to `main` using the protocol below.
@@ -439,7 +443,7 @@ git rebase origin/main
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 scripts/check-naming-conventions.sh
-scripts/package-progress-table.sh >/tmp/ai-sdk-rust-package-progress.md
+scripts/package-progress-table.sh --output docs/package-progress.md
 cargo test --all-features
 
 git -C "$main_repo" checkout main
@@ -459,7 +463,7 @@ git -C "$main_repo" merge --no-ff "$branch" -m "Merge ai-sdk-rust parity slice"
   cargo fmt --all --check
   cargo clippy --all-targets --all-features -- -D warnings
   scripts/check-naming-conventions.sh
-  scripts/package-progress-table.sh >/tmp/ai-sdk-rust-package-progress.md
+  scripts/package-progress-table.sh --output docs/package-progress.md
   cargo test --all-features
 )
 git -C "$main_repo" push origin main
