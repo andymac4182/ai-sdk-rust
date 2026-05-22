@@ -6,7 +6,8 @@ use std::time::Instant;
 
 use ai_sdk_provider::json::JsonValue;
 use ai_sdk_provider::{
-    LanguageModelMessage, LanguageModelToolResultOutput, LanguageModelToolResultPart,
+    FinishReason, InputTokenUsage, LanguageModelMessage, LanguageModelToolResultOutput,
+    LanguageModelToolResultPart, LanguageModelUsage, OutputTokenUsage,
 };
 use ai_sdk_provider_utils::{
     ExecuteToolOutput, Tool, ToolExecutionOptions, ToolModelOutputOptions, execute_tool,
@@ -906,6 +907,19 @@ impl fmt::Debug for WorkflowAgentOnFinishCallback {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowAgentFinishInfo {
+    /// Concatenated generated text from completed steps.
+    pub text: String,
+
+    /// Final unified finish reason.
+    pub finish_reason: FinishReason,
+
+    /// Final raw provider finish reason, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_finish_reason: Option<String>,
+
+    /// Aggregate usage across all completed steps.
+    pub total_usage: LanguageModelUsage,
+
     /// Final conversation messages observed by the agent loop.
     pub messages: Vec<LanguageModelMessage>,
 
@@ -931,7 +945,14 @@ pub struct WorkflowAgentFinishInfo {
 
 impl From<&WorkflowAgentStreamResult> for WorkflowAgentFinishInfo {
     fn from(result: &WorkflowAgentStreamResult) -> Self {
+        let final_step = result.steps.last();
         Self {
+            text: result.steps.iter().map(|step| step.text.as_str()).collect(),
+            finish_reason: final_step
+                .map(|step| step.finish_reason.clone())
+                .unwrap_or(FinishReason::Other),
+            raw_finish_reason: final_step.and_then(|step| step.raw_finish_reason.clone()),
+            total_usage: add_workflow_step_usage(&result.steps),
             messages: result.messages.clone(),
             steps: result.steps.clone(),
             tool_calls: result.tool_calls.clone(),
@@ -1067,6 +1088,39 @@ fn call_tool_execution_end_callbacks(
     if let Some(on_tool_execution_end) = stream_on_tool_execution_end {
         on_tool_execution_end.call(info.clone());
     }
+}
+
+fn add_workflow_step_usage(steps: &[WorkflowStreamStep]) -> LanguageModelUsage {
+    LanguageModelUsage {
+        input_tokens: InputTokenUsage {
+            total: sum_optional_u64(steps.iter().map(|step| step.usage.input_tokens.total)),
+            no_cache: sum_optional_u64(steps.iter().map(|step| step.usage.input_tokens.no_cache)),
+            cache_read: sum_optional_u64(
+                steps.iter().map(|step| step.usage.input_tokens.cache_read),
+            ),
+            cache_write: sum_optional_u64(
+                steps.iter().map(|step| step.usage.input_tokens.cache_write),
+            ),
+        },
+        output_tokens: OutputTokenUsage {
+            total: sum_optional_u64(steps.iter().map(|step| step.usage.output_tokens.total)),
+            text: sum_optional_u64(steps.iter().map(|step| step.usage.output_tokens.text)),
+            reasoning: sum_optional_u64(
+                steps.iter().map(|step| step.usage.output_tokens.reasoning),
+            ),
+        },
+        raw: None,
+    }
+}
+
+fn sum_optional_u64(values: impl IntoIterator<Item = Option<u64>>) -> Option<u64> {
+    let mut total = 0_u64;
+    let mut saw_value = false;
+    for value in values.into_iter().flatten() {
+        saw_value = true;
+        total = total.saturating_add(value);
+    }
+    saw_value.then_some(total)
 }
 
 fn messages_before_current_tool_calls(messages: &[LanguageModelMessage]) -> WorkflowPrompt {
@@ -1224,11 +1278,11 @@ mod tests {
 
     use ai_sdk_provider::json::{JsonObject, JsonValue};
     use ai_sdk_provider::{
-        FinishReason, LanguageModelAssistantContentPart, LanguageModelAssistantMessage,
-        LanguageModelFinishReason, LanguageModelStreamFinish, LanguageModelStreamPart,
-        LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
-        LanguageModelToolCall, LanguageModelUsage, LanguageModelUserContentPart,
-        LanguageModelUserMessage, OutputTokenUsage, ProviderMetadata,
+        FinishReason, InputTokenUsage, LanguageModelAssistantContentPart,
+        LanguageModelAssistantMessage, LanguageModelFinishReason, LanguageModelStreamFinish,
+        LanguageModelStreamPart, LanguageModelTextDelta, LanguageModelTextEnd,
+        LanguageModelTextStart, LanguageModelToolCall, LanguageModelUsage,
+        LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage, ProviderMetadata,
     };
     use ai_sdk_provider_utils::{Schema, ToolExecutionError, ValidationResult};
     use serde_json::json;
@@ -1270,6 +1324,23 @@ mod tests {
             output_tokens: OutputTokenUsage {
                 total: Some(5),
                 text: Some(5),
+                reasoning: None,
+            },
+            raw: None,
+        }
+    }
+
+    fn usage_with_totals(input_tokens: u64, output_tokens: u64) -> LanguageModelUsage {
+        LanguageModelUsage {
+            input_tokens: InputTokenUsage {
+                total: Some(input_tokens),
+                no_cache: Some(input_tokens),
+                cache_read: None,
+                cache_write: None,
+            },
+            output_tokens: OutputTokenUsage {
+                total: Some(output_tokens),
+                text: Some(output_tokens),
                 reasoning: None,
             },
             raw: None,
@@ -1811,6 +1882,55 @@ mod tests {
             *calls.lock().expect("calls lock succeeds"),
             vec!["constructor".to_string(), "method".to_string()]
         );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_pass_finish_event_information() {
+        let finish_info = Arc::new(Mutex::new(None));
+        let finish_info_for_callback = Arc::clone(&finish_info);
+        let step = output_from_parts(
+            [
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1", "Hello, ",
+                )),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("text-1", "world!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("text-1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage_with_totals(3, 10),
+                    LanguageModelFinishReason {
+                        unified: FinishReason::Stop,
+                        raw: Some("stop".to_string()),
+                    },
+                )),
+            ],
+            0,
+        );
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let executor = ScriptedStreamTextStepExecutor::new([step]);
+
+        poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_on_finish(
+                WorkflowAgentOnFinishCallback::new(move |info| {
+                    *finish_info_for_callback
+                        .lock()
+                        .expect("finish info lock succeeds") = Some(info);
+                }),
+            ),
+        ))
+        .expect("agent stream succeeds");
+
+        let info = finish_info
+            .lock()
+            .expect("finish info lock succeeds")
+            .clone()
+            .expect("on_finish was called");
+        assert_eq!(info.text, "Hello, world!");
+        assert_eq!(info.finish_reason, FinishReason::Stop);
+        assert_eq!(info.raw_finish_reason.as_deref(), Some("stop"));
+        assert_eq!(info.steps.len(), 1);
+        assert_eq!(info.total_usage.input_tokens.total, Some(3));
+        assert_eq!(info.total_usage.output_tokens.total, Some(10));
     }
 
     #[test]
