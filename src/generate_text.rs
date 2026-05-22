@@ -700,13 +700,13 @@ impl LanguageModelCallPerformance {
             response_time_ms,
             effective_output_tokens_per_second: calculate_tokens_per_second(
                 usage.output_tokens.total,
-                response_time_ms,
+                Some(response_time_ms),
             ),
             output_tokens_per_second: None,
             input_tokens_per_second: None,
             effective_total_tokens_per_second: calculate_tokens_per_second(
                 sum_token_counts(usage.input_tokens.total, usage.output_tokens.total),
-                response_time_ms,
+                Some(response_time_ms),
             ),
             time_to_first_output_token_ms: None,
         }
@@ -4556,11 +4556,11 @@ impl GenerateTextStepPerformance {
         Self {
             effective_output_tokens_per_second: calculate_tokens_per_second(
                 usage.output_tokens.total,
-                response_time_ms,
+                Some(response_time_ms),
             ),
             effective_total_tokens_per_second: calculate_tokens_per_second(
                 sum_token_counts(usage.input_tokens.total, usage.output_tokens.total),
-                response_time_ms,
+                Some(response_time_ms),
             ),
             step_time_ms,
             response_time_ms,
@@ -7589,7 +7589,11 @@ fn duration_ms(duration: Duration) -> u64 {
     duration.as_millis().try_into().unwrap_or(u64::MAX)
 }
 
-fn calculate_tokens_per_second(tokens: Option<u64>, duration_ms: u64) -> f64 {
+fn calculate_tokens_per_second(tokens: Option<u64>, duration_ms: Option<u64>) -> f64 {
+    let Some(duration_ms) = duration_ms else {
+        return 0.0;
+    };
+
     if duration_ms == 0 {
         return 0.0;
     }
@@ -7673,9 +7677,10 @@ mod tests {
         ToolCallRepairOriginalError, ToolExecutionEndEvent, ToolExecutionStartEvent,
         ToolInputRefinementError, TypedToolCall, TypedToolError, TypedToolOutputDenied,
         TypedToolResult, UiMessageStreamError, UnsupportedModelVersionError,
-        collect_tool_approvals, experimental_filter_active_tools, filter_active_tools,
-        generate_text, has_tool_call, is_loop_finished, is_step_count, is_stop_condition_met,
-        normalize_tool_approval_status, prune_messages, resolve_tool_approval, step_count_is,
+        calculate_tokens_per_second, collect_tool_approvals, experimental_filter_active_tools,
+        filter_active_tools, generate_text, has_tool_call, is_loop_finished, is_step_count,
+        is_stop_condition_met, normalize_tool_approval_status, prune_messages,
+        resolve_tool_approval, step_count_is, sum_token_counts,
     };
     use crate::file_data::{FileData, FileDataContent};
     use crate::headers::Headers;
@@ -7933,6 +7938,48 @@ mod tests {
                 "responseTimeMs": 0
             })
         );
+    }
+
+    #[test]
+    fn calculate_tokens_per_second_should_calculate_average_output_tokens_per_second() {
+        assert_eq!(calculate_tokens_per_second(Some(10), Some(500)), 20.0);
+    }
+
+    #[test]
+    fn calculate_tokens_per_second_should_return_zero_when_output_token_count_is_unknown() {
+        assert_eq!(calculate_tokens_per_second(None, Some(500)), 0.0);
+    }
+
+    #[test]
+    fn calculate_tokens_per_second_should_return_zero_when_response_time_is_zero() {
+        assert_eq!(calculate_tokens_per_second(Some(10), Some(0)), 0.0);
+    }
+
+    #[test]
+    fn calculate_tokens_per_second_should_return_zero_when_response_time_is_zero_and_output_tokens_are_unknown()
+     {
+        assert_eq!(calculate_tokens_per_second(None, Some(0)), 0.0);
+    }
+
+    #[test]
+    fn calculate_tokens_per_second_should_return_zero_when_duration_is_unknown() {
+        assert_eq!(calculate_tokens_per_second(Some(10), None), 0.0);
+    }
+
+    #[test]
+    fn sum_token_counts_should_sum_known_token_counts() {
+        assert_eq!(sum_token_counts(Some(3), Some(10)), Some(13));
+    }
+
+    #[test]
+    fn sum_token_counts_should_treat_one_unknown_token_count_as_zero() {
+        assert_eq!(sum_token_counts(None, Some(10)), Some(10));
+        assert_eq!(sum_token_counts(Some(3), None), Some(3));
+    }
+
+    #[test]
+    fn sum_token_counts_should_return_unknown_when_both_token_counts_are_unknown() {
+        assert_eq!(sum_token_counts(None, None), None);
     }
 
     #[test]
