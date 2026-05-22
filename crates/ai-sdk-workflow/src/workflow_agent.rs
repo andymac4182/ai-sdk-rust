@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Instant;
 
 use ai_sdk_provider::json::JsonValue;
 use ai_sdk_provider::{
@@ -46,6 +47,12 @@ pub struct WorkflowAgentOptions {
     /// Default step-finish callback.
     pub on_step_finish: Option<WorkflowAgentOnStepFinishCallback>,
 
+    /// Default tool-execution start callback.
+    pub on_tool_execution_start: Option<WorkflowAgentOnToolExecutionStartCallback>,
+
+    /// Default tool-execution end callback.
+    pub on_tool_execution_end: Option<WorkflowAgentOnToolExecutionEndCallback>,
+
     /// Default finish callback.
     pub on_finish: Option<WorkflowAgentOnFinishCallback>,
 }
@@ -62,6 +69,8 @@ impl WorkflowAgentOptions {
             tool_choice: None,
             prepare_step: None,
             on_step_finish: None,
+            on_tool_execution_start: None,
+            on_tool_execution_end: None,
             on_finish: None,
         }
     }
@@ -121,6 +130,24 @@ impl WorkflowAgentOptions {
         self
     }
 
+    /// Sets a constructor-level tool-execution start callback.
+    pub fn with_on_tool_execution_start(
+        mut self,
+        on_tool_execution_start: WorkflowAgentOnToolExecutionStartCallback,
+    ) -> Self {
+        self.on_tool_execution_start = Some(on_tool_execution_start);
+        self
+    }
+
+    /// Sets a constructor-level tool-execution end callback.
+    pub fn with_on_tool_execution_end(
+        mut self,
+        on_tool_execution_end: WorkflowAgentOnToolExecutionEndCallback,
+    ) -> Self {
+        self.on_tool_execution_end = Some(on_tool_execution_end);
+        self
+    }
+
     /// Sets a constructor-level finish callback.
     pub fn with_on_finish(mut self, on_finish: WorkflowAgentOnFinishCallback) -> Self {
         self.on_finish = Some(on_finish);
@@ -139,6 +166,8 @@ pub struct WorkflowAgent {
     tool_choice: Option<JsonValue>,
     prepare_step: Option<WorkflowPrepareStepCallback>,
     on_step_finish: Option<WorkflowAgentOnStepFinishCallback>,
+    on_tool_execution_start: Option<WorkflowAgentOnToolExecutionStartCallback>,
+    on_tool_execution_end: Option<WorkflowAgentOnToolExecutionEndCallback>,
     on_finish: Option<WorkflowAgentOnFinishCallback>,
 }
 
@@ -154,6 +183,8 @@ impl WorkflowAgent {
             tool_choice: options.tool_choice,
             prepare_step: options.prepare_step,
             on_step_finish: options.on_step_finish,
+            on_tool_execution_start: options.on_tool_execution_start,
+            on_tool_execution_end: options.on_tool_execution_end,
             on_finish: options.on_finish,
         }
     }
@@ -192,6 +223,10 @@ impl WorkflowAgent {
         let prepare_step = options.prepare_step.or_else(|| self.prepare_step.clone());
         let constructor_on_step_finish = self.on_step_finish.clone();
         let stream_on_step_finish = options.on_step_finish;
+        let constructor_on_tool_execution_start = self.on_tool_execution_start.clone();
+        let stream_on_tool_execution_start = options.on_tool_execution_start;
+        let constructor_on_tool_execution_end = self.on_tool_execution_end.clone();
+        let stream_on_tool_execution_end = options.on_tool_execution_end;
         let constructor_on_finish = self.on_finish.clone();
         let stream_on_finish = options.on_finish;
 
@@ -244,7 +279,15 @@ impl WorkflowAgent {
                 continue;
             }
 
-            let execution = self.execute_tool_calls(&yield_value).await?;
+            let execution = self
+                .execute_tool_calls(
+                    &yield_value,
+                    &constructor_on_tool_execution_start,
+                    &stream_on_tool_execution_start,
+                    &constructor_on_tool_execution_end,
+                    &stream_on_tool_execution_end,
+                )
+                .await?;
             missing_provider_executed_tool_results
                 .extend(execution.missing_provider_executed_tool_results);
 
@@ -287,6 +330,10 @@ impl WorkflowAgent {
     async fn execute_tool_calls(
         &self,
         yield_value: &crate::StreamTextIteratorYieldValue,
+        constructor_on_tool_execution_start: &Option<WorkflowAgentOnToolExecutionStartCallback>,
+        stream_on_tool_execution_start: &Option<WorkflowAgentOnToolExecutionStartCallback>,
+        constructor_on_tool_execution_end: &Option<WorkflowAgentOnToolExecutionEndCallback>,
+        stream_on_tool_execution_end: &Option<WorkflowAgentOnToolExecutionEndCallback>,
     ) -> Result<WorkflowAgentToolExecution, WorkflowAgentError> {
         let mut execution = WorkflowAgentToolExecution::default();
 
@@ -327,14 +374,44 @@ impl WorkflowAgent {
                 continue;
             }
 
+            let context = validated_tool_context(tool, tool_call, &yield_value.tools_context)?;
+            let event_messages = messages_before_current_tool_calls(&yield_value.messages);
+            let start_info = WorkflowAgentToolExecutionStartInfo {
+                tool_call: tool_call.clone(),
+                messages: event_messages.clone(),
+                tool_context: context.clone(),
+            };
+            call_tool_execution_start_callbacks(
+                constructor_on_tool_execution_start,
+                stream_on_tool_execution_start,
+                &start_info,
+            );
+
+            let started_at = Instant::now();
             let tool_result = execute_local_tool(
                 tool,
                 tool_call,
                 yield_value.messages.clone(),
-                &yield_value.tools_context,
+                context.clone(),
             )
             .await?;
-            execution.tool_results.push(tool_result);
+            let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let end_info = WorkflowAgentToolExecutionEndInfo {
+                tool_call: tool_call.clone(),
+                messages: event_messages,
+                tool_context: context,
+                duration_ms,
+                success: tool_result.success,
+                output: tool_result.output.clone(),
+                error: tool_result.error.clone(),
+            };
+            call_tool_execution_end_callbacks(
+                constructor_on_tool_execution_end,
+                stream_on_tool_execution_end,
+                &end_info,
+            );
+
+            execution.tool_results.push(tool_result.tool_result);
         }
 
         Ok(execution)
@@ -371,6 +448,12 @@ pub struct WorkflowAgentStreamOptions<E> {
     /// Stream-level step-finish callback that runs after any constructor callback.
     pub on_step_finish: Option<WorkflowAgentOnStepFinishCallback>,
 
+    /// Stream-level tool-execution start callback that runs after constructor callbacks.
+    pub on_tool_execution_start: Option<WorkflowAgentOnToolExecutionStartCallback>,
+
+    /// Stream-level tool-execution end callback that runs after constructor callbacks.
+    pub on_tool_execution_end: Option<WorkflowAgentOnToolExecutionEndCallback>,
+
     /// Stream-level finish callback that runs after any constructor callback.
     pub on_finish: Option<WorkflowAgentOnFinishCallback>,
 }
@@ -388,6 +471,8 @@ impl<E> WorkflowAgentStreamOptions<E> {
             tool_choice: None,
             prepare_step: None,
             on_step_finish: None,
+            on_tool_execution_start: None,
+            on_tool_execution_end: None,
             on_finish: None,
         }
     }
@@ -440,6 +525,24 @@ impl<E> WorkflowAgentStreamOptions<E> {
         self
     }
 
+    /// Sets a stream-level tool-execution start callback.
+    pub fn with_on_tool_execution_start(
+        mut self,
+        on_tool_execution_start: WorkflowAgentOnToolExecutionStartCallback,
+    ) -> Self {
+        self.on_tool_execution_start = Some(on_tool_execution_start);
+        self
+    }
+
+    /// Sets a stream-level tool-execution end callback.
+    pub fn with_on_tool_execution_end(
+        mut self,
+        on_tool_execution_end: WorkflowAgentOnToolExecutionEndCallback,
+    ) -> Self {
+        self.on_tool_execution_end = Some(on_tool_execution_end);
+        self
+    }
+
     /// Sets a stream-level finish callback.
     pub fn with_on_finish(mut self, on_finish: WorkflowAgentOnFinishCallback) -> Self {
         self.on_finish = Some(on_finish);
@@ -475,6 +578,110 @@ impl fmt::Debug for WorkflowAgentOnStepFinishCallback {
             .debug_struct("WorkflowAgentOnStepFinishCallback")
             .finish_non_exhaustive()
     }
+}
+
+/// Callback invoked before a local workflow tool executor runs.
+#[derive(Clone)]
+pub struct WorkflowAgentOnToolExecutionStartCallback {
+    callback: Arc<dyn Fn(WorkflowAgentToolExecutionStartInfo) + Send + Sync + 'static>,
+}
+
+impl WorkflowAgentOnToolExecutionStartCallback {
+    /// Creates a tool-execution start callback from a synchronous Rust function.
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(WorkflowAgentToolExecutionStartInfo) + Send + Sync + 'static,
+    {
+        Self {
+            callback: Arc::new(callback),
+        }
+    }
+
+    fn call(&self, info: WorkflowAgentToolExecutionStartInfo) {
+        (self.callback)(info);
+    }
+}
+
+impl fmt::Debug for WorkflowAgentOnToolExecutionStartCallback {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkflowAgentOnToolExecutionStartCallback")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Callback invoked after a local workflow tool executor completes.
+#[derive(Clone)]
+pub struct WorkflowAgentOnToolExecutionEndCallback {
+    callback: Arc<dyn Fn(WorkflowAgentToolExecutionEndInfo) + Send + Sync + 'static>,
+}
+
+impl WorkflowAgentOnToolExecutionEndCallback {
+    /// Creates a tool-execution end callback from a synchronous Rust function.
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(WorkflowAgentToolExecutionEndInfo) + Send + Sync + 'static,
+    {
+        Self {
+            callback: Arc::new(callback),
+        }
+    }
+
+    fn call(&self, info: WorkflowAgentToolExecutionEndInfo) {
+        (self.callback)(info);
+    }
+}
+
+impl fmt::Debug for WorkflowAgentOnToolExecutionEndCallback {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkflowAgentOnToolExecutionEndCallback")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Information passed before a workflow tool is executed locally.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowAgentToolExecutionStartInfo {
+    /// Tool call about to be executed.
+    pub tool_call: ParsedToolCall,
+
+    /// Prompt messages that produced the tool call.
+    pub messages: WorkflowPrompt,
+
+    /// Tool-specific context supplied for this call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_context: Option<JsonValue>,
+}
+
+/// Information passed after a workflow tool is executed locally.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowAgentToolExecutionEndInfo {
+    /// Tool call that was executed.
+    pub tool_call: ParsedToolCall,
+
+    /// Prompt messages that produced the tool call.
+    pub messages: WorkflowPrompt,
+
+    /// Tool-specific context supplied for this call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_context: Option<JsonValue>,
+
+    /// Execution time in milliseconds.
+    pub duration_ms: u64,
+
+    /// Whether the tool executor completed successfully.
+    pub success: bool,
+
+    /// Raw tool output for successful executions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<JsonValue>,
+
+    /// Error message for failed executions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Callback invoked when [`WorkflowAgent::stream`] finishes successfully.
@@ -622,6 +829,39 @@ fn call_step_finish_callbacks(
     }
 }
 
+fn call_tool_execution_start_callbacks(
+    constructor_on_tool_execution_start: &Option<WorkflowAgentOnToolExecutionStartCallback>,
+    stream_on_tool_execution_start: &Option<WorkflowAgentOnToolExecutionStartCallback>,
+    info: &WorkflowAgentToolExecutionStartInfo,
+) {
+    if let Some(on_tool_execution_start) = constructor_on_tool_execution_start {
+        on_tool_execution_start.call(info.clone());
+    }
+    if let Some(on_tool_execution_start) = stream_on_tool_execution_start {
+        on_tool_execution_start.call(info.clone());
+    }
+}
+
+fn call_tool_execution_end_callbacks(
+    constructor_on_tool_execution_end: &Option<WorkflowAgentOnToolExecutionEndCallback>,
+    stream_on_tool_execution_end: &Option<WorkflowAgentOnToolExecutionEndCallback>,
+    info: &WorkflowAgentToolExecutionEndInfo,
+) {
+    if let Some(on_tool_execution_end) = constructor_on_tool_execution_end {
+        on_tool_execution_end.call(info.clone());
+    }
+    if let Some(on_tool_execution_end) = stream_on_tool_execution_end {
+        on_tool_execution_end.call(info.clone());
+    }
+}
+
+fn messages_before_current_tool_calls(messages: &[LanguageModelMessage]) -> WorkflowPrompt {
+    match messages.last() {
+        Some(LanguageModelMessage::Assistant(_)) => messages[..messages.len() - 1].to_vec(),
+        _ => messages.to_vec(),
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct WorkflowAgentToolExecution {
     tool_results: Vec<LanguageModelToolResultPart>,
@@ -629,39 +869,62 @@ struct WorkflowAgentToolExecution {
     missing_provider_executed_tool_results: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct WorkflowAgentLocalToolResult {
+    tool_result: LanguageModelToolResultPart,
+    success: bool,
+    output: Option<JsonValue>,
+    error: Option<String>,
+}
+
 async fn execute_local_tool(
     tool: &Tool,
     tool_call: &ParsedToolCall,
     messages: WorkflowPrompt,
-    tools_context: &WorkflowToolsContext,
-) -> Result<LanguageModelToolResultPart, WorkflowAgentError> {
-    let context = validated_tool_context(tool, tool_call, tools_context)?;
+    context: Option<JsonValue>,
+) -> Result<WorkflowAgentLocalToolResult, WorkflowAgentError> {
     let mut options = ToolExecutionOptions::new(tool_call.tool_call_id.clone(), messages);
-    if let Some(context) = context {
+    if let Some(context) = context.clone() {
         options = options.with_context(context);
     }
 
-    let output = match execute_tool(tool, tool_call.input.clone(), options.clone()).await {
-        Ok(outputs) => {
-            let raw_output = final_tool_output(outputs).unwrap_or(JsonValue::Null);
-            if let Some(model_output) = tool.model_output(ToolModelOutputOptions::new(
-                tool_call.tool_call_id.clone(),
-                tool_call.input.clone(),
-                raw_output.clone(),
-            )) {
-                model_output.await
-            } else {
-                json_value_to_tool_result_output(raw_output)
+    let (output, success, raw_output, error) =
+        match execute_tool(tool, tool_call.input.clone(), options.clone()).await {
+            Ok(outputs) => {
+                let raw_output = final_tool_output(outputs).unwrap_or(JsonValue::Null);
+                let output = if let Some(model_output) =
+                    tool.model_output(ToolModelOutputOptions::new(
+                        tool_call.tool_call_id.clone(),
+                        tool_call.input.clone(),
+                        raw_output.clone(),
+                    )) {
+                    model_output.await
+                } else {
+                    json_value_to_tool_result_output(raw_output.clone())
+                };
+                (output, true, Some(raw_output), None)
             }
-        }
-        Err(error) => LanguageModelToolResultOutput::error_text(error.into_message()),
-    };
+            Err(error) => {
+                let message = error.into_message();
+                (
+                    LanguageModelToolResultOutput::error_text(message.clone()),
+                    false,
+                    None,
+                    Some(message),
+                )
+            }
+        };
 
-    Ok(LanguageModelToolResultPart::new(
-        tool_call.tool_call_id.clone(),
-        tool_call.tool_name.clone(),
-        output,
-    ))
+    Ok(WorkflowAgentLocalToolResult {
+        tool_result: LanguageModelToolResultPart::new(
+            tool_call.tool_call_id.clone(),
+            tool_call.tool_name.clone(),
+            output,
+        ),
+        success,
+        output: raw_output,
+        error,
+    })
 }
 
 fn validated_tool_context(
@@ -745,7 +1008,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
 
-    use ai_sdk_provider::json::JsonObject;
+    use ai_sdk_provider::json::{JsonObject, JsonValue};
     use ai_sdk_provider::{
         FinishReason, LanguageModelAssistantContentPart, LanguageModelAssistantMessage,
         LanguageModelFinishReason, LanguageModelStreamFinish, LanguageModelStreamPart,
@@ -834,6 +1097,15 @@ mod tests {
 
     fn stop_step() -> DoStreamStepOutput {
         output_from_parts([finish(FinishReason::Stop)], 1)
+    }
+
+    fn executable_test_tool() -> Tool {
+        Tool::new("testTool", object_schema())
+            .with_execute(|_, _| async { Ok(json!("hello-result")) })
+    }
+
+    fn executable_tool_call_step(input: &str) -> DoStreamStepOutput {
+        tool_call_step(LanguageModelToolCall::new("call-1", "testTool", input))
     }
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -1467,6 +1739,285 @@ mod tests {
             captured_step.provider_metadata.as_ref(),
             Some(&provider_metadata)
         );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_call_on_tool_execution_start_from_constructor() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_constructor = Arc::clone(&calls);
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model())
+                .with_tool(executable_test_tool())
+                .with_on_tool_execution_start(WorkflowAgentOnToolExecutionStartCallback::new(
+                    move |_| {
+                        calls_for_constructor
+                            .lock()
+                            .expect("calls lock succeeds")
+                            .push("constructor".to_string());
+                    },
+                )),
+        );
+        let executor = ScriptedStreamTextStepExecutor::new([
+            executable_tool_call_step(r#"{"value":"test"}"#),
+            stop_step(),
+        ]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+            .expect("agent stream succeeds");
+
+        assert_eq!(
+            *calls.lock().expect("calls lock succeeds"),
+            vec!["constructor".to_string()]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_call_on_tool_execution_start_from_stream_method() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_method = Arc::clone(&calls);
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model()).with_tool(executable_test_tool()),
+        );
+        let executor = ScriptedStreamTextStepExecutor::new([
+            executable_tool_call_step(r#"{"value":"test"}"#),
+            stop_step(),
+        ]);
+
+        poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_on_tool_execution_start(
+                WorkflowAgentOnToolExecutionStartCallback::new(move |_| {
+                    calls_for_method
+                        .lock()
+                        .expect("calls lock succeeds")
+                        .push("method".to_string());
+                }),
+            ),
+        ))
+        .expect("agent stream succeeds");
+
+        assert_eq!(
+            *calls.lock().expect("calls lock succeeds"),
+            vec!["method".to_string()]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_call_both_constructor_and_method_on_tool_execution_start_in_correct_order()
+     {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_constructor = Arc::clone(&calls);
+        let calls_for_method = Arc::clone(&calls);
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model())
+                .with_tool(executable_test_tool())
+                .with_on_tool_execution_start(WorkflowAgentOnToolExecutionStartCallback::new(
+                    move |_| {
+                        calls_for_constructor
+                            .lock()
+                            .expect("calls lock succeeds")
+                            .push("constructor".to_string());
+                    },
+                )),
+        );
+        let executor = ScriptedStreamTextStepExecutor::new([
+            executable_tool_call_step(r#"{"value":"test"}"#),
+            stop_step(),
+        ]);
+
+        poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_on_tool_execution_start(
+                WorkflowAgentOnToolExecutionStartCallback::new(move |_| {
+                    calls_for_method
+                        .lock()
+                        .expect("calls lock succeeds")
+                        .push("method".to_string());
+                }),
+            ),
+        ))
+        .expect("agent stream succeeds");
+
+        assert_eq!(
+            *calls.lock().expect("calls lock succeeds"),
+            vec!["constructor".to_string(), "method".to_string()]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_pass_tool_execution_start_event_information() {
+        let captured_event = Arc::new(Mutex::new(None));
+        let captured_event_for_callback = Arc::clone(&captured_event);
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model()).with_tool(executable_test_tool()),
+        );
+        let executor = ScriptedStreamTextStepExecutor::new([
+            executable_tool_call_step(r#"{"value":"test"}"#),
+            stop_step(),
+        ]);
+
+        poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_on_tool_execution_start(
+                WorkflowAgentOnToolExecutionStartCallback::new(move |info| {
+                    *captured_event_for_callback
+                        .lock()
+                        .expect("captured event lock succeeds") = Some(info);
+                }),
+            ),
+        ))
+        .expect("agent stream succeeds");
+
+        let event = captured_event
+            .lock()
+            .expect("captured event lock succeeds")
+            .clone()
+            .expect("event was captured");
+        assert_eq!(event.tool_call.tool_name, "testTool");
+        assert_eq!(event.tool_call.tool_call_id, "call-1");
+        assert_eq!(event.tool_call.input, json!({ "value": "test" }));
+        assert_eq!(event.messages.len(), 1);
+        assert_eq!(event.tool_context, None);
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_call_on_tool_execution_end_from_constructor() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_constructor = Arc::clone(&calls);
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model())
+                .with_tool(executable_test_tool())
+                .with_on_tool_execution_end(WorkflowAgentOnToolExecutionEndCallback::new(
+                    move |_| {
+                        calls_for_constructor
+                            .lock()
+                            .expect("calls lock succeeds")
+                            .push("constructor".to_string());
+                    },
+                )),
+        );
+        let executor = ScriptedStreamTextStepExecutor::new([
+            executable_tool_call_step(r#"{"value":"test"}"#),
+            stop_step(),
+        ]);
+
+        poll_ready(agent.stream(WorkflowAgentStreamOptions::new(user_prompt(), executor)))
+            .expect("agent stream succeeds");
+
+        assert_eq!(
+            *calls.lock().expect("calls lock succeeds"),
+            vec!["constructor".to_string()]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_call_on_tool_execution_end_from_stream_method() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_method = Arc::clone(&calls);
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model()).with_tool(executable_test_tool()),
+        );
+        let executor = ScriptedStreamTextStepExecutor::new([
+            executable_tool_call_step(r#"{"value":"test"}"#),
+            stop_step(),
+        ]);
+
+        poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_on_tool_execution_end(
+                WorkflowAgentOnToolExecutionEndCallback::new(move |_| {
+                    calls_for_method
+                        .lock()
+                        .expect("calls lock succeeds")
+                        .push("method".to_string());
+                }),
+            ),
+        ))
+        .expect("agent stream succeeds");
+
+        assert_eq!(
+            *calls.lock().expect("calls lock succeeds"),
+            vec!["method".to_string()]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_call_both_constructor_and_method_on_tool_execution_end_in_correct_order()
+     {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_constructor = Arc::clone(&calls);
+        let calls_for_method = Arc::clone(&calls);
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model())
+                .with_tool(executable_test_tool())
+                .with_on_tool_execution_end(WorkflowAgentOnToolExecutionEndCallback::new(
+                    move |_| {
+                        calls_for_constructor
+                            .lock()
+                            .expect("calls lock succeeds")
+                            .push("constructor".to_string());
+                    },
+                )),
+        );
+        let executor = ScriptedStreamTextStepExecutor::new([
+            executable_tool_call_step(r#"{"value":"test"}"#),
+            stop_step(),
+        ]);
+
+        poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_on_tool_execution_end(
+                WorkflowAgentOnToolExecutionEndCallback::new(move |_| {
+                    calls_for_method
+                        .lock()
+                        .expect("calls lock succeeds")
+                        .push("method".to_string());
+                }),
+            ),
+        ))
+        .expect("agent stream succeeds");
+
+        assert_eq!(
+            *calls.lock().expect("calls lock succeeds"),
+            vec!["constructor".to_string(), "method".to_string()]
+        );
+    }
+
+    #[test]
+    fn workflow_agent_compat_should_pass_tool_execution_end_event_information_on_success() {
+        let captured_event = Arc::new(Mutex::new(None));
+        let captured_event_for_callback = Arc::clone(&captured_event);
+        let agent = WorkflowAgent::new(
+            WorkflowAgentOptions::new(model()).with_tool(executable_test_tool()),
+        );
+        let executor = ScriptedStreamTextStepExecutor::new([
+            executable_tool_call_step(r#"{"value":"hello"}"#),
+            stop_step(),
+        ]);
+
+        poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_on_tool_execution_end(
+                WorkflowAgentOnToolExecutionEndCallback::new(move |info| {
+                    *captured_event_for_callback
+                        .lock()
+                        .expect("captured event lock succeeds") = Some(info);
+                }),
+            ),
+        ))
+        .expect("agent stream succeeds");
+
+        let event = captured_event
+            .lock()
+            .expect("captured event lock succeeds")
+            .clone()
+            .expect("event was captured");
+        assert_eq!(event.tool_call.tool_name, "testTool");
+        assert_eq!(event.tool_call.tool_call_id, "call-1");
+        assert_eq!(event.tool_call.input, json!({ "value": "hello" }));
+        assert!(event.success);
+        assert_eq!(
+            event.output,
+            Some(JsonValue::String("hello-result".to_string()))
+        );
+        assert_eq!(event.error, None);
+        assert_eq!(event.messages.len(), 1);
+        assert_eq!(event.tool_context, None);
+        assert!(event.duration_ms < 60_000);
     }
 
     #[test]
