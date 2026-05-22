@@ -1077,6 +1077,13 @@ focused tests for each portable behavior before changing rows to `verified`.
   parse-failure, and empty-text failures. The JS rejection assertions map to
   Rust's explicit `object: None`, retained error state, response metadata,
   usage, and finish reason.
+- 2026-05-22: `streamObject` provider-error stream parity added
+  `stream_object_partial_object_stream_suppresses_provider_errors` in
+  `src/stream_object.rs`, mapping the upstream `partialObjectStream` case where
+  model errors are suppressed from partial object deltas while still surfacing
+  through `onError` and the final error result. Rust models the upstream thrown
+  `doStream` error as a provider `Error` stream part because the Rust provider
+  trait returns a stream result instead of throwing a promise.
 - 2026-05-21: `streamObject` array output parity added
   `stream_object_array_three_elements_streams_complete_objects_in_partial_object_stream`,
   `stream_object_array_three_elements_streams_complete_objects_in_text_stream`,
@@ -2578,6 +2585,9 @@ focused tests for each portable behavior before changing rows to `verified`.
    array output. The upstream `callback ordering` call-id correlation case now
    has the named Rust counterpart
    `stream_object_callbacks_correlate_all_events_with_same_call_id`.
+   The upstream `partialObjectStream` provider-error suppression case now has
+   the named Rust counterpart
+   `stream_object_partial_object_stream_suppresses_provider_errors`.
 9. Continue native Gateway provider test parity from upstream
    `gateway-provider.test.ts` and any remaining Gateway provider package tests
    before returning to unrelated providers. The portable
