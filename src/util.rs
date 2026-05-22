@@ -792,6 +792,82 @@ mod tests {
     }
 
     #[test]
+    fn is_deep_equal_data_should_check_if_two_primitives_are_equal() {
+        assert!(is_deep_equal_data(&json!(1), &json!(1)));
+        assert!(!is_deep_equal_data(&json!(1), &json!(2)));
+    }
+
+    #[test]
+    fn is_deep_equal_data_should_return_false_for_different_types() {
+        assert!(!is_deep_equal_data(&json!({ "a": 1 }), &json!(1)));
+    }
+
+    #[test]
+    fn is_deep_equal_data_should_return_false_for_null_values_compared_with_objects() {
+        assert!(!is_deep_equal_data(&json!({ "a": 1 }), &json!(null)));
+    }
+
+    #[test]
+    fn is_deep_equal_data_should_identify_two_equal_objects() {
+        assert!(is_deep_equal_data(
+            &json!({ "a": 1, "b": 2 }),
+            &json!({ "a": 1, "b": 2 })
+        ));
+    }
+
+    #[test]
+    fn is_deep_equal_data_should_identify_two_objects_with_different_values() {
+        assert!(!is_deep_equal_data(
+            &json!({ "a": 1, "b": 2 }),
+            &json!({ "a": 1, "b": 3 })
+        ));
+    }
+
+    #[test]
+    fn is_deep_equal_data_should_identify_two_objects_with_different_number_of_keys() {
+        assert!(!is_deep_equal_data(
+            &json!({ "a": 1, "b": 2 }),
+            &json!({ "a": 1, "b": 2, "c": 3 })
+        ));
+    }
+
+    #[test]
+    fn is_deep_equal_data_should_handle_nested_objects() {
+        assert!(is_deep_equal_data(
+            &json!({ "a": { "c": 1 }, "b": 2 }),
+            &json!({ "a": { "c": 1 }, "b": 2 })
+        ));
+    }
+
+    #[test]
+    fn is_deep_equal_data_should_detect_inequality_in_nested_objects() {
+        assert!(!is_deep_equal_data(
+            &json!({ "a": { "c": 1 }, "b": 2 }),
+            &json!({ "a": { "c": 2 }, "b": 2 })
+        ));
+    }
+
+    #[test]
+    fn is_deep_equal_data_should_compare_arrays_correctly() {
+        assert!(is_deep_equal_data(&json!([1, 2, 3]), &json!([1, 2, 3])));
+        assert!(!is_deep_equal_data(&json!([1, 2, 3]), &json!([1, 2, 4])));
+    }
+
+    #[test]
+    fn is_deep_equal_data_should_return_false_for_null_comparison_with_object() {
+        assert!(!is_deep_equal_data(&json!({ "a": 1 }), &json!(null)));
+    }
+
+    #[test]
+    fn is_deep_equal_data_should_distinguish_between_array_and_object_with_same_enumerable_properties()
+     {
+        assert!(!is_deep_equal_data(
+            &json!({ "0": "one", "1": "two", "length": 2 }),
+            &json!(["one", "two"])
+        ));
+    }
+
+    #[test]
     fn prepare_headers_should_set_content_type_header_if_not_present() {
         let headers = prepare_headers(Some(Headers::new()), content_type_default_headers());
 
