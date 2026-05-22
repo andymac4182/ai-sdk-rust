@@ -940,6 +940,158 @@ mod tests {
     }
 
     #[test]
+    fn merge_objects_should_merge_two_flat_objects() {
+        let target = json!({ "a": 1, "b": 2 });
+        let source = json!({ "b": 3, "c": 4 });
+
+        assert_eq!(
+            merge_objects(Some(&target), Some(&source)),
+            Some(json!({ "a": 1, "b": 3, "c": 4 }))
+        );
+        assert_eq!(target, json!({ "a": 1, "b": 2 }));
+        assert_eq!(source, json!({ "b": 3, "c": 4 }));
+    }
+
+    #[test]
+    fn merge_objects_should_deeply_merge_nested_objects() {
+        let target = json!({ "a": 1, "b": { "c": 2, "d": 3 } });
+        let source = json!({ "b": { "c": 4, "e": 5 } });
+
+        assert_eq!(
+            merge_objects(Some(&target), Some(&source)),
+            Some(json!({ "a": 1, "b": { "c": 4, "d": 3, "e": 5 } }))
+        );
+    }
+
+    #[test]
+    fn merge_objects_should_replace_arrays_instead_of_merging_them() {
+        let target = json!({ "a": [1, 2, 3], "b": 2 });
+        let source = json!({ "a": [4, 5] });
+
+        assert_eq!(
+            merge_objects(Some(&target), Some(&source)),
+            Some(json!({ "a": [4, 5], "b": 2 }))
+        );
+    }
+
+    #[test]
+    fn merge_objects_should_handle_null_values() {
+        let target = json!({ "a": 1, "b": null });
+        let source = json!({ "a": null, "b": 2 });
+
+        assert_eq!(
+            merge_objects(Some(&target), Some(&source)),
+            Some(json!({ "a": null, "b": 2 }))
+        );
+    }
+
+    #[test]
+    fn merge_objects_should_handle_complex_nested_structures() {
+        let target = json!({
+            "a": 1,
+            "b": {
+                "c": [1, 2, 3],
+                "d": {
+                    "e": 4,
+                    "f": 5
+                }
+            }
+        });
+        let source = json!({
+            "b": {
+                "c": [4, 5],
+                "d": {
+                    "f": 6,
+                    "g": 7
+                }
+            },
+            "h": 8
+        });
+
+        assert_eq!(
+            merge_objects(Some(&target), Some(&source)),
+            Some(json!({
+                "a": 1,
+                "b": {
+                    "c": [4, 5],
+                    "d": {
+                        "e": 4,
+                        "f": 6,
+                        "g": 7
+                    }
+                },
+                "h": 8
+            }))
+        );
+    }
+
+    #[test]
+    fn merge_objects_should_handle_empty_objects() {
+        let empty = json!({});
+        let object = json!({ "a": 1 });
+
+        assert_eq!(
+            merge_objects(Some(&empty), Some(&object)),
+            Some(json!({ "a": 1 }))
+        );
+        assert_eq!(
+            merge_objects(Some(&object), Some(&empty)),
+            Some(json!({ "a": 1 }))
+        );
+    }
+
+    #[test]
+    fn merge_objects_should_handle_undefined_inputs() {
+        let target = json!({ "a": 1 });
+        let source = json!({ "b": 2 });
+
+        assert_eq!(merge_objects(None, None), None);
+        assert_eq!(merge_objects(Some(&target), None), Some(json!({ "a": 1 })));
+        assert_eq!(merge_objects(None, Some(&source)), Some(json!({ "b": 2 })));
+    }
+
+    #[test]
+    fn merge_objects_should_not_pollute_object_prototype_via_proto() {
+        let malicious = json!({ "__proto__": { "polluted": true } });
+
+        assert_eq!(
+            merge_objects(Some(&json!({})), Some(&malicious)),
+            Some(json!({}))
+        );
+    }
+
+    #[test]
+    fn merge_objects_should_ignore_proto_constructor_and_prototype_keys() {
+        let malicious = json!({
+            "__proto__": { "a": 1 },
+            "constructor": { "prototype": { "b": 2 } },
+            "prototype": { "c": 3 },
+            "safe": "value"
+        });
+
+        assert_eq!(
+            merge_objects(Some(&json!({ "existing": "ok" })), Some(&malicious)),
+            Some(json!({ "existing": "ok", "safe": "value" }))
+        );
+    }
+
+    #[test]
+    fn merge_objects_should_ignore_dangerous_keys_nested_in_mergeable_objects() {
+        let base = json!({ "metadata": { "user": "alice" } });
+        let malicious = json!({
+            "metadata": {
+                "__proto__": { "polluted": true },
+                "role": "admin"
+            }
+        });
+
+        assert_eq!(
+            merge_objects(Some(&base), Some(&malicious)),
+            Some(json!({ "metadata": { "user": "alice", "role": "admin" } }))
+        );
+    }
+
+    #[test]
     fn merge_objects_deeply_merges_json_objects() {
         let base = json!({
             "a": 1,

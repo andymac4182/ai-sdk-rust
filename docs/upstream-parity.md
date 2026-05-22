@@ -576,7 +576,7 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 | Upstream area | Test files scanned | Status | Notes |
 | --- | ---: | --- | --- |
-| `packages/ai` | 128 | in-progress | Many non-streaming high-level API tests are represented in Rust, including non-language high-level abort-signal forwarding for embedding, image, speech, video, transcription, reranking calls, and named token-rate/token-count/header/deep-equal utility counterparts; initial ToolLoopAgent wrapper and callback-merging coverage exists, while stream, UI, remaining agent call-options schema/type-level parity, compatibility, and broader edge coverage remain. |
+| `packages/ai` | 128 | in-progress | Many non-streaming high-level API tests are represented in Rust, including non-language high-level abort-signal forwarding for embedding, image, speech, video, transcription, reranking calls, and named token-rate/token-count/header/deep-equal/merge-object utility counterparts; initial ToolLoopAgent wrapper and callback-merging coverage exists, while stream, UI, remaining agent call-options schema/type-level parity, compatibility, and broader edge coverage remain. |
 | Provider package tests | 228 | in-progress | Gateway, Vercel AI Gateway OpenAI-compatible, Vercel v0, OpenAI-compatible non-language abort request forwarding, OpenAI foundation, Open Responses foundation, DeepInfra foundation, TogetherAI, Hugging Face, Cerebras, Baseten, Voyage, Luma, RevAI, AssemblyAI, Azure, ByteDance, Mistral, Black Forest Labs, Hume, and Deepgram provider tests now exist. Concrete provider package test files remain largely unported across OpenAI's broader Responses streaming/tools/files/speech/transcription surfaces, Hugging Face SSE/tool parity, Anthropic, Google, Bedrock, xAI, and the remaining provider packages. |
 | `packages/provider` | 1 | in-progress | Upstream `get-error-message.test.ts` now has a one-to-one Rust test split for every portable original case, including null/undefined, strings, named/custom errors, custom `toString`, and JSON-like values. The package row remains in progress while v2/v3 compatibility surfaces and exact stream abstractions remain unported. |
 | `packages/provider-utils` | 77 | in-progress | Many provider support behaviors are represented in the matching `ai-sdk-provider-utils` crate, including one-to-one `filterNullable`, `removeUndefinedEntries`, complete portable `validateTypes`/`safeValidateTypes`, complete portable `secureJsonParse`, complete portable `parseJSON`/`safeParseJSON`/`isParsableJson`, complete portable `injectJsonInstruction`, exact `mediaTypeToExtension` table rows, complete portable `normalizeHeaders` cases, complete portable `mapReasoningToProvider*` cases, complete portable `resolve` cases, complete portable `createToolNameMapping` cases, complete portable `withUserAgentSuffix`, `getRuntimeEnvironmentUserAgent`, `isUrlSupported`, `validateDownloadUrl`, `downloadBlob`/`DownloadError`, `getFromApi`, `delay`, `executeTool`, `isExecutableTool`, portable `asSchema`/`StandardSchema`, `readResponseWithSizeLimit`, `responseHandler`, `handleFetchError`, `convertAsyncIteratorToReadableStream`, `isJSONSerializable`, `StreamingToolCallTracker`, `serializeModelOptions`, and provider-utils `content-part` type-contract cases, complete portable `createIdGenerator`/`generateId` cases, complete portable `DelayedPromise` cases, portable `isProviderReference` cases, and complete portable `resolveProviderReference` cases plus abort propagation for GET, JSON, form-data, and generic POST request helpers, but exact browser stream/fetch parity and Zod adapter snapshots are incomplete or JavaScript-specific. |
@@ -613,6 +613,15 @@ focused tests for each portable behavior before changing rows to `verified`.
   array-vs-object distinction. The upstream prototype, Date object, and
   function comparison cases are JavaScript-runtime-specific and non-portable at
   Rust's `JsonValue` boundary.
+- 2026-05-22: `packages/ai` `mergeObjects` utility parity split named Rust
+  counterparts for every portable upstream `util/merge-objects.test.ts` case:
+  flat object merging without source mutation, deep nested object merging,
+  array replacement, null value handling, complex nested replacement/merge
+  behavior, empty objects, undefined input equivalents via `None`, top-level
+  dangerous key filtering, combined `__proto__`/`constructor`/`prototype`
+  filtering, and nested dangerous key filtering. JavaScript Date, RegExp, and
+  object-property `undefined` identity semantics are non-portable at Rust's
+  `JsonValue` boundary.
 - 2026-05-22: OpenAI Responses current upstream corpus audit closed the
   `packages/openai/src/responses` subcorpus. The refreshed upstream inventory
   has 322 explicit `it`/`test` cases across four Responses test files, plus
