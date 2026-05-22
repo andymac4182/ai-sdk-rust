@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ParsedToolCall, ProviderExecutedToolResult, StreamTextIterator, WorkflowGenerationSettings,
-    WorkflowModelInfo, WorkflowPrompt, WorkflowRuntimeContext, WorkflowStreamStep,
-    WorkflowStreamTextError, WorkflowStreamTextStepExecutor, WorkflowToolsContext,
+    WorkflowModelInfo, WorkflowPrepareStepCallback, WorkflowPrompt, WorkflowRuntimeContext,
+    WorkflowStreamStep, WorkflowStreamTextError, WorkflowStreamTextStepExecutor,
+    WorkflowToolsContext,
 };
 
 /// Constructor options for [`WorkflowAgent`].
@@ -37,6 +38,9 @@ pub struct WorkflowAgentOptions {
 
     /// Default serialized tool-choice value.
     pub tool_choice: Option<JsonValue>,
+
+    /// Default prepare-step callback.
+    pub prepare_step: Option<WorkflowPrepareStepCallback>,
 }
 
 impl WorkflowAgentOptions {
@@ -49,6 +53,7 @@ impl WorkflowAgentOptions {
             generation_settings: WorkflowGenerationSettings::default(),
             active_tools: None,
             tool_choice: None,
+            prepare_step: None,
         }
     }
 
@@ -91,6 +96,12 @@ impl WorkflowAgentOptions {
         self.tool_choice = Some(tool_choice.into());
         self
     }
+
+    /// Sets a constructor-level prepare-step callback.
+    pub fn with_prepare_step(mut self, prepare_step: WorkflowPrepareStepCallback) -> Self {
+        self.prepare_step = Some(prepare_step);
+        self
+    }
 }
 
 /// Deterministic Rust equivalent of upstream `WorkflowAgent`.
@@ -102,6 +113,7 @@ pub struct WorkflowAgent {
     generation_settings: WorkflowGenerationSettings,
     active_tools: Option<Vec<String>>,
     tool_choice: Option<JsonValue>,
+    prepare_step: Option<WorkflowPrepareStepCallback>,
 }
 
 impl WorkflowAgent {
@@ -114,6 +126,7 @@ impl WorkflowAgent {
             generation_settings: options.generation_settings,
             active_tools: options.active_tools,
             tool_choice: options.tool_choice,
+            prepare_step: options.prepare_step,
         }
     }
 
@@ -148,12 +161,14 @@ impl WorkflowAgent {
             .or_else(|| self.active_tools.clone())
             .unwrap_or_default();
         let tool_choice = options.tool_choice.or_else(|| self.tool_choice.clone());
+        let prepare_step = options.prepare_step.or_else(|| self.prepare_step.clone());
 
         let mut iterator = StreamTextIterator::from_runtime_tools(
             options.prompt,
             self.tools.values().cloned(),
             options.executor,
         )
+        .with_model(self.model.clone())
         .with_generation_settings(generation_settings)
         .with_runtime_context(options.runtime_context)
         .with_tools_context(options.tools_context);
@@ -163,6 +178,9 @@ impl WorkflowAgent {
         }
         if let Some(tool_choice) = tool_choice {
             iterator = iterator.with_tool_choice(tool_choice);
+        }
+        if let Some(prepare_step) = prepare_step {
+            iterator = iterator.with_prepare_step(prepare_step);
         }
 
         let mut pending_tool_results = None;
@@ -294,6 +312,9 @@ pub struct WorkflowAgentStreamOptions<E> {
 
     /// Stream-level tool choice that overrides constructor defaults.
     pub tool_choice: Option<JsonValue>,
+
+    /// Stream-level prepare-step callback that overrides constructor defaults.
+    pub prepare_step: Option<WorkflowPrepareStepCallback>,
 }
 
 impl<E> WorkflowAgentStreamOptions<E> {
@@ -307,6 +328,7 @@ impl<E> WorkflowAgentStreamOptions<E> {
             tools_context: WorkflowToolsContext::new(),
             active_tools: None,
             tool_choice: None,
+            prepare_step: None,
         }
     }
 
@@ -340,6 +362,12 @@ impl<E> WorkflowAgentStreamOptions<E> {
     /// Sets stream-level tool choice.
     pub fn with_tool_choice(mut self, tool_choice: impl Into<JsonValue>) -> Self {
         self.tool_choice = Some(tool_choice.into());
+        self
+    }
+
+    /// Sets a stream-level prepare-step callback.
+    pub fn with_prepare_step(mut self, prepare_step: WorkflowPrepareStepCallback) -> Self {
+        self.prepare_step = Some(prepare_step);
         self
     }
 }
@@ -536,7 +564,10 @@ mod tests {
     use ai_sdk_provider_utils::{Schema, ToolExecutionError, ValidationResult};
     use serde_json::json;
 
-    use crate::{DoStreamStepOutput, ScriptedStreamTextStepExecutor, do_stream_step_from_parts};
+    use crate::{
+        DoStreamStepOutput, ScriptedStreamTextStepExecutor, WorkflowPrepareStepResult,
+        do_stream_step_from_parts,
+    };
 
     fn model() -> WorkflowModelInfo {
         WorkflowModelInfo::new("test", "test-model")
@@ -556,6 +587,12 @@ mod tests {
                 ai_sdk_provider::LanguageModelTextPart::new("test"),
             )],
         ))]
+    }
+
+    fn user_text_message(text: &str) -> LanguageModelMessage {
+        LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+            LanguageModelUserContentPart::Text(ai_sdk_provider::LanguageModelTextPart::new(text)),
+        ]))
     }
 
     fn usage() -> LanguageModelUsage {
@@ -1122,6 +1159,54 @@ mod tests {
                 "defaultUnit": "celsius"
             }))
         );
+    }
+
+    #[test]
+    fn workflow_agent_upstream_should_pass_prepare_step_callback_to_stream_text_iterator() {
+        let injected_message = user_text_message("injected message");
+        let prepare_injected_message = injected_message.clone();
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()));
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+
+        let result = poll_ready(agent.stream(
+            WorkflowAgentStreamOptions::new(user_prompt(), executor).with_prepare_step(
+                WorkflowPrepareStepCallback::new(move |info| {
+                    let mut messages = info.messages;
+                    messages.push(prepare_injected_message.clone());
+                    WorkflowPrepareStepResult::default().with_messages(messages)
+                }),
+            ),
+        ))
+        .expect("agent stream succeeds");
+
+        assert!(result.messages.contains(&injected_message));
+    }
+
+    #[test]
+    fn workflow_agent_upstream_prepare_step_updates_runtime_context_for_agent_loop() {
+        let agent = WorkflowAgent::new(WorkflowAgentOptions::new(model()).with_prepare_step(
+            WorkflowPrepareStepCallback::new(|info| {
+                let mut runtime_context = info.runtime_context;
+                runtime_context.insert("lastStep".to_string(), json!(info.step_number));
+                WorkflowPrepareStepResult::default().with_runtime_context(runtime_context)
+            }),
+        ));
+        let executor = ScriptedStreamTextStepExecutor::new([stop_step()]);
+        let runtime_context: WorkflowRuntimeContext = serde_json::from_value(json!({
+            "tenantId": "tenant_123"
+        }))
+        .expect("runtime context is an object");
+
+        let result = poll_ready(
+            agent.stream(
+                WorkflowAgentStreamOptions::new(user_prompt(), executor)
+                    .with_runtime_context(runtime_context),
+            ),
+        )
+        .expect("agent stream succeeds");
+
+        assert_eq!(result.runtime_context["tenantId"], json!("tenant_123"));
+        assert_eq!(result.runtime_context["lastStep"], json!(0));
     }
 
     #[test]

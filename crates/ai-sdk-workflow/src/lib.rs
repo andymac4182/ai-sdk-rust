@@ -19,10 +19,11 @@ pub use chat_transport::{
 pub use stream_text_iterator::{
     DoStreamStepOptions, DoStreamStepOutput, ParsedToolCall, ProviderExecutedToolResult,
     ScriptedStreamTextStepCall, ScriptedStreamTextStepExecutor, StreamFinish, StreamTextIterator,
-    StreamTextIteratorYieldValue, WorkflowGenerationSettings, WorkflowModelInfo, WorkflowPrompt,
-    WorkflowRuntimeContext, WorkflowStreamStep, WorkflowStreamStepContent, WorkflowStreamTextError,
-    WorkflowStreamTextStepExecutor, WorkflowToolsContext, do_stream_step_from_parts,
-    sanitize_provider_metadata_for_tool_call,
+    StreamTextIteratorYieldValue, WorkflowGenerationSettings, WorkflowModelInfo,
+    WorkflowPrepareStepCallback, WorkflowPrepareStepInfo, WorkflowPrepareStepResult,
+    WorkflowPrompt, WorkflowRuntimeContext, WorkflowStreamStep, WorkflowStreamStepContent,
+    WorkflowStreamTextError, WorkflowStreamTextStepExecutor, WorkflowToolsContext,
+    do_stream_step_from_parts, sanitize_provider_metadata_for_tool_call,
 };
 pub use workflow_agent::{
     WorkflowAgent, WorkflowAgentError, WorkflowAgentOptions, WorkflowAgentStreamOptions,
