@@ -3547,6 +3547,73 @@ mod tests {
     }
 
     #[test]
+    fn stream_object_callbacks_correlate_all_events_with_same_call_id() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    r#"{ "content": "Hello, world!" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let call_ids = Arc::new(Mutex::new(Vec::<String>::new()));
+        let start_call_ids = Arc::clone(&call_ids);
+        let step_start_call_ids = Arc::clone(&call_ids);
+        let step_finish_call_ids = Arc::clone(&call_ids);
+        let finish_call_ids = Arc::clone(&call_ids);
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_experimental_on_start(move |event| {
+                    let call_ids = Arc::clone(&start_call_ids);
+                    async move {
+                        call_ids
+                            .lock()
+                            .expect("callback call ids lock")
+                            .push(event.call_id);
+                    }
+                })
+                .with_experimental_on_step_start(move |event| {
+                    let call_ids = Arc::clone(&step_start_call_ids);
+                    async move {
+                        call_ids
+                            .lock()
+                            .expect("callback call ids lock")
+                            .push(event.call_id);
+                    }
+                })
+                .with_on_step_finish(move |event| {
+                    let call_ids = Arc::clone(&step_finish_call_ids);
+                    async move {
+                        call_ids
+                            .lock()
+                            .expect("callback call ids lock")
+                            .push(event.call_id);
+                    }
+                })
+                .with_on_finish(move |event| {
+                    let call_ids = Arc::clone(&finish_call_ids);
+                    async move {
+                        call_ids
+                            .lock()
+                            .expect("callback call ids lock")
+                            .push(event.call_id);
+                    }
+                }),
+        ));
+
+        assert_eq!(result.object, Some(json!({ "content": "Hello, world!" })));
+        let call_ids = call_ids.lock().expect("callback call ids lock");
+        assert_eq!(call_ids.len(), 4);
+        assert!(call_ids[0].starts_with("aiobj-"));
+        assert!(call_ids.iter().all(|call_id| call_id == &call_ids[0]));
+    }
+
+    #[test]
     fn stream_object_invokes_lifecycle_callbacks_with_streamed_step() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
