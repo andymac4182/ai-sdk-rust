@@ -1096,6 +1096,13 @@ fn open_responses_provider_option_passthrough_enabled(provider_options_name: &st
     )
 }
 
+fn open_responses_provider_reference_file_parts_supported(provider_options_name: &str) -> bool {
+    matches!(
+        provider_options_name,
+        "openai" | "azure" | "vercel-ai-gateway"
+    )
+}
+
 fn merge_open_responses_provider_option_object(
     options: &JsonObject,
     passthrough_options: bool,
@@ -2486,6 +2493,11 @@ fn open_responses_file_part(
                 return Err(
                     "Open Responses file parts with provider references are not implemented yet."
                         .to_string(),
+                );
+            }
+            if !open_responses_provider_reference_file_parts_supported(provider_options_name) {
+                return Err(
+                    "'file parts with provider references' functionality not supported".to_string(),
                 );
             }
 
@@ -23022,6 +23034,50 @@ mod tests {
             openai_metadata_value(&result.provider_metadata, "errorMessage"),
             Some(&json!(
                 "No provider reference found for provider 'openai'. Available providers: anthropic"
+            ))
+        );
+        assert_eq!(
+            result
+                .request
+                .as_ref()
+                .and_then(|request| request.body.as_ref()),
+            Some(&json!({ "model": "gpt-4.1-mini" }))
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_rejects_file_parts_with_provider_references() {
+        let (result, request_body) = open_responses_prompt_request_body_for_settings(
+            OpenResponsesProviderSettings::new(
+                "openResponses",
+                "https://api.openresponses.test/v1/responses",
+            )
+            .with_api_key("test-api-key"),
+            LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Reference {
+                            reference: open_responses_provider_reference(&[(
+                                "openResponses",
+                                "file-ref-123",
+                            )]),
+                        },
+                        "image/png",
+                    ),
+                )]),
+            )]),
+        );
+
+        assert_eq!(result.finish_reason.unified, FinishReason::Error);
+        assert!(request_body.is_none());
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("openResponses"))
+                .and_then(|metadata| metadata.get("errorMessage")),
+            Some(&json!(
+                "'file parts with provider references' functionality not supported"
             ))
         );
         assert_eq!(
