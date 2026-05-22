@@ -1805,6 +1805,41 @@ mod tests {
     }
 
     #[test]
+    fn stream_object_object_stream_uses_schema_name_and_description() {
+        let model = MockLanguageModel::new()
+            .with_stream_result(LanguageModelStreamResult::new(object_stream()));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_schema_name("test-name")
+                .with_schema_description("test description"),
+        ));
+
+        assert_eq!(
+            result.partial_object_stream,
+            vec![
+                json!({}),
+                json!({"content": "Hello, "}),
+                json!({"content": "Hello, world"}),
+                json!({"content": "Hello, world!"})
+            ]
+        );
+
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].prompt, prompt());
+        let Some(LanguageModelResponseFormat::Json {
+            name, description, ..
+        }) = &calls[0].response_format
+        else {
+            panic!("expected JSON response format");
+        };
+        assert_eq!(name.as_deref(), Some("test-name"));
+        assert_eq!(description.as_deref(), Some("test description"));
+    }
+
+    #[test]
     fn stream_object_collects_partial_objects_text_and_finish_metadata() {
         let model = MockLanguageModel::new()
             .with_stream_result(LanguageModelStreamResult::new(object_stream()));
