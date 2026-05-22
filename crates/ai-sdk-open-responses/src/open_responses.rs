@@ -6978,6 +6978,10 @@ mod tests {
         include_str!("fixtures/openai-image-generation-tool.1.json");
     const OPEN_RESPONSES_CLIENT_TOOL_SEARCH_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-client-tool-search.1.json");
+    const OPEN_RESPONSES_TOOL_SEARCH_JSON_FIXTURE: &str =
+        include_str!("fixtures/openai-tool-search.1.json");
+    const OPEN_RESPONSES_TOOL_SEARCH_CHUNKS_FIXTURE: &str =
+        include_str!("fixtures/openai-tool-search.1.chunks.txt");
     const OPEN_RESPONSES_LOCAL_SHELL_TOOL_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-local-shell-tool.1.json");
     const OPEN_RESPONSES_SHELL_TOOL_JSON_FIXTURE: &str =
@@ -25382,77 +25386,35 @@ mod tests {
 
     #[test]
     fn open_responses_provider_generates_hosted_tool_search_fixture() {
-        const RESPONSE_ID: &str = "resp_04bd69550b37ba260069aa689530d0819094482b7c14059a0f";
-        const TOOL_SEARCH_CALL_ID: &str = "tsc_04bd69550b37ba260069aa689605cc8190bd2d9bf1199fa630";
-        const TOOL_SEARCH_OUTPUT_ID: &str =
-            "tso_04bd69550b37ba260069aa68965b508190949d19c05f1b6df9";
+        let fixture: JsonValue = serde_json::from_str(OPEN_RESPONSES_TOOL_SEARCH_JSON_FIXTURE)
+            .expect("tool-search fixture JSON parses");
+        let fixture_output = fixture["output"]
+            .as_array()
+            .expect("fixture output is an array");
+        let fixture_tool_search_call = fixture_output
+            .iter()
+            .find(|item| item["type"].as_str() == Some("tool_search_call"))
+            .expect("fixture includes a tool-search call");
+        let fixture_tool_search_output = fixture_output
+            .iter()
+            .find(|item| item["type"].as_str() == Some("tool_search_output"))
+            .expect("fixture includes a tool-search output");
+        let response_id = fixture["id"].as_str().expect("fixture response id is set");
+        let tool_search_call_id = fixture_tool_search_call["id"]
+            .as_str()
+            .expect("tool-search call id is set");
+        let tool_search_output_id = fixture_tool_search_output["id"]
+            .as_str()
+            .expect("tool-search output id is set");
 
-        let transport: OpenResponsesTransport = Arc::new(
-            move |_request| -> OpenResponsesTransportFuture {
-                Box::pin(ready(Ok(ProviderApiResponse::text(
-                    200,
-                    "OK",
-                    json!({
-                        "id": RESPONSE_ID,
-                        "object": "response",
-                        "created_at": 1772775573,
-                        "status": "completed",
-                        "model": "gpt-5.4-2026-03-05",
-                        "output": [
-                            {
-                                "id": TOOL_SEARCH_CALL_ID,
-                                "type": "tool_search_call",
-                                "status": "completed",
-                                "arguments": {
-                                    "paths": ["get_weather"]
-                                },
-                                "call_id": null,
-                                "execution": "server"
-                            },
-                            {
-                                "id": TOOL_SEARCH_OUTPUT_ID,
-                                "type": "tool_search_output",
-                                "status": "completed",
-                                "call_id": null,
-                                "execution": "server",
-                                "tools": open_responses_tool_search_fixture_tools()
-                            },
-                            {
-                                "id": "fc_04bd69550b37ba260069aa68969e088190a5ebe91c1448f693",
-                                "type": "function_call",
-                                "status": "completed",
-                                "arguments": "{\"location\":\"San Francisco, CA\",\"unit\":\"fahrenheit\"}",
-                                "call_id": "call_ytqozXvUXG8NN1b0IODxzUaE",
-                                "name": "get_weather",
-                                "namespace": "get_weather"
-                            }
-                        ],
-                        "service_tier": "default",
-                        "usage": {
-                            "input_tokens": 640,
-                            "input_tokens_details": {
-                                "cached_tokens": 0
-                            },
-                            "output_tokens": 46,
-                            "output_tokens_details": {
-                                "reasoning_tokens": 20
-                            },
-                            "total_tokens": 686
-                        }
-                    })
-                    .to_string(),
-                ))))
-            },
+        let (result, request_body) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5-nano",
+            OPEN_RESPONSES_TOOL_SEARCH_JSON_FIXTURE,
+            open_responses_hosted_tool_search_fixture_call_options(),
         );
-        let provider = create_open_responses(
-            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
-                .with_api_key("test-api-key"),
-        )
-        .with_transport(transport);
-        let model = provider.language_model("gpt-5-nano");
 
-        let result =
-            poll_ready(model.do_generate(open_responses_hosted_tool_search_fixture_call_options()));
+        assert_eq!(request_body["tools"][0]["type"], json!("tool_search"));
+        assert_eq!(request_body["tools"][1]["defer_loading"], json!(true));
 
         assert_eq!(result.finish_reason.unified, FinishReason::ToolCalls);
         assert_eq!(result.usage.input_tokens.total, Some(640));
@@ -25461,7 +25423,7 @@ mod tests {
         assert_eq!(
             openai_metadata_value(&result.provider_metadata, "responseId")
                 .and_then(JsonValue::as_str),
-            Some(RESPONSE_ID)
+            Some(response_id)
         );
 
         let tool_calls = result
@@ -25484,39 +25446,37 @@ mod tests {
             .iter()
             .find(|tool_call| tool_call.tool_name == "toolSearch")
             .expect("content includes hosted tool-search call");
-        assert_eq!(tool_search_call.tool_call_id, TOOL_SEARCH_CALL_ID);
+        assert_eq!(tool_search_call.tool_call_id, tool_search_call_id);
         assert_eq!(tool_search_call.provider_executed, Some(true));
         assert_eq!(
             serde_json::from_str::<JsonValue>(&tool_search_call.input)
                 .expect("tool-search input parses"),
             json!({
-                "arguments": {
-                    "paths": ["get_weather"]
-                },
-                "call_id": null
+                "arguments": fixture_tool_search_call["arguments"].clone(),
+                "call_id": fixture_tool_search_call["call_id"].clone()
             })
         );
         assert_eq!(
             openai_metadata_value(&tool_search_call.provider_metadata, "itemId")
                 .and_then(JsonValue::as_str),
-            Some(TOOL_SEARCH_CALL_ID)
+            Some(tool_search_call_id)
         );
 
         let tool_search_result = tool_results
             .iter()
             .find(|tool_result| tool_result.tool_name == "toolSearch")
             .expect("content includes hosted tool-search result");
-        assert_eq!(tool_search_result.tool_call_id, TOOL_SEARCH_CALL_ID);
+        assert_eq!(tool_search_result.tool_call_id, tool_search_call_id);
         assert_eq!(
             tool_search_result.result.as_value(),
             &json!({
-                "tools": open_responses_tool_search_fixture_tools()
+                "tools": fixture_tool_search_output["tools"].clone()
             })
         );
         assert_eq!(
             openai_metadata_value(&tool_search_result.provider_metadata, "itemId")
                 .and_then(JsonValue::as_str),
-            Some(TOOL_SEARCH_OUTPUT_ID)
+            Some(tool_search_output_id)
         );
     }
 
@@ -36645,122 +36605,7 @@ mod tests {
         const TOOL_SEARCH_OUTPUT_ID: &str =
             "tso_08a14073c7135dc10069aa6862b1248190ba40cbba918ecfa2";
 
-        let tool_search_call = json!({
-            "id": TOOL_SEARCH_CALL_ID,
-            "type": "tool_search_call",
-            "status": "completed",
-            "arguments": {
-                "paths": ["get_weather"]
-            },
-            "call_id": null,
-            "execution": "server"
-        });
-        let tool_search_output = json!({
-            "id": TOOL_SEARCH_OUTPUT_ID,
-            "type": "tool_search_output",
-            "status": "completed",
-            "call_id": null,
-            "execution": "server",
-            "tools": open_responses_tool_search_fixture_tools()
-        });
-        let function_call = json!({
-            "id": "fc_08a14073c7135dc10069aa68630840819098f7c17c4e577327",
-            "type": "function_call",
-            "status": "completed",
-            "arguments": "{\"location\":\"San Francisco, CA\",\"unit\":\"fahrenheit\"}",
-            "call_id": "call_pddfxhfOx4gY56zn4vIIEbFp",
-            "name": "get_weather",
-            "namespace": "get_weather"
-        });
-        let sse = open_responses_sse_from_events(vec![
-            json!({
-                "type": "response.created",
-                "sequence_number": 0,
-                "response": {
-                    "id": RESPONSE_ID,
-                    "object": "response",
-                    "created_at": 1772775522,
-                    "status": "in_progress",
-                    "model": "gpt-5.4-2026-03-05",
-                    "output": [],
-                    "service_tier": "auto",
-                    "usage": null
-                }
-            }),
-            json!({
-                "type": "response.output_item.added",
-                "item": {
-                    "id": TOOL_SEARCH_CALL_ID,
-                    "type": "tool_search_call",
-                    "status": "in_progress",
-                    "arguments": {},
-                    "call_id": null,
-                    "execution": "server"
-                },
-                "output_index": 0,
-                "sequence_number": 2
-            }),
-            json!({
-                "type": "response.output_item.done",
-                "item": tool_search_call.clone(),
-                "output_index": 0,
-                "sequence_number": 3
-            }),
-            json!({
-                "type": "response.output_item.added",
-                "item": {
-                    "id": TOOL_SEARCH_OUTPUT_ID,
-                    "type": "tool_search_output",
-                    "status": "in_progress",
-                    "call_id": null,
-                    "execution": "server",
-                    "tools": open_responses_tool_search_fixture_tools()
-                },
-                "output_index": 1,
-                "sequence_number": 4
-            }),
-            json!({
-                "type": "response.output_item.done",
-                "item": tool_search_output.clone(),
-                "output_index": 1,
-                "sequence_number": 5
-            }),
-            json!({
-                "type": "response.output_item.done",
-                "item": function_call.clone(),
-                "output_index": 2,
-                "sequence_number": 21
-            }),
-            json!({
-                "type": "response.completed",
-                "sequence_number": 22,
-                "response": {
-                    "id": RESPONSE_ID,
-                    "object": "response",
-                    "created_at": 1772775522,
-                    "status": "completed",
-                    "completed_at": 1772775523,
-                    "model": "gpt-5.4-2026-03-05",
-                    "output": [
-                        tool_search_call,
-                        tool_search_output,
-                        function_call
-                    ],
-                    "service_tier": "default",
-                    "usage": {
-                        "input_tokens": 640,
-                        "input_tokens_details": {
-                            "cached_tokens": 0
-                        },
-                        "output_tokens": 46,
-                        "output_tokens_details": {
-                            "reasoning_tokens": 20
-                        },
-                        "total_tokens": 686
-                    }
-                }
-            }),
-        ]);
+        let sse = open_responses_sse_from_fixture_lines(OPEN_RESPONSES_TOOL_SEARCH_CHUNKS_FIXTURE);
         let transport: OpenResponsesTransport =
             Arc::new(move |_request| -> OpenResponsesTransportFuture {
                 Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse.clone()))))
