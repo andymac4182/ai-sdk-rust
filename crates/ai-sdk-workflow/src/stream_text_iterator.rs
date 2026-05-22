@@ -1249,6 +1249,117 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_iterator_upstream_should_preserve_provider_metadata_for_multiple_parallel_tool_calls()
+     {
+        let weather_tool_call =
+            LanguageModelToolCall::new("call-1", "weatherTool", r#"{"city":"NYC"}"#)
+                .with_provider_metadata(provider_metadata(json!({
+                    "google": {
+                        "thoughtSignature": "sig_weather_123"
+                    }
+                })));
+        let lookup_tool_call =
+            LanguageModelToolCall::new("call-2", "lookupTool", r#"{"id":"123"}"#)
+                .with_provider_metadata(provider_metadata(json!({
+                    "anthropic": {
+                        "cacheControl": {
+                            "type": "ephemeral"
+                        }
+                    }
+                })));
+        let executor = ScriptedStreamTextStepExecutor::new([
+            output_from_parts(
+                [
+                    LanguageModelStreamPart::ToolCall(weather_tool_call),
+                    LanguageModelStreamPart::ToolCall(lookup_tool_call),
+                    finish(FinishReason::ToolCalls),
+                ],
+                0,
+            ),
+            output_from_parts([finish(FinishReason::Stop)], 1),
+        ]);
+        let mut iterator =
+            StreamTextIterator::new(user_prompt(), SerializableToolSet::new(), executor);
+
+        iterator.next(None).expect("first step succeeds");
+        iterator
+            .next(Some(vec![
+                tool_result("call-1", "weatherTool", json!({ "ok": true })),
+                tool_result("call-2", "lookupTool", json!({ "ok": true })),
+            ]))
+            .expect("continuation succeeds");
+
+        let prompt = &iterator.executor().calls()[1].prompt;
+        assert_eq!(
+            assistant_tool_call_provider_options(prompt, "weatherTool"),
+            Some(Some(provider_metadata(json!({
+                "google": {
+                    "thoughtSignature": "sig_weather_123"
+                }
+            }))))
+        );
+        assert_eq!(
+            assistant_tool_call_provider_options(prompt, "lookupTool"),
+            Some(Some(provider_metadata(json!({
+                "anthropic": {
+                    "cacheControl": {
+                        "type": "ephemeral"
+                    }
+                }
+            }))))
+        );
+    }
+
+    #[test]
+    fn stream_text_iterator_upstream_should_handle_mixed_tool_calls_with_and_without_provider_metadata()
+     {
+        let metadata_tool_call =
+            LanguageModelToolCall::new("call-1", "metadataTool", r#"{"query":"test"}"#)
+                .with_provider_metadata(provider_metadata(json!({
+                    "google": {
+                        "thoughtSignature": "sig_metadata_123"
+                    }
+                })));
+        let plain_tool_call =
+            LanguageModelToolCall::new("call-2", "plainTool", r#"{"query":"test"}"#);
+        let executor = ScriptedStreamTextStepExecutor::new([
+            output_from_parts(
+                [
+                    LanguageModelStreamPart::ToolCall(metadata_tool_call),
+                    LanguageModelStreamPart::ToolCall(plain_tool_call),
+                    finish(FinishReason::ToolCalls),
+                ],
+                0,
+            ),
+            output_from_parts([finish(FinishReason::Stop)], 1),
+        ]);
+        let mut iterator =
+            StreamTextIterator::new(user_prompt(), SerializableToolSet::new(), executor);
+
+        iterator.next(None).expect("first step succeeds");
+        iterator
+            .next(Some(vec![
+                tool_result("call-1", "metadataTool", json!({ "ok": true })),
+                tool_result("call-2", "plainTool", json!({ "ok": true })),
+            ]))
+            .expect("continuation succeeds");
+
+        let prompt = &iterator.executor().calls()[1].prompt;
+        assert_eq!(
+            assistant_tool_call_provider_options(prompt, "metadataTool"),
+            Some(Some(provider_metadata(json!({
+                "google": {
+                    "thoughtSignature": "sig_metadata_123"
+                }
+            }))))
+        );
+        assert_eq!(
+            assistant_tool_call_provider_options(prompt, "plainTool"),
+            Some(None)
+        );
+    }
+
+    #[test]
     fn stream_text_iterator_upstream_should_allow_prepare_step_to_modify_messages() {
         let injected_message = user_text_message("injected message");
         let prepare_injected_message = injected_message.clone();
