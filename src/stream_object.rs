@@ -3013,6 +3013,26 @@ mod tests {
     }
 
     #[test]
+    fn stream_object_partial_object_stream_suppresses_provider_errors() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(
+                    json!({"message": "test error"}),
+                )),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_on_error(|_| ready(())),
+        ));
+
+        assert!(result.partial_object_stream.is_empty());
+        assert_eq!(result.finish_reason, FinishReason::Error);
+        assert_eq!(result.error, Some(json!({"message": "test error"})));
+    }
+
+    #[test]
     fn stream_object_retains_error_parts() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
