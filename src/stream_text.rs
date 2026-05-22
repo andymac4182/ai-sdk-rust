@@ -3238,12 +3238,23 @@ where
                         parts.push(TextStreamPart::ReasoningEnd(part));
                     }
                     LanguageModelStreamPart::ToolInputStart(part) => {
+                        let mut part = part.clone();
                         ongoing_tool_call_tool_names
                             .insert(part.id.clone(), part.tool_name.clone());
                         let tool = controls
                             .tools
                             .iter()
                             .find(|tool| tool.name == part.tool_name);
+                        if let Some(tool) = tool {
+                            if part.dynamic.is_none() {
+                                part.dynamic = Some(tool.is_dynamic());
+                            }
+                            if part.title.is_none()
+                                && let Some(title) = tool.title()
+                            {
+                                part.title = Some(title.to_string());
+                            }
+                        }
                         push_text_stream_part(
                             parts,
                             TextStreamPart::ToolInputStart(part.clone()),
@@ -4214,7 +4225,7 @@ mod tests {
     };
     use crate::mock_models::MockLanguageModel;
     use crate::prompt::Prompt;
-    use crate::provider_utils::Tool;
+    use crate::provider_utils::{Tool, ToolExecutionError};
     use crate::telemetry::{
         TelemetryEvent, TelemetryEventKind, TelemetryIntegration, TelemetryOptions,
     };
@@ -5112,6 +5123,441 @@ mod tests {
                 .as_slice(),
             [json!({ "value": "raw" })]
         );
+    }
+
+    #[test]
+    fn stream_text_result_full_stream_sends_tool_call_deltas() {
+        let timestamp = time::OffsetDateTime::UNIX_EPOCH;
+        let response_metadata = LanguageModelStreamResponseMetadata::new()
+            .with_id("id-0")
+            .with_model_id("mock-model-id")
+            .with_timestamp(timestamp);
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string" }
+            },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ResponseMetadata(response_metadata),
+                LanguageModelStreamPart::ToolInputStart(LanguageModelToolInputStart::new(
+                    "call-1",
+                    "test-tool",
+                )),
+                LanguageModelStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                    "call-1", "{\"",
+                )),
+                LanguageModelStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                    "call-1", "value",
+                )),
+                LanguageModelStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                    "call-1", "\":\"",
+                )),
+                LanguageModelStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                    "call-1", "Spark",
+                )),
+                LanguageModelStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                    "call-1", "le",
+                )),
+                LanguageModelStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                    "call-1", " Day",
+                )),
+                LanguageModelStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                    "call-1", "\"}",
+                )),
+                LanguageModelStreamPart::ToolInputEnd(LanguageModelToolInputEnd::new("call-1")),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "test-tool",
+                    r#"{"value":"Sparkle Day"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    LanguageModelFinishReason {
+                        unified: FinishReason::ToolCalls,
+                        raw: None,
+                    },
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(Tool::new("test-tool", input_schema))
+                .with_tool_choice(LanguageModelToolChoice::Required),
+        ));
+
+        let part_names = result
+            .parts
+            .iter()
+            .map(|part| match part {
+                TextStreamPart::Start(_) => "start",
+                TextStreamPart::StartStep(_) => "start-step",
+                TextStreamPart::ToolInputStart(_) => "tool-input-start",
+                TextStreamPart::ToolInputDelta(_) => "tool-input-delta",
+                TextStreamPart::ToolInputEnd(_) => "tool-input-end",
+                TextStreamPart::ToolCall(_) => "tool-call",
+                TextStreamPart::FinishStep(_) => "finish-step",
+                TextStreamPart::Finish(_) => "finish",
+                _ => "other",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            part_names,
+            vec![
+                "start",
+                "start-step",
+                "tool-input-start",
+                "tool-input-delta",
+                "tool-input-delta",
+                "tool-input-delta",
+                "tool-input-delta",
+                "tool-input-delta",
+                "tool-input-delta",
+                "tool-input-delta",
+                "tool-input-end",
+                "tool-call",
+                "finish-step",
+                "finish"
+            ]
+        );
+
+        let tool_input_start = result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TextStreamPart::ToolInputStart(part) => Some(part),
+                _ => None,
+            })
+            .expect("full stream includes tool-input-start");
+        assert_eq!(tool_input_start.id, "call-1");
+        assert_eq!(tool_input_start.tool_name, "test-tool");
+        assert_eq!(tool_input_start.dynamic, Some(false));
+        assert_eq!(tool_input_start.title, None);
+
+        let deltas = result
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::ToolInputDelta(part) => Some(part.delta.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            deltas,
+            vec!["{\"", "value", "\":\"", "Spark", "le", " Day", "\"}"]
+        );
+
+        let tool_input_end = result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TextStreamPart::ToolInputEnd(part) => Some(part),
+                _ => None,
+            })
+            .expect("full stream includes tool-input-end");
+        assert_eq!(tool_input_end.id, "call-1");
+
+        let tool_call = result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TextStreamPart::ToolCall(part) => Some(part),
+                _ => None,
+            })
+            .expect("full stream includes tool-call");
+        assert_eq!(tool_call.tool_call_id, "call-1");
+        assert_eq!(tool_call.tool_name, "test-tool");
+        assert_eq!(tool_call.input, json!({ "value": "Sparkle Day" }));
+
+        let finish_step = result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TextStreamPart::FinishStep(part) => Some(part),
+                _ => None,
+            })
+            .expect("full stream includes finish-step");
+        assert_eq!(finish_step.response.id.as_deref(), Some("id-0"));
+        assert_eq!(finish_step.response.timestamp, Some(timestamp));
+        assert_eq!(finish_step.finish_reason, FinishReason::ToolCalls);
+        assert_eq!(finish_step.raw_finish_reason, None);
+        assert_eq!(finish_step.usage, usage());
+
+        let stream_calls = model.stream_calls();
+        assert_eq!(stream_calls.len(), 1);
+        assert_eq!(
+            stream_calls[0].tool_choice.as_ref(),
+            Some(&LanguageModelToolChoice::Required)
+        );
+    }
+
+    #[test]
+    fn stream_text_result_full_stream_passes_provider_metadata_on_tool_input_start() {
+        let provider_metadata = ProviderMetadata::from([(
+            "testProvider".to_string(),
+            Map::from_iter([("someKey".to_string(), json!("someValue"))]),
+        )]);
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string" }
+            },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ResponseMetadata(
+                    LanguageModelStreamResponseMetadata::new()
+                        .with_id("id-0")
+                        .with_model_id("mock-model-id")
+                        .with_timestamp(time::OffsetDateTime::UNIX_EPOCH),
+                ),
+                LanguageModelStreamPart::ToolInputStart(
+                    LanguageModelToolInputStart::new("call-1", "test-tool")
+                        .with_provider_metadata(provider_metadata.clone()),
+                ),
+                LanguageModelStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                    "call-1",
+                    r#"{"value":"test"}"#,
+                )),
+                LanguageModelStreamPart::ToolInputEnd(LanguageModelToolInputEnd::new("call-1")),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "test-tool",
+                    r#"{"value":"test"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    LanguageModelFinishReason {
+                        unified: FinishReason::ToolCalls,
+                        raw: None,
+                    },
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(Tool::new("test-tool", input_schema))
+                .with_tool_choice(LanguageModelToolChoice::Required),
+        ));
+
+        let tool_input_start = result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TextStreamPart::ToolInputStart(part) => Some(part),
+                _ => None,
+            })
+            .expect("full stream includes tool-input-start");
+        assert_eq!(
+            tool_input_start.provider_metadata,
+            Some(provider_metadata.clone())
+        );
+        assert_eq!(tool_input_start.dynamic, Some(false));
+    }
+
+    #[test]
+    fn stream_text_result_full_stream_sends_tool_results() {
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string" }
+            },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ResponseMetadata(
+                    LanguageModelStreamResponseMetadata::new()
+                        .with_id("id-0")
+                        .with_model_id("mock-model-id")
+                        .with_timestamp(time::OffsetDateTime::UNIX_EPOCH),
+                ),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "tool1",
+                    r#"{ "value": "value" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    LanguageModelFinishReason {
+                        unified: FinishReason::Stop,
+                        raw: Some("stop".to_string()),
+                    },
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_tool(
+                Tool::new("tool1", input_schema)
+                    .with_title("Tool 1")
+                    .with_execute(|input, options| async move {
+                        assert_eq!(input, json!({ "value": "value" }));
+                        assert_eq!(options.messages, vec![user_message("test-input")]);
+                        Ok(json!("value-result"))
+                    }),
+            ),
+        ));
+
+        let part_names = result
+            .parts
+            .iter()
+            .map(|part| match part {
+                TextStreamPart::Start(_) => "start",
+                TextStreamPart::StartStep(_) => "start-step",
+                TextStreamPart::ToolCall(_) => "tool-call",
+                TextStreamPart::ToolResult(_) => "tool-result",
+                TextStreamPart::FinishStep(_) => "finish-step",
+                TextStreamPart::Finish(_) => "finish",
+                _ => "other",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            part_names,
+            vec![
+                "start",
+                "start-step",
+                "tool-call",
+                "tool-result",
+                "finish-step",
+                "finish"
+            ]
+        );
+
+        let tool_result = result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TextStreamPart::ToolResult(part) => Some(part),
+                _ => None,
+            })
+            .expect("full stream includes tool-result");
+        assert_eq!(tool_result.tool_call_id, "call-1");
+        assert_eq!(tool_result.tool_name, "tool1");
+        assert_eq!(tool_result.input, json!({ "value": "value" }));
+        assert_eq!(tool_result.output, json!("value-result"));
+        assert_eq!(tool_result.title.as_deref(), Some("Tool 1"));
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_results, vec![tool_result.clone()]);
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.steps[0].tool_results, vec![tool_result.clone()]);
+    }
+
+    struct OnePendingToolFuture {
+        polls: Arc<AtomicUsize>,
+        value: String,
+    }
+
+    impl Future for OnePendingToolFuture {
+        type Output = Result<JsonValue, ToolExecutionError>;
+
+        fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+            let this = self.get_mut();
+            if this.polls.fetch_add(1, Ordering::SeqCst) == 0 {
+                context.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+
+            Poll::Ready(Ok(json!(format!("{}-result", this.value))))
+        }
+    }
+
+    #[test]
+    fn stream_text_result_full_stream_sends_delayed_asynchronous_tool_results() {
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string" }
+            },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let polls_for_tool = Arc::clone(&polls);
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ResponseMetadata(
+                    LanguageModelStreamResponseMetadata::new()
+                        .with_id("id-0")
+                        .with_model_id("mock-model-id")
+                        .with_timestamp(time::OffsetDateTime::UNIX_EPOCH),
+                ),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "tool1",
+                    r#"{ "value": "value" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    LanguageModelFinishReason {
+                        unified: FinishReason::Stop,
+                        raw: Some("stop".to_string()),
+                    },
+                )),
+            ]));
+
+        let result = poll_until_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_tool(
+                Tool::new("tool1", input_schema)
+                    .with_title("Tool 1")
+                    .with_execute(move |input, _options| {
+                        let value = input["value"]
+                            .as_str()
+                            .expect("value is a string")
+                            .to_string();
+                        OnePendingToolFuture {
+                            polls: Arc::clone(&polls_for_tool),
+                            value,
+                        }
+                    }),
+            ),
+        ));
+
+        assert!(
+            polls.load(Ordering::SeqCst) > 1,
+            "tool future should have returned Pending before completion"
+        );
+
+        let tool_result_index = result
+            .parts
+            .iter()
+            .position(|part| matches!(part, TextStreamPart::ToolResult(_)))
+            .expect("full stream includes tool-result");
+        let finish_step_index = result
+            .parts
+            .iter()
+            .position(|part| matches!(part, TextStreamPart::FinishStep(_)))
+            .expect("full stream includes finish-step");
+        assert!(
+            tool_result_index < finish_step_index,
+            "delayed tool result must be emitted before finish-step"
+        );
+
+        let tool_result = result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TextStreamPart::ToolResult(part) => Some(part),
+                _ => None,
+            })
+            .expect("full stream includes tool-result");
+        assert_eq!(tool_result.input, json!({ "value": "value" }));
+        assert_eq!(tool_result.output, json!("value-result"));
+        assert_eq!(result.tool_results, vec![tool_result.clone()]);
     }
 
     #[test]
