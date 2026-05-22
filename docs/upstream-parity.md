@@ -1893,6 +1893,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   tool-search calls, call-result id aliasing when `call_id` is null, returned
   deferred function-tool definitions, OpenAI item metadata, `tool-calls`
   finish reason, and usage preservation.
+- 2026-05-22: OpenAI Responses hosted tool-search fixture parity hardened those
+  two tests to consume byte-matched local copies of upstream
+  `openai-tool-search.1.json` and `openai-tool-search.1.chunks.txt` instead of
+  hand-built response payloads, preserving fixture-only fields and streamed
+  function-call deltas from the original upstream test data.
 - 2026-05-20: OpenAI Responses phase metadata fixture parity added
   `open_responses_provider_generates_phase_fixture_metadata` and
   `open_responses_provider_streams_phase_fixture_metadata` now use byte-matched
