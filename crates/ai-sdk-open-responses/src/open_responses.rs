@@ -6926,7 +6926,7 @@ fn provider_api_response(
 mod tests {
     use super::{
         OpenResponsesProvider, OpenResponsesProviderSettings, OpenResponsesTransport,
-        OpenResponsesTransportFuture, create_open_responses,
+        OpenResponsesTransportFuture, create_open_responses, open_responses_file_search_output,
     };
     use ai_sdk_provider::file_data::{FileData, FileDataContent, ProviderReference};
     use ai_sdk_provider::headers::Headers;
@@ -6982,6 +6982,14 @@ mod tests {
         include_str!("fixtures/openai-tool-search.1.json");
     const OPEN_RESPONSES_TOOL_SEARCH_CHUNKS_FIXTURE: &str =
         include_str!("fixtures/openai-tool-search.1.chunks.txt");
+    const OPEN_RESPONSES_FILE_SEARCH_TOOL_1_JSON_FIXTURE: &str =
+        include_str!("fixtures/openai-file-search-tool.1.json");
+    const OPEN_RESPONSES_FILE_SEARCH_TOOL_1_CHUNKS_FIXTURE: &str =
+        include_str!("fixtures/openai-file-search-tool.1.chunks.txt");
+    const OPEN_RESPONSES_FILE_SEARCH_TOOL_2_JSON_FIXTURE: &str =
+        include_str!("fixtures/openai-file-search-tool.2.json");
+    const OPEN_RESPONSES_FILE_SEARCH_TOOL_2_CHUNKS_FIXTURE: &str =
+        include_str!("fixtures/openai-file-search-tool.2.chunks.txt");
     const OPEN_RESPONSES_LOCAL_SHELL_TOOL_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-local-shell-tool.1.json");
     const OPEN_RESPONSES_SHELL_TOOL_JSON_FIXTURE: &str =
@@ -7116,6 +7124,53 @@ mod tests {
             .join("\n\n");
         sse.push_str("\n\ndata: [DONE]\n");
         sse
+    }
+
+    fn open_responses_fixture_output(fixture: &JsonValue) -> &[JsonValue] {
+        fixture["output"]
+            .as_array()
+            .map(Vec::as_slice)
+            .expect("fixture output is an array")
+    }
+
+    fn open_responses_fixture_output_item<'a>(
+        fixture: &'a JsonValue,
+        item_type: &str,
+    ) -> &'a JsonValue {
+        open_responses_fixture_output(fixture)
+            .iter()
+            .find(|item| item["type"].as_str() == Some(item_type))
+            .expect("fixture includes requested output item")
+    }
+
+    fn open_responses_fixture_reasoning_ids(fixture: &JsonValue) -> Vec<&str> {
+        open_responses_fixture_output(fixture)
+            .iter()
+            .filter(|item| item["type"].as_str() == Some("reasoning"))
+            .map(|item| item["id"].as_str().expect("reasoning item id is set"))
+            .collect()
+    }
+
+    fn open_responses_fixture_message_text(fixture: &JsonValue) -> &str {
+        open_responses_fixture_output_item(fixture, "message")["content"]
+            .as_array()
+            .expect("message content is an array")
+            .iter()
+            .find(|part| part["type"].as_str() == Some("output_text"))
+            .and_then(|part| part["text"].as_str())
+            .expect("fixture message has output text")
+    }
+
+    fn open_responses_fixture_chunk_event(
+        fixture: &str,
+        predicate: impl Fn(&JsonValue) -> bool,
+    ) -> JsonValue {
+        fixture
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<JsonValue>(line).expect("fixture event parses"))
+            .find(predicate)
+            .expect("fixture chunk event exists")
     }
 
     fn open_responses_test_custom_tool() -> LanguageModelTool {
@@ -30036,23 +30091,9 @@ mod tests {
     #[test]
     fn open_responses_provider_generates_file_search_without_results_include_fixture_request_body()
     {
-        let body = json!({
-            "id": "resp_file_search_request_body_without_results",
-            "object": "response",
-            "created_at": 1_758_113_338,
-            "status": "completed",
-            "model": "gpt-5-nano-2025-08-07",
-            "output": [],
-            "usage": {
-                "input_tokens": 1,
-                "output_tokens": 1,
-                "total_tokens": 2
-            }
-        })
-        .to_string();
         let (_, request_body) = open_responses_generate_result_from_text_with_request_body(
             "gpt-5-nano",
-            &body,
+            OPEN_RESPONSES_FILE_SEARCH_TOOL_1_JSON_FIXTURE,
             open_responses_file_search_fixture_call_options(None),
         );
 
@@ -30077,87 +30118,52 @@ mod tests {
 
     #[test]
     fn open_responses_provider_generates_file_search_without_results_include_fixture_content() {
-        const RESPONSE_ID: &str = "resp_0a098396a8feca410068caae39e7648196b346e99fa8ec494c";
-        const FIRST_REASONING_ID: &str = "rs_0a098396a8feca410068caae3b47208196957fe59419daad70";
-        const FILE_SEARCH_ID: &str = "fs_0a098396a8feca410068caae3cab5c8196a54fd00498464e62";
-        const SECOND_REASONING_ID: &str = "rs_0a098396a8feca410068caae3e21a081968e7ac588401c4a6a";
-        const MESSAGE_ID: &str = "msg_0a098396a8feca410068caae457c508196b2fcd079d1d3ec74";
-        const FINAL_TEXT: &str = "According to the document, an embedding model is used to convert complex data (like words or images) into a dense vector (a list of numbers) representation called an embedding, which captures semantic and syntactic relationships.";
-
-        let transport: OpenResponsesTransport =
-            Arc::new(move |_request| -> OpenResponsesTransportFuture {
-                Box::pin(ready(Ok(ProviderApiResponse::text(
-                    200,
-                    "OK",
-                    open_responses_file_search_generate_body(
-                        RESPONSE_ID,
-                        1_758_113_338,
-                        FIRST_REASONING_ID,
-                        FILE_SEARCH_ID,
-                        SECOND_REASONING_ID,
-                        MESSAGE_ID,
-                        FINAL_TEXT,
-                        json!([
-                            "What is an embedding model according to this document?",
-                            "What is an embedding model?",
-                            "definition of embedding model in the document",
-                            "embedding model description"
-                        ]),
-                        JsonValue::Null,
-                        3700,
-                        2560,
-                        741,
-                        640,
-                    ),
-                ))))
-            });
-        let provider = create_open_responses(
-            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
-                .with_api_key("test-api-key"),
-        )
-        .with_transport(transport);
-
-        let result = poll_ready(
-            provider
-                .language_model("gpt-5-nano")
-                .do_generate(open_responses_file_search_fixture_call_options(None)),
+        let fixture: JsonValue =
+            serde_json::from_str(OPEN_RESPONSES_FILE_SEARCH_TOOL_1_JSON_FIXTURE)
+                .expect("file-search fixture JSON parses");
+        let reasoning_ids = open_responses_fixture_reasoning_ids(&fixture);
+        let file_search = open_responses_fixture_output_item(&fixture, "file_search_call");
+        let message = open_responses_fixture_output_item(&fixture, "message");
+        let expected_results = open_responses_file_search_output(file_search)["results"].clone();
+        let (result, _) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5-nano",
+            OPEN_RESPONSES_FILE_SEARCH_TOOL_1_JSON_FIXTURE,
+            open_responses_file_search_fixture_call_options(None),
         );
 
         open_responses_assert_file_search_generate_content(
             &result.content,
-            FIRST_REASONING_ID,
-            FILE_SEARCH_ID,
-            SECOND_REASONING_ID,
-            MESSAGE_ID,
-            FINAL_TEXT,
-            JsonValue::Null,
+            reasoning_ids[0],
+            file_search["id"].as_str().expect("file-search id is set"),
+            reasoning_ids[1],
+            message["id"].as_str().expect("message id is set"),
+            open_responses_fixture_message_text(&fixture),
+            expected_results,
         );
         assert_eq!(result.finish_reason.unified, FinishReason::Stop);
-        assert_eq!(result.usage.input_tokens.total, Some(3700));
-        assert_eq!(result.usage.input_tokens.cache_read, Some(2560));
-        assert_eq!(result.usage.output_tokens.total, Some(741));
-        assert_eq!(result.usage.output_tokens.reasoning, Some(640));
+        assert_eq!(
+            result.usage.input_tokens.total,
+            fixture["usage"]["input_tokens"].as_u64()
+        );
+        assert_eq!(
+            result.usage.input_tokens.cache_read,
+            fixture["usage"]["input_tokens_details"]["cached_tokens"].as_u64()
+        );
+        assert_eq!(
+            result.usage.output_tokens.total,
+            fixture["usage"]["output_tokens"].as_u64()
+        );
+        assert_eq!(
+            result.usage.output_tokens.reasoning,
+            fixture["usage"]["output_tokens_details"]["reasoning_tokens"].as_u64()
+        );
     }
 
     #[test]
     fn open_responses_provider_generates_file_search_with_results_include_fixture_request_body() {
-        let body = json!({
-            "id": "resp_file_search_request_body_with_results",
-            "object": "response",
-            "created_at": 1_758_116_611,
-            "status": "completed",
-            "model": "gpt-5-nano-2025-08-07",
-            "output": [],
-            "usage": {
-                "input_tokens": 1,
-                "output_tokens": 1,
-                "total_tokens": 2
-            }
-        })
-        .to_string();
         let (_, request_body) = open_responses_generate_result_from_text_with_request_body(
             "gpt-5-nano",
-            &body,
+            OPEN_RESPONSES_FILE_SEARCH_TOOL_2_JSON_FIXTURE,
             open_responses_file_search_fixture_call_options(Some(
                 openai_file_search_results_include_options(),
             )),
@@ -30184,121 +30190,74 @@ mod tests {
 
     #[test]
     fn open_responses_provider_generates_file_search_with_results_include_fixture_content() {
-        const RESPONSE_ID: &str = "resp_0365d26c32c64c650068cabb02fea4819495862c2bc58440ad";
-        const FIRST_REASONING_ID: &str = "rs_0365d26c32c64c650068cabb03bcc48194bfbd973152bca8f6";
-        const FILE_SEARCH_ID: &str = "fs_0365d26c32c64c650068cabb04aa388194b53c59de50a3951e";
-        const SECOND_REASONING_ID: &str = "rs_0365d26c32c64c650068cabb061740819491324d349d0f07ca";
-        const MESSAGE_ID: &str = "msg_0365d26c32c64c650068cabb0e66b081949f66f61dacef39f3";
-        const FINAL_TEXT: &str = concat!(
-            "According to the document, an embedding model converts complex data ",
-            "(like words or images) into a dense vector \u{2014} a list of numbers ",
-            "\u{2014} called an embedding."
-        );
-
-        let transport: OpenResponsesTransport =
-            Arc::new(move |_request| -> OpenResponsesTransportFuture {
-                Box::pin(ready(Ok(ProviderApiResponse::text(
-                    200,
-                    "OK",
-                    open_responses_file_search_generate_body(
-                        RESPONSE_ID,
-                        1_758_116_611,
-                        FIRST_REASONING_ID,
-                        FILE_SEARCH_ID,
-                        SECOND_REASONING_ID,
-                        MESSAGE_ID,
-                        FINAL_TEXT,
-                        json!([
-                            "What is an embedding model according to this document?",
-                            "What is an embedding model in the document?",
-                            "definition of embedding model",
-                            "embedding model explanation 'embedding model'"
-                        ]),
-                        json!([
-                            {
-                                "attributes": {},
-                                "file_id": "file-Ebzhf8H4DPGPr9pUhr7n7v",
-                                "filename": "ai.pdf",
-                                "score": 0.9311,
-                                "text": "An embedding model is used to convert complex data."
-                            }
-                        ]),
-                        3678,
-                        2304,
-                        536,
-                        448,
-                    ),
-                ))))
-            });
-        let provider = create_open_responses(
-            OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
-                .with_api_key("test-api-key"),
-        )
-        .with_transport(transport);
-
-        let result = poll_ready(provider.language_model("gpt-5-nano").do_generate(
+        let fixture: JsonValue =
+            serde_json::from_str(OPEN_RESPONSES_FILE_SEARCH_TOOL_2_JSON_FIXTURE)
+                .expect("file-search fixture JSON parses");
+        let reasoning_ids = open_responses_fixture_reasoning_ids(&fixture);
+        let file_search = open_responses_fixture_output_item(&fixture, "file_search_call");
+        let message = open_responses_fixture_output_item(&fixture, "message");
+        let expected_results = open_responses_file_search_output(file_search)["results"].clone();
+        let (result, _) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-5-nano",
+            OPEN_RESPONSES_FILE_SEARCH_TOOL_2_JSON_FIXTURE,
             open_responses_file_search_fixture_call_options(Some(
                 openai_file_search_results_include_options(),
             )),
-        ));
+        );
 
         open_responses_assert_file_search_generate_content(
             &result.content,
-            FIRST_REASONING_ID,
-            FILE_SEARCH_ID,
-            SECOND_REASONING_ID,
-            MESSAGE_ID,
-            FINAL_TEXT,
-            json!([
-                {
-                    "attributes": {},
-                    "fileId": "file-Ebzhf8H4DPGPr9pUhr7n7v",
-                    "filename": "ai.pdf",
-                    "score": 0.9311,
-                    "text": "An embedding model is used to convert complex data."
-                }
-            ]),
+            reasoning_ids[0],
+            file_search["id"].as_str().expect("file-search id is set"),
+            reasoning_ids[1],
+            message["id"].as_str().expect("message id is set"),
+            open_responses_fixture_message_text(&fixture),
+            expected_results,
         );
         assert_eq!(result.finish_reason.unified, FinishReason::Stop);
-        assert_eq!(result.usage.input_tokens.total, Some(3678));
-        assert_eq!(result.usage.input_tokens.cache_read, Some(2304));
-        assert_eq!(result.usage.output_tokens.total, Some(536));
-        assert_eq!(result.usage.output_tokens.reasoning, Some(448));
+        assert_eq!(
+            result.usage.input_tokens.total,
+            fixture["usage"]["input_tokens"].as_u64()
+        );
+        assert_eq!(
+            result.usage.input_tokens.cache_read,
+            fixture["usage"]["input_tokens_details"]["cached_tokens"].as_u64()
+        );
+        assert_eq!(
+            result.usage.output_tokens.total,
+            fixture["usage"]["output_tokens"].as_u64()
+        );
+        assert_eq!(
+            result.usage.output_tokens.reasoning,
+            fixture["usage"]["output_tokens_details"]["reasoning_tokens"].as_u64()
+        );
     }
 
     #[test]
     fn open_responses_provider_streams_file_search_without_results_include() {
+        let fixture_file_search_done = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_FILE_SEARCH_TOOL_1_CHUNKS_FIXTURE,
+            |event| {
+                event["type"].as_str() == Some("response.output_item.done")
+                    && event["item"]["type"].as_str() == Some("file_search_call")
+            },
+        );
+        let file_search_item = &fixture_file_search_done["item"];
+        let expected_file_search_output = open_responses_file_search_output(file_search_item);
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
-        let transport: OpenResponsesTransport = Arc::new(
-            move |request| -> OpenResponsesTransportFuture {
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
                 *captured_request_for_transport
                     .lock()
                     .expect("captured request mutex is not poisoned") = Some(request.clone());
 
-                let sse = [
-                    r#"data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_0459517ad68504ad0068cabfba22b88192836339640e9a765a","object":"response","created_at":1758117818,"status":"in_progress","model":"gpt-5-mini-2025-08-07","output":[],"parallel_tool_calls":true,"reasoning":{"effort":"medium","summary":null},"store":true,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"file_search","filters":null,"max_num_results":20,"ranking_options":{"ranker":"auto","score_threshold":0},"vector_store_ids":["vs_68caad8bd5d88191ab766cf043d89a18"]}],"usage":null,"metadata":{}}}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.added","sequence_number":4,"output_index":1,"item":{"id":"fs_0459517ad68504ad0068cabfbd76888192a5dc4475fadabf8a","type":"file_search_call","status":"in_progress","queries":[],"results":null}}"#,
-                    "",
-                    r#"data: {"type":"response.file_search_call.in_progress","sequence_number":5,"output_index":1,"item_id":"fs_0459517ad68504ad0068cabfbd76888192a5dc4475fadabf8a"}"#,
-                    "",
-                    r#"data: {"type":"response.file_search_call.searching","sequence_number":6,"output_index":1,"item_id":"fs_0459517ad68504ad0068cabfbd76888192a5dc4475fadabf8a"}"#,
-                    "",
-                    r#"data: {"type":"response.file_search_call.completed","sequence_number":7,"output_index":1,"item_id":"fs_0459517ad68504ad0068cabfbd76888192a5dc4475fadabf8a"}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.done","sequence_number":8,"output_index":1,"item":{"id":"fs_0459517ad68504ad0068cabfbd76888192a5dc4475fadabf8a","type":"file_search_call","status":"completed","queries":["What is an embedding model according to this document?","What is an embedding model defined as in the document?","definition of embedding model"],"results":null}}"#,
-                    "",
-                    r#"data: {"type":"response.completed","sequence_number":93,"response":{"id":"resp_0459517ad68504ad0068cabfba22b88192836339640e9a765a","object":"response","created_at":1758117818,"status":"completed","model":"gpt-5-mini-2025-08-07","output":[{"id":"fs_0459517ad68504ad0068cabfbd76888192a5dc4475fadabf8a","type":"file_search_call","status":"completed","queries":["What is an embedding model according to this document?","What is an embedding model defined as in the document?","definition of embedding model"],"results":null}],"usage":{"input_tokens":3737,"input_tokens_details":{"cached_tokens":2304},"output_tokens":621,"output_tokens_details":{"reasoning_tokens":512},"total_tokens":4358}}}"#,
-                    "",
-                    "data: [DONE]",
-                    "",
-                ]
-                .join("\n");
+                let sse = open_responses_sse_from_fixture_lines(
+                    OPEN_RESPONSES_FILE_SEARCH_TOOL_1_CHUNKS_FIXTURE,
+                );
 
                 Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
-            },
-        );
+            });
         let provider = create_open_responses(
             OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
                 .with_api_key("test-api-key"),
@@ -30318,7 +30277,9 @@ mod tests {
             .expect("stream includes file search tool call");
         assert_eq!(
             tool_call.tool_call_id,
-            "fs_0459517ad68504ad0068cabfbd76888192a5dc4475fadabf8a"
+            file_search_item["id"]
+                .as_str()
+                .expect("fixture file-search id is set")
         );
         assert_eq!(tool_call.tool_name, "fileSearch");
         assert_eq!(tool_call.input, "{}");
@@ -30333,17 +30294,7 @@ mod tests {
             })
             .expect("stream includes file search tool result");
         assert_eq!(tool_result.tool_name, "fileSearch");
-        assert_eq!(
-            tool_result.result.as_value(),
-            &json!({
-                "queries": [
-                    "What is an embedding model according to this document?",
-                    "What is an embedding model defined as in the document?",
-                    "definition of embedding model"
-                ],
-                "results": null
-            })
-        );
+        assert_eq!(tool_result.result.as_value(), &expected_file_search_output);
 
         let request_body = captured_open_responses_request_body(&captured_request);
         assert!(request_body.get("include").is_none());
@@ -30358,37 +30309,29 @@ mod tests {
 
     #[test]
     fn open_responses_provider_streams_file_search_with_results_include() {
+        let fixture_file_search_done = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_FILE_SEARCH_TOOL_2_CHUNKS_FIXTURE,
+            |event| {
+                event["type"].as_str() == Some("response.output_item.done")
+                    && event["item"]["type"].as_str() == Some("file_search_call")
+            },
+        );
+        let expected_file_search_output =
+            open_responses_file_search_output(&fixture_file_search_done["item"]);
         let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
         let captured_request_for_transport = Arc::clone(&captured_request);
-        let transport: OpenResponsesTransport = Arc::new(
-            move |request| -> OpenResponsesTransportFuture {
+        let transport: OpenResponsesTransport =
+            Arc::new(move |request| -> OpenResponsesTransportFuture {
                 *captured_request_for_transport
                     .lock()
                     .expect("captured request mutex is not poisoned") = Some(request.clone());
 
-                let sse = [
-                    r#"data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_06456cb9918b63780068cacd710b0881a1b00b5fca56e7100b","object":"response","created_at":1758121329,"status":"in_progress","model":"gpt-5-mini-2025-08-07","output":[],"parallel_tool_calls":true,"reasoning":{"effort":"medium","summary":null},"store":true,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[{"type":"file_search","filters":null,"max_num_results":20,"ranking_options":{"ranker":"auto","score_threshold":0},"vector_store_ids":["vs_68caad8bd5d88191ab766cf043d89a18"]}],"usage":null,"metadata":{}}}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.added","sequence_number":4,"output_index":1,"item":{"id":"fs_06456cb9918b63780068cacd74a1dc81a1bf68dd57f140b4b6","type":"file_search_call","status":"in_progress","queries":[],"results":null}}"#,
-                    "",
-                    r#"data: {"type":"response.file_search_call.in_progress","sequence_number":5,"output_index":1,"item_id":"fs_06456cb9918b63780068cacd74a1dc81a1bf68dd57f140b4b6"}"#,
-                    "",
-                    r#"data: {"type":"response.file_search_call.searching","sequence_number":6,"output_index":1,"item_id":"fs_06456cb9918b63780068cacd74a1dc81a1bf68dd57f140b4b6"}"#,
-                    "",
-                    r#"data: {"type":"response.file_search_call.completed","sequence_number":7,"output_index":1,"item_id":"fs_06456cb9918b63780068cacd74a1dc81a1bf68dd57f140b4b6"}"#,
-                    "",
-                    r#"data: {"type":"response.output_item.done","sequence_number":8,"output_index":1,"item":{"id":"fs_06456cb9918b63780068cacd74a1dc81a1bf68dd57f140b4b6","type":"file_search_call","status":"completed","queries":["What is an embedding model according to this document?","What is an embedding model definition in this document?","How does the document define an embedding model?"],"results":[{"attributes":{},"file_id":"file-Ebzhf8H4DPGPr9pUhr7n7v","filename":"ai.pdf","score":0.9312,"text":"An embedding model is used to convert complex data."}]}}"#,
-                    "",
-                    r#"data: {"type":"response.completed","sequence_number":92,"response":{"id":"resp_06456cb9918b63780068cacd710b0881a1b00b5fca56e7100b","object":"response","created_at":1758121329,"status":"completed","model":"gpt-5-mini-2025-08-07","output":[{"id":"fs_06456cb9918b63780068cacd74a1dc81a1bf68dd57f140b4b6","type":"file_search_call","status":"completed","queries":["What is an embedding model according to this document?","What is an embedding model definition in this document?","How does the document define an embedding model?"],"results":[{"attributes":{},"file_id":"file-Ebzhf8H4DPGPr9pUhr7n7v","filename":"ai.pdf","score":0.9312,"text":"An embedding model is used to convert complex data."}]}],"usage":{"input_tokens":3748,"input_tokens_details":{"cached_tokens":2304},"output_tokens":543,"output_tokens_details":{"reasoning_tokens":448},"total_tokens":4291}}}"#,
-                    "",
-                    "data: [DONE]",
-                    "",
-                ]
-                .join("\n");
+                let sse = open_responses_sse_from_fixture_lines(
+                    OPEN_RESPONSES_FILE_SEARCH_TOOL_2_CHUNKS_FIXTURE,
+                );
 
                 Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse))))
-            },
-        );
+            });
         let provider = create_open_responses(
             OpenResponsesProviderSettings::new("openai", "https://api.openai.test/v1/responses")
                 .with_api_key("test-api-key"),
@@ -30411,25 +30354,7 @@ mod tests {
             })
             .expect("stream includes file search tool result");
         assert_eq!(tool_result.tool_name, "fileSearch");
-        assert_eq!(
-            tool_result.result.as_value(),
-            &json!({
-                "queries": [
-                    "What is an embedding model according to this document?",
-                    "What is an embedding model definition in this document?",
-                    "How does the document define an embedding model?"
-                ],
-                "results": [
-                    {
-                        "attributes": {},
-                        "fileId": "file-Ebzhf8H4DPGPr9pUhr7n7v",
-                        "filename": "ai.pdf",
-                        "score": 0.9312,
-                        "text": "An embedding model is used to convert complex data."
-                    }
-                ]
-            })
-        );
+        assert_eq!(tool_result.result.as_value(), &expected_file_search_output);
 
         let request_body = captured_open_responses_request_body(&captured_request);
         assert_eq!(request_body["include"], json!(["file_search_call.results"]));
@@ -38486,84 +38411,6 @@ mod tests {
         }
 
         options
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn open_responses_file_search_generate_body(
-        response_id: &str,
-        created_at: i64,
-        first_reasoning_id: &str,
-        file_search_id: &str,
-        second_reasoning_id: &str,
-        message_id: &str,
-        final_text: &str,
-        queries: JsonValue,
-        results: JsonValue,
-        input_tokens: u64,
-        cached_tokens: u64,
-        output_tokens: u64,
-        reasoning_tokens: u64,
-    ) -> String {
-        json!({
-            "id": response_id,
-            "object": "response",
-            "created_at": created_at,
-            "status": "completed",
-            "model": "gpt-5-mini-2025-08-07",
-            "output": [
-                {
-                    "id": first_reasoning_id,
-                    "type": "reasoning",
-                    "summary": []
-                },
-                {
-                    "id": file_search_id,
-                    "type": "file_search_call",
-                    "status": "completed",
-                    "queries": queries,
-                    "results": results
-                },
-                {
-                    "id": second_reasoning_id,
-                    "type": "reasoning",
-                    "summary": []
-                },
-                {
-                    "id": message_id,
-                    "type": "message",
-                    "status": "completed",
-                    "content": [
-                        {
-                            "type": "output_text",
-                            "annotations": [
-                                {
-                                    "type": "file_citation",
-                                    "file_id": "file-Ebzhf8H4DPGPr9pUhr7n7v",
-                                    "filename": "ai.pdf",
-                                    "index": 438
-                                }
-                            ],
-                            "logprobs": [],
-                            "text": final_text
-                        }
-                    ],
-                    "role": "assistant"
-                }
-            ],
-            "usage": {
-                "input_tokens": input_tokens,
-                "input_tokens_details": {
-                    "cached_tokens": cached_tokens
-                },
-                "output_tokens": output_tokens,
-                "output_tokens_details": {
-                    "reasoning_tokens": reasoning_tokens
-                },
-                "total_tokens": input_tokens + output_tokens
-            },
-            "service_tier": "default"
-        })
-        .to_string()
     }
 
     fn open_responses_assert_file_search_fixture_tool_request(request_body: &JsonValue) {
