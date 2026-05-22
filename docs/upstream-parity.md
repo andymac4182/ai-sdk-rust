@@ -1718,6 +1718,11 @@ focused tests for each portable behavior before changing rows to `verified`.
   included result field mapping when `file_search_call.results` is requested,
   provider-executed tool-call/result stream parts, and request include
   forwarding.
+- 2026-05-22: OpenAI Responses file-search fixture parity hardened the generated
+  and streamed file-search tests to consume byte-matched local copies of
+  upstream `openai-file-search-tool.1` and `openai-file-search-tool.2`
+  JSON/chunks fixtures, deriving ids, text, usage, query arrays, and result
+  payloads from the fixtures instead of shortened reconstructed bodies.
 - 2026-05-20: OpenAI Responses code-interpreter annotation stream fixture
   parity added
   `open_responses_provider_streams_code_interpreter_results_with_annotations`
