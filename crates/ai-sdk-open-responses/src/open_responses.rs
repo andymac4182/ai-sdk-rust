@@ -6980,6 +6980,10 @@ mod tests {
         include_str!("fixtures/openai-image-generation-tool.1.chunks.txt");
     const OPEN_RESPONSES_CLIENT_TOOL_SEARCH_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-client-tool-search.1.json");
+    const OPEN_RESPONSES_CUSTOM_TOOL_JSON_FIXTURE: &str =
+        include_str!("fixtures/openai-custom-tool.1.json");
+    const OPEN_RESPONSES_CUSTOM_TOOL_CHUNKS_FIXTURE: &str =
+        include_str!("fixtures/openai-custom-tool.1.chunks.txt");
     const OPEN_RESPONSES_TOOL_SEARCH_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-tool-search.1.json");
     const OPEN_RESPONSES_TOOL_SEARCH_CHUNKS_FIXTURE: &str =
@@ -7203,69 +7207,8 @@ mod tests {
     }
 
     fn open_responses_custom_tool_fixture_response_body() -> JsonValue {
-        json!({
-            "id": "resp_custom_tool_test_001",
-            "object": "response",
-            "created_at": 1741257730,
-            "status": "completed",
-            "error": null,
-            "incomplete_details": null,
-            "input": [],
-            "instructions": null,
-            "max_output_tokens": null,
-            "model": "gpt-5.2-codex",
-            "output": [
-                {
-                    "type": "custom_tool_call",
-                    "id": "ct_abc123def456",
-                    "call_id": "call_custom_sql_001",
-                    "name": "write_sql",
-                    "input": "SELECT * FROM users WHERE age > 25",
-                    "status": "completed"
-                }
-            ],
-            "parallel_tool_calls": true,
-            "previous_response_id": null,
-            "reasoning": {
-                "effort": "low",
-                "summary": null
-            },
-            "store": true,
-            "temperature": 1,
-            "text": {
-                "format": {
-                    "type": "text"
-                }
-            },
-            "tool_choice": "required",
-            "tools": [
-                {
-                    "type": "custom",
-                    "name": "write_sql",
-                    "description": "Write a SQL SELECT query to answer the user question.",
-                    "format": {
-                        "type": "grammar",
-                        "syntax": "regex",
-                        "definition": "SELECT .+"
-                    }
-                }
-            ],
-            "top_p": 1,
-            "truncation": "disabled",
-            "usage": {
-                "input_tokens": 50,
-                "input_tokens_details": {
-                    "cached_tokens": 0
-                },
-                "output_tokens": 20,
-                "output_tokens_details": {
-                    "reasoning_tokens": 0
-                },
-                "total_tokens": 70
-            },
-            "user": null,
-            "metadata": {}
-        })
+        serde_json::from_str(OPEN_RESPONSES_CUSTOM_TOOL_JSON_FIXTURE)
+            .expect("custom tool fixture JSON parses")
     }
 
     fn open_responses_hosted_tool_search_fixture_call_options() -> LanguageModelCallOptions {
@@ -36267,197 +36210,57 @@ mod tests {
 
     #[test]
     fn open_responses_provider_streams_custom_tool_fixture() {
-        const RESPONSE_ID: &str = "resp_custom_tool_test_001";
-        const CUSTOM_TOOL_ITEM_ID: &str = "ct_abc123def456";
-        const CALL_ID: &str = "call_custom_sql_001";
-        const CUSTOM_TOOL_INPUT: &str = "SELECT * FROM users WHERE age > 25";
-        let raw_deltas = ["SELECT * ", "FROM users ", "WHERE age > 25"];
-
-        let custom_tool_call = json!({
-            "type": "custom_tool_call",
-            "id": CUSTOM_TOOL_ITEM_ID,
-            "call_id": CALL_ID,
-            "name": "write_sql",
-            "input": CUSTOM_TOOL_INPUT,
-            "status": "completed"
-        });
-        let mut events = vec![
-            json!({
-                "type": "response.created",
-                "response": {
-                    "id": RESPONSE_ID,
-                    "object": "response",
-                    "created_at": 1741257730,
-                    "status": "in_progress",
-                    "error": null,
-                    "incomplete_details": null,
-                    "instructions": null,
-                    "max_output_tokens": null,
-                    "model": "gpt-5.2-codex",
-                    "output": [],
-                    "parallel_tool_calls": true,
-                    "previous_response_id": null,
-                    "reasoning": {
-                        "effort": "low",
-                        "summary": null
-                    },
-                    "store": true,
-                    "temperature": 1,
-                    "text": {
-                        "format": {
-                            "type": "text"
-                        }
-                    },
-                    "tool_choice": "required",
-                    "tools": [
-                        {
-                            "type": "custom",
-                            "name": "write_sql",
-                            "description": "Write a SQL SELECT query to answer the user question.",
-                            "format": {
-                                "type": "grammar",
-                                "syntax": "regex",
-                                "definition": "SELECT .+"
-                            }
-                        }
-                    ],
-                    "top_p": 1,
-                    "truncation": "disabled",
-                    "usage": null,
-                    "user": null,
-                    "metadata": {}
-                }
-            }),
-            json!({
-                "type": "response.in_progress",
-                "response": {
-                    "id": RESPONSE_ID,
-                    "object": "response",
-                    "created_at": 1741257730,
-                    "status": "in_progress",
-                    "error": null,
-                    "incomplete_details": null,
-                    "instructions": null,
-                    "max_output_tokens": null,
-                    "model": "gpt-5.2-codex",
-                    "output": [],
-                    "parallel_tool_calls": true,
-                    "previous_response_id": null,
-                    "reasoning": {
-                        "effort": "low",
-                        "summary": null
-                    },
-                    "store": true,
-                    "temperature": 1,
-                    "text": {
-                        "format": {
-                            "type": "text"
-                        }
-                    },
-                    "tool_choice": "required",
-                    "tools": [
-                        {
-                            "type": "custom",
-                            "name": "write_sql",
-                            "description": "Write a SQL SELECT query to answer the user question.",
-                            "format": {
-                                "type": "grammar",
-                                "syntax": "regex",
-                                "definition": "SELECT .+"
-                            }
-                        }
-                    ],
-                    "top_p": 1,
-                    "truncation": "disabled",
-                    "usage": null,
-                    "user": null,
-                    "metadata": {}
-                }
-            }),
-            json!({
-                "type": "response.output_item.added",
-                "output_index": 0,
-                "item": {
-                    "type": "custom_tool_call",
-                    "id": CUSTOM_TOOL_ITEM_ID,
-                    "call_id": CALL_ID,
-                    "name": "write_sql",
-                    "input": ""
-                }
-            }),
-        ];
-        for delta in raw_deltas {
-            events.push(json!({
-                "type": "response.custom_tool_call_input.delta",
-                "item_id": CUSTOM_TOOL_ITEM_ID,
-                "output_index": 0,
-                "delta": delta
-            }));
-        }
-        events.extend([
-            json!({
-                "type": "response.output_item.done",
-                "output_index": 0,
-                "item": custom_tool_call.clone()
-            }),
-            json!({
-                "type": "response.completed",
-                "response": {
-                    "id": RESPONSE_ID,
-                    "object": "response",
-                    "created_at": 1741257730,
-                    "status": "completed",
-                    "error": null,
-                    "incomplete_details": null,
-                    "instructions": null,
-                    "max_output_tokens": null,
-                    "model": "gpt-5.2-codex",
-                    "output": [custom_tool_call],
-                    "parallel_tool_calls": true,
-                    "previous_response_id": null,
-                    "reasoning": {
-                        "effort": "low",
-                        "summary": null
-                    },
-                    "store": true,
-                    "temperature": 1,
-                    "text": {
-                        "format": {
-                            "type": "text"
-                        }
-                    },
-                    "tool_choice": "required",
-                    "tools": [
-                        {
-                            "type": "custom",
-                            "name": "write_sql",
-                            "description": "Write a SQL SELECT query to answer the user question.",
-                            "format": {
-                                "type": "grammar",
-                                "syntax": "regex",
-                                "definition": "SELECT .+"
-                            }
-                        }
-                    ],
-                    "top_p": 1,
-                    "truncation": "disabled",
-                    "usage": {
-                        "input_tokens": 50,
-                        "input_tokens_details": {
-                            "cached_tokens": 0
-                        },
-                        "output_tokens": 20,
-                        "output_tokens_details": {
-                            "reasoning_tokens": 0
-                        },
-                        "total_tokens": 70
-                    },
-                    "user": null,
-                    "metadata": {}
-                }
-            }),
-        ]);
-        let sse = open_responses_sse_from_events(events);
+        let response_created_event = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_CUSTOM_TOOL_CHUNKS_FIXTURE,
+            |event| event["type"].as_str() == Some("response.created"),
+        );
+        let response_completed_event = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_CUSTOM_TOOL_CHUNKS_FIXTURE,
+            |event| event["type"].as_str() == Some("response.completed"),
+        );
+        let custom_tool_done_event = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_CUSTOM_TOOL_CHUNKS_FIXTURE,
+            |event| {
+                event["type"].as_str() == Some("response.output_item.done")
+                    && event["item"]["type"].as_str() == Some("custom_tool_call")
+            },
+        );
+        let delta_events = OPEN_RESPONSES_CUSTOM_TOOL_CHUNKS_FIXTURE
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<JsonValue>(line).expect("fixture event parses"))
+            .filter(|event| event["type"].as_str() == Some("response.custom_tool_call_input.delta"))
+            .collect::<Vec<_>>();
+        let raw_deltas = delta_events
+            .iter()
+            .map(|event| event["delta"].as_str().expect("custom tool delta is set"))
+            .collect::<Vec<_>>();
+        let response = &response_created_event["response"];
+        let completed_response = &response_completed_event["response"];
+        let usage = &completed_response["usage"];
+        let custom_tool_call = &custom_tool_done_event["item"];
+        let response_id = response["id"].as_str().expect("response id is set");
+        let model_id = response["model"].as_str().expect("model id is set");
+        let created_at = response["created_at"]
+            .as_i64()
+            .expect("response created_at is set");
+        let custom_tool_item_id = custom_tool_call["id"]
+            .as_str()
+            .expect("custom tool item id is set");
+        let call_id = custom_tool_call["call_id"]
+            .as_str()
+            .expect("custom tool call id is set");
+        let custom_tool_name = custom_tool_call["name"]
+            .as_str()
+            .expect("custom tool name is set");
+        let custom_tool_input = custom_tool_call["input"]
+            .as_str()
+            .expect("custom tool input is set");
+        let input_tokens = usage["input_tokens"].as_u64();
+        let cached_tokens = usage["input_tokens_details"]["cached_tokens"].as_u64();
+        let output_tokens = usage["output_tokens"].as_u64();
+        let reasoning_tokens = usage["output_tokens_details"]["reasoning_tokens"].as_u64();
+        let sse = open_responses_sse_from_fixture_lines(OPEN_RESPONSES_CUSTOM_TOOL_CHUNKS_FIXTURE);
         let transport: OpenResponsesTransport =
             Arc::new(move |_request| -> OpenResponsesTransportFuture {
                 Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse.clone()))))
@@ -36479,27 +36282,27 @@ mod tests {
                 _ => None,
             })
             .expect("stream includes response metadata");
-        assert_eq!(metadata.id.as_deref(), Some(RESPONSE_ID));
-        assert_eq!(metadata.model_id.as_deref(), Some("gpt-5.2-codex"));
+        assert_eq!(metadata.id.as_deref(), Some(response_id));
+        assert_eq!(metadata.model_id.as_deref(), Some(model_id));
         assert_eq!(
             metadata
                 .timestamp
                 .map(|timestamp| timestamp.unix_timestamp()),
-            Some(1_741_257_730)
+            Some(created_at)
         );
 
         assert!(result.stream.iter().any(|part| {
             matches!(
                 part,
                 LanguageModelStreamPart::ToolInputStart(start)
-                    if start.id == CALL_ID && start.tool_name == "write_sql"
+                    if start.id == call_id && start.tool_name == custom_tool_name
             )
         }));
         let input_deltas = result
             .stream
             .iter()
             .filter_map(|part| match part {
-                LanguageModelStreamPart::ToolInputDelta(delta) if delta.id == CALL_ID => {
+                LanguageModelStreamPart::ToolInputDelta(delta) if delta.id == call_id => {
                     Some(delta.delta.as_str())
                 }
                 _ => None,
@@ -36509,7 +36312,7 @@ mod tests {
         assert!(result.stream.iter().any(|part| {
             matches!(
                 part,
-                LanguageModelStreamPart::ToolInputEnd(end) if end.id == CALL_ID
+                LanguageModelStreamPart::ToolInputEnd(end) if end.id == call_id
             )
         }));
 
@@ -36521,16 +36324,16 @@ mod tests {
                 _ => None,
             })
             .expect("stream includes custom tool call");
-        assert_eq!(tool_call.tool_call_id, CALL_ID);
-        assert_eq!(tool_call.tool_name, "write_sql");
+        assert_eq!(tool_call.tool_call_id, call_id);
+        assert_eq!(tool_call.tool_name, custom_tool_name);
         assert_eq!(
             serde_json::from_str::<JsonValue>(&tool_call.input).expect("tool input parses"),
-            json!(CUSTOM_TOOL_INPUT)
+            json!(custom_tool_input)
         );
         assert_eq!(
             openai_metadata_value(&tool_call.provider_metadata, "itemId")
                 .and_then(JsonValue::as_str),
-            Some(CUSTOM_TOOL_ITEM_ID)
+            Some(custom_tool_item_id)
         );
 
         let finish = result
@@ -36543,14 +36346,14 @@ mod tests {
             .expect("stream includes finish");
         assert_eq!(finish.finish_reason.unified, FinishReason::ToolCalls);
         assert_eq!(finish.finish_reason.raw, None);
-        assert_eq!(finish.usage.input_tokens.total, Some(50));
-        assert_eq!(finish.usage.input_tokens.cache_read, Some(0));
-        assert_eq!(finish.usage.output_tokens.total, Some(20));
-        assert_eq!(finish.usage.output_tokens.reasoning, Some(0));
+        assert_eq!(finish.usage.input_tokens.total, input_tokens);
+        assert_eq!(finish.usage.input_tokens.cache_read, cached_tokens);
+        assert_eq!(finish.usage.output_tokens.total, output_tokens);
+        assert_eq!(finish.usage.output_tokens.reasoning, reasoning_tokens);
         assert_eq!(
             openai_metadata_value(&finish.provider_metadata, "responseId")
                 .and_then(JsonValue::as_str),
-            Some(RESPONSE_ID)
+            Some(response_id)
         );
     }
 
