@@ -1184,30 +1184,61 @@ mod tests {
     }
 
     #[test]
-    fn split_array_chunks_values_like_upstream() {
+    fn split_array_should_split_an_array_into_chunks_of_the_specified_size() {
         assert_eq!(
             split_array(&[1, 2, 3, 4, 5], 2).unwrap(),
             vec![vec![1, 2], vec![3, 4], vec![5]]
         );
-        assert_eq!(split_array(&[1, 2, 3], 5).unwrap(), vec![vec![1, 2, 3]]);
-        assert_eq!(
-            split_array(&[1, 2, 3], 1).unwrap(),
-            vec![vec![1], vec![2], vec![3]]
-        );
+    }
 
+    #[test]
+    fn split_array_should_return_empty_array_when_input_array_is_empty() {
         let empty: Vec<Vec<i32>> = split_array(&[], 2).unwrap();
+
         assert!(empty.is_empty());
     }
 
     #[test]
-    fn split_array_rejects_zero_and_negative_chunk_sizes() {
+    fn split_array_should_return_original_array_when_chunk_size_is_greater_than_array_length() {
+        assert_eq!(split_array(&[1, 2, 3], 5).unwrap(), vec![vec![1, 2, 3]]);
+    }
+
+    #[test]
+    fn split_array_should_return_original_array_when_chunk_size_is_equal_to_array_length() {
+        assert_eq!(split_array(&[1, 2, 3], 3).unwrap(), vec![vec![1, 2, 3]]);
+    }
+
+    #[test]
+    fn split_array_should_handle_chunk_size_of_one_correctly() {
+        assert_eq!(
+            split_array(&[1, 2, 3], 1).unwrap(),
+            vec![vec![1], vec![2], vec![3]]
+        );
+    }
+
+    #[test]
+    fn split_array_should_throw_error_for_chunk_size_of_zero() {
         assert_eq!(
             split_array(&[1, 2, 3], 0).unwrap_err(),
             super::SplitArrayError
         );
+    }
+
+    #[test]
+    fn split_array_should_throw_error_for_negative_chunk_size() {
         assert_eq!(
             split_array(&[1, 2, 3], -1).unwrap_err().to_string(),
             "chunkSize must be greater than 0"
+        );
+    }
+
+    #[test]
+    fn split_array_should_handle_non_integer_chunk_size_by_flooring_the_size() {
+        let size = 2.5_f64.floor() as isize;
+
+        assert_eq!(
+            split_array(&[1, 2, 3, 4, 5], size).unwrap(),
+            vec![vec![1, 2], vec![3, 4], vec![5]]
         );
     }
 
