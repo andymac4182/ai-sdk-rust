@@ -1641,21 +1641,21 @@ mod tests {
     }
 
     #[test]
-    fn cosine_similarity_calculates_similarity() {
+    fn cosine_similarity_should_calculate_cosine_similarity_correctly() {
         let result = cosine_similarity(&[1.0, 2.0, 3.0], &[4.0, 5.0, 6.0]).unwrap();
 
         assert_close(result, 0.974_631_846_197_076_2);
     }
 
     #[test]
-    fn cosine_similarity_calculates_negative_similarity() {
+    fn cosine_similarity_should_calculate_negative_cosine_similarity_correctly() {
         let result = cosine_similarity(&[1.0, 0.0], &[-1.0, 0.0]).unwrap();
 
         assert_close(result, -1.0);
     }
 
     #[test]
-    fn cosine_similarity_rejects_mismatched_lengths() {
+    fn cosine_similarity_should_throw_error_when_vectors_have_different_lengths() {
         let error = cosine_similarity(&[1.0, 2.0, 3.0], &[4.0, 5.0]).unwrap_err();
 
         assert_eq!(error.parameter(), "vector1,vector2");
@@ -1670,8 +1670,12 @@ mod tests {
     }
 
     #[test]
-    fn cosine_similarity_returns_zero_for_empty_or_zero_vectors() {
+    fn cosine_similarity_returns_zero_for_empty_vectors() {
         assert_eq!(cosine_similarity(&[], &[]).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn cosine_similarity_should_give_zero_when_one_of_the_vectors_is_a_zero_vector() {
         assert_eq!(
             cosine_similarity(&[0.0, 1.0, 2.0], &[0.0, 0.0, 0.0]).unwrap(),
             0.0
@@ -1683,7 +1687,7 @@ mod tests {
     }
 
     #[test]
-    fn cosine_similarity_handles_very_small_magnitudes() {
+    fn cosine_similarity_should_handle_vectors_with_very_small_magnitudes() {
         let result = cosine_similarity(&[1e-10, 0.0, 0.0], &[2e-10, 0.0, 0.0]).unwrap();
         let negative = cosine_similarity(&[1e-10, 0.0, 0.0], &[-1e-10, 0.0, 0.0]).unwrap();
 
