@@ -4602,6 +4602,70 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_result_text_stream_filters_out_empty_text_deltas() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", ", ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("test-input")],
+        )));
+
+        assert_eq!(result.text_stream, vec!["Hello", ", ", "world!"]);
+        assert_eq!(result.text, "Hello, world!");
+        assert!(result.parts.iter().all(|part| match part {
+            TextStreamPart::TextDelta(part) => !part.text.is_empty(),
+            _ => true,
+        }));
+    }
+
+    #[test]
+    fn stream_text_result_text_stream_excludes_reasoning_content() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("r1")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "r1",
+                    "I will not be visible in textStream.",
+                )),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("r1")),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("test-input")],
+        )));
+
+        assert_eq!(result.text_stream, vec!["Hello"]);
+        assert_eq!(result.text, "Hello");
+        assert_eq!(
+            result.reasoning_text,
+            Some("I will not be visible in textStream.".to_string())
+        );
+    }
+
+    #[test]
     fn stream_text_smooth_stream_transforms_chunks_before_callbacks() {
         let chunks = Arc::new(Mutex::new(Vec::new()));
         let chunks_for_callback = Arc::clone(&chunks);
