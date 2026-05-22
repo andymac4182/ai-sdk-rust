@@ -6988,6 +6988,12 @@ mod tests {
         include_str!("fixtures/openai-custom-tool.1.json");
     const OPEN_RESPONSES_CUSTOM_TOOL_CHUNKS_FIXTURE: &str =
         include_str!("fixtures/openai-custom-tool.1.chunks.txt");
+    const OPEN_RESPONSES_APPLY_PATCH_TOOL_JSON_FIXTURE: &str =
+        include_str!("fixtures/openai-apply-patch-tool.1.json");
+    const OPEN_RESPONSES_APPLY_PATCH_TOOL_CHUNKS_FIXTURE: &str =
+        include_str!("fixtures/openai-apply-patch-tool.1.chunks.txt");
+    const OPEN_RESPONSES_APPLY_PATCH_TOOL_DELETE_CHUNKS_FIXTURE: &str =
+        include_str!("fixtures/openai-apply-patch-tool-delete.1.chunks.txt");
     const OPEN_RESPONSES_TOOL_SEARCH_JSON_FIXTURE: &str =
         include_str!("fixtures/openai-tool-search.1.json");
     const OPEN_RESPONSES_TOOL_SEARCH_CHUNKS_FIXTURE: &str =
@@ -25603,23 +25609,9 @@ mod tests {
 
     #[test]
     fn open_responses_provider_generates_apply_patch_create_file_fixture_request_body() {
-        let body = json!({
-            "id": "resp_apply_patch_request_body",
-            "object": "response",
-            "created_at": 1764182460,
-            "status": "completed",
-            "model": "gpt-5.1-2025-11-13",
-            "output": [],
-            "usage": {
-                "input_tokens": 1,
-                "output_tokens": 1,
-                "total_tokens": 2
-            }
-        })
-        .to_string();
         let (_, request_body) = open_responses_generate_result_from_text_with_request_body(
             "gpt-5.1-2025-11-13",
-            &body,
+            OPEN_RESPONSES_APPLY_PATCH_TOOL_JSON_FIXTURE,
             open_responses_apply_patch_fixture_call_options(),
         );
 
@@ -25649,82 +25641,38 @@ mod tests {
 
     #[test]
     fn open_responses_provider_generates_apply_patch_create_file_fixture_content() {
-        const RESPONSE_ID: &str = "resp_0b04c5f8dfc43af500692749bc5b288197b45e830995fd32d3";
-        const APPLY_PATCH_ID: &str = "apc_0b04c5f8dfc43af500692749bd60908197b0e453c38f30191a";
-        const CALL_ID: &str = "call_CdXiGtcRl49Q6Ek20tG9lYOr";
-        const DIFF: &str = "+## Shopping Checklist\n+\n+- [ ] Milk\n+- [ ] Bread\n+- [ ] Eggs\n+- [ ] Apples\n+- [ ] Coffee\n+\n";
+        let fixture: JsonValue = serde_json::from_str(OPEN_RESPONSES_APPLY_PATCH_TOOL_JSON_FIXTURE)
+            .expect("apply-patch fixture JSON parses");
+        let apply_patch_call = open_responses_fixture_output_item(&fixture, "apply_patch_call");
+        let usage = &fixture["usage"];
+        let response_id = fixture["id"].as_str().expect("response id is set");
+        let model_id = fixture["model"].as_str().expect("model id is set");
+        let created_at = fixture["created_at"]
+            .as_i64()
+            .expect("response created_at is set");
+        let service_tier = fixture["service_tier"]
+            .as_str()
+            .expect("response service tier is set");
+        let input_tokens = usage["input_tokens"].as_u64();
+        let cached_tokens = usage["input_tokens_details"]["cached_tokens"].as_u64();
+        let output_tokens = usage["output_tokens"].as_u64();
+        let reasoning_tokens = usage["output_tokens_details"]["reasoning_tokens"].as_u64();
+        let apply_patch_id = apply_patch_call["id"]
+            .as_str()
+            .expect("apply-patch item id is set");
+        let call_id = apply_patch_call["call_id"]
+            .as_str()
+            .expect("apply-patch call id is set");
+        let diff = apply_patch_call["operation"]["diff"]
+            .as_str()
+            .expect("apply-patch diff is set");
 
         let transport: OpenResponsesTransport =
             Arc::new(move |_request| -> OpenResponsesTransportFuture {
                 Box::pin(ready(Ok(ProviderApiResponse::text(
                     200,
                     "OK",
-                    json!({
-                        "id": RESPONSE_ID,
-                        "object": "response",
-                        "created_at": 1764182460,
-                        "status": "completed",
-                        "background": false,
-                        "billing": {
-                            "payer": "developer"
-                        },
-                        "error": null,
-                        "incomplete_details": null,
-                        "instructions": null,
-                        "max_output_tokens": null,
-                        "max_tool_calls": null,
-                        "model": "gpt-5.1-2025-11-13",
-                        "output": [
-                            {
-                                "id": APPLY_PATCH_ID,
-                                "type": "apply_patch_call",
-                                "status": "completed",
-                                "call_id": CALL_ID,
-                                "operation": open_responses_apply_patch_create_file_operation(DIFF)
-                            }
-                        ],
-                        "parallel_tool_calls": true,
-                        "previous_response_id": null,
-                        "prompt_cache_key": null,
-                        "prompt_cache_retention": null,
-                        "reasoning": {
-                            "effort": "none",
-                            "summary": null
-                        },
-                        "safety_identifier": null,
-                        "service_tier": "default",
-                        "store": true,
-                        "temperature": 1,
-                        "text": {
-                            "format": {
-                                "type": "text"
-                            },
-                            "verbosity": "medium"
-                        },
-                        "tool_choice": "auto",
-                        "tools": [
-                            {
-                                "type": "apply_patch"
-                            }
-                        ],
-                        "top_logprobs": 0,
-                        "top_p": 1,
-                        "truncation": "disabled",
-                        "usage": {
-                            "input_tokens": 642,
-                            "input_tokens_details": {
-                                "cached_tokens": 0
-                            },
-                            "output_tokens": 67,
-                            "output_tokens_details": {
-                                "reasoning_tokens": 0
-                            },
-                            "total_tokens": 709
-                        },
-                        "user": null,
-                        "metadata": {}
-                    })
-                    .to_string(),
+                    OPEN_RESPONSES_APPLY_PATCH_TOOL_JSON_FIXTURE.to_string(),
                 ))))
             });
         let provider = create_open_responses(
@@ -25738,29 +25686,29 @@ mod tests {
             poll_ready(model.do_generate(open_responses_apply_patch_fixture_call_options()));
 
         assert_eq!(result.finish_reason.unified, FinishReason::Stop);
-        assert_eq!(result.usage.input_tokens.total, Some(642));
-        assert_eq!(result.usage.input_tokens.cache_read, Some(0));
-        assert_eq!(result.usage.output_tokens.total, Some(67));
-        assert_eq!(result.usage.output_tokens.reasoning, Some(0));
+        assert_eq!(result.usage.input_tokens.total, input_tokens);
+        assert_eq!(result.usage.input_tokens.cache_read, cached_tokens);
+        assert_eq!(result.usage.output_tokens.total, output_tokens);
+        assert_eq!(result.usage.output_tokens.reasoning, reasoning_tokens);
         assert_eq!(
             openai_metadata_value(&result.provider_metadata, "responseId")
                 .and_then(JsonValue::as_str),
-            Some(RESPONSE_ID)
+            Some(response_id)
         );
         assert_eq!(
             openai_metadata_value(&result.provider_metadata, "serviceTier")
                 .and_then(JsonValue::as_str),
-            Some("default")
+            Some(service_tier)
         );
 
         let response = result.response.as_ref().expect("result includes response");
-        assert_eq!(response.id.as_deref(), Some(RESPONSE_ID));
-        assert_eq!(response.model_id.as_deref(), Some("gpt-5.1-2025-11-13"));
+        assert_eq!(response.id.as_deref(), Some(response_id));
+        assert_eq!(response.model_id.as_deref(), Some(model_id));
         assert_eq!(
             response
                 .timestamp
                 .map(|timestamp| timestamp.unix_timestamp()),
-            Some(1_764_182_460)
+            Some(created_at)
         );
 
         let tool_calls = result
@@ -25772,18 +25720,18 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(tool_calls.len(), 1);
-        assert_eq!(tool_calls[0].tool_call_id, CALL_ID);
+        assert_eq!(tool_calls[0].tool_call_id, call_id);
         assert_eq!(tool_calls[0].tool_name, "apply_patch");
         assert_eq!(tool_calls[0].provider_executed, None);
         assert_eq!(
             serde_json::from_str::<JsonValue>(&tool_calls[0].input)
                 .expect("apply patch input parses"),
-            open_responses_apply_patch_create_file_input(CALL_ID, DIFF)
+            open_responses_apply_patch_create_file_input(call_id, diff)
         );
         assert_eq!(
             openai_metadata_value(&tool_calls[0].provider_metadata, "itemId")
                 .and_then(JsonValue::as_str),
-            Some(APPLY_PATCH_ID)
+            Some(apply_patch_id)
         );
     }
 
@@ -35654,215 +35602,66 @@ mod tests {
 
     #[test]
     fn open_responses_provider_streams_apply_patch_create_file_fixture() {
-        const RESPONSE_ID: &str = "resp_0372d86dfc1762fe00692741f339a08190bce9b78ee2079295";
-        const APPLY_PATCH_ID: &str = "apc_0372d86dfc1762fe00692741f3f3dc8190879cba489ff2fc8b";
-        const CALL_ID: &str = "call_kA46f91ZwocQyMCKyyZqRyC5";
-        const DIFF: &str = "+## Shopping Checklist\n+\n+- [ ] Milk\n+- [ ] Bread\n+- [ ] Eggs\n+- [ ] Fresh fruit\n+- [ ] Coffee\n";
-        let raw_deltas = [
-            "+",
-            "##",
-            " Shopping",
-            " Checklist",
-            "\n",
-            "+\n",
-            "+-",
-            " [",
-            " ]",
-            " Milk",
-            "\n",
-            "+-",
-            " [",
-            " ]",
-            " Bread",
-            "\n",
-            "+-",
-            " [",
-            " ]",
-            " Eggs",
-            "\n",
-            "+-",
-            " [",
-            " ]",
-            " Fresh",
-            " fruit",
-            "\n",
-            "+-",
-            " [",
-            " ]",
-            " Coffee",
-            "\n",
-        ];
+        let response_created_event = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_APPLY_PATCH_TOOL_CHUNKS_FIXTURE,
+            |event| event["type"].as_str() == Some("response.created"),
+        );
+        let response_completed_event = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_APPLY_PATCH_TOOL_CHUNKS_FIXTURE,
+            |event| event["type"].as_str() == Some("response.completed"),
+        );
+        let apply_patch_done_event = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_APPLY_PATCH_TOOL_CHUNKS_FIXTURE,
+            |event| {
+                event["type"].as_str() == Some("response.output_item.done")
+                    && event["item"]["type"].as_str() == Some("apply_patch_call")
+            },
+        );
+        let diff_done_event = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_APPLY_PATCH_TOOL_CHUNKS_FIXTURE,
+            |event| event["type"].as_str() == Some("response.apply_patch_call_operation_diff.done"),
+        );
+        let delta_events = OPEN_RESPONSES_APPLY_PATCH_TOOL_CHUNKS_FIXTURE
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<JsonValue>(line).expect("fixture event parses"))
+            .filter(|event| {
+                event["type"].as_str() == Some("response.apply_patch_call_operation_diff.delta")
+            })
+            .collect::<Vec<_>>();
+        let raw_deltas = delta_events
+            .iter()
+            .map(|event| event["delta"].as_str().expect("apply-patch delta is set"))
+            .collect::<Vec<_>>();
+        let response = &response_created_event["response"];
+        let completed_response = &response_completed_event["response"];
+        let usage = &completed_response["usage"];
+        let apply_patch_call = &apply_patch_done_event["item"];
+        let response_id = response["id"].as_str().expect("response id is set");
+        let model_id = response["model"].as_str().expect("model id is set");
+        let created_at = response["created_at"]
+            .as_i64()
+            .expect("response created_at is set");
+        let service_tier = completed_response["service_tier"]
+            .as_str()
+            .expect("response service tier is set");
+        let input_tokens = usage["input_tokens"].as_u64();
+        let cached_tokens = usage["input_tokens_details"]["cached_tokens"].as_u64();
+        let output_tokens = usage["output_tokens"].as_u64();
+        let reasoning_tokens = usage["output_tokens_details"]["reasoning_tokens"].as_u64();
+        let apply_patch_id = apply_patch_call["id"]
+            .as_str()
+            .expect("apply-patch item id is set");
+        let call_id = apply_patch_call["call_id"]
+            .as_str()
+            .expect("apply-patch call id is set");
+        let diff = diff_done_event["diff"]
+            .as_str()
+            .expect("apply-patch diff is set");
+        let expected_input = open_responses_apply_patch_create_file_input(call_id, diff);
 
-        let apply_patch_call = json!({
-            "id": APPLY_PATCH_ID,
-            "type": "apply_patch_call",
-            "status": "completed",
-            "call_id": CALL_ID,
-            "operation": open_responses_apply_patch_create_file_operation(DIFF)
-        });
-        let mut events = vec![
-            json!({
-                "type": "response.created",
-                "sequence_number": 0,
-                "response": {
-                    "id": RESPONSE_ID,
-                    "object": "response",
-                    "created_at": 1764180467,
-                    "status": "in_progress",
-                    "background": false,
-                    "error": null,
-                    "incomplete_details": null,
-                    "instructions": null,
-                    "max_output_tokens": null,
-                    "max_tool_calls": null,
-                    "model": "gpt-5.1-2025-11-13",
-                    "output": [],
-                    "parallel_tool_calls": true,
-                    "previous_response_id": null,
-                    "prompt_cache_key": null,
-                    "prompt_cache_retention": null,
-                    "reasoning": {
-                        "effort": "none",
-                        "summary": null
-                    },
-                    "safety_identifier": null,
-                    "service_tier": "auto",
-                    "store": true,
-                    "temperature": 1,
-                    "text": {
-                        "format": {
-                            "type": "text"
-                        },
-                        "verbosity": "medium"
-                    },
-                    "tool_choice": "auto",
-                    "tools": [
-                        {
-                            "type": "apply_patch"
-                        }
-                    ],
-                    "top_logprobs": 0,
-                    "top_p": 1,
-                    "truncation": "disabled",
-                    "usage": null,
-                    "user": null,
-                    "metadata": {}
-                }
-            }),
-            json!({
-                "type": "response.in_progress",
-                "sequence_number": 1,
-                "response": {
-                    "id": RESPONSE_ID,
-                    "object": "response",
-                    "created_at": 1764180467,
-                    "status": "in_progress",
-                    "model": "gpt-5.1-2025-11-13",
-                    "output": [],
-                    "usage": null
-                }
-            }),
-            json!({
-                "type": "response.output_item.added",
-                "sequence_number": 2,
-                "output_index": 0,
-                "item": {
-                    "id": APPLY_PATCH_ID,
-                    "type": "apply_patch_call",
-                    "status": "in_progress",
-                    "call_id": CALL_ID,
-                    "operation": {
-                        "type": "create_file",
-                        "diff": "",
-                        "path": "shopping-checklist.md"
-                    }
-                }
-            }),
-        ];
-        for (index, delta) in raw_deltas.into_iter().enumerate() {
-            events.push(json!({
-                "type": "response.apply_patch_call_operation_diff.delta",
-                "sequence_number": 3 + index,
-                "item_id": APPLY_PATCH_ID,
-                "output_index": 0,
-                "delta": delta
-            }));
-        }
-        events.extend([
-            json!({
-                "type": "response.apply_patch_call_operation_diff.done",
-                "sequence_number": 35,
-                "item_id": APPLY_PATCH_ID,
-                "output_index": 0,
-                "diff": DIFF
-            }),
-            json!({
-                "type": "response.output_item.done",
-                "sequence_number": 36,
-                "output_index": 0,
-                "item": apply_patch_call.clone()
-            }),
-            json!({
-                "type": "response.completed",
-                "sequence_number": 37,
-                "response": {
-                    "id": RESPONSE_ID,
-                    "object": "response",
-                    "created_at": 1764180467,
-                    "status": "completed",
-                    "background": false,
-                    "error": null,
-                    "incomplete_details": null,
-                    "instructions": null,
-                    "max_output_tokens": null,
-                    "max_tool_calls": null,
-                    "model": "gpt-5.1-2025-11-13",
-                    "output": [apply_patch_call],
-                    "parallel_tool_calls": true,
-                    "previous_response_id": null,
-                    "prompt_cache_key": null,
-                    "prompt_cache_retention": null,
-                    "reasoning": {
-                        "effort": "none",
-                        "summary": null
-                    },
-                    "safety_identifier": null,
-                    "service_tier": "default",
-                    "store": true,
-                    "temperature": 1,
-                    "text": {
-                        "format": {
-                            "type": "text"
-                        },
-                        "verbosity": "medium"
-                    },
-                    "tool_choice": "auto",
-                    "tools": [
-                        {
-                            "type": "apply_patch"
-                        }
-                    ],
-                    "top_logprobs": 0,
-                    "top_p": 1,
-                    "truncation": "disabled",
-                    "usage": {
-                        "input_tokens": 642,
-                        "input_tokens_details": {
-                            "cached_tokens": 0
-                        },
-                        "output_tokens": 67,
-                        "output_tokens_details": {
-                            "reasoning_tokens": 0
-                        },
-                        "total_tokens": 709
-                    },
-                    "user": null,
-                    "metadata": {}
-                }
-            }),
-        ]);
-
-        let sse = open_responses_sse_from_events(events);
+        let sse =
+            open_responses_sse_from_fixture_lines(OPEN_RESPONSES_APPLY_PATCH_TOOL_CHUNKS_FIXTURE);
         let transport: OpenResponsesTransport =
             Arc::new(move |_request| -> OpenResponsesTransportFuture {
                 Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse.clone()))))
@@ -35884,27 +35683,27 @@ mod tests {
                 _ => None,
             })
             .expect("stream includes response metadata");
-        assert_eq!(metadata.id.as_deref(), Some(RESPONSE_ID));
-        assert_eq!(metadata.model_id.as_deref(), Some("gpt-5.1-2025-11-13"));
+        assert_eq!(metadata.id.as_deref(), Some(response_id));
+        assert_eq!(metadata.model_id.as_deref(), Some(model_id));
         assert_eq!(
             metadata
                 .timestamp
                 .map(|timestamp| timestamp.unix_timestamp()),
-            Some(1_764_180_467)
+            Some(created_at)
         );
 
         assert!(result.stream.iter().any(|part| {
             matches!(
                 part,
                 LanguageModelStreamPart::ToolInputStart(start)
-                    if start.id == CALL_ID && start.tool_name == "apply_patch"
+                    if start.id == call_id && start.tool_name == "apply_patch"
             )
         }));
         let input_deltas = result
             .stream
             .iter()
             .filter_map(|part| match part {
-                LanguageModelStreamPart::ToolInputDelta(delta) if delta.id == CALL_ID => {
+                LanguageModelStreamPart::ToolInputDelta(delta) if delta.id == call_id => {
                     Some(delta.delta.as_str())
                 }
                 _ => None,
@@ -35912,14 +35711,13 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(input_deltas.len(), raw_deltas.len() + 2);
         let streamed_input = input_deltas.join("");
-        assert_eq!(
-            serde_json::from_str::<JsonValue>(&streamed_input).expect("streamed input parses"),
-            open_responses_apply_patch_create_file_input(CALL_ID, DIFF)
-        );
+        let streamed_input_value =
+            serde_json::from_str::<JsonValue>(&streamed_input).expect("streamed input parses");
+        assert_eq!(&streamed_input_value, &expected_input);
         assert!(result.stream.iter().any(|part| {
             matches!(
                 part,
-                LanguageModelStreamPart::ToolInputEnd(end) if end.id == CALL_ID
+                LanguageModelStreamPart::ToolInputEnd(end) if end.id == call_id
             )
         }));
 
@@ -35931,16 +35729,15 @@ mod tests {
                 _ => None,
             })
             .expect("stream includes apply patch tool call");
-        assert_eq!(tool_call.tool_call_id, CALL_ID);
+        assert_eq!(tool_call.tool_call_id, call_id);
         assert_eq!(tool_call.tool_name, "apply_patch");
-        assert_eq!(
-            serde_json::from_str::<JsonValue>(&tool_call.input).expect("tool input parses"),
-            open_responses_apply_patch_create_file_input(CALL_ID, DIFF)
-        );
+        let tool_call_input =
+            serde_json::from_str::<JsonValue>(&tool_call.input).expect("tool input parses");
+        assert_eq!(&tool_call_input, &expected_input);
         assert_eq!(
             openai_metadata_value(&tool_call.provider_metadata, "itemId")
                 .and_then(JsonValue::as_str),
-            Some(APPLY_PATCH_ID)
+            Some(apply_patch_id)
         );
 
         let finish = result
@@ -35952,180 +35749,59 @@ mod tests {
             })
             .expect("stream includes finish");
         assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
-        assert_eq!(finish.usage.input_tokens.total, Some(642));
-        assert_eq!(finish.usage.input_tokens.cache_read, Some(0));
-        assert_eq!(finish.usage.output_tokens.total, Some(67));
-        assert_eq!(finish.usage.output_tokens.reasoning, Some(0));
+        assert_eq!(finish.usage.input_tokens.total, input_tokens);
+        assert_eq!(finish.usage.input_tokens.cache_read, cached_tokens);
+        assert_eq!(finish.usage.output_tokens.total, output_tokens);
+        assert_eq!(finish.usage.output_tokens.reasoning, reasoning_tokens);
         assert_eq!(
             openai_metadata_value(&finish.provider_metadata, "responseId")
                 .and_then(JsonValue::as_str),
-            Some(RESPONSE_ID)
+            Some(response_id)
         );
         assert_eq!(
             openai_metadata_value(&finish.provider_metadata, "serviceTier")
                 .and_then(JsonValue::as_str),
-            Some("default")
+            Some(service_tier)
         );
     }
 
     #[test]
     fn open_responses_provider_streams_apply_patch_delete_file_fixture() {
-        const RESPONSE_ID: &str = "resp_delete_001";
-        const APPLY_PATCH_ID: &str = "apc_delete_001";
-        const CALL_ID: &str = "call_delete_1";
+        let response_completed_event = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_APPLY_PATCH_TOOL_DELETE_CHUNKS_FIXTURE,
+            |event| event["type"].as_str() == Some("response.completed"),
+        );
+        let apply_patch_done_event = open_responses_fixture_chunk_event(
+            OPEN_RESPONSES_APPLY_PATCH_TOOL_DELETE_CHUNKS_FIXTURE,
+            |event| {
+                event["type"].as_str() == Some("response.output_item.done")
+                    && event["item"]["type"].as_str() == Some("apply_patch_call")
+            },
+        );
+        let completed_response = &response_completed_event["response"];
+        let usage = &completed_response["usage"];
+        let apply_patch_call = &apply_patch_done_event["item"];
+        let response_id = completed_response["id"]
+            .as_str()
+            .expect("response id is set");
+        let service_tier = completed_response["service_tier"]
+            .as_str()
+            .expect("response service tier is set");
+        let input_tokens = usage["input_tokens"].as_u64();
+        let cached_tokens = usage["input_tokens_details"]["cached_tokens"].as_u64();
+        let output_tokens = usage["output_tokens"].as_u64();
+        let reasoning_tokens = usage["output_tokens_details"]["reasoning_tokens"].as_u64();
+        let apply_patch_id = apply_patch_call["id"]
+            .as_str()
+            .expect("apply-patch item id is set");
+        let call_id = apply_patch_call["call_id"]
+            .as_str()
+            .expect("apply-patch call id is set");
+        let expected_input = open_responses_apply_patch_delete_file_input(call_id);
 
-        let apply_patch_call = json!({
-            "id": APPLY_PATCH_ID,
-            "type": "apply_patch_call",
-            "status": "completed",
-            "call_id": CALL_ID,
-            "operation": {
-                "type": "delete_file",
-                "path": "obsolete.txt"
-            }
-        });
-        let sse = open_responses_sse_from_events(vec![
-            json!({
-                "type": "response.created",
-                "sequence_number": 0,
-                "response": {
-                    "id": RESPONSE_ID,
-                    "object": "response",
-                    "created_at": 1764180467,
-                    "status": "in_progress",
-                    "background": false,
-                    "error": null,
-                    "incomplete_details": null,
-                    "instructions": null,
-                    "max_output_tokens": null,
-                    "max_tool_calls": null,
-                    "model": "gpt-5.1-2025-11-13",
-                    "output": [],
-                    "parallel_tool_calls": true,
-                    "previous_response_id": null,
-                    "prompt_cache_key": null,
-                    "prompt_cache_retention": null,
-                    "reasoning": {
-                        "effort": "none",
-                        "summary": null
-                    },
-                    "safety_identifier": null,
-                    "service_tier": "default",
-                    "store": true,
-                    "temperature": 1,
-                    "text": {
-                        "format": {
-                            "type": "text"
-                        },
-                        "verbosity": "medium"
-                    },
-                    "tool_choice": "auto",
-                    "tools": [
-                        {
-                            "type": "apply_patch"
-                        }
-                    ],
-                    "top_logprobs": 0,
-                    "top_p": 1,
-                    "truncation": "disabled",
-                    "usage": null,
-                    "user": null,
-                    "metadata": {}
-                }
-            }),
-            json!({
-                "type": "response.in_progress",
-                "sequence_number": 1,
-                "response": {
-                    "id": RESPONSE_ID,
-                    "object": "response",
-                    "created_at": 1764180467,
-                    "status": "in_progress",
-                    "model": "gpt-5.1-2025-11-13",
-                    "output": [],
-                    "usage": null
-                }
-            }),
-            json!({
-                "type": "response.output_item.added",
-                "sequence_number": 2,
-                "output_index": 0,
-                "item": {
-                    "id": APPLY_PATCH_ID,
-                    "type": "apply_patch_call",
-                    "status": "in_progress",
-                    "call_id": CALL_ID,
-                    "operation": {
-                        "type": "delete_file",
-                        "path": "obsolete.txt"
-                    }
-                }
-            }),
-            json!({
-                "type": "response.output_item.done",
-                "sequence_number": 3,
-                "output_index": 0,
-                "item": apply_patch_call.clone()
-            }),
-            json!({
-                "type": "response.completed",
-                "sequence_number": 4,
-                "response": {
-                    "id": RESPONSE_ID,
-                    "object": "response",
-                    "created_at": 1764180467,
-                    "status": "completed",
-                    "background": false,
-                    "error": null,
-                    "incomplete_details": null,
-                    "instructions": null,
-                    "max_output_tokens": null,
-                    "max_tool_calls": null,
-                    "model": "gpt-5.1-2025-11-13",
-                    "output": [apply_patch_call],
-                    "parallel_tool_calls": true,
-                    "previous_response_id": null,
-                    "prompt_cache_key": null,
-                    "prompt_cache_retention": null,
-                    "reasoning": {
-                        "effort": "none",
-                        "summary": null
-                    },
-                    "safety_identifier": null,
-                    "service_tier": "default",
-                    "store": true,
-                    "temperature": 1,
-                    "text": {
-                        "format": {
-                            "type": "text"
-                        },
-                        "verbosity": "medium"
-                    },
-                    "tool_choice": "auto",
-                    "tools": [
-                        {
-                            "type": "apply_patch"
-                        }
-                    ],
-                    "top_logprobs": 0,
-                    "top_p": 1,
-                    "truncation": "disabled",
-                    "usage": {
-                        "input_tokens": 24,
-                        "input_tokens_details": {
-                            "cached_tokens": 0
-                        },
-                        "output_tokens": 0,
-                        "output_tokens_details": {
-                            "reasoning_tokens": 0
-                        },
-                        "total_tokens": 24
-                    },
-                    "user": null,
-                    "metadata": {}
-                }
-            }),
-        ]);
+        let sse = open_responses_sse_from_fixture_lines(
+            OPEN_RESPONSES_APPLY_PATCH_TOOL_DELETE_CHUNKS_FIXTURE,
+        );
         let transport: OpenResponsesTransport =
             Arc::new(move |_request| -> OpenResponsesTransportFuture {
                 Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse.clone()))))
@@ -36143,27 +35819,24 @@ mod tests {
             matches!(
                 part,
                 LanguageModelStreamPart::ToolInputStart(start)
-                    if start.id == CALL_ID && start.tool_name == "apply_patch"
+                    if start.id == call_id && start.tool_name == "apply_patch"
             )
         }));
         let input_deltas = result
             .stream
             .iter()
             .filter_map(|part| match part {
-                LanguageModelStreamPart::ToolInputDelta(delta) if delta.id == CALL_ID => {
+                LanguageModelStreamPart::ToolInputDelta(delta) if delta.id == call_id => {
                     Some(delta.delta.as_str())
                 }
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(
-            input_deltas,
-            vec![open_responses_apply_patch_delete_file_input(CALL_ID).to_string()]
-        );
+        assert_eq!(input_deltas, vec![expected_input.to_string()]);
         assert!(result.stream.iter().any(|part| {
             matches!(
                 part,
-                LanguageModelStreamPart::ToolInputEnd(end) if end.id == CALL_ID
+                LanguageModelStreamPart::ToolInputEnd(end) if end.id == call_id
             )
         }));
 
@@ -36175,16 +35848,15 @@ mod tests {
                 _ => None,
             })
             .expect("stream includes delete apply patch tool call");
-        assert_eq!(tool_call.tool_call_id, CALL_ID);
+        assert_eq!(tool_call.tool_call_id, call_id);
         assert_eq!(tool_call.tool_name, "apply_patch");
-        assert_eq!(
-            serde_json::from_str::<JsonValue>(&tool_call.input).expect("tool input parses"),
-            open_responses_apply_patch_delete_file_input(CALL_ID)
-        );
+        let tool_call_input =
+            serde_json::from_str::<JsonValue>(&tool_call.input).expect("tool input parses");
+        assert_eq!(&tool_call_input, &expected_input);
         assert_eq!(
             openai_metadata_value(&tool_call.provider_metadata, "itemId")
                 .and_then(JsonValue::as_str),
-            Some(APPLY_PATCH_ID)
+            Some(apply_patch_id)
         );
 
         let finish = result
@@ -36196,19 +35868,19 @@ mod tests {
             })
             .expect("stream includes finish");
         assert_eq!(finish.finish_reason.unified, FinishReason::Stop);
-        assert_eq!(finish.usage.input_tokens.total, Some(24));
-        assert_eq!(finish.usage.input_tokens.cache_read, Some(0));
-        assert_eq!(finish.usage.output_tokens.total, Some(0));
-        assert_eq!(finish.usage.output_tokens.reasoning, Some(0));
+        assert_eq!(finish.usage.input_tokens.total, input_tokens);
+        assert_eq!(finish.usage.input_tokens.cache_read, cached_tokens);
+        assert_eq!(finish.usage.output_tokens.total, output_tokens);
+        assert_eq!(finish.usage.output_tokens.reasoning, reasoning_tokens);
         assert_eq!(
             openai_metadata_value(&finish.provider_metadata, "responseId")
                 .and_then(JsonValue::as_str),
-            Some(RESPONSE_ID)
+            Some(response_id)
         );
         assert_eq!(
             openai_metadata_value(&finish.provider_metadata, "serviceTier")
                 .and_then(JsonValue::as_str),
-            Some("default")
+            Some(service_tier)
         );
     }
 

@@ -1747,6 +1747,13 @@ focused tests for each portable behavior before changing rows to `verified`.
   `openai-client-tool-search.2.chunks.txt`, deriving provisional/final
   tool-search call ids, item ids, arguments, and follow-up function-call input
   from the fixtures instead of reconstructed SSE literals.
+- 2026-05-22: OpenAI Responses apply-patch fixture parity hardened the
+  generated create-file tests plus create/delete streaming tests to consume
+  byte-matched local copies of upstream `openai-apply-patch-tool.1.json`,
+  `openai-apply-patch-tool.1.chunks.txt`, and
+  `openai-apply-patch-tool-delete.1.chunks.txt`, deriving ids, operations,
+  streamed diff deltas, metadata, and usage from the fixtures instead of
+  reconstructed JSON/SSE literals.
 - 2026-05-20: OpenAI Responses code-interpreter annotation stream fixture
   parity added
   `open_responses_provider_streams_code_interpreter_results_with_annotations`
