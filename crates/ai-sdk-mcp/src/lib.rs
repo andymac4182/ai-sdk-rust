@@ -1733,10 +1733,29 @@ fn extract_mcp_structured_content(
 /// contract: POST JSON-RPC, protocol/session headers, JSON and SSE response
 /// payload parsing, best-effort inbound SSE GET/resumption, 202 notification
 /// acceptance, and DELETE session cleanup.
+#[derive(Clone)]
+struct SharedOAuthClientProvider(Arc<Mutex<Box<dyn OAuthClientProvider + Send>>>);
+
+impl fmt::Debug for SharedOAuthClientProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SharedOAuthClientProvider")
+    }
+}
+
+impl SharedOAuthClientProvider {
+    fn new<P>(provider: P) -> Self
+    where
+        P: OAuthClientProvider + Send + 'static,
+    {
+        Self(Arc::new(Mutex::new(Box::new(provider))))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct McpHttpTransport {
     url: String,
     headers: BTreeMap<String, String>,
+    auth_provider: Option<SharedOAuthClientProvider>,
     session_id: Option<String>,
     protocol_version: Option<String>,
     last_inbound_event_id: Option<String>,
@@ -1776,6 +1795,7 @@ impl McpHttpTransport {
         Self {
             url: url.into(),
             headers: BTreeMap::new(),
+            auth_provider: None,
             session_id: None,
             protocol_version: None,
             last_inbound_event_id: None,
@@ -1804,6 +1824,15 @@ impl McpHttpTransport {
                 .into_iter()
                 .map(|(key, value)| (key.into(), value.into())),
         );
+        self
+    }
+
+    /// Adds an OAuth provider used to attach bearer tokens and refresh on 401 responses.
+    pub fn with_auth_provider<P>(mut self, provider: P) -> Self
+    where
+        P: OAuthClientProvider + Send + 'static,
+    {
+        self.auth_provider = Some(SharedOAuthClientProvider::new(provider));
         self
     }
 
@@ -1846,7 +1875,7 @@ impl McpHttpTransport {
     fn common_headers(
         &self,
         base: impl IntoIterator<Item = (&'static str, &'static str)>,
-    ) -> BTreeMap<String, String> {
+    ) -> McpClientResult<BTreeMap<String, String>> {
         let mut headers = self.headers.clone();
         for (key, value) in base {
             headers.insert(key.to_string(), value.to_string());
@@ -1858,13 +1887,69 @@ impl McpHttpTransport {
         if let Some(session_id) = &self.session_id {
             headers.insert("mcp-session-id".to_string(), session_id.clone());
         }
+        if let Some(access_token) = self.oauth_access_token()? {
+            headers.insert(
+                "Authorization".to_string(),
+                format!("Bearer {access_token}"),
+            );
+        }
 
-        with_user_agent_suffix(
+        Ok(with_user_agent_suffix(
             Some(headers.into_iter().map(|(key, value)| (key, Some(value)))),
             [format!("ai-sdk/{}", env!("CARGO_PKG_VERSION"))],
         )
         .into_iter()
-        .collect()
+        .collect())
+    }
+
+    fn oauth_access_token(&self) -> McpClientResult<Option<String>> {
+        let Some(provider) = &self.auth_provider else {
+            return Ok(None);
+        };
+        let provider = provider.0.lock().map_err(|_| {
+            McpClientError::new("MCP HTTP Transport Error: OAuth provider lock poisoned")
+        })?;
+        let tokens = provider.tokens().map_err(|error| {
+            McpClientError::new(format!(
+                "MCP HTTP Transport Error: failed to load OAuth tokens: {error}"
+            ))
+        })?;
+        Ok(tokens
+            .map(|tokens| tokens.access_token)
+            .filter(|access_token| !access_token.is_empty()))
+    }
+
+    fn authorize_after_unauthorized_response(
+        &mut self,
+        response: &ureq::http::Response<ureq::Body>,
+    ) -> McpClientResult<bool> {
+        let Some(provider) = &self.auth_provider else {
+            return Ok(false);
+        };
+
+        let mut options = AuthOptions::new(self.url.clone());
+        if let Some(resource_metadata_url) = response
+            .headers()
+            .get("www-authenticate")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| extract_resource_metadata_url(Some(value)))
+        {
+            options = options.with_resource_metadata_url(resource_metadata_url.to_string());
+        }
+
+        let mut provider = provider.0.lock().map_err(|_| {
+            McpClientError::new("MCP HTTP Transport Error: OAuth provider lock poisoned")
+        })?;
+        match auth(provider.as_mut(), options).map_err(|error| {
+            McpClientError::new(format!(
+                "MCP HTTP Transport Error: OAuth authorization failed: {error}"
+            ))
+        })? {
+            AuthResult::Authorized => Ok(true),
+            AuthResult::Redirect => Err(McpClientError::new(
+                "MCP HTTP Transport Error: OAuth authorization required",
+            )),
+        }
     }
 
     fn open_inbound_sse(&mut self) -> McpClientResult<()> {
@@ -1894,8 +1979,18 @@ impl McpHttpTransport {
     }
 
     fn open_inbound_sse_once(&mut self) -> Result<(), InboundSseAttemptError> {
+        self.open_inbound_sse_once_with_auth_retry(false)
+    }
+
+    fn open_inbound_sse_once_with_auth_retry(
+        &mut self,
+        tried_auth: bool,
+    ) -> Result<(), InboundSseAttemptError> {
         let mut builder = ureq::get(&self.url);
-        for (name, value) in self.common_headers([("Accept", "text/event-stream")]) {
+        for (name, value) in self
+            .common_headers([("Accept", "text/event-stream")])
+            .map_err(InboundSseAttemptError::Fatal)?
+        {
             builder = builder.header(name.as_str(), value.as_str());
         }
         if let Some(last_event_id) = &self.last_inbound_event_id {
@@ -1918,6 +2013,15 @@ impl McpHttpTransport {
         }
 
         let status = response.status().as_u16();
+        if status == 401
+            && !tried_auth
+            && self
+                .authorize_after_unauthorized_response(&response)
+                .map_err(InboundSseAttemptError::Fatal)?
+        {
+            return self.open_inbound_sse_once_with_auth_retry(true);
+        }
+
         if status == 405 {
             return Ok(());
         }
@@ -1963,28 +2067,39 @@ impl McpHttpTransport {
         let body = serde_json::to_string(message).map_err(|error| {
             McpClientError::new(format!("Failed to serialize MCP message: {error}"))
         })?;
+        self.execute_post_with_auth_retry(message, body, false)
+    }
+
+    fn execute_post_with_auth_retry(
+        &mut self,
+        message: &JsonRpcMessage,
+        body: String,
+        tried_auth: bool,
+    ) -> McpClientResult<Vec<JsonRpcMessage>> {
         let mut builder = ureq::post(&self.url);
         for (name, value) in self.common_headers([
             ("Content-Type", "application/json"),
             ("Accept", "application/json, text/event-stream"),
-        ]) {
+        ])? {
             builder = builder.header(name.as_str(), value.as_str());
         }
         let response = builder
             .config()
             .http_status_as_error(false)
             .build()
-            .send(body)
+            .send(body.clone())
             .map_err(|error| {
                 McpClientError::new(format!("MCP HTTP Transport Error: fetch failed: {error}"))
             })?;
 
-        self.handle_post_response(message, response)
+        self.handle_post_response(message, body, tried_auth, response)
     }
 
     fn handle_post_response(
         &mut self,
         message: &JsonRpcMessage,
+        body: String,
+        tried_auth: bool,
         mut response: ureq::http::Response<ureq::Body>,
     ) -> McpClientResult<Vec<JsonRpcMessage>> {
         if let Some(session_id) = response
@@ -1996,6 +2111,10 @@ impl McpHttpTransport {
         }
 
         let status = response.status().as_u16();
+        if status == 401 && !tried_auth && self.authorize_after_unauthorized_response(&response)? {
+            return self.execute_post_with_auth_retry(message, body, true);
+        }
+
         let content_type = response
             .headers()
             .get("content-type")
@@ -2071,7 +2190,7 @@ impl McpTransport for McpHttpTransport {
     fn close(&mut self) -> McpClientResult<()> {
         if let Some(session_id) = self.session_id.clone() {
             let mut builder = ureq::delete(&self.url);
-            for (name, value) in self.common_headers([]) {
+            for (name, value) in self.common_headers([])? {
                 builder = builder.header(name.as_str(), value.as_str());
             }
             builder = builder.header("mcp-session-id", session_id.as_str());
@@ -3676,6 +3795,154 @@ mod tests {
     }
 
     #[test]
+    fn mcp_http_transport_refreshes_oauth_tokens_for_unauthorized_inbound_sse() {
+        let server = LocalHttpServer::new(Vec::new());
+        let transport_url = format!("{}/mcp", server.url());
+        server.set_responses(vec![
+            LocalHttpResponse::new(
+                401,
+                [
+                    ("content-type".to_string(), "text/plain".to_string()),
+                    (
+                        "www-authenticate".to_string(),
+                        format!(
+                            "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource\"",
+                            server.url()
+                        ),
+                    ),
+                ],
+                "Unauthorized",
+            ),
+            LocalHttpResponse::json(oauth_protected_resource_metadata_json(
+                &server.url(),
+                &transport_url,
+            )),
+            LocalHttpResponse::json(oauth_authorization_server_metadata_json(&server.url())),
+            LocalHttpResponse::json(json!({
+                "access_token": "fresh-mcp-token",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "refresh_token": "next-refresh-token"
+            })),
+            LocalHttpResponse::empty(405),
+        ]);
+        let provider = HttpTransportOAuthProviderStub::with_refresh_token();
+        let mut transport =
+            McpHttpTransport::new(transport_url).with_auth_provider(provider.clone());
+
+        transport
+            .start()
+            .expect("OAuth refresh retries inbound SSE");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 5);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].path, "/mcp");
+        assert_eq!(
+            requests[0].headers.get("authorization"),
+            Some(&"Bearer expired-mcp-token".to_string())
+        );
+        assert_eq!(requests[1].path, "/.well-known/oauth-protected-resource");
+        assert_eq!(requests[2].path, "/.well-known/oauth-authorization-server");
+        assert_eq!(requests[3].path, "/token");
+        assert_eq!(requests[4].method, "GET");
+        assert_eq!(
+            requests[4].headers.get("authorization"),
+            Some(&"Bearer fresh-mcp-token".to_string())
+        );
+        assert_eq!(provider.access_token().as_deref(), Some("fresh-mcp-token"));
+    }
+
+    #[test]
+    fn mcp_http_transport_refreshes_oauth_tokens_and_retries_unauthorized_post() {
+        let server = LocalHttpServer::new(Vec::new());
+        let transport_url = format!("{}/mcp", server.url());
+        server.set_responses(vec![
+            LocalHttpResponse::empty(405),
+            LocalHttpResponse::new(
+                401,
+                [
+                    ("content-type".to_string(), "text/plain".to_string()),
+                    (
+                        "www-authenticate".to_string(),
+                        format!(
+                            "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource\"",
+                            server.url()
+                        ),
+                    ),
+                ],
+                "Unauthorized",
+            ),
+            LocalHttpResponse::json(oauth_protected_resource_metadata_json(
+                &server.url(),
+                &transport_url,
+            )),
+            LocalHttpResponse::json(oauth_authorization_server_metadata_json(&server.url())),
+            LocalHttpResponse::json(json!({
+                "access_token": "fresh-mcp-token",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "refresh_token": "next-refresh-token"
+            })),
+            LocalHttpResponse::json(json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "result": {
+                    "protocolVersion": LATEST_PROTOCOL_VERSION,
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "oauth-protected-mcp-server", "version": "1.0.0" }
+                }
+            }))
+            .with_header("mcp-session-id", "oauth-session-1"),
+            LocalHttpResponse::empty(200),
+            LocalHttpResponse::empty(200),
+        ]);
+        let provider = HttpTransportOAuthProviderStub::with_refresh_token();
+        let client = create_mcp_client(
+            McpClientConfig::new(
+                McpHttpTransport::new(transport_url).with_auth_provider(provider.clone()),
+            )
+            .with_client_name("oauth-http-transport-test-client"),
+        )
+        .expect("client initializes after transport refreshes token");
+
+        assert_eq!(
+            client.server_info().expect("server info").name,
+            "oauth-protected-mcp-server"
+        );
+        client.close().expect("client closes authenticated session");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 8);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[1].method, "POST");
+        assert_eq!(requests[1].body["method"], "initialize");
+        assert_eq!(
+            requests[1].headers.get("authorization"),
+            Some(&"Bearer expired-mcp-token".to_string())
+        );
+        assert_eq!(requests[2].path, "/.well-known/oauth-protected-resource");
+        assert_eq!(requests[3].path, "/.well-known/oauth-authorization-server");
+        assert_eq!(requests[4].path, "/token");
+        assert_eq!(requests[5].body["method"], "initialize");
+        assert_eq!(
+            requests[5].headers.get("authorization"),
+            Some(&"Bearer fresh-mcp-token".to_string())
+        );
+        assert_eq!(requests[6].body["method"], "notifications/initialized");
+        assert_eq!(requests[7].method, "DELETE");
+        assert_eq!(
+            requests[7].headers.get("mcp-session-id"),
+            Some(&"oauth-session-1".to_string())
+        );
+        assert_eq!(
+            requests[7].headers.get("authorization"),
+            Some(&"Bearer fresh-mcp-token".to_string())
+        );
+        assert_eq!(provider.access_token().as_deref(), Some("fresh-mcp-token"));
+    }
+
+    #[test]
     fn mcp_sse_transport_connects_to_endpoint_and_posts_messages() {
         let server = LocalHttpServer::new(vec![
             LocalHttpResponse::new(
@@ -5270,6 +5537,111 @@ mod tests {
         body: JsonValue,
     }
 
+    #[derive(Clone, Debug)]
+    struct HttpTransportOAuthProviderStub {
+        state: Arc<Mutex<HttpTransportOAuthProviderStubState>>,
+    }
+
+    #[derive(Debug)]
+    struct HttpTransportOAuthProviderStubState {
+        tokens: Option<OAuthTokens>,
+        client_information: OAuthClientInformation,
+        redirects: Vec<url::Url>,
+        saved_code_verifier: Option<String>,
+    }
+
+    impl HttpTransportOAuthProviderStub {
+        fn with_refresh_token() -> Self {
+            Self {
+                state: Arc::new(Mutex::new(HttpTransportOAuthProviderStubState {
+                    tokens: Some(OAuthTokens {
+                        access_token: "expired-mcp-token".to_string(),
+                        id_token: None,
+                        token_type: "Bearer".to_string(),
+                        expires_in: Some(1),
+                        scope: None,
+                        refresh_token: Some("refresh-mcp-token".to_string()),
+                    }),
+                    client_information: OAuthClientInformation::new("mcp-client")
+                        .with_client_secret("mcp-client-secret"),
+                    redirects: Vec::new(),
+                    saved_code_verifier: None,
+                })),
+            }
+        }
+
+        fn access_token(&self) -> Option<String> {
+            self.state
+                .lock()
+                .expect("OAuth provider state lock")
+                .tokens
+                .as_ref()
+                .map(|tokens| tokens.access_token.clone())
+        }
+    }
+
+    impl OAuthClientProvider for HttpTransportOAuthProviderStub {
+        fn tokens(&self) -> McpOAuthResult<Option<OAuthTokens>> {
+            Ok(self
+                .state
+                .lock()
+                .expect("OAuth provider state lock")
+                .tokens
+                .clone())
+        }
+
+        fn save_tokens(&mut self, tokens: OAuthTokens) -> McpOAuthResult<()> {
+            self.state.lock().expect("OAuth provider state lock").tokens = Some(tokens);
+            Ok(())
+        }
+
+        fn redirect_to_authorization(&mut self, authorization_url: url::Url) -> McpOAuthResult<()> {
+            self.state
+                .lock()
+                .expect("OAuth provider state lock")
+                .redirects
+                .push(authorization_url);
+            Ok(())
+        }
+
+        fn save_code_verifier(&mut self, code_verifier: String) -> McpOAuthResult<()> {
+            self.state
+                .lock()
+                .expect("OAuth provider state lock")
+                .saved_code_verifier = Some(code_verifier);
+            Ok(())
+        }
+
+        fn code_verifier(&self) -> McpOAuthResult<String> {
+            Ok(self
+                .state
+                .lock()
+                .expect("OAuth provider state lock")
+                .saved_code_verifier
+                .clone()
+                .unwrap_or_else(|| "saved-code-verifier".to_string()))
+        }
+
+        fn redirect_url(&self) -> String {
+            "http://localhost:3000/callback".to_string()
+        }
+
+        fn client_metadata(&self) -> OAuthClientMetadata {
+            OAuthClientMetadata::new(vec!["http://localhost:3000/callback".to_string()])
+                .with_client_name("HTTP transport OAuth provider")
+        }
+
+        fn client_information(&self) -> McpOAuthResult<Option<OAuthClientInformation>> {
+            Ok(Some(
+                self.state
+                    .lock()
+                    .expect("OAuth provider state lock")
+                    .client_information
+                    .clone(),
+            ))
+        }
+    }
+
     struct LocalHttpResponse {
         status: u16,
         headers: BTreeMap<String, String>,
@@ -5325,6 +5697,7 @@ mod tests {
     struct LocalHttpServer {
         url: String,
         requests: Arc<Mutex<Vec<LocalHttpRequest>>>,
+        responses: Arc<Mutex<VecDeque<LocalHttpResponse>>>,
         stop: Arc<AtomicBool>,
         handle: Option<JoinHandle<()>>,
     }
@@ -5360,6 +5733,7 @@ mod tests {
             Self {
                 url,
                 requests,
+                responses,
                 stop,
                 handle: Some(handle),
             }
@@ -5371,6 +5745,10 @@ mod tests {
 
         fn requests(&self) -> Vec<LocalHttpRequest> {
             self.requests.lock().expect("local requests lock").clone()
+        }
+
+        fn set_responses(&self, responses: Vec<LocalHttpResponse>) {
+            *self.responses.lock().expect("local responses lock") = VecDeque::from(responses);
         }
     }
 
@@ -5463,6 +5841,29 @@ mod tests {
             path,
             headers,
             body: serde_json::from_str(&body).unwrap_or(JsonValue::Null),
+        })
+    }
+
+    fn oauth_protected_resource_metadata_json(
+        authorization_server_url: &str,
+        resource_url: &str,
+    ) -> JsonValue {
+        json!({
+            "resource": resource_url,
+            "authorization_servers": [authorization_server_url]
+        })
+    }
+
+    fn oauth_authorization_server_metadata_json(server_url: &str) -> JsonValue {
+        json!({
+            "issuer": server_url,
+            "authorization_endpoint": format!("{server_url}/authorize"),
+            "token_endpoint": format!("{server_url}/token"),
+            "registration_endpoint": format!("{server_url}/register"),
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code", "refresh_token"],
+            "token_endpoint_auth_methods_supported": ["client_secret_post", "none"],
+            "code_challenge_methods_supported": ["S256"]
         })
     }
 }
