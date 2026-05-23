@@ -12,14 +12,15 @@
 //!   raw millisecond count to milliseconds, panicking on malformed
 //!   input (matching upstream's `throw new Error("Invalid duration: …")`).
 //!
-//! **What is deferred:** `TranscriptsApiImpl` itself — every `append` /
-//! `list` / `delete` / `count` method calls `StateAdapter.appendToList`
-//! or `StateAdapter.getList`. Those land once the placeholder
-//! [`crate::types::StateAdapter`] trait is extended with concrete async
-//! methods (see the state-memory module-header note for the design
-//! decision and migration plan).
+//! [`TranscriptsApiImpl`] — the upstream class, ported in slice 118
+//! after the Phase 1.5 StateAdapter trait extension.
 
-use crate::types::{DurationString, DurationUnit};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::types::{
+    DurationString, DurationUnit, StateAdapter, StateResult, TranscriptEntry, TranscriptsConfig,
+};
 
 /// Either a raw millisecond count or a validated [`DurationString`].
 /// 1:1 port of upstream `number | DurationString`.
@@ -129,6 +130,160 @@ fn duration_string_to_ms(value: &DurationString) -> u64 {
         DurationUnit::Days => 86_400_000,
     };
     value.value() * multiplier
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn generate_id() -> String {
+    // 1:1 with upstream `crypto.randomUUID()` semantically — the only
+    // requirement is uniqueness within a single SDK instance's lifetime.
+    // An atomic counter + timestamp gives that without pulling in `uuid`.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let t = now_ms();
+    format!("ts-{t:016x}-{n:016x}")
+}
+
+/// Input to [`TranscriptsApiImpl::append`]. 1:1 with upstream
+/// `interface AppendTranscriptInput` (every field optional except
+/// `text` + `role` + `thread_id` + `platform`). The SDK fills in
+/// `id` and `timestamp` at append time.
+#[derive(Debug, Clone)]
+pub struct AppendTranscriptInput {
+    /// mdast AST. Stored only when `config.store_formatted == Some(true)`.
+    pub formatted: Option<crate::types::FormattedContent>,
+    /// Originating adapter name (e.g. `"slack"`, `"teams"`).
+    pub platform: String,
+    /// Platform-native message ID, when known.
+    pub platform_message_id: Option<String>,
+    /// `user` / `assistant` / `system`.
+    pub role: crate::types::TranscriptRole,
+    /// Plain-text body.
+    pub text: String,
+    /// Originating thread ID.
+    pub thread_id: String,
+    /// Cross-platform user key.
+    pub user_key: String,
+}
+
+/// Per-user transcript store. 1:1 port of upstream
+/// `class TranscriptsApiImpl`.
+///
+/// Reads/writes flow through the [`StateAdapter`] trait: `append`
+/// calls [`StateAdapter::append_to_list`], `list` / `count` call
+/// [`StateAdapter::get_list`], and `delete` writes a tombstone via
+/// `append_to_list` (followed by a single-item list, matching
+/// upstream's "delete-by-tombstone" trick).
+#[derive(Clone)]
+pub struct TranscriptsApiImpl {
+    state: Arc<dyn StateAdapter>,
+    config: TranscriptsConfig,
+}
+
+impl std::fmt::Debug for TranscriptsApiImpl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TranscriptsApiImpl")
+            .field("state", &self.state)
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
+impl TranscriptsApiImpl {
+    /// 1:1 port of upstream `new TranscriptsApiImpl({ state, config })`.
+    pub fn new(state: Arc<dyn StateAdapter>, config: TranscriptsConfig) -> Self {
+        Self { state, config }
+    }
+
+    fn max_per_user(&self) -> usize {
+        self.config
+            .max_per_user
+            .map(|n| n as usize)
+            .unwrap_or(DEFAULT_MAX_PER_USER)
+    }
+
+    fn retention_ms(&self) -> Option<u64> {
+        let policy = self.config.retention.as_ref()?;
+        let input = match policy {
+            crate::types::RetentionPolicy::Millis(ms) => DurationInput::Millis(*ms),
+            crate::types::RetentionPolicy::Duration(d) => DurationInput::String(d.clone()),
+        };
+        parse_duration(Some(&input))
+    }
+
+    /// 1:1 port of upstream `async append(input): Promise<TranscriptEntry>`.
+    /// Fills in `id` + `timestamp` and writes the entry to the user's
+    /// list via [`StateAdapter::append_to_list`].
+    pub async fn append(&self, input: AppendTranscriptInput) -> StateResult<TranscriptEntry> {
+        let store_formatted = self.config.store_formatted.unwrap_or(false);
+        let entry = TranscriptEntry {
+            formatted: if store_formatted {
+                input.formatted
+            } else {
+                None
+            },
+            id: generate_id(),
+            platform: input.platform,
+            platform_message_id: input.platform_message_id,
+            role: input.role,
+            text: input.text,
+            thread_id: input.thread_id,
+            timestamp: now_ms(),
+            user_key: input.user_key.clone(),
+        };
+        let key = user_transcript_key(&input.user_key);
+        let value = serde_json::to_value(&entry).expect("TranscriptEntry serializes cleanly");
+        self.state
+            .append_to_list(&key, value, Some(self.max_per_user()), self.retention_ms())
+            .await?;
+        Ok(entry)
+    }
+
+    /// 1:1 port of upstream `async list(userKey, options?): Promise<TranscriptEntry[]>`.
+    /// Filters out tombstones (matching upstream's `list()` filter); the
+    /// page-size limit defaults to [`DEFAULT_LIST_LIMIT`] when `None` (1:1
+    /// with upstream's `options?.limit ?? DEFAULT_LIST_LIMIT`).
+    pub async fn list(
+        &self,
+        user_key: &str,
+        limit: Option<usize>,
+    ) -> StateResult<Vec<TranscriptEntry>> {
+        let key = user_transcript_key(user_key);
+        let raw = self
+            .state
+            .get_list(&key, Some(limit.unwrap_or(DEFAULT_LIST_LIMIT)))
+            .await?;
+        Ok(raw
+            .into_iter()
+            .filter(|v| !is_tombstone(v))
+            .filter_map(|v| serde_json::from_value(v).ok())
+            .collect())
+    }
+
+    /// 1:1 port of upstream `async delete(userKey): Promise<void>`.
+    /// Writes a tombstone marker via [`StateAdapter::append_to_list`]
+    /// with `max_length: Some(1)` so the list collapses to just the
+    /// tombstone; subsequent [`Self::list`] / [`Self::count`] calls
+    /// observe an empty result.
+    pub async fn delete(&self, user_key: &str) -> StateResult<()> {
+        let key = user_transcript_key(user_key);
+        self.state
+            .append_to_list(&key, tombstone(), Some(1), self.retention_ms())
+            .await
+    }
+
+    /// 1:1 port of upstream `async count(userKey): Promise<number>`.
+    /// Counts non-tombstone entries.
+    pub async fn count(&self, user_key: &str) -> StateResult<usize> {
+        let key = user_transcript_key(user_key);
+        let raw = self.state.get_list(&key, None).await?;
+        Ok(raw.iter().filter(|v| !is_tombstone(v)).count())
+    }
 }
 
 #[cfg(test)]
@@ -266,5 +421,197 @@ mod tests {
             let key = user_transcript_key(user);
             assert_eq!(user_key_from_transcript_key(&key), Some(user));
         }
+    }
+
+    // ---------- slice 118: TranscriptsApiImpl class ----------
+
+    use crate::types::{
+        StateAdapter, StateAdapterError, StateResult, TranscriptRole, TranscriptsConfig,
+    };
+    use futures_executor::block_on;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    #[derive(Debug, Default)]
+    struct MockState {
+        lists: Mutex<HashMap<String, Vec<serde_json::Value>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StateAdapter for MockState {
+        async fn get(&self, _key: &str) -> StateResult<Option<serde_json::Value>> {
+            Ok(None)
+        }
+        async fn set(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _ttl_ms: Option<u64>,
+        ) -> StateResult<()> {
+            Ok(())
+        }
+        async fn delete(&self, _key: &str) -> StateResult<()> {
+            Ok(())
+        }
+        async fn append_to_list(
+            &self,
+            key: &str,
+            value: serde_json::Value,
+            max_length: Option<usize>,
+            _ttl_ms: Option<u64>,
+        ) -> StateResult<()> {
+            let mut lists = self
+                .lists
+                .lock()
+                .map_err(|_| StateAdapterError::NotConnected)?;
+            let list = lists.entry(key.to_string()).or_default();
+            list.push(value);
+            if let Some(max) = max_length {
+                if list.len() > max {
+                    let start = list.len() - max;
+                    *list = list.split_off(start);
+                }
+            }
+            Ok(())
+        }
+        async fn get_list(
+            &self,
+            key: &str,
+            limit: Option<usize>,
+        ) -> StateResult<Vec<serde_json::Value>> {
+            let lists = self
+                .lists
+                .lock()
+                .map_err(|_| StateAdapterError::NotConnected)?;
+            let list = lists.get(key).cloned().unwrap_or_default();
+            Ok(match limit {
+                Some(n) if list.len() > n => list[list.len() - n..].to_vec(),
+                _ => list,
+            })
+        }
+    }
+
+    fn sample_input(user: &str) -> AppendTranscriptInput {
+        AppendTranscriptInput {
+            formatted: None,
+            platform: "slack".to_string(),
+            platform_message_id: None,
+            role: TranscriptRole::User,
+            text: "hello".to_string(),
+            thread_id: "slack:C1:1.0".to_string(),
+            user_key: user.to_string(),
+        }
+    }
+
+    #[test]
+    fn transcripts_api_append_then_list_returns_the_entry() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(state, TranscriptsConfig::default());
+        let entry = block_on(api.append(sample_input("U1"))).unwrap();
+        assert_eq!(entry.user_key, "U1");
+        assert_eq!(entry.text, "hello");
+        assert!(!entry.id.is_empty());
+        let list = block_on(api.list("U1", None)).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, entry.id);
+    }
+
+    #[test]
+    fn transcripts_api_count_returns_the_number_of_non_tombstone_entries() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(state, TranscriptsConfig::default());
+        assert_eq!(block_on(api.count("U1")).unwrap(), 0);
+        block_on(api.append(sample_input("U1"))).unwrap();
+        block_on(api.append(sample_input("U1"))).unwrap();
+        assert_eq!(block_on(api.count("U1")).unwrap(), 2);
+    }
+
+    #[test]
+    fn transcripts_api_delete_writes_a_tombstone_and_empties_subsequent_lists() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(state, TranscriptsConfig::default());
+        block_on(api.append(sample_input("U1"))).unwrap();
+        block_on(api.append(sample_input("U1"))).unwrap();
+        block_on(api.delete("U1")).unwrap();
+        assert_eq!(block_on(api.list("U1", None)).unwrap().len(), 0);
+        assert_eq!(block_on(api.count("U1")).unwrap(), 0);
+    }
+
+    #[test]
+    fn transcripts_api_isolates_users_by_key() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(state, TranscriptsConfig::default());
+        block_on(api.append(sample_input("U1"))).unwrap();
+        block_on(api.append(sample_input("U2"))).unwrap();
+        block_on(api.append(sample_input("U2"))).unwrap();
+        assert_eq!(block_on(api.count("U1")).unwrap(), 1);
+        assert_eq!(block_on(api.count("U2")).unwrap(), 2);
+    }
+
+    #[test]
+    fn transcripts_api_respects_max_per_user_cap_via_state_layer() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(
+            state,
+            TranscriptsConfig {
+                max_per_user: Some(2),
+                ..Default::default()
+            },
+        );
+        block_on(api.append(sample_input("U1"))).unwrap();
+        block_on(api.append(sample_input("U1"))).unwrap();
+        block_on(api.append(sample_input("U1"))).unwrap();
+        assert_eq!(block_on(api.count("U1")).unwrap(), 2);
+    }
+
+    #[test]
+    fn transcripts_api_store_formatted_false_drops_the_formatted_field() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(
+            state,
+            TranscriptsConfig {
+                store_formatted: Some(false),
+                ..Default::default()
+            },
+        );
+        let mut input = sample_input("U1");
+        input.formatted = Some(serde_json::json!({"type":"root","children":[]}));
+        let entry = block_on(api.append(input)).unwrap();
+        assert!(entry.formatted.is_none());
+    }
+
+    #[test]
+    fn transcripts_api_store_formatted_true_keeps_the_formatted_field() {
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(
+            state,
+            TranscriptsConfig {
+                store_formatted: Some(true),
+                ..Default::default()
+            },
+        );
+        let mut input = sample_input("U1");
+        input.formatted = Some(serde_json::json!({"type":"root","children":[]}));
+        let entry = block_on(api.append(input)).unwrap();
+        assert!(entry.formatted.is_some());
+    }
+
+    #[test]
+    fn transcripts_api_list_default_limit_caps_at_default_list_limit() {
+        // The mock state honors the limit passed by the impl. With no
+        // explicit limit, the impl asks for DEFAULT_LIST_LIMIT.
+        let state: Arc<dyn StateAdapter> = Arc::new(MockState::default());
+        let api = TranscriptsApiImpl::new(
+            state,
+            TranscriptsConfig {
+                max_per_user: Some(1000),
+                ..Default::default()
+            },
+        );
+        for _ in 0..60 {
+            block_on(api.append(sample_input("U1"))).unwrap();
+        }
+        let list = block_on(api.list("U1", None)).unwrap();
+        assert_eq!(list.len(), DEFAULT_LIST_LIMIT);
     }
 }
