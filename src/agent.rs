@@ -1234,11 +1234,11 @@ mod tests {
 
     use super::*;
     use crate::language_model::{
-        FinishReason, LanguageModelAbortController, LanguageModelAbortSignal, LanguageModelContent,
-        LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelStreamFinish,
-        LanguageModelStreamPart, LanguageModelStreamResult, LanguageModelText,
-        LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextStart,
-        LanguageModelToolCall, LanguageModelUsage,
+        FinishReason, LanguageModelAbortController, LanguageModelAbortSignal,
+        LanguageModelCallOptions, LanguageModelContent, LanguageModelFinishReason,
+        LanguageModelGenerateResult, LanguageModelStreamFinish, LanguageModelStreamPart,
+        LanguageModelStreamResult, LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd,
+        LanguageModelTextStart, LanguageModelToolCall, LanguageModelUsage,
     };
     use crate::mock_models::MockLanguageModel;
     use crate::prompt::TimeoutConfigurationOptions;
@@ -1326,6 +1326,42 @@ mod tests {
         ])
     }
 
+    fn generate_call_with_model_settings(
+        model_settings: ToolLoopAgentModelSettings,
+    ) -> LanguageModelCallOptions {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model).with_model_settings(model_settings),
+        );
+
+        let result = poll_ready(agent.generate("test")).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "reply");
+        model
+            .generate_calls()
+            .into_iter()
+            .next()
+            .expect("model was called")
+    }
+
+    fn stream_call_with_model_settings(
+        model_settings: ToolLoopAgentModelSettings,
+    ) -> LanguageModelCallOptions {
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("reply"));
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model).with_model_settings(model_settings),
+        );
+
+        let result = poll_ready(agent.stream("test")).expect("agent stream succeeds");
+
+        assert_eq!(result.text, "reply");
+        model
+            .stream_calls()
+            .into_iter()
+            .next()
+            .expect("model was called")
+    }
+
     #[test]
     fn tool_loop_agent_exposes_version_id_and_tools() {
         let model = MockLanguageModel::new();
@@ -1372,6 +1408,105 @@ mod tests {
             crate::language_model::LanguageModelMessage::System(message)
                 if message.content == "Use concise answers."
         ));
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_forwards_temperature_to_generate_text() {
+        let call = generate_call_with_model_settings(
+            ToolLoopAgentModelSettings::new().with_temperature(0.5),
+        );
+
+        assert_eq!(call.temperature, Some(0.5));
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_forwards_max_output_tokens_to_generate_text() {
+        let call = generate_call_with_model_settings(
+            ToolLoopAgentModelSettings::new().with_max_output_tokens(256),
+        );
+
+        assert_eq!(call.max_output_tokens, Some(256));
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_forwards_top_p_to_generate_text() {
+        let call =
+            generate_call_with_model_settings(ToolLoopAgentModelSettings::new().with_top_p(0.9));
+
+        assert_eq!(call.top_p, Some(0.9));
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_forwards_top_k_to_generate_text() {
+        let call =
+            generate_call_with_model_settings(ToolLoopAgentModelSettings::new().with_top_k(40));
+
+        assert_eq!(call.top_k, Some(40));
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_forwards_presence_penalty_to_generate_text() {
+        let call = generate_call_with_model_settings(
+            ToolLoopAgentModelSettings::new().with_presence_penalty(0.1),
+        );
+
+        assert_eq!(call.presence_penalty, Some(0.1));
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_forwards_frequency_penalty_to_generate_text() {
+        let call = generate_call_with_model_settings(
+            ToolLoopAgentModelSettings::new().with_frequency_penalty(0.2),
+        );
+
+        assert_eq!(call.frequency_penalty, Some(0.2));
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_forwards_stop_sequences_to_generate_text() {
+        let call = generate_call_with_model_settings(
+            ToolLoopAgentModelSettings::new()
+                .with_stop_sequence("STOP")
+                .with_stop_sequence("END"),
+        );
+
+        assert_eq!(
+            call.stop_sequences,
+            Some(vec!["STOP".to_string(), "END".to_string()])
+        );
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_forwards_seed_to_generate_text() {
+        let call =
+            generate_call_with_model_settings(ToolLoopAgentModelSettings::new().with_seed(42));
+
+        assert_eq!(call.seed, Some(42));
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_forwards_headers_to_generate_text() {
+        let mut headers = Headers::new();
+        headers.insert("x-custom".to_string(), "value".to_string());
+        let call = generate_call_with_model_settings(
+            ToolLoopAgentModelSettings::new().with_headers(headers),
+        );
+
+        assert_eq!(
+            call.headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-custom")),
+            Some(&"value".to_string())
+        );
+    }
+
+    #[test]
+    fn tool_loop_agent_stream_forwards_include_raw_chunks_to_stream_text() {
+        let call = stream_call_with_model_settings(
+            ToolLoopAgentModelSettings::new().with_include_raw_chunks(true),
+        );
+
+        assert_eq!(call.include_raw_chunks, Some(true));
     }
 
     #[test]
