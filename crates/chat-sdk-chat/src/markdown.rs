@@ -1135,4 +1135,69 @@ mod tests {
             "hard break absent and no fallback text"
         );
     }
+
+    // ---------- slice 69: 4 more 1:1 markdown.test.ts cases ----------
+
+    #[test]
+    fn parse_markdown_recognizes_image_url_and_alt_text() {
+        let node = parse_markdown("![alt text](https://example.com/img.png)").expect("parses");
+        fn find_image_url(n: &Node) -> Option<String> {
+            if let Node::Image(img) = n {
+                return Some(img.url.clone());
+            }
+            for c in get_node_children(n).iter() {
+                if let Some(u) = find_image_url(c) {
+                    return Some(u);
+                }
+            }
+            None
+        }
+        assert_eq!(
+            find_image_url(&node).as_deref(),
+            Some("https://example.com/img.png")
+        );
+    }
+
+    #[test]
+    fn parse_markdown_handles_thematic_break_horizontal_rule() {
+        let node = parse_markdown("before\n\n---\n\nafter").expect("parses");
+        fn has_thematic(n: &Node) -> bool {
+            matches!(n, Node::ThematicBreak(_)) || get_node_children(n).iter().any(has_thematic)
+        }
+        assert!(has_thematic(&node));
+    }
+
+    #[test]
+    fn parse_markdown_extracts_nested_lists_with_paragraph_items() {
+        let node = parse_markdown("- outer\n  - nested\n  - sibling\n- second").expect("parses");
+        fn count_lists(n: &Node) -> usize {
+            let self_count = if matches!(n, Node::List(_)) { 1 } else { 0 };
+            self_count + get_node_children(n).iter().map(count_lists).sum::<usize>()
+        }
+        assert!(count_lists(&node) >= 2, "expected nested list structure");
+        let plain = to_plain_text(&node);
+        for item in ["outer", "nested", "sibling", "second"] {
+            assert!(plain.contains(item), "missing {item}: {plain:?}");
+        }
+    }
+
+    #[test]
+    fn parse_markdown_preserves_indented_code_block_value() {
+        // 4-space indent triggers indented code block in CommonMark.
+        let node = parse_markdown("    let x = 1;\n    let y = 2;").expect("parses");
+        fn find_code_value(n: &Node) -> Option<String> {
+            if let Node::Code(c) = n {
+                return Some(c.value.clone());
+            }
+            for child in get_node_children(n).iter() {
+                if let Some(v) = find_code_value(child) {
+                    return Some(v);
+                }
+            }
+            None
+        }
+        let value = find_code_value(&node).expect("indented code block parses");
+        assert!(value.contains("let x = 1;"));
+        assert!(value.contains("let y = 2;"));
+    }
 }
