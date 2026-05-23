@@ -332,9 +332,30 @@ pub enum UiMessageChunk {
         /// Tool call identifier.
         tool_call_id: String,
 
+        /// Whether the approval status was decided automatically.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        is_automatic: Option<bool>,
+
         /// Provider-specific metadata for the approval request.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<ProviderMetadata>,
+    },
+
+    /// Tool approval response is available.
+    ToolApprovalResponse {
+        /// Approval request identifier.
+        approval_id: String,
+
+        /// Whether the approval was granted.
+        approved: bool,
+
+        /// Optional approval or denial reason.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+
+        /// Whether the approval is for a provider-executed tool call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_executed: Option<bool>,
     },
 
     /// Tool output was denied.
@@ -818,7 +839,18 @@ impl UiMessageChunk {
         Self::ToolApprovalRequest {
             approval_id: approval_id.into(),
             tool_call_id: tool_call_id.into(),
+            is_automatic: None,
             provider_metadata: None,
+        }
+    }
+
+    /// Creates a tool-approval-response UI-message chunk.
+    pub fn tool_approval_response(approval_id: impl Into<String>, approved: bool) -> Self {
+        Self::ToolApprovalResponse {
+            approval_id: approval_id.into(),
+            approved,
+            reason: None,
+            provider_executed: None,
         }
     }
 
@@ -1373,6 +1405,7 @@ Ensure a \"reasoning-start\" chunk is sent before any \"reasoning-end\" chunks."
             | UiMessageChunk::ToolOutputAvailable { .. }
             | UiMessageChunk::ToolOutputError { .. }
             | UiMessageChunk::ToolApprovalRequest { .. }
+            | UiMessageChunk::ToolApprovalResponse { .. }
             | UiMessageChunk::ToolOutputDenied { .. }
             | UiMessageChunk::Custom { .. }) => {
                 state.message.parts.push(

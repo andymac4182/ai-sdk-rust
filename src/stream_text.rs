@@ -17,11 +17,11 @@ use crate::generate_text::{
     GenerateTextOnToolExecutionStart, GenerateTextStartEvent, GenerateTextStep,
     GenerateTextStepStartEvent, GenerateTextTool, GenerateTextToolCall,
     GenerateTextToolExecutionEndEvent, GenerateTextToolExecutionStartEvent, GenerateTextToolResult,
-    LanguageModelCallEndEvent, LanguageModelCallStartEvent, StopCondition,
-    ToolApprovalConfiguration, ToolCallRepair, ToolCallRepairOptions, ToolInputRefinement,
-    ToolInputRefinementError, apply_generate_text_response_metadata, execute_tool_calls,
-    filter_active_language_model_tools, generate_text_call_id,
-    generate_text_tool_result_from_language_model_tool_result,
+    LanguageModelCallEndEvent, LanguageModelCallStartEvent, StepToolApprovalResponse,
+    StopCondition, ToolApprovalConfiguration, ToolApprovalResponseOutput, ToolCallRepair,
+    ToolCallRepairOptions, ToolInputRefinement, ToolInputRefinementError,
+    apply_generate_text_response_metadata, execute_tool_calls, filter_active_language_model_tools,
+    generate_text_call_id, generate_text_tool_result_from_language_model_tool_result,
     invoke_tool_input_available_callback, invoke_tool_input_delta_callback,
     invoke_tool_input_start_callback, is_stop_condition_met, mark_runtime_dynamic_tool_calls,
     mark_tool_call_metadata, mark_tool_call_titles, mark_tool_result_metadata,
@@ -473,6 +473,81 @@ impl Default for TextStreamAbortPart {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum TextStreamToolApprovalRequestKind {
+    #[serde(rename = "tool-approval-request")]
+    ToolApprovalRequest,
+}
+
+/// Tool approval request emitted by a high-level text stream.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextStreamToolApprovalRequestPart {
+    #[serde(rename = "type")]
+    kind: TextStreamToolApprovalRequestKind,
+
+    /// Identifier for the approval request.
+    pub approval_id: String,
+
+    /// Identifier of the tool call that requires approval.
+    pub tool_call_id: String,
+
+    /// Whether the approval status was decided automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_automatic: Option<bool>,
+
+    /// Optional provider-specific metadata for the approval request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<ProviderMetadata>,
+}
+
+impl TextStreamToolApprovalRequestPart {
+    /// Creates a high-level tool approval request part.
+    pub fn new(approval_id: impl Into<String>, tool_call_id: impl Into<String>) -> Self {
+        Self {
+            kind: TextStreamToolApprovalRequestKind::ToolApprovalRequest,
+            approval_id: approval_id.into(),
+            tool_call_id: tool_call_id.into(),
+            is_automatic: None,
+            provider_metadata: None,
+        }
+    }
+
+    /// Creates a high-level request from a provider stream request.
+    pub fn from_language_model_tool_approval_request(
+        request: LanguageModelToolApprovalRequest,
+    ) -> Self {
+        Self {
+            kind: TextStreamToolApprovalRequestKind::ToolApprovalRequest,
+            approval_id: request.approval_id,
+            tool_call_id: request.tool_call_id,
+            is_automatic: None,
+            provider_metadata: request.provider_metadata,
+        }
+    }
+
+    /// Sets whether this request was automatically approved or denied.
+    pub fn with_automatic(mut self, is_automatic: bool) -> Self {
+        self.is_automatic = Some(is_automatic);
+        self
+    }
+
+    /// Adds provider-specific metadata to this approval request.
+    pub fn with_provider_metadata(mut self, provider_metadata: ProviderMetadata) -> Self {
+        self.provider_metadata = Some(provider_metadata);
+        self
+    }
+
+    fn to_language_model_tool_approval_request(&self) -> LanguageModelToolApprovalRequest {
+        let mut request =
+            LanguageModelToolApprovalRequest::new(&self.approval_id, &self.tool_call_id);
+        if let Some(provider_metadata) = &self.provider_metadata {
+            request = request.with_provider_metadata(provider_metadata.clone());
+        }
+        request
+    }
+}
+
 /// Caller-controlled abort signal for Rust `stream_text` calls.
 pub type StreamTextAbortSignal = LanguageModelAbortSignal;
 
@@ -516,8 +591,11 @@ pub enum TextStreamPart {
     /// End of streamed tool input.
     ToolInputEnd(LanguageModelToolInputEnd),
 
-    /// Provider-executed tool approval request.
-    ToolApprovalRequest(LanguageModelToolApprovalRequest),
+    /// Tool approval request.
+    ToolApprovalRequest(TextStreamToolApprovalRequestPart),
+
+    /// Tool approval response.
+    ToolApprovalResponse(ToolApprovalResponseOutput),
 
     /// Generated tool call.
     ToolCall(GenerateTextToolCall),
@@ -1912,7 +1990,17 @@ impl StreamTextResult {
                     chunks.push(UiMessageChunk::ToolApprovalRequest {
                         approval_id: part.approval_id.clone(),
                         tool_call_id: part.tool_call_id.clone(),
+                        is_automatic: part.is_automatic,
                         provider_metadata: part.provider_metadata.clone(),
+                    });
+                    push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
+                }
+                TextStreamPart::ToolApprovalResponse(part) => {
+                    chunks.push(UiMessageChunk::ToolApprovalResponse {
+                        approval_id: part.approval_id.clone(),
+                        approved: part.approved,
+                        reason: part.reason.clone(),
+                        provider_executed: part.provider_executed,
                     });
                     push_stream_text_ui_message_metadata(&mut chunks, &options, stream_part);
                 }
@@ -2420,11 +2508,18 @@ where
         .await;
 
         for request in &tool_approvals.requests {
-            parts.push(TextStreamPart::ToolApprovalRequest(
-                LanguageModelToolApprovalRequest::new(
-                    request.approval_id.clone(),
-                    request.tool_call_id.clone(),
-                ),
+            let mut approval_request = TextStreamToolApprovalRequestPart::new(
+                request.approval_id.clone(),
+                request.tool_call_id.clone(),
+            );
+            if let Some(is_automatic) = request.is_automatic {
+                approval_request = approval_request.with_automatic(is_automatic);
+            }
+            parts.push(TextStreamPart::ToolApprovalRequest(approval_request));
+        }
+        for response in &tool_approvals.responses {
+            parts.push(TextStreamPart::ToolApprovalResponse(
+                text_stream_tool_approval_response_output(response),
             ));
         }
 
@@ -2830,8 +2925,11 @@ impl CollectedStreamTextStep {
                     }
                 }
                 TextStreamPart::ToolApprovalRequest(part) => {
-                    provider_content.push(LanguageModelContent::ToolApprovalRequest(part.clone()));
+                    provider_content.push(LanguageModelContent::ToolApprovalRequest(
+                        part.to_language_model_tool_approval_request(),
+                    ));
                 }
+                TextStreamPart::ToolApprovalResponse(_) => {}
                 TextStreamPart::ToolCall(part) => {
                     tool_calls.push(part.clone());
                     provider_content.push(LanguageModelContent::ToolCall(
@@ -3324,7 +3422,9 @@ where
                     LanguageModelStreamPart::ToolApprovalRequest(part) => {
                         provider_content
                             .push(LanguageModelContent::ToolApprovalRequest(part.clone()));
-                        parts.push(TextStreamPart::ToolApprovalRequest(part));
+                        parts.push(TextStreamPart::ToolApprovalRequest(
+                            TextStreamToolApprovalRequestPart::from_language_model_tool_approval_request(part),
+                        ));
                     }
                     LanguageModelStreamPart::ToolCall(part) => {
                         let tool_call = GenerateTextToolCall::from_language_model_tool_call(&part);
@@ -3667,6 +3767,26 @@ fn language_model_tool_call_from_stream_text_tool_call(
     }
 
     provider_tool_call
+}
+
+fn text_stream_tool_approval_response_output(
+    approval_response: &StepToolApprovalResponse,
+) -> ToolApprovalResponseOutput {
+    let mut output = ToolApprovalResponseOutput::new(
+        approval_response.response.approval_id.clone(),
+        approval_response.tool_call.clone(),
+        approval_response.response.approved,
+    );
+
+    if let Some(reason) = &approval_response.response.reason {
+        output = output.with_reason(reason.clone());
+    }
+
+    if let Some(provider_executed) = approval_response.tool_call.provider_executed {
+        output = output.with_provider_executed(provider_executed);
+    }
+
+    output
 }
 
 fn language_model_tool_result_from_stream_text_tool_result(
@@ -4230,7 +4350,9 @@ mod tests {
 
     use super::*;
     use crate::file_data::{FileData, FileDataContent};
-    use crate::generate_text::{GenerateTextContentPart, ToolApprovalStatusKind, has_tool_call};
+    use crate::generate_text::{
+        GenerateTextContentPart, NormalizedToolApprovalStatus, has_tool_call,
+    };
     use crate::json::NonNullJsonValue;
     use crate::language_model::{
         FinishReason, InputTokenUsage, LanguageModelAssistantContentPart,
@@ -9918,6 +10040,137 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_automatic_tool_approval_response_streams_before_tool_result() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "weather",
+                    r#"{"city":"Brisbane"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "Approved.",
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+        let execute_count = Arc::new(AtomicUsize::new(0));
+        let execute_count_for_tool = Arc::clone(&execute_count);
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Weather?")])
+                .with_tool(Tool::new("weather", input_schema).with_execute(
+                    move |input, _options| {
+                        let execute_count = Arc::clone(&execute_count_for_tool);
+                        async move {
+                            execute_count.fetch_add(1, Ordering::SeqCst);
+                            Ok(json!({ "forecast": "sunny", "city": input["city"] }))
+                        }
+                    },
+                ))
+                .with_tool_approval(ToolApprovalConfiguration::new().with_tool_status(
+                    "weather",
+                    NormalizedToolApprovalStatus::approved_with_reason("trusted internal tool"),
+                ))
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(execute_count.load(Ordering::SeqCst), 1);
+        assert_eq!(model.stream_calls().len(), 2);
+        assert_eq!(result.text, "Approved.");
+
+        let (approval_request_index, approval_request) = result
+            .parts
+            .iter()
+            .enumerate()
+            .find_map(|(index, part)| {
+                if let TextStreamPart::ToolApprovalRequest(request) = part
+                    && request.tool_call_id == "call-1"
+                    && request.is_automatic == Some(true)
+                {
+                    Some((index, request))
+                } else {
+                    None
+                }
+            })
+            .expect("automatic approval request is streamed");
+        let (approval_response_index, approval_response) = result
+            .parts
+            .iter()
+            .enumerate()
+            .find_map(|(index, part)| {
+                if let TextStreamPart::ToolApprovalResponse(response) = part
+                    && response.approved
+                    && response.reason.as_deref() == Some("trusted internal tool")
+                {
+                    Some((index, response))
+                } else {
+                    None
+                }
+            })
+            .expect("automatic approval response is streamed");
+        assert_eq!(approval_response.approval_id, approval_request.approval_id);
+        let tool_result_index = result
+            .parts
+            .iter()
+            .position(|part| matches!(part, TextStreamPart::ToolResult(result) if result.tool_call_id == "call-1"))
+            .expect("tool result is streamed");
+        assert!(approval_request_index < approval_response_index);
+        assert!(approval_response_index < tool_result_index);
+
+        let chunks = serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize");
+        let chunks = chunks.as_array().expect("chunks are an array");
+        assert!(chunks.contains(&json!({
+            "type": "tool-approval-request",
+            "approvalId": approval_request.approval_id.clone(),
+            "toolCallId": "call-1",
+            "isAutomatic": true
+        })));
+        assert!(chunks.contains(&json!({
+            "type": "tool-approval-response",
+            "approvalId": approval_request.approval_id.clone(),
+            "approved": true,
+            "reason": "trusted internal tool"
+        })));
+        assert!(chunks.iter().any(|chunk| {
+            chunk["type"] == "tool-output-available"
+                && chunk["toolCallId"] == "call-1"
+                && chunk["output"]["forecast"] == "sunny"
+        }));
+
+        assert!(matches!(
+            &model.stream_calls()[1].prompt[2],
+            LanguageModelMessage::Tool(message)
+                if message.content.len() == 2
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelToolContentPart::ToolApprovalResponse(response)
+                            if response.approved
+                                && response.reason.as_deref() == Some("trusted internal tool")
+                    )
+                    && matches!(
+                        &message.content[1],
+                        LanguageModelToolContentPart::ToolResult(part)
+                            if part.tool_name == "weather"
+                    )
+        ));
+    }
+
+    #[test]
     fn stream_text_applies_denied_tool_approval_to_continuation_messages() {
         let model = MockLanguageModel::new().with_stream_results([
             LanguageModelStreamResult::new(vec![
@@ -9960,23 +10213,54 @@ mod tests {
                         }
                     },
                 ))
-                .with_tool_approval(
-                    ToolApprovalConfiguration::new()
-                        .with_tool_status("weather", ToolApprovalStatusKind::Denied),
-                )
+                .with_tool_approval(ToolApprovalConfiguration::new().with_tool_status(
+                    "weather",
+                    NormalizedToolApprovalStatus::denied_with_reason("blocked by policy"),
+                ))
                 .with_max_steps(2),
         ));
 
         assert_eq!(execute_count.load(Ordering::SeqCst), 0);
         assert_eq!(model.stream_calls().len(), 2);
         assert_eq!(result.text, "Request denied.");
+        let approval_request_id = result
+            .parts
+            .iter()
+            .find_map(|part| {
+                if let TextStreamPart::ToolApprovalRequest(request) = part
+                    && request.tool_call_id == "call-1"
+                    && request.is_automatic == Some(true)
+                {
+                    Some(request.approval_id.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("automatic denial request is streamed");
         assert!(result.parts.iter().any(|part| {
             matches!(
                 part,
-                TextStreamPart::ToolApprovalRequest(request)
-                    if request.tool_call_id == "call-1"
+                TextStreamPart::ToolApprovalResponse(response)
+                    if response.approval_id == approval_request_id
+                        && !response.approved
+                        && response.reason.as_deref() == Some("blocked by policy")
             )
         }));
+
+        let chunks = serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize");
+        let chunks = chunks.as_array().expect("chunks are an array");
+        assert!(chunks.contains(&json!({
+            "type": "tool-approval-request",
+            "approvalId": approval_request_id.clone(),
+            "toolCallId": "call-1",
+            "isAutomatic": true
+        })));
+        assert!(chunks.contains(&json!({
+            "type": "tool-approval-response",
+            "approvalId": approval_request_id.clone(),
+            "approved": false,
+            "reason": "blocked by policy"
+        })));
 
         assert!(matches!(
             &model.stream_calls()[1].prompt[2],
@@ -9986,6 +10270,7 @@ mod tests {
                         &message.content[0],
                         LanguageModelToolContentPart::ToolApprovalResponse(response)
                             if !response.approved
+                                && response.reason.as_deref() == Some("blocked by policy")
                     )
                     && matches!(
                         &message.content[1],
