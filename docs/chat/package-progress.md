@@ -3,12 +3,12 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 20.8%
-- Portable package average: 16.1%
-- Closed package rows: 3 / 18
-- Strict portable verified rows: 2 / 17
+- Average estimated completion: 26.3%
+- Portable package average: 17.1%
+- Closed package rows: 4 / 18
+- Strict portable verified rows: 2 / 16
 - In-progress rows: 1
-- Not-started rows: 14
+- Not-started rows: 13
 
 ## 100% Closed
 
@@ -17,6 +17,7 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | `@chat-sdk/adapter-shared` | 100% | Verified | shared adapter utilities |
 | `@chat-sdk/tests` | 100% | JavaScript-only | test support library |
 | `@chat-sdk/state-memory` | 100% | Verified | state backend (in-memory) |
+| `@chat-sdk/adapter-web` | 100% | JavaScript-only | adapter package |
 
 ## In Progress
 
@@ -37,7 +38,6 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | `@chat-sdk/adapter-messenger` | 0% | Not started | adapter package |
 | `@chat-sdk/adapter-telegram` | 0% | Not started | adapter package |
 | `@chat-sdk/adapter-whatsapp` | 0% | Not started | adapter package |
-| `@chat-sdk/adapter-web` | 0% | Not started | adapter package |
 | `@chat-sdk/state-redis` | 0% | Not started | state backend (Redis) |
 | `@chat-sdk/state-ioredis` | 0% | Not started | state backend (ioredis) |
 | `@chat-sdk/state-pg` | 0% | Not started | state backend (Postgres) |
