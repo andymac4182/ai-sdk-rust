@@ -1588,4 +1588,57 @@ mod tests {
         }
         assert!(has_delete(&node));
     }
+
+    // ---------- slice 77: 4 more 1:1 markdown.test.ts cases ----------
+
+    #[test]
+    fn parse_markdown_list_item_with_paragraph_child() {
+        let node = parse_markdown("- a paragraph item").expect("parses");
+        fn list_item_has_paragraph(n: &Node) -> bool {
+            if let Node::ListItem(li) = n {
+                if li.children.iter().any(|c| matches!(c, Node::Paragraph(_))) {
+                    return true;
+                }
+            }
+            get_node_children(n).iter().any(list_item_has_paragraph)
+        }
+        assert!(list_item_has_paragraph(&node));
+    }
+
+    #[test]
+    fn parse_markdown_paragraph_with_only_spaces_collapses() {
+        let node = parse_markdown("   \n  \n").expect("parses");
+        let root = match node {
+            Node::Root(r) => r,
+            _ => unreachable!(),
+        };
+        assert!(root.children.is_empty());
+    }
+
+    #[test]
+    fn parse_markdown_consecutive_paragraphs_each_get_their_own_node() {
+        let node = parse_markdown("alpha\n\nbeta\n\ngamma").expect("parses");
+        let root = match node {
+            Node::Root(r) => r,
+            _ => unreachable!(),
+        };
+        let p = root
+            .children
+            .iter()
+            .filter(|c| matches!(c, Node::Paragraph(_)))
+            .count();
+        assert_eq!(p, 3);
+    }
+
+    #[test]
+    fn parse_markdown_inline_image_inside_paragraph_alongside_text() {
+        let node = parse_markdown("see ![alt](https://example.com/img.png) here").expect("parses");
+        let plain = to_plain_text(&node);
+        assert!(plain.contains("see"));
+        assert!(plain.contains("here"));
+        fn has_image(n: &Node) -> bool {
+            matches!(n, Node::Image(_)) || get_node_children(n).iter().any(has_image)
+        }
+        assert!(has_image(&node));
+    }
 }
