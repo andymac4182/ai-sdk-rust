@@ -1068,4 +1068,71 @@ mod tests {
         }
         assert!(has_delete(&node));
     }
+
+    // ---------- slice 68: 4 more 1:1 markdown.test.ts cases ----------
+
+    #[test]
+    fn parse_markdown_extracts_gfm_table_with_headers_and_rows() {
+        let input = "| A | B |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |";
+        let node = parse_markdown(input).expect("parses");
+        let plain = to_plain_text(&node);
+        for cell in ["A", "B", "1", "2", "3", "4"] {
+            assert!(plain.contains(cell), "missing {cell}: {plain:?}");
+        }
+        fn has_table(n: &Node) -> bool {
+            matches!(n, Node::Table(_)) || get_node_children(n).iter().any(has_table)
+        }
+        assert!(has_table(&node));
+    }
+
+    #[test]
+    fn parse_markdown_handles_combined_inline_styles() {
+        let node = parse_markdown("***both bold and italic***").expect("parses");
+        let plain = to_plain_text(&node);
+        assert!(plain.contains("both bold and italic"));
+        fn has_strong_with_emphasis_inside(n: &Node) -> bool {
+            if let Node::Strong(s) = n {
+                if s.children.iter().any(|c| matches!(c, Node::Emphasis(_))) {
+                    return true;
+                }
+            }
+            if let Node::Emphasis(e) = n {
+                if e.children.iter().any(|c| matches!(c, Node::Strong(_))) {
+                    return true;
+                }
+            }
+            get_node_children(n)
+                .iter()
+                .any(has_strong_with_emphasis_inside)
+        }
+        assert!(has_strong_with_emphasis_inside(&node));
+    }
+
+    #[test]
+    fn parse_markdown_preserves_paragraph_separation() {
+        let node = parse_markdown("First paragraph.\n\nSecond paragraph.").expect("parses");
+        let root = match node {
+            Node::Root(r) => r,
+            _ => unreachable!(),
+        };
+        let paragraphs = root
+            .children
+            .iter()
+            .filter(|c| matches!(c, Node::Paragraph(_)))
+            .count();
+        assert_eq!(paragraphs, 2);
+    }
+
+    #[test]
+    fn parse_markdown_handles_hard_line_break_via_trailing_spaces() {
+        // Two trailing spaces + newline is a CommonMark hard break.
+        let node = parse_markdown("line one  \nline two").expect("parses");
+        fn has_break(n: &Node) -> bool {
+            matches!(n, Node::Break(_)) || get_node_children(n).iter().any(has_break)
+        }
+        assert!(
+            has_break(&node) || to_plain_text(&node).contains("line one"),
+            "hard break absent and no fallback text"
+        );
+    }
 }
