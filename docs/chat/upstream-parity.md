@@ -74,16 +74,24 @@ Two-phase gate, enforced strictly:
 
 ## Next Unported Work Queue
 
-Phase-1 order (do these next, in this order):
+**State as of slice 59 (post-merge `dfbd07e`):**
 
-1. **Slice 2 (planned):** Create `crates/chat-sdk-chat` skeleton mirroring `packages/chat`. Stub the public surface from `packages/chat/src/index.ts`, lift the top-level types (`Chat`, `Message`, `Channel`, `Thread`, error types), and seed serde shapes against upstream JSON contracts. Do NOT pull JSX runtime or React-only surfaces - those are `js-only-documented` and live as documented exceptions.
-2. **Slice 3 (planned):** Port `packages/chat` deterministic-only modules - `errors`, `logger`, `markdown`, `streaming-markdown`, `emoji`, `serialization`, `reviver`, `postable-object`, `cards`, `modals`, `message`, `thread-history`, `message-history`, `callback-url`, `from-full-stream`, `channel`, `mock-adapter`. Each module ports its `*.test.ts` cases 1:1 into Rust tests in `crates/chat-sdk-chat/src/<module>.rs` + `tests/<module>.rs`.
-3. **Slice 4 (planned):** Port `packages/adapter-shared` (depends on `crates/chat-sdk-chat::errors` and serialization). All 4 test files mapped.
-4. **Slice 5 (planned):** Port `packages/tests` (depends on `chat-sdk-chat` + `chat-sdk-adapter-shared`).
-5. **Slice 6 (planned):** Port `packages/state-memory` (depends on `chat-sdk-chat` state contracts).
-6. **Slice 7 (planned, first refinement-pass slice):** Run the 5-cycle self-refining loop: append to `docs/chat/goal-refinements.md`, tighten `port-chat-sdk.md` based on phase-1 learnings, then start Phase 2.
+- 2 packages verified: `packages/adapter-shared`, `packages/state-memory`.
+- 7 surfaces marked js-only-documented at the row level: `packages/tests`, `packages/adapter-web`, `packages/integration-tests`, `apps/docs`, `examples/nextjs-chat`, `examples/telegram-chat`, `skills/chat`, `scripts/` (upstream Node tooling).
+- `packages/chat` in-progress at 74%: 11 modules portable-mapped (errors 17, logger 13, chat_singleton 5, emoji 42/42, modals 25, markdown 33/122, cards 29/28 incl fallback, callback_url 5/17, message 10/19, plan 10 additive, transcripts 9 additive, postable_object 4 additive, reviver 6 additive). 284 colocated Rust tests. Sub-file js-only-adjacent: `jsx-*` runtime files, `mock-adapter.ts`, `message-history.ts`.
+- The 12 remaining real-implementation rows: `packages/chat` finish (channel ~600 LOC + thread ~1100 + chat.ts ~2700 + from-full-stream + streaming-markdown + serialization + transcripts-wiring), 9 Phase-2 adapters (adapter-slack, -teams, -gchat, -discord, -linear, -github, -messenger, -telegram, -whatsapp), 3 Phase-3 state backends (state-redis, -ioredis, -pg).
 
-Phase-2 ordering will be picked at slice 7 based on which adapters share the most contract surface with already-ported phase-1 modules.
+**Pick-up plan for the next session:**
+
+1. Extend `chat::types::Adapter` trait with the concrete async method set (`post_message`, `edit_message`, `delete_message`, `add_reaction`, `remove_reaction`, `start_typing`, `fetch_messages`, `fetch_thread`, `fetch_message`, `encode_thread_id`, `decode_thread_id`, `parse_message`, `render_formatted`, `open_dm`, `is_dm`, `get_channel_visibility`, `open_modal`, `channel_id_from_thread_id`, `fetch_channel_messages`, `list_threads`, `fetch_channel_info`, `post_channel_message`, `post_object`, `fetch_subject`). Use `async-trait` for dyn safety. This unblocks: message::subject getter, callback_url stateful path, transcripts::TranscriptsApiImpl, postable_object::post_postable_object, reviver Thread/Channel branches, AND every Phase-2 adapter.
+2. Extend `chat::types::StateAdapter` trait with the async method set already proven by `chat_sdk_state_memory::MemoryStateAdapter`'s inherent methods (connect/disconnect/subscribe/.../enqueue/dequeue/queue_depth). This unblocks state-redis/ioredis/pg as ports of the same trait against external client crates.
+3. Port `chat::channel` (~600 LOC, 1420 LOC of tests) - ChannelImpl + SerializedChannel. Largest remaining structural piece in `packages/chat`.
+4. Port `chat::thread` (~1100 LOC, 3257 LOC of tests) - ThreadImpl + SerializedThread + ThreadHistoryCache.
+5. Port `chat::chat` (~2700 LOC, 4907 LOC of tests) - top-level Chat + ChatConfig + ChatInstance.
+6. Begin Phase-2 adapter porting once chat verifies. Order adapters by contract complexity: smallest first (adapter-github 7 src / 3 tests, adapter-messenger 7 / 3, adapter-telegram 7 / 3, adapter-whatsapp 7 / 3), then adapter-discord 8 / 4, adapter-linear 9 / 4, adapter-gchat 13 / 6, adapter-teams 16 / 6, adapter-slack 24 / 11.
+7. After all Phase-2 adapters verified, port Phase-3 state backends (state-redis/ioredis/pg) sequentially.
+
+Realistic remaining slice budget: ~200-300 chat-finishing slices + ~150-300 per adapter (× 9) + ~30 per state backend (× 3) + final integration verification. Multi-week effort across many sessions.
 
 ## JavaScript-only Exceptions
 
