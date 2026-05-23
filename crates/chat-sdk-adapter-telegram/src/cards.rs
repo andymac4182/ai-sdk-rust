@@ -59,7 +59,10 @@ pub fn encode_telegram_callback_data(
     value: Option<&str>,
 ) -> Result<String, TelegramCallbackTooLargeError> {
     let mut obj = serde_json::Map::with_capacity(2);
-    obj.insert("a".to_string(), serde_json::Value::String(action_id.to_string()));
+    obj.insert(
+        "a".to_string(),
+        serde_json::Value::String(action_id.to_string()),
+    );
     if let Some(v) = value {
         obj.insert("v".to_string(), serde_json::Value::String(v.to_string()));
     }
@@ -105,10 +108,7 @@ pub fn decode_telegram_callback_data(data: Option<&str>) -> DecodedTelegramCallb
         && let Some(a) = parsed.get("a").and_then(|v| v.as_str())
         && !a.is_empty()
     {
-        let value = parsed
-            .get("v")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned);
+        let value = parsed.get("v").and_then(|v| v.as_str()).map(str::to_owned);
         return DecodedTelegramCallbackData {
             action_id: a.to_string(),
             value,
@@ -265,7 +265,12 @@ mod tests {
         let r0 = rows[0].as_array().unwrap();
         assert_eq!(r0.len(), 2);
         assert_eq!(r0[0]["text"], "A");
-        assert!(r0[0]["callback_data"].as_str().unwrap().starts_with("chat:"));
+        assert!(
+            r0[0]["callback_data"]
+                .as_str()
+                .unwrap()
+                .starts_with("chat:")
+        );
         assert_eq!(r0[1]["text"], "B");
         // Second row: one link button.
         let r1 = rows[1].as_array().unwrap();
@@ -300,8 +305,7 @@ mod tests {
 
     #[test]
     fn encodes_and_decodes_callback_payload_with_value() {
-        let encoded =
-            encode_telegram_callback_data("approve", Some("request-123")).unwrap();
+        let encoded = encode_telegram_callback_data("approve", Some("request-123")).unwrap();
         let decoded = decode_telegram_callback_data(Some(&encoded));
         assert_eq!(
             decoded,
