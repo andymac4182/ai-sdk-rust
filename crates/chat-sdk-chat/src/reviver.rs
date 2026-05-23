@@ -44,6 +44,20 @@ impl From<Value> for Revived {
     }
 }
 
+/// Parse a JSON string and revive the resulting top-level value in
+/// one step. 1:1 with upstream's canonical
+/// `JSON.parse(text, reviver)` usage at the chat-SDK call sites that
+/// rehydrate transcripts / workflow snapshots from disk.
+///
+/// Returns `Err(serde_json::Error)` if the input is not valid JSON;
+/// malformed-but-valid `chat:Message` envelopes fall through to
+/// [`Revived::PassThrough`] (matching upstream's permissive
+/// try/catch posture inside the reviver itself).
+pub fn revive_str(text: &str) -> Result<Revived, serde_json::Error> {
+    let value: Value = serde_json::from_str(text)?;
+    Ok(revive_value(value))
+}
+
 /// Promote a [`serde_json::Value`] into a typed Rust struct when its
 /// `_type` field matches a known chat-SDK envelope. 1:1 port (in
 /// progress) of upstream `reviver(_key, value)`.
@@ -170,5 +184,53 @@ mod tests {
             Revived::PassThrough(v) => assert_eq!(v, value),
             other => panic!("expected PassThrough, got {other:?}"),
         }
+    }
+
+    // ---------- slice 107: revive_str helper ----------
+
+    #[test]
+    fn revive_str_parses_and_promotes_chat_message_envelope() {
+        let value = sample_message_payload();
+        let text = serde_json::to_string(&value).unwrap();
+        match revive_str(&text).unwrap() {
+            Revived::Message(m) => assert_eq!(m.id, "m1"),
+            other => panic!("expected Revived::Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn revive_str_passes_through_objects_with_unknown_type_tags() {
+        let text = r#"{"_type":"chat:Thread","id":"t1"}"#;
+        match revive_str(text).unwrap() {
+            Revived::PassThrough(v) => {
+                assert_eq!(v.get("_type").and_then(Value::as_str), Some("chat:Thread"));
+            }
+            other => panic!("expected PassThrough, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn revive_str_passes_through_primitive_json_values() {
+        // The reviver is shaped around envelope objects; bare strings /
+        // numbers / arrays parse and fall through verbatim.
+        match revive_str("\"hello\"").unwrap() {
+            Revived::PassThrough(v) => assert_eq!(v, json!("hello")),
+            other => panic!("expected PassThrough, got {other:?}"),
+        }
+        match revive_str("42").unwrap() {
+            Revived::PassThrough(v) => assert_eq!(v, json!(42)),
+            other => panic!("expected PassThrough, got {other:?}"),
+        }
+        match revive_str("[1,2,3]").unwrap() {
+            Revived::PassThrough(v) => assert_eq!(v, json!([1, 2, 3])),
+            other => panic!("expected PassThrough, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn revive_str_returns_err_for_invalid_json() {
+        assert!(revive_str("not-json").is_err());
+        assert!(revive_str("").is_err());
+        assert!(revive_str("{").is_err());
     }
 }
