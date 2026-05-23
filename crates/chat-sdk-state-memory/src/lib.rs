@@ -523,6 +523,42 @@ impl chat_sdk_chat::types::StateAdapter for MemoryStateAdapter {
             _ => list,
         })
     }
+
+    async fn set_if_not_exists(
+        &self,
+        key: &str,
+        value: serde_json::Value,
+        ttl_ms: Option<u64>,
+    ) -> chat_sdk_chat::types::StateResult<bool> {
+        MemoryStateAdapter::set_if_not_exists(self, key, value, ttl_ms).map_err(Into::into)
+    }
+
+    async fn acquire_lock(
+        &self,
+        thread_id: &str,
+        ttl_ms: u64,
+    ) -> chat_sdk_chat::types::StateResult<Option<chat_sdk_chat::types::Lock>> {
+        MemoryStateAdapter::acquire_lock(self, thread_id, ttl_ms).map_err(Into::into)
+    }
+
+    async fn release_lock(
+        &self,
+        lock: &chat_sdk_chat::types::Lock,
+    ) -> chat_sdk_chat::types::StateResult<()> {
+        MemoryStateAdapter::release_lock(self, lock).map_err(Into::into)
+    }
+
+    async fn force_release_lock(&self, thread_id: &str) -> chat_sdk_chat::types::StateResult<()> {
+        MemoryStateAdapter::force_release_lock(self, thread_id).map_err(Into::into)
+    }
+
+    async fn extend_lock(
+        &self,
+        lock: &chat_sdk_chat::types::Lock,
+        ttl_ms: u64,
+    ) -> chat_sdk_chat::types::StateResult<bool> {
+        MemoryStateAdapter::extend_lock(self, lock, ttl_ms).map_err(Into::into)
+    }
 }
 
 #[cfg(test)]

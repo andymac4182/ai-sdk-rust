@@ -1414,6 +1414,58 @@ pub trait StateAdapter: Send + Sync + std::fmt::Debug {
         key: &str,
         limit: Option<usize>,
     ) -> StateResult<Vec<serde_json::Value>>;
+
+    /// Conditional write. 1:1 with upstream
+    /// `setIfNotExists<T>(key, value, options?): Promise<boolean>`.
+    /// Returns `true` when the value was written, `false` when a
+    /// non-expired value already lived at `key`. Default impl falls
+    /// back to `get`+`set` — production backends should override with
+    /// an atomic implementation (`SETNX` / `INSERT … ON CONFLICT`).
+    async fn set_if_not_exists(
+        &self,
+        key: &str,
+        value: serde_json::Value,
+        ttl_ms: Option<u64>,
+    ) -> StateResult<bool> {
+        if self.get(key).await?.is_some() {
+            return Ok(false);
+        }
+        self.set(key, value, ttl_ms).await?;
+        Ok(true)
+    }
+
+    /// Acquire a per-thread lock. 1:1 with upstream
+    /// `acquireLock(threadId, ttlMs): Promise<Lock | null>`. Returns
+    /// `Ok(None)` when a non-expired lock is already held for the
+    /// thread; otherwise returns a fresh [`Lock`] (token + expiry).
+    /// Default impl returns `Ok(None)` so backends that don't ship a
+    /// lock primitive can opt out (consumers must not assume a lock
+    /// was granted just because no error came back).
+    async fn acquire_lock(&self, _thread_id: &str, _ttl_ms: u64) -> StateResult<Option<Lock>> {
+        Ok(None)
+    }
+
+    /// Release a per-thread lock. 1:1 with upstream
+    /// `releaseLock(lock): Promise<void>`. Default is a no-op so
+    /// backends that don't implement locks can leave it unimplemented.
+    async fn release_lock(&self, _lock: &Lock) -> StateResult<()> {
+        Ok(())
+    }
+
+    /// Force-release a thread's lock without checking ownership.
+    /// 1:1 with upstream `forceReleaseLock(threadId): Promise<void>`.
+    /// Default is a no-op.
+    async fn force_release_lock(&self, _thread_id: &str) -> StateResult<()> {
+        Ok(())
+    }
+
+    /// Extend a lock's TTL. 1:1 with upstream
+    /// `extendLock(lock, ttlMs): Promise<boolean>`. Returns `true` if
+    /// the lock was extended, `false` if it had already expired or was
+    /// stolen. Default returns `false`.
+    async fn extend_lock(&self, _lock: &Lock, _ttl_ms: u64) -> StateResult<bool> {
+        Ok(false)
+    }
 }
 
 /// Errors returned by [`StateAdapter`] method calls. Mirrors upstream's
@@ -2896,5 +2948,118 @@ mod tests {
             err.to_string(),
             "Adapter parsed an invalid payload: missing field `id`"
         );
+    }
+
+    // ---------- slice 125: StateAdapter trait extension (locks + set_if_not_exists) ----------
+
+    /// State that exercises the minimal `get`/`set`/`append_to_list`/
+    /// `get_list`/`delete` methods. Used to verify the default impls
+    /// of the new locks + `set_if_not_exists` trait methods.
+    #[derive(Debug, Default)]
+    struct MinimalState {
+        kv: std::sync::Mutex<std::collections::HashMap<String, serde_json::Value>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StateAdapter for MinimalState {
+        async fn get(&self, key: &str) -> StateResult<Option<serde_json::Value>> {
+            Ok(self
+                .kv
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(key)
+                .cloned())
+        }
+        async fn set(
+            &self,
+            key: &str,
+            value: serde_json::Value,
+            _ttl_ms: Option<u64>,
+        ) -> StateResult<()> {
+            self.kv
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(key.to_string(), value);
+            Ok(())
+        }
+        async fn delete(&self, key: &str) -> StateResult<()> {
+            self.kv
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(key);
+            Ok(())
+        }
+        async fn append_to_list(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _max_length: Option<usize>,
+            _ttl_ms: Option<u64>,
+        ) -> StateResult<()> {
+            Ok(())
+        }
+        async fn get_list(
+            &self,
+            _key: &str,
+            _limit: Option<usize>,
+        ) -> StateResult<Vec<serde_json::Value>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn state_adapter_default_set_if_not_exists_writes_when_missing() {
+        let state = MinimalState::default();
+        let wrote = block_on(state.set_if_not_exists("k", serde_json::json!(1), None)).unwrap();
+        assert!(wrote);
+        let got = block_on(state.get("k")).unwrap();
+        assert_eq!(got, Some(serde_json::json!(1)));
+    }
+
+    #[test]
+    fn state_adapter_default_set_if_not_exists_no_op_when_present() {
+        let state = MinimalState::default();
+        block_on(state.set("k", serde_json::json!("first"), None)).unwrap();
+        let wrote =
+            block_on(state.set_if_not_exists("k", serde_json::json!("second"), None)).unwrap();
+        assert!(!wrote);
+        let got = block_on(state.get("k")).unwrap();
+        assert_eq!(got, Some(serde_json::json!("first")));
+    }
+
+    #[test]
+    fn state_adapter_default_acquire_lock_returns_none() {
+        let state = MinimalState::default();
+        let lock = block_on(state.acquire_lock("t1", 1000)).unwrap();
+        assert!(lock.is_none());
+    }
+
+    #[test]
+    fn state_adapter_default_release_lock_is_no_op() {
+        let state = MinimalState::default();
+        let dummy = Lock {
+            expires_at: 0,
+            thread_id: "t1".to_string(),
+            token: "tok".to_string(),
+        };
+        block_on(state.release_lock(&dummy)).unwrap();
+    }
+
+    #[test]
+    fn state_adapter_default_force_release_lock_is_no_op() {
+        let state = MinimalState::default();
+        block_on(state.force_release_lock("t1")).unwrap();
+    }
+
+    #[test]
+    fn state_adapter_default_extend_lock_returns_false() {
+        let state = MinimalState::default();
+        let dummy = Lock {
+            expires_at: 0,
+            thread_id: "t1".to_string(),
+            token: "tok".to_string(),
+        };
+        let extended = block_on(state.extend_lock(&dummy, 1000)).unwrap();
+        assert!(!extended);
     }
 }
