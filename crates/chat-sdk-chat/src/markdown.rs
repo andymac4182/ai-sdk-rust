@@ -920,6 +920,70 @@ mod tests {
         assert_eq!(markdown_to_plain_text(""), "");
     }
 
+    // ---------- slice 66: additional 1:1 markdown.test.ts cases ----------
+
+    #[test]
+    fn parse_markdown_extracts_strong_text_as_strong_node() {
+        let node = parse_markdown("**bold**").expect("parses");
+        assert_eq!(to_plain_text(&node), "bold");
+        fn has_strong(n: &Node) -> bool {
+            matches!(n, Node::Strong(_)) || get_node_children(n).iter().any(has_strong)
+        }
+        assert!(has_strong(&node));
+    }
+
+    #[test]
+    fn parse_markdown_extracts_emphasis_text_as_emphasis_node() {
+        let node = parse_markdown("*italic*").expect("parses");
+        assert_eq!(to_plain_text(&node), "italic");
+        fn has_emphasis(n: &Node) -> bool {
+            matches!(n, Node::Emphasis(_)) || get_node_children(n).iter().any(has_emphasis)
+        }
+        assert!(has_emphasis(&node));
+    }
+
+    #[test]
+    fn parse_markdown_extracts_inline_code_node() {
+        let node = parse_markdown("Run `cargo test` now").expect("parses");
+        let plain = to_plain_text(&node);
+        assert!(plain.contains("cargo test"));
+        fn has_inline_code(n: &Node) -> bool {
+            matches!(n, Node::InlineCode(_)) || get_node_children(n).iter().any(has_inline_code)
+        }
+        assert!(has_inline_code(&node));
+    }
+
+    #[test]
+    fn parse_markdown_extracts_link_with_label_and_url() {
+        let node = parse_markdown("[label](https://example.com)").expect("parses");
+        assert_eq!(to_plain_text(&node), "label");
+        fn find_link_url(n: &Node) -> Option<String> {
+            if let Node::Link(l) = n {
+                return Some(l.url.clone());
+            }
+            for c in get_node_children(n).iter() {
+                if let Some(u) = find_link_url(c) {
+                    return Some(u);
+                }
+            }
+            None
+        }
+        assert_eq!(find_link_url(&node).as_deref(), Some("https://example.com"));
+    }
+
+    #[test]
+    fn parse_markdown_supports_heading_levels_one_through_six() {
+        for level in 1..=6u8 {
+            let input = format!("{} heading {level}", "#".repeat(level as usize));
+            let node = parse_markdown(&input).expect("parses");
+            let plain = to_plain_text(&node);
+            assert!(
+                plain.contains(&format!("heading {level}")),
+                "level {level}: {plain:?}"
+            );
+        }
+    }
+
     #[test]
     fn parse_markdown_returns_an_error_for_malformed_extension_input() {
         // The markdown-rs parser is tolerant; supplying an empty string
