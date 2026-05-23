@@ -20,17 +20,23 @@ use crate::openai_compatible::{
 };
 use crate::provider::{
     NoSuchModelError, Provider, ProviderMetadata, ProviderWithFiles, ProviderWithSkills,
+    ProviderWithSpeechModel,
 };
 use crate::provider_utils::{
     FetchErrorInfo, FormData, FormDataInputValue, FormDataValue, HandledFetchError,
-    PostFormDataToApiOptions, ProviderApiResponseHandlerError, ResponseHandlerResult,
-    convert_base64_to_bytes, convert_to_form_data, create_json_response_handler,
-    post_form_data_to_api, without_trailing_slash,
+    PostFormDataToApiOptions, PostJsonToApiOptions, ProviderApiResponseHandlerError,
+    ResponseHandlerResult, convert_base64_to_bytes, convert_to_form_data,
+    create_binary_response_handler, create_json_response_handler, post_form_data_to_api,
+    post_json_to_api, without_trailing_slash,
 };
 use crate::skills::{
     Skills, SkillsFileData, SkillsUploadSkillCallOptions, SkillsUploadSkillResult,
 };
+use crate::speech_model::{
+    SpeechModel, SpeechModelCallOptions, SpeechModelRequest, SpeechModelResponse, SpeechModelResult,
+};
 use crate::warning::Warning;
+use time::OffsetDateTime;
 
 /// Default base URL for upstream `@ai-sdk/openai` API calls.
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
@@ -205,6 +211,45 @@ impl OpenAISkills {
             headers,
             transport,
         }
+    }
+}
+
+/// OpenAI speech model for `/audio/speech`.
+#[derive(Clone)]
+pub struct OpenAISpeechModel {
+    provider: String,
+    model_id: String,
+    base_url: String,
+    headers: Headers,
+    transport: OpenAICompatibleTransport,
+    current_date: Option<Arc<dyn Fn() -> OffsetDateTime + Send + Sync>>,
+}
+
+impl OpenAISpeechModel {
+    fn new(
+        provider: impl Into<String>,
+        model_id: impl Into<String>,
+        base_url: impl Into<String>,
+        headers: Headers,
+        transport: OpenAICompatibleTransport,
+    ) -> Self {
+        Self {
+            provider: provider.into(),
+            model_id: model_id.into(),
+            base_url: base_url.into(),
+            headers,
+            transport,
+            current_date: None,
+        }
+    }
+
+    /// Injects the response timestamp provider. This is primarily useful for deterministic tests.
+    pub fn with_current_date(
+        mut self,
+        current_date: impl Fn() -> OffsetDateTime + Send + Sync + 'static,
+    ) -> Self {
+        self.current_date = Some(Arc::new(current_date));
+        self
     }
 }
 
@@ -404,6 +449,26 @@ impl OpenAIProvider {
         self.image(model_id)
     }
 
+    /// Creates an OpenAI speech model.
+    pub fn speech(&self, model_id: impl Into<String>) -> OpenAISpeechModel {
+        let provider_name = openai_provider_name(&self.settings);
+        OpenAISpeechModel::new(
+            format!("{provider_name}.speech"),
+            model_id,
+            openai_base_url(&self.settings),
+            openai_headers(&self.settings),
+            self.transport
+                .as_ref()
+                .map(Arc::clone)
+                .unwrap_or_else(default_openai_files_transport),
+        )
+    }
+
+    /// Creates an OpenAI speech model.
+    pub fn speech_model(&self, model_id: impl Into<String>) -> OpenAISpeechModel {
+        self.speech(model_id)
+    }
+
     /// Creates the OpenAI files upload interface.
     pub fn files(&self) -> OpenAIFiles {
         let provider_name = openai_provider_name(&self.settings);
@@ -511,6 +576,90 @@ impl ProviderWithSkills for OpenAIProvider {
 
     fn skills(&self) -> Self::Skills {
         OpenAIProvider::skills(self)
+    }
+}
+
+impl ProviderWithSpeechModel for OpenAIProvider {
+    type SpeechModel = OpenAISpeechModel;
+
+    fn speech_model(&self, model_id: &str) -> Result<Self::SpeechModel, NoSuchModelError> {
+        Ok(OpenAIProvider::speech_model(self, model_id))
+    }
+}
+
+impl SpeechModel for OpenAISpeechModel {
+    type GenerateFuture<'a>
+        = Pin<Box<dyn Future<Output = SpeechModelResult> + Send + 'a>>
+    where
+        Self: 'a;
+
+    fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    fn do_generate(&self, options: SpeechModelCallOptions) -> Self::GenerateFuture<'_> {
+        let provider = self.provider.clone();
+        let model_id = self.model_id.clone();
+        let base_url = self.base_url.clone();
+        let mut headers = self.headers.clone();
+        let transport = Arc::clone(&self.transport);
+        let current_date = self.current_date.as_ref().map(Arc::clone);
+
+        Box::pin(async move {
+            let timestamp = current_date
+                .as_ref()
+                .map(|current_date| current_date())
+                .unwrap_or_else(OffsetDateTime::now_utc);
+            let (request_body, warnings) = openai_speech_request_body(&model_id, &options);
+
+            if let Some(request_headers) = &options.headers {
+                for (name, value) in request_headers {
+                    headers.insert(name.clone(), value.clone());
+                }
+            }
+
+            let response = post_json_to_api(
+                PostJsonToApiOptions::new(
+                    format!("{base_url}/audio/speech"),
+                    JsonValue::Object(request_body.clone()),
+                )
+                .with_headers(headers.into_iter().map(|(name, value)| (name, Some(value))))
+                .with_optional_abort_signal(options.abort_signal),
+                move |request| transport(request),
+                |request, response| {
+                    create_binary_response_handler(
+                        response.binary_response_handler_options(request),
+                    )
+                    .map_err(ProviderApiResponseHandlerError::from)
+                },
+                move |request, response| {
+                    Ok(openai_failed_response_handler(&provider, request, response))
+                },
+            )
+            .await
+            .expect("OpenAI speech generation failed");
+
+            let mut speech_response = SpeechModelResponse::new(timestamp, model_id.clone());
+            if let Some(response_headers) = response.response_headers {
+                speech_response.headers = Some(response_headers);
+            }
+
+            let mut result =
+                SpeechModelResult::new(FileDataContent::Bytes(response.value), speech_response)
+                    .with_request(
+                        SpeechModelRequest::new().with_body(JsonValue::Object(request_body)),
+                    );
+
+            for warning in warnings {
+                result = result.with_warning(warning);
+            }
+
+            result
+        })
     }
 }
 
@@ -781,6 +930,81 @@ fn openai_skill_upload_warnings(options: &SkillsUploadSkillCallOptions) -> Vec<W
     warnings
 }
 
+fn openai_speech_request_body(
+    model_id: &str,
+    options: &SpeechModelCallOptions,
+) -> (JsonObject, Vec<Warning>) {
+    let mut request_body = JsonObject::new();
+    let mut warnings = Vec::new();
+
+    request_body.insert("model".to_string(), JsonValue::String(model_id.to_string()));
+    request_body.insert("input".to_string(), JsonValue::String(options.text.clone()));
+    request_body.insert(
+        "voice".to_string(),
+        JsonValue::String(options.voice.clone().unwrap_or_else(|| "alloy".to_string())),
+    );
+
+    let mut response_format = "mp3".to_string();
+    if let Some(output_format) = &options.output_format {
+        if openai_speech_output_format_is_supported(output_format) {
+            response_format = output_format.clone();
+        } else {
+            warnings.push(Warning::Unsupported {
+                feature: "outputFormat".to_string(),
+                details: Some(format!(
+                    "Unsupported output format: {output_format}. Using mp3 instead."
+                )),
+            });
+        }
+    }
+    request_body.insert(
+        "response_format".to_string(),
+        JsonValue::String(response_format),
+    );
+
+    if let Some(speed) = options.speed {
+        request_body.insert("speed".to_string(), JsonValue::from(speed));
+    }
+    if let Some(instructions) = &options.instructions {
+        request_body.insert(
+            "instructions".to_string(),
+            JsonValue::String(instructions.clone()),
+        );
+    }
+    if let Some(openai_options) = options
+        .provider_options
+        .as_ref()
+        .and_then(|provider_options| provider_options.get("openai"))
+    {
+        if let Some(JsonValue::String(instructions)) = openai_options.get("instructions") {
+            request_body.insert(
+                "instructions".to_string(),
+                JsonValue::String(instructions.clone()),
+            );
+        }
+        if let Some(speed) = openai_options.get("speed").and_then(JsonValue::as_f64) {
+            request_body.insert("speed".to_string(), JsonValue::from(speed));
+        }
+    }
+    if let Some(language) = &options.language {
+        warnings.push(Warning::Unsupported {
+            feature: "language".to_string(),
+            details: Some(format!(
+                "OpenAI speech models do not support language selection. Language parameter \"{language}\" was ignored."
+            )),
+        });
+    }
+
+    (request_body, warnings)
+}
+
+fn openai_speech_output_format_is_supported(output_format: &str) -> bool {
+    matches!(
+        output_format,
+        "mp3" | "opus" | "aac" | "flac" | "wav" | "pcm"
+    )
+}
+
 fn openai_failed_response_handler(
     provider: &str,
     request: &crate::provider_utils::ProviderApiRequest,
@@ -914,13 +1138,15 @@ mod tests {
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
     use crate::provider::{
-        Provider, ProviderOptions, ProviderWithFiles, ProviderWithSkills, SpecificationVersion,
+        Provider, ProviderOptions, ProviderWithFiles, ProviderWithSkills, ProviderWithSpeechModel,
+        SpecificationVersion,
     };
     use crate::provider_utils::{
         FormDataValue, ParseJsonResult, ProviderApiRequest, ProviderApiRequestBody,
         ProviderApiRequestMethod, ProviderApiResponse, Schema, safe_parse_json_with_schema,
     };
     use crate::skills::{Skills, SkillsFile, SkillsFileData, SkillsUploadSkillCallOptions};
+    use crate::speech_model::{SpeechModel, SpeechModelCallOptions};
     use crate::warning::Warning;
     use serde_json::{Map, json};
     use std::future::Future;
@@ -928,6 +1154,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
+    use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
     #[test]
     fn openai_error_data_schema_should_parse_openrouter_resource_exhausted_error() {
@@ -1862,6 +2089,249 @@ mod tests {
     }
 
     #[test]
+    fn openai_speech_should_pass_the_model_and_text() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_speech_test_provider(Arc::clone(&captured_requests), "mp3");
+
+        let _result = poll_ready(
+            provider
+                .speech("tts-1")
+                .do_generate(SpeechModelCallOptions::new("Hello from the AI SDK!")),
+        );
+
+        let request = captured_openai_request(&captured_requests);
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://api.openai.test/v1/audio/speech");
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "tts-1",
+                "input": "Hello from the AI SDK!",
+                "voice": "alloy",
+                "response_format": "mp3"
+            }))
+        );
+    }
+
+    #[test]
+    fn openai_speech_should_pass_headers() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_speech_test_provider(Arc::clone(&captured_requests), "mp3");
+
+        let _result = poll_ready(
+            provider.speech("tts-1").do_generate(
+                SpeechModelCallOptions::new("Hello from the AI SDK!")
+                    .with_header("Custom-Request-Header", "request-header-value"),
+            ),
+        );
+
+        let request = captured_openai_request(&captured_requests);
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request.headers.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("custom-request-header")
+                .map(String::as_str),
+            Some("request-header-value")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("openai-organization")
+                .map(String::as_str),
+            Some("org_test")
+        );
+        assert_eq!(
+            request.headers.get("openai-project").map(String::as_str),
+            Some("proj_test")
+        );
+        assert!(
+            request
+                .headers
+                .get("user-agent")
+                .is_some_and(|value| value.contains("ai-sdk/openai/0.1.0"))
+        );
+    }
+
+    #[test]
+    fn openai_speech_should_pass_options() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_speech_test_provider(Arc::clone(&captured_requests), "opus");
+
+        let _result = poll_ready(
+            provider.speech("tts-1").do_generate(
+                SpeechModelCallOptions::new("Hello from the AI SDK!")
+                    .with_voice("nova")
+                    .with_output_format("opus")
+                    .with_speed(1.5),
+            ),
+        );
+
+        let request = captured_openai_request(&captured_requests);
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "model": "tts-1",
+                "input": "Hello from the AI SDK!",
+                "voice": "nova",
+                "speed": 1.5,
+                "response_format": "opus"
+            }))
+        );
+    }
+
+    #[test]
+    fn openai_speech_should_return_audio_data_with_correct_content_type() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_speech_test_provider(Arc::clone(&captured_requests), "opus");
+        let expected_audio = vec![7_u8; 100];
+
+        let result = poll_ready(provider.speech("tts-1").do_generate(
+            SpeechModelCallOptions::new("Hello from the AI SDK!").with_output_format("opus"),
+        ));
+
+        assert_eq!(result.audio, FileDataContent::Bytes(expected_audio));
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("content-type"))
+                .map(String::as_str),
+            Some("audio/opus")
+        );
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("test-request-id")
+        );
+    }
+
+    #[test]
+    fn openai_speech_should_include_response_data_with_timestamp_model_id_and_headers() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_speech_test_provider(Arc::clone(&captured_requests), "mp3");
+        let test_date =
+            OffsetDateTime::parse("1970-01-01T00:00:00Z", &Rfc3339).expect("date parses");
+
+        let result = poll_ready(
+            provider
+                .speech("tts-1")
+                .with_current_date(move || test_date)
+                .do_generate(SpeechModelCallOptions::new("Hello from the AI SDK!")),
+        );
+
+        assert_eq!(result.response.timestamp, test_date);
+        assert_eq!(result.response.model_id, "tts-1");
+        assert_eq!(
+            result.response.headers,
+            Some(Headers::from([
+                ("content-type".to_string(), "audio/mp3".to_string()),
+                ("x-ratelimit-remaining".to_string(), "123".to_string()),
+                ("x-request-id".to_string(), "test-request-id".to_string()),
+            ]))
+        );
+    }
+
+    #[test]
+    fn openai_speech_should_use_real_date_when_no_custom_date_provider_is_specified() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_speech_test_provider(Arc::clone(&captured_requests), "mp3");
+        let before = OffsetDateTime::now_utc();
+
+        let result = poll_ready(
+            provider
+                .speech("tts-1")
+                .do_generate(SpeechModelCallOptions::new("Hello from the AI SDK!")),
+        );
+        let after = OffsetDateTime::now_utc();
+
+        assert!(result.response.timestamp >= before);
+        assert!(result.response.timestamp <= after);
+        assert_eq!(result.response.model_id, "tts-1");
+    }
+
+    #[test]
+    fn openai_speech_should_handle_different_audio_formats() {
+        for format in ["mp3", "opus", "aac", "flac", "wav", "pcm"] {
+            let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+            let provider = openai_speech_test_provider(Arc::clone(&captured_requests), format);
+            let provider_options: ProviderOptions = serde_json::from_value(json!({
+                "openai": {
+                    "response_format": format
+                }
+            }))
+            .expect("provider options deserialize");
+
+            let result = poll_ready(
+                provider.speech("tts-1").do_generate(
+                    SpeechModelCallOptions::new("Hello from the AI SDK!")
+                        .with_provider_options(provider_options),
+                ),
+            );
+
+            assert_eq!(result.audio, FileDataContent::Bytes(vec![7_u8; 100]));
+            assert_eq!(
+                result
+                    .response
+                    .headers
+                    .as_ref()
+                    .and_then(|headers| headers.get("content-type"))
+                    .map(String::as_str),
+                Some(format!("audio/{format}").as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn openai_speech_should_include_warnings_if_any_are_generated() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_speech_test_provider(Arc::clone(&captured_requests), "mp3");
+
+        let result = poll_ready(
+            provider
+                .speech("tts-1")
+                .do_generate(SpeechModelCallOptions::new("Hello from the AI SDK!")),
+        );
+
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_speech_should_set_specification_version_and_provider() {
+        let provider = openai_speech_test_provider(Arc::new(Mutex::new(Vec::new())), "mp3");
+        let speech = ProviderWithSpeechModel::speech_model(&provider, "tts-1")
+            .expect("speech model resolves");
+
+        assert_eq!(speech.specification_version(), SpecificationVersion::V4);
+        assert_eq!(speech.provider(), "openai.speech");
+        assert_eq!(speech.model_id(), "tts-1");
+    }
+
+    #[test]
     fn openai_provider_uses_default_base_url_name_override_and_provider_trait() {
         let provider = OpenAIProvider::new().with_name("custom-openai");
 
@@ -1879,6 +2349,9 @@ mod tests {
         assert_eq!(trait_embedding.provider(), "custom-openai.embedding");
         let trait_image = Provider::image_model(&provider, "dall-e-3").expect("image model exists");
         assert_eq!(trait_image.provider(), "custom-openai.image");
+        let trait_speech =
+            ProviderWithSpeechModel::speech_model(&provider, "tts-1").expect("speech model exists");
+        assert_eq!(trait_speech.provider(), "custom-openai.speech");
     }
 
     #[test]
@@ -1980,6 +2453,38 @@ mod tests {
                     })
                     .to_string(),
                 ))))
+            });
+
+        OpenAIProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://api.openai.test/v1/")
+            .with_organization("org_test")
+            .with_project("proj_test")
+            .with_header("custom-header", "value")
+            .with_transport(transport)
+    }
+
+    fn openai_speech_test_provider(
+        captured_requests: Arc<Mutex<Vec<ProviderApiRequest>>>,
+        format: &'static str,
+    ) -> OpenAIProvider {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                captured_requests
+                    .lock()
+                    .expect("captured requests mutex is not poisoned")
+                    .push(request);
+
+                Box::pin(ready(Ok(ProviderApiResponse::bytes(
+                    200,
+                    "OK",
+                    vec![7_u8; 100],
+                )
+                .with_headers(Headers::from([
+                    ("content-type".to_string(), format!("audio/{format}")),
+                    ("x-ratelimit-remaining".to_string(), "123".to_string()),
+                    ("x-request-id".to_string(), "test-request-id".to_string()),
+                ])))))
             });
 
         OpenAIProvider::new()

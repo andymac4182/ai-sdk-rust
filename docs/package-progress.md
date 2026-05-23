@@ -4,7 +4,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 
 - Displayed package rows: 56
 - Average estimated completion: 50.5%
-- Portable package average: 39.7%
+- Portable package average: 39.8%
 - Closed package rows: 13 / 56
 - Strict portable verified rows: 3 / 46
 - In-progress rows: 28
@@ -35,7 +35,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `ai` | 98% | In progress | core package | Core surface is broad; model resolution plus abort, callback, serial job, token metric, response-message, portable... |
 | `@ai-sdk/provider` | 75% | In progress | provider contracts | Provider-v4 contracts are largely represented; v2/v3 compatibility and exact stream abstractions remain. |
 | `@ai-sdk/provider-utils` | 82% | In progress | provider support library | Most runtime helpers and many type-contract cases are mapped; browser stream/fetch parity and remaining type-level/Zod... |
-| `@ai-sdk/openai` | 70% | In progress | provider package | OpenAI/Open Responses foundations, non-Responses OpenAI error schema parsing, Files upload, and Skills upload... |
+| `@ai-sdk/openai` | 72% | In progress | provider package | OpenAI/Open Responses foundations, non-Responses OpenAI error schema parsing, Files upload, Skills upload, and Speech... |
 | `@ai-sdk/open-responses` | 88% | In progress | provider package | Most fixture, tool, prompt, request, metadata, and stream slices are mapped; remaining... |
 | `@ai-sdk/assemblyai` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
 | `@ai-sdk/azure` | 45% | In progress | provider package | Initial provider crate exists; full upstream test and live-provider parity remain. |
