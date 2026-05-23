@@ -3,12 +3,12 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 38.8%
-- Portable package average: 26.6%
+- Average estimated completion: 39.4%
+- Portable package average: 27.3%
 - Closed package rows: 5 / 18
 - Strict portable verified rows: 2 / 15
-- In-progress rows: 11
-- Not-started rows: 2
+- In-progress rows: 12
+- Not-started rows: 1
 
 ## 100% Closed
 
@@ -34,11 +34,11 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | `@chat-sdk/adapter-messenger` | 10% | In progress | adapter package | Crate scaffold (slice 132). 11 tests. HTTP I/O deferred. |
 | `@chat-sdk/adapter-telegram` | 10% | In progress | adapter package | Crate scaffold (slice 130). 13 tests. HTTP I/O deferred. |
 | `@chat-sdk/adapter-whatsapp` | 10% | In progress | adapter package | Crate scaffold (slice 133). 11 tests. HTTP I/O deferred. |
-| `@chat-sdk/state-redis` | 10% | In progress | state backend (Redis) | Crate scaffold (slice 140): RedisStateAdapter impl StateAdapter (5 methods return NotConnected placeholder).... |
+| `@chat-sdk/state-redis` | 10% | In progress | state backend (Redis) | Crate scaffold (slice 140): RedisStateAdapter impl StateAdapter (NotConnected placeholder). 11 tests. redis-rs wire-up... |
+| `@chat-sdk/state-ioredis` | 10% | In progress | state backend (ioredis) | Crate scaffold (slice 141): IoredisStateAdapter (cluster + Sentinel support) impl StateAdapter (NotConnected... |
 
 ## Not Started
 
 | Package | Completion | Status | Kind |
 | --- | ---: | --- | --- |
-| `@chat-sdk/state-ioredis` | 0% | Not started | state backend (ioredis) |
 | `@chat-sdk/state-pg` | 0% | Not started | state backend (Postgres) |
