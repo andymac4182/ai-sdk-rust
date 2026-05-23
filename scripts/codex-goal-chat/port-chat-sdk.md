@@ -880,11 +880,14 @@ session's first slice should ship the workspace runtime
 commitment that unblocks every in-progress package's HTTP /
 DB layer:
 
-1. Add `tokio = { version = "1", features = ["rt-multi-thread",
-   "macros"] }` and `reqwest = { version = "0.12", features =
-   ["json", "rustls-tls"], default-features = false }` to
-   `crates/chat-sdk-adapter-shared/Cargo.toml`. Re-export the
-   chosen runtime via `chat_sdk_adapter_shared::runtime`.
+1. **DONE in slice 144.** Added `tokio = { version = "1",
+   features = ["rt-multi-thread", "macros"] }` and
+   `reqwest = { version = "0.13", features = ["json", "rustls"],
+   default-features = false }` to
+   `crates/chat-sdk-adapter-shared/Cargo.toml`.
+   `chat_sdk_adapter_shared::runtime` re-exports both crates +
+   provides `default_http_client()` with the chat-sdk defaults
+   (30s timeout, `chat-sdk-rust/<version>` User-Agent).
 2. Pick the Postgres client (recommend `sqlx` for compile-time
    query checking; `tokio-postgres` for lower dep footprint).
 3. Add `redis = { version = "0.27", features = ["tokio-comp"] }`
