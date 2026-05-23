@@ -1976,3 +1976,120 @@ reply option + pre-minted bearer, 14 -> 17 tests, 10% -> 15%).
   `defaultNodeToText` helpers because the base class isn't
   ported yet. A `BaseFormatConverter` Rust port would
   de-duplicate.
+
+### 2026-05-24 — slices 191..196
+
+**What the brief got wrong or left out**
+
+- **HMAC-SHA256 webhook signature verification ports as a
+  reusable per-adapter pattern.** Slices 192/194/195/196 added
+  signature verifiers to Slack, WhatsApp, Messenger, and GitHub
+  with effectively identical Cargo dep sets (`hmac = 0.12` +
+  `sha2 = 0.10` + `subtle = 2.5`) and ~50 LOC of Rust each. The
+  per-adapter shape differences are small but real: Slack uses
+  `v0:<ts>:<body>` HMAC + `v0=` prefix + clock-skew check;
+  WhatsApp compares the full `sha256=<hex>` string; Messenger
+  splits on `=` and validates the algorithm prefix explicitly;
+  GitHub matches WhatsApp's shape but with the webhook secret
+  rather than app secret. Each variant has its own upstream
+  validation flow worth porting 1:1.
+
+- **The `chat-sdk-adapter-shared` crate doesn't yet centralise
+  HMAC primitives.** The 4 adapter ports duplicate the
+  `HmacSha256` type alias + hex-encode pattern. After Discord
+  (Ed25519) lands, lifting a shared `verify_hmac_sha256(...)`
+  helper into `chat-sdk-adapter-shared` is reasonable.
+
+- **The Telegram MarkdownV2 walker (slice 191) is the largest
+  custom node-walker in the project.** ~250 LOC of recursive
+  match-emit handling all 20+ mdast variants with per-variant
+  escape contexts (text uses `escape_markdown_v2`, code uses
+  `escape_code_block`, link URLs use `escape_link_url`). The
+  walker handles Definition/FootnoteDefinition/Yaml/Toml as
+  empty-output variants and uses walk_ast to preprocess Tables
+  into code blocks before rendering.
+
+- **Slack's modals.ts encode/decode metadata pair (slice 193) is
+  the closest the adapter-slack module has to a "pure-helper
+  subset" that ports cleanly without depending on the larger
+  Slack View JSON structure.** Same applies to format/index.ts
+  text-object builders.
+
+**Stale or misleading guidance**
+
+- The refinement entry from slices 186-190 estimated ~700-800
+  remaining test cases. After slices 191-196 ported ~70 more
+  cases (Telegram fromAst 13, modals codec 12, HMAC verifiers
+  ~30 additive + 18 GitHub markdown), the realistic remaining
+  count is ~650.
+
+- The "slack-style single<->double marker scanner" pattern noted
+  in slice 178-182 refinement now has a 4th instance (GChat
+  in slice 190). Time to lift into `chat-sdk-adapter-shared` as
+  a generic `upgrade_single_to_double_marker(text, marker,
+  replacement)` helper. Deferred to a future slice.
+
+**Edits applied**
+
+- `crates/chat-sdk-adapter-telegram/src/markdown.rs` (slice 191):
+  full `TelegramFormatConverter` + `render_markdown_v2` +
+  `escape_code_block` + `escape_link_url` pub helpers. 18 new
+  tests (13 upstream + 5 helper).
+- `crates/chat-sdk-adapter-slack/src/webhook.rs` (slice 192):
+  `verify_slack_signature_value` + `verify_slack_signature` +
+  `SlackVerifyOptions` + `SlackWebhookVerificationError`. 11
+  new tests.
+- `crates/chat-sdk-adapter-slack/src/modals.rs` (slice 193):
+  `ModalMetadata` + `encode_modal_metadata` +
+  `decode_modal_metadata`. 12 ported upstream cases.
+- `crates/chat-sdk-adapter-whatsapp/src/webhook.rs` (slice 194):
+  `verify_whatsapp_signature`. 7 new tests.
+- `crates/chat-sdk-adapter-messenger/src/webhook.rs` (slice 195):
+  `verify_messenger_signature` with explicit algorithm-prefix
+  split. 10 new tests.
+- `crates/chat-sdk-adapter-github/src/webhook.rs` (slice 196):
+  `verify_github_signature`. 8 new tests.
+
+**Open refinements deferred**
+
+- **`chat-sdk-adapter-shared::crypto::verify_hmac_sha256`**: lift
+  the 4 adapter ports into a generic helper, parameterised by
+  algorithm prefix shape (`sha256=...` vs `v0=...` vs
+  `<algo>=<hex>` split). One slice when Discord Ed25519 lands.
+
+- **Discord Ed25519 webhook signature verification**: Discord
+  signs interactions with Ed25519, not HMAC. Needs the `ed25519
+  -dalek` crate (~3 LOC of Cargo dep + ~30 LOC of verify call +
+  ~5 tests).
+
+- **Remaining Telegram markdown.test.ts cases** (~50): nested
+  list rendering, truncation, MarkdownV2-validity corpus
+  invariants. Each is a small follow-up slice.
+
+- **Full Slack webhook/parse.ts + verify.ts integration**:
+  combine the verify helper with the parse helpers from slice
+  174 into a single readSlackWebhook entry point that takes a
+  Request, verifies the signature, and parses the body. Then
+  port the ~150 cases from `webhook/index.test.ts`.
+
+- **Slack modalToSlackView + selectOptionToSlackOption**: port
+  the remaining 21 of 33 modals.test.ts cases. Requires
+  modelling Slack's View JSON shape (block_id / element /
+  input / etc).
+
+- **WhatsApp interactive-message branch in cards.ts**: the
+  `cardToWhatsApp` returning a button-interactive payload (~5
+  of 15 remaining cards.test.ts cases).
+
+- **State-backend client wire-up**: state-redis / state-ioredis
+  / state-pg all still 10% (NotConnected placeholder).
+
+- **BaseFormatConverter in chat-sdk-chat**: each adapter
+  markdown converter inlines its own renderList /
+  defaultNodeToText pattern. Lifting these into chat-sdk-chat's
+  BaseFormatConverter base class would de-duplicate. Deferred.
+
+- **Adaptive-cards rendering**: Teams uses Adaptive Cards JSON
+  for cardToTeams. Discord uses Embed + Action Row JSON for
+  cardToDiscord. Each is a substantial slice (~150-200 LOC +
+  ~30-40 test cases).
