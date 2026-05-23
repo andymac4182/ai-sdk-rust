@@ -22,8 +22,11 @@ all = "warn"
 async-trait = "0.1.89"
 chat-sdk-adapter-shared = { path = "../chat-sdk-adapter-shared" }
 chat-sdk-chat = { path = "../chat-sdk-chat" }
+ed25519-dalek = "2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 
 [dev-dependencies]
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 futures-executor = "0.3.32"
+rand = "0.8"
