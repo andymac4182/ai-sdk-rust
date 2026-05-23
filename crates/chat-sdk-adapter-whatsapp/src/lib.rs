@@ -384,12 +384,19 @@ pub struct DecodedWhatsappThreadId {
     pub customer_phone: String,
 }
 
-/// Decode a WhatsApp thread id.
+/// Decode a WhatsApp thread id. 1:1 with upstream
+/// `decodeThreadId(threadId)`: requires exactly the
+/// `whatsapp:<phone_number_id>:<customer_phone>` shape (rejects extra
+/// segments and empty components). Returns `None` for any malformed
+/// input; upstream throws `ValidationError` in the same cases.
 pub fn decode_thread_id(thread_id: &str) -> Option<DecodedWhatsappThreadId> {
     let suffix = thread_id.strip_prefix(THREAD_ID_PREFIX)?;
-    let mut parts = suffix.splitn(2, ':');
-    let phone_number_id = parts.next()?;
-    let customer_phone = parts.next()?;
+    let parts: Vec<&str> = suffix.split(':').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let phone_number_id = parts[0];
+    let customer_phone = parts[1];
     if phone_number_id.is_empty() || customer_phone.is_empty() {
         return None;
     }
@@ -462,6 +469,40 @@ mod tests {
         assert!(decode_thread_id("whatsapp:onlyone").is_none());
         assert!(decode_thread_id("whatsapp::15551234567").is_none());
         assert!(decode_thread_id("whatsapp:PNID:").is_none());
+    }
+
+    #[test]
+    fn decode_thread_id_returns_none_for_completely_wrong_format() {
+        // 1:1 with upstream `decodeThreadId("nonsense") throws`.
+        assert!(decode_thread_id("nonsense").is_none());
+    }
+
+    #[test]
+    fn decode_thread_id_returns_none_for_extra_segments() {
+        // 1:1 with upstream `decodeThreadId("whatsapp:123:456:extra")
+        // throws`. The Rust port now uses `split(':')` + exact-length
+        // check (was `splitn(2, ':')` which silently accepted extras).
+        assert!(decode_thread_id("whatsapp:123:456:extra").is_none());
+    }
+
+    #[test]
+    fn encode_decode_round_trip_with_international_numbers() {
+        // 1:1 with upstream `encodeThreadId / decodeThreadId roundtrip
+        // > should round-trip with international numbers`.
+        let encoded = encode_thread_id("999888777", "919876543210");
+        let decoded = decode_thread_id(&encoded).unwrap();
+        assert_eq!(decoded.phone_number_id, "999888777");
+        assert_eq!(decoded.customer_phone, "919876543210");
+    }
+
+    #[test]
+    fn encode_thread_id_works_with_different_phone_numbers() {
+        // 1:1 with upstream `encodeThreadId > should encode with
+        // different phone numbers`.
+        assert_eq!(
+            encode_thread_id("987654321", "44771234567"),
+            "whatsapp:987654321:44771234567"
+        );
     }
 
     // ---------- channel_id_from_thread_id + is_dm ----------
