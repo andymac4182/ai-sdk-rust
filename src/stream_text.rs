@@ -7904,6 +7904,75 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_result_supports_text_ui_message_and_full_stream_from_single_result() {
+        let response_metadata = LanguageModelStreamResponseMetadata::new()
+            .with_id("id-0")
+            .with_model_id("mock-model-id");
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::ResponseMetadata(response_metadata),
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", ", ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+
+        let text_stream = result.text_stream.clone();
+        let full_stream = serde_json::to_value(&result.parts).expect("parts serialize");
+        let ui_message_stream =
+            serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize");
+
+        assert_eq!(text_stream, vec!["Hello", ", ", "world!"]);
+        assert_eq!(
+            full_stream
+                .as_array()
+                .expect("full stream is array")
+                .iter()
+                .filter(|part| part["type"] == "text-delta")
+                .map(|part| part["text"].as_str().expect("text delta"))
+                .collect::<Vec<_>>(),
+            vec!["Hello", ", ", "world!"]
+        );
+        assert!(
+            full_stream
+                .as_array()
+                .expect("full stream is array")
+                .iter()
+                .any(|part| part["type"] == "finish-step"
+                    && part["response"]["id"] == "id-0"
+                    && part["response"]["modelId"] == "mock-model-id")
+        );
+        assert_eq!(
+            ui_message_stream,
+            json!([
+                { "type": "start" },
+                { "type": "start-step" },
+                { "type": "text-start", "id": "1" },
+                { "type": "text-delta", "id": "1", "delta": "Hello" },
+                { "type": "text-delta", "id": "1", "delta": ", " },
+                { "type": "text-delta", "id": "1", "delta": "world!" },
+                { "type": "text-end", "id": "1" },
+                { "type": "finish-step" },
+                { "type": "finish", "finishReason": "stop" }
+            ])
+        );
+
+        assert_eq!(result.text_stream, text_stream);
+        assert_eq!(
+            serde_json::to_value(&result.parts).expect("parts serialize"),
+            full_stream
+        );
+        assert_eq!(
+            serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize"),
+            ui_message_stream
+        );
+    }
+
+    #[test]
     fn stream_text_preserves_raw_chunks_when_requested() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
