@@ -139,6 +139,15 @@ impl TeamsAdapter {
             self.api_base()
         )
     }
+
+    /// Build the URL for a specific activity:
+    /// `<api_base>/v3/conversations/<conversation_id>/activities/<activity_id>`.
+    fn activity_url(&self, conversation_id: &str, activity_id: &str) -> String {
+        format!(
+            "{}/v3/conversations/{conversation_id}/activities/{activity_id}",
+            self.api_base()
+        )
+    }
 }
 
 #[async_trait]
@@ -213,6 +222,143 @@ impl Adapter for TeamsAdapter {
         json["id"].as_str().map(str::to_owned).ok_or_else(|| {
             AdapterError::InvalidPayload("Bot Framework activity response missing id".to_string())
         })
+    }
+
+    /// Edit a Teams activity via Bot Framework's update endpoint.
+    /// 1:1 with the text-only path of upstream `adapter.editMessage`
+    /// (Adaptive Cards branch deferred): PUT
+    /// `<api_base>/v3/conversations/<conversation_id>/activities/<activity_id>`
+    /// with `{type: "message", text}`. Returns the (unchanged)
+    /// activity id.
+    async fn edit_message(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<String> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Teams-encoded"))
+        })?;
+        let bearer = self.bearer_token.as_deref().ok_or_else(|| {
+            AdapterError::InvalidPayload("TeamsAdapter has no bearer_token configured".to_string())
+        })?;
+
+        let url = self.activity_url(&decoded.conversation_id, message_id);
+        let body = serde_json::json!({
+            "type": "message",
+            "text": text,
+        });
+
+        let response = self
+            .http
+            .put(&url)
+            .bearer_auth(bearer)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: {body_text}"
+            )));
+        }
+        Ok(message_id.to_string())
+    }
+
+    /// Delete a Teams activity via Bot Framework's delete endpoint.
+    /// 1:1 with upstream's `adapter.deleteMessage`. DELETE
+    /// `<api_base>/v3/conversations/<conversation_id>/activities/<activity_id>`.
+    async fn delete_message(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Teams-encoded"))
+        })?;
+        let bearer = self.bearer_token.as_deref().ok_or_else(|| {
+            AdapterError::InvalidPayload("TeamsAdapter has no bearer_token configured".to_string())
+        })?;
+
+        let url = self.activity_url(&decoded.conversation_id, message_id);
+        let response = self
+            .http
+            .delete(&url)
+            .bearer_auth(bearer)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: {body_text}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Teams Bot Framework does not yet expose reactions through
+    /// the SDK. 1:1 with upstream's
+    /// `throw NotImplementedError("addReaction is not yet supported
+    /// by the Teams SDK", "addReaction")`.
+    async fn add_reaction(
+        &self,
+        _thread_id: &str,
+        _message_id: &str,
+        _emoji: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+        Err(AdapterError::InvalidPayload(
+            "addReaction is not yet supported by the Teams SDK".to_string(),
+        ))
+    }
+
+    /// Send a Teams typing indicator. 1:1 with upstream's
+    /// `adapter.startTyping`: POSTs `{type: "typing"}` as an
+    /// activity to the conversation.
+    async fn start_typing(
+        &self,
+        thread_id: &str,
+        _status: Option<&str>,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Teams-encoded"))
+        })?;
+        let bearer = self.bearer_token.as_deref().ok_or_else(|| {
+            AdapterError::InvalidPayload("TeamsAdapter has no bearer_token configured".to_string())
+        })?;
+
+        let url = self.activities_url(&decoded.conversation_id);
+        let body = serde_json::json!({ "type": "typing" });
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(bearer)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: {body_text}"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -359,6 +505,69 @@ mod tests {
             }
             other => panic!("expected InvalidPayload, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn adapter_edit_message_rejects_non_teams_thread_ids() {
+        let adapter = TeamsAdapter::new(TeamsAdapterOptions::new("a", "p", "t"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.edit_message("slack:C1:1.0", "msg", "hi"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Teams-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_delete_message_requires_a_bearer() {
+        let adapter = TeamsAdapter::new(TeamsAdapterOptions::new("a", "p", "t"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.delete_message("teams:CONV:MSG", "msg"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("no bearer_token configured"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_add_reaction_is_not_implemented() {
+        let adapter = TeamsAdapter::new(TeamsAdapterOptions::new("a", "p", "t"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.add_reaction("teams:CONV:MSG", "msg", "👍"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not yet supported by the Teams SDK"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_start_typing_rejects_non_teams_thread_ids() {
+        let adapter = TeamsAdapter::new(TeamsAdapterOptions::new("a", "p", "t"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.start_typing("slack:C1:1.0", None));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Teams-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_activity_url_builds_the_upstream_endpoint() {
+        let adapter = TeamsAdapter::new(
+            TeamsAdapterOptions::new("a", "p", "t").with_api_base("https://example.test"),
+        );
+        assert_eq!(
+            adapter.activity_url("CONV", "ACT"),
+            "https://example.test/v3/conversations/CONV/activities/ACT"
+        );
     }
 
     #[test]
