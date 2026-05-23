@@ -2642,6 +2642,37 @@ mod tests {
         assert_eq!(end_events[0].provider_metadata, Some(provider_metadata));
     }
 
+    fn panicking_generate_object_callback<T>(_event: T) -> Ready<()> {
+        panic!("callback error")
+    }
+
+    #[test]
+    fn generate_object_callback_panics_do_not_break_generation() {
+        let result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(
+                "{\"answer\":42}",
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::Stop,
+                raw: Some("stop".to_string()),
+            },
+            object_usage(),
+        );
+        let model = StaticObjectModel::new(result);
+
+        let output = poll_ready(generate_object(
+            GenerateObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_experimental_on_start(panicking_generate_object_callback)
+                .with_experimental_on_step_start(panicking_generate_object_callback)
+                .with_on_step_finish(panicking_generate_object_callback)
+                .with_on_finish(panicking_generate_object_callback),
+        ))
+        .expect("object is generated despite callback panics");
+
+        assert_eq!(output.object, json!({ "answer": 42 }));
+    }
+
     #[test]
     fn generate_object_dispatches_telemetry_lifecycle_events() {
         let result = LanguageModelGenerateResult::new(
