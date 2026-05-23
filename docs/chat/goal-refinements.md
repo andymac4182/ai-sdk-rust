@@ -2842,3 +2842,75 @@ module-aliasing test).
   decision lands.
 - **postToCallbackUrl HTTP** (3 cases) — still needs a mock-fetch
   trait abstraction (see refinement for slices 232..236).
+
+### 2026-05-24 - slices 247..251
+
+**Slices covered**
+
+- 247 state-ioredis + state-pg `generate_token()` helpers. ioredis
+  uses `ioredis_<unix_ms>_<13-char-base36-lowercase>` (rand
+  dep added); pg uses `pg_<v4-uuid>` (uuid dep added). 5 cases.
+- 248 Messenger `MESSENGER_MESSAGE_LIMIT = 2000` + `truncate_message`
+  helper exposing the private upstream `truncateMessage` 1:1. 4
+  cases.
+- 249 `Chat::has_singleton()` + `Chat::get_singleton()` static
+  associated functions, 1:1 with upstream `Chat.hasSingleton()` +
+  `Chat.getSingleton()` class methods. 2 cases.
+- 250 Teams `AUTO_SUBMIT_ACTION_ID = "__auto_submit"` const
+  re-exported from upstream `cards.ts`. 1 case.
+- 251 Discord `InteractionResponseType` const namespace
+  (`DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE = 5`,
+  `DEFERRED_UPDATE_MESSAGE = 6`). 1 case.
+
+**What the brief got wrong or left out**
+
+- Several adapters expose private helpers that the brief documents
+  as "deferred" but which are actually self-contained pure
+  functions (truncateMessage, generateToken, AUTO_SUBMIT_ACTION_ID,
+  InteractionResponseType). Exposing them at module scope rather
+  than keeping the private posture lets them be unit-tested
+  directly. Future port reviews should grep upstream for "function
+  <name>" (no `export`) and consider whether the helper is
+  pure-and-testable enough to expose.
+- The two `generate_token` styles (`<prefix>_<ms>_<base36>` for
+  redis/ioredis; `<prefix>_<uuid>` for pg) diverge from upstream's
+  Node `crypto.randomUUID()` + `Math.random().toString(36)` only in
+  the dep used. The Rust port uses `uuid::Uuid::new_v4()` for the
+  pg case (matching Node's v4) and a base36 sampler for the
+  redis/ioredis cases (matching Node's `Math.random().toString(36)`
+  output alphabet).
+- `Chat.getSingleton()` / `Chat.hasSingleton()` are static class
+  methods upstream. In Rust they become `pub fn` on the `Chat`
+  struct (associated functions) — both forms work for `T::method()`
+  call-site syntax.
+
+**Stale or misleading guidance**
+
+- The brief's "% completion" estimates still don't account for
+  inherent (non-trait) adapter helpers in a structured way. After
+  the slice 227..251 batch the adapter helper surface has roughly
+  doubled but the per-adapter row body keeps growing without a
+  numerator/denominator break-out. A future refinement should add
+  a structured "inherent helpers: N/M" tally column alongside the
+  existing "trait methods: N/8".
+- Slice 250's `AUTO_SUBMIT_ACTION_ID` const sat unported for many
+  slices despite being a one-line port. Future refinement cycles
+  should sweep `export const`/`export type` from each upstream
+  module and check Rust coverage — single-const ports are the
+  cheapest possible parity wins.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+
+**Open refinements deferred**
+
+- **Slack Block Kit** (34 cases), **Discord embeds** (31),
+  **Messenger templates** (~50), **Teams Adaptive Cards** (26),
+  **chat-sdk-chat ChannelImpl/ThreadImpl/ChatImpl** (~470), all
+  adapter `index.test.ts` integration suites — all still blocked.
+- **state-redis / state-ioredis / state-pg client wire-up**
+  remains blocked on workspace runtime decision (tokio + bb8-redis
+  vs deadpool + …).
+- **postToCallbackUrl HTTP** (3 cases) — needs a mock-fetch trait
+  abstraction.

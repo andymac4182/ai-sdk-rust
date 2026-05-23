@@ -132,6 +132,25 @@ impl DiscordAdapter {
     }
 }
 
+/// Discord interaction response types. 1:1 with upstream
+/// `export const InteractionResponseType = { ... } as const`.
+/// Only the two types the SDK currently emits are defined here.
+///
+/// - [`Self::DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE`] (`5`) — ACK
+///   and edit later (deferred).
+/// - [`Self::DEFERRED_UPDATE_MESSAGE`] (`6`) — ACK component
+///   interaction, update message later.
+pub struct InteractionResponseType;
+
+impl InteractionResponseType {
+    /// ACK and edit later (deferred). 1:1 with upstream
+    /// `DeferredChannelMessageWithSource: 5`.
+    pub const DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE: u8 = 5;
+    /// ACK component interaction, update message later. 1:1 with
+    /// upstream `DeferredUpdateMessage: 6`.
+    pub const DEFERRED_UPDATE_MESSAGE: u8 = 6;
+}
+
 #[async_trait]
 impl Adapter for DiscordAdapter {
     fn name(&self) -> &str {
@@ -556,6 +575,18 @@ mod tests {
         )]))]));
         let result = adapter.render_formatted(&ast);
         assert!(result.contains("Hello world"), "got: {result}");
+    }
+
+    #[test]
+    #[test]
+    fn interaction_response_type_constants_match_upstream() {
+        // 1:1 with upstream `InteractionResponseType = { ... }`.
+        // The two values currently emitted by the SDK are 5 and 6;
+        // the upstream comment notes additional types
+        // (`ChannelMessageWithSource: 4`, `UpdateMessage: 7`) that
+        // aren't currently used by the adapter.
+        assert_eq!(InteractionResponseType::DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE, 5);
+        assert_eq!(InteractionResponseType::DEFERRED_UPDATE_MESSAGE, 6);
     }
 
     #[test]
