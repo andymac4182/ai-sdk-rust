@@ -45,6 +45,7 @@ use crate::provider_utils::{
 };
 use crate::retry::DEFAULT_MAX_RETRIES;
 use crate::telemetry::{TelemetryDispatcher, TelemetryOptions, create_telemetry_dispatcher};
+use crate::util::{Callback, notify};
 use crate::warning::Warning;
 
 const DEFAULT_MAX_STEPS: usize = 1;
@@ -1011,7 +1012,7 @@ pub type OnToolExecutionStartCallback<'a> = GenerateTextOnToolExecutionStartFunc
 /// Callback wrapper for upstream `onToolExecutionStart`.
 #[derive(Clone)]
 pub struct GenerateTextOnToolExecutionStart<'a> {
-    on_tool_execution_start: Rc<GenerateTextOnToolExecutionStartFunction<'a>>,
+    on_tool_execution_start: Callback<'a, GenerateTextToolExecutionStartEvent>,
 }
 
 impl<'a> GenerateTextOnToolExecutionStart<'a> {
@@ -1022,7 +1023,7 @@ impl<'a> GenerateTextOnToolExecutionStart<'a> {
         Fut: Future<Output = ()> + 'a,
     {
         Self {
-            on_tool_execution_start: Rc::new(move |event| Box::pin(on_tool_execution_start(event))),
+            on_tool_execution_start: Callback::infallible(on_tool_execution_start),
         }
     }
 
@@ -1031,7 +1032,7 @@ impl<'a> GenerateTextOnToolExecutionStart<'a> {
         &self,
         event: GenerateTextToolExecutionStartEvent,
     ) -> GenerateTextOnToolExecutionStartFuture<'a> {
-        (self.on_tool_execution_start)(event)
+        Box::pin(notify(event, self.on_tool_execution_start.clone()))
     }
 }
 
@@ -1056,7 +1057,7 @@ pub type OnToolExecutionEndCallback<'a> = GenerateTextOnToolExecutionEndFunction
 /// Callback wrapper for upstream `onToolExecutionEnd`.
 #[derive(Clone)]
 pub struct GenerateTextOnToolExecutionEnd<'a> {
-    on_tool_execution_end: Rc<GenerateTextOnToolExecutionEndFunction<'a>>,
+    on_tool_execution_end: Callback<'a, GenerateTextToolExecutionEndEvent>,
 }
 
 impl<'a> GenerateTextOnToolExecutionEnd<'a> {
@@ -1067,7 +1068,7 @@ impl<'a> GenerateTextOnToolExecutionEnd<'a> {
         Fut: Future<Output = ()> + 'a,
     {
         Self {
-            on_tool_execution_end: Rc::new(move |event| Box::pin(on_tool_execution_end(event))),
+            on_tool_execution_end: Callback::infallible(on_tool_execution_end),
         }
     }
 
@@ -1076,7 +1077,7 @@ impl<'a> GenerateTextOnToolExecutionEnd<'a> {
         &self,
         event: GenerateTextToolExecutionEndEvent,
     ) -> GenerateTextOnToolExecutionEndFuture<'a> {
-        (self.on_tool_execution_end)(event)
+        Box::pin(notify(event, self.on_tool_execution_end.clone()))
     }
 }
 
@@ -7855,7 +7856,8 @@ mod tests {
         ActiveTools, ContentPart, DefaultGeneratedFile, DynamicToolCall, DynamicToolError,
         DynamicToolResult, ExperimentalGeneratedImage, GenerateTextContentPart,
         GenerateTextEndEvent, GenerateTextFileContent, GenerateTextFinishEvent,
-        GenerateTextInclude, GenerateTextModelInfo, GenerateTextOptions, GenerateTextReasoning,
+        GenerateTextInclude, GenerateTextModelInfo, GenerateTextOnToolExecutionEnd,
+        GenerateTextOnToolExecutionStart, GenerateTextOptions, GenerateTextReasoning,
         GenerateTextResult, GenerateTextStartEvent, GenerateTextStep, GenerateTextStepEndEvent,
         GenerateTextStepPerformance, GenerateTextStepStartEvent, GenerateTextToolCall,
         GenerateTextToolError, GenerateTextToolExecutionEndEvent,
@@ -11836,6 +11838,17 @@ mod tests {
         tool_call: GenerateTextToolCall,
         tools_context: JsonObject,
     ) -> (Vec<GenerateTextToolResult>, BTreeMap<String, u64>) {
+        execute_tool_calls_for_test_with_context(tools, tool_call, tools_context, None, None, None)
+    }
+
+    fn execute_tool_calls_for_test_with_context<'a, 'b>(
+        tools: &[Tool],
+        tool_call: GenerateTextToolCall,
+        tools_context: JsonObject,
+        experimental_sandbox: Option<&'a Arc<dyn ExperimentalSandbox>>,
+        on_tool_execution_start: Option<&'a GenerateTextOnToolExecutionStart<'b>>,
+        on_tool_execution_end: Option<&'a GenerateTextOnToolExecutionEnd<'b>>,
+    ) -> (Vec<GenerateTextToolResult>, BTreeMap<String, u64>) {
         let tool_calls = vec![tool_call];
         let messages = vec![user_message("test message")];
 
@@ -11846,7 +11859,12 @@ mod tests {
             &messages,
             &tools_context,
             &BTreeSet::new(),
-            (None, None, None, None),
+            (
+                experimental_sandbox,
+                on_tool_execution_start,
+                on_tool_execution_end,
+                None,
+            ),
         ))
     }
 
@@ -11886,6 +11904,42 @@ mod tests {
         assert_eq!(tool_results[0].output, json!("test-result"));
         assert_eq!(tool_results[0].dynamic, Some(false));
         assert_eq!(tool_results[0].is_error, None);
+    }
+
+    #[test]
+    fn execute_tool_call_should_pass_sandbox_to_tool_execution() {
+        let received_sandbox = Arc::new(Mutex::new(None::<String>));
+        let received_sandbox_for_closure = Arc::clone(&received_sandbox);
+        let sandbox: Arc<dyn ExperimentalSandbox> = Arc::new(TestSandbox::new("test sandbox"));
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema()).with_execute(
+                move |_input, options| {
+                    let received_sandbox = Arc::clone(&received_sandbox_for_closure);
+                    async move {
+                        *received_sandbox.lock().expect("sandbox lock") = options
+                            .experimental_sandbox
+                            .as_ref()
+                            .map(|sandbox| sandbox.description().to_string());
+                        Ok(json!("test-result"))
+                    }
+                },
+            ),
+        ];
+
+        let (tool_results, _) = execute_tool_calls_for_test_with_context(
+            &tools,
+            execute_tool_call_test_call(),
+            JsonObject::new(),
+            Some(&sandbox),
+            None,
+            None,
+        );
+
+        assert_eq!(tool_results[0].output, json!("test-result"));
+        assert_eq!(
+            received_sandbox.lock().expect("sandbox lock").as_deref(),
+            Some("test sandbox")
+        );
     }
 
     #[test]
@@ -12030,6 +12084,324 @@ mod tests {
                 .expect("error output is a string")
                 .contains("expected key1 string")
         );
+    }
+
+    #[test]
+    fn execute_tool_call_should_call_start_callback_with_correct_data_before_execution() {
+        let execution_order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let start_events = Arc::new(Mutex::new(Vec::<GenerateTextToolExecutionStartEvent>::new()));
+        let execution_order_for_tool = Arc::clone(&execution_order);
+        let execution_order_for_callback = Arc::clone(&execution_order);
+        let start_events_for_callback = Arc::clone(&start_events);
+        let context_schema = FlexibleSchema::from(
+            Schema::new(
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "key1": { "type": "string" }
+                    },
+                    "required": ["key1"]
+                })
+                .as_object()
+                .expect("schema is an object")
+                .clone(),
+            )
+            .with_validator(|value| {
+                if value.get("key1").and_then(JsonValue::as_str).is_some() {
+                    ValidationResult::success(value.clone())
+                } else {
+                    ValidationResult::failure("expected key1 string")
+                }
+            }),
+        );
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema())
+                .with_context_schema(context_schema)
+                .with_execute(move |_input, _options| {
+                    let execution_order = Arc::clone(&execution_order_for_tool);
+                    async move {
+                        execution_order.lock().expect("order lock").push("execute");
+                        Ok(json!("test-result"))
+                    }
+                }),
+        ];
+        let on_start = GenerateTextOnToolExecutionStart::new(move |event| {
+            let execution_order = Arc::clone(&execution_order_for_callback);
+            let start_events = Arc::clone(&start_events_for_callback);
+            async move {
+                execution_order
+                    .lock()
+                    .expect("order lock")
+                    .push("onToolExecutionStart");
+                start_events.lock().expect("start events lock").push(event);
+            }
+        });
+        let tools_context =
+            JsonObject::from_iter([("testTool".to_string(), json!({ "key1": "value1" }))]);
+
+        let (tool_results, _) = execute_tool_calls_for_test_with_context(
+            &tools,
+            execute_tool_call_test_call(),
+            tools_context,
+            None,
+            Some(&on_start),
+            None,
+        );
+
+        assert_eq!(tool_results[0].output, json!("test-result"));
+        assert_eq!(
+            execution_order.lock().expect("order lock").as_slice(),
+            ["onToolExecutionStart", "execute"]
+        );
+        let start_events = start_events.lock().expect("start events lock");
+        assert_eq!(start_events.len(), 1);
+        assert_eq!(start_events[0].call_id, "test-telemetry-call-id");
+        assert_eq!(start_events[0].messages, vec![user_message("test message")]);
+        assert_eq!(start_events[0].tool_call, execute_tool_call_test_call());
+        assert_eq!(
+            start_events[0].tool_context,
+            Some(json!({ "key1": "value1" }))
+        );
+    }
+
+    #[test]
+    fn execute_tool_call_should_not_break_execution_when_start_callback_panics() {
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema())
+                .with_execute(|_input, _options| async move { Ok(json!("test-result")) }),
+        ];
+        let on_start =
+            GenerateTextOnToolExecutionStart::new(|_event| async move { panic!("callback error") });
+
+        let (tool_results, _) = execute_tool_calls_for_test_with_context(
+            &tools,
+            execute_tool_call_test_call(),
+            JsonObject::new(),
+            None,
+            Some(&on_start),
+            None,
+        );
+
+        assert_eq!(tool_results[0].output, json!("test-result"));
+    }
+
+    #[test]
+    fn execute_tool_call_should_call_end_callback_with_success_data_when_tool_succeeds() {
+        let end_events = Arc::new(Mutex::new(Vec::<GenerateTextToolExecutionEndEvent>::new()));
+        let end_events_for_callback = Arc::clone(&end_events);
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema())
+                .with_execute(|_input, _options| async move { Ok(json!("test-result")) }),
+        ];
+        let on_end = GenerateTextOnToolExecutionEnd::new(move |event| {
+            let end_events = Arc::clone(&end_events_for_callback);
+            async move {
+                end_events.lock().expect("end events lock").push(event);
+            }
+        });
+
+        let (tool_results, tool_execution_ms) = execute_tool_calls_for_test_with_context(
+            &tools,
+            execute_tool_call_test_call(),
+            JsonObject::new(),
+            None,
+            None,
+            Some(&on_end),
+        );
+
+        let end_events = end_events.lock().expect("end events lock");
+        assert_eq!(end_events.len(), 1);
+        assert_eq!(end_events[0].call_id, "test-telemetry-call-id");
+        assert_eq!(end_events[0].messages, vec![user_message("test message")]);
+        assert_eq!(end_events[0].tool_call, execute_tool_call_test_call());
+        assert_eq!(end_events[0].tool_context, None);
+        assert_eq!(end_events[0].tool_output, tool_results[0]);
+        assert_eq!(end_events[0].tool_output.output, json!("test-result"));
+        assert_eq!(
+            tool_execution_ms.get("call-1"),
+            Some(&end_events[0].tool_execution_ms)
+        );
+    }
+
+    #[test]
+    fn execute_tool_call_should_call_end_callback_with_error_data_when_tool_fails() {
+        let end_events = Arc::new(Mutex::new(Vec::<GenerateTextToolExecutionEndEvent>::new()));
+        let end_events_for_callback = Arc::clone(&end_events);
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema()).with_execute(
+                |_input, _options| async move {
+                    Err::<JsonValue, ToolExecutionError>(ToolExecutionError::new("test error"))
+                },
+            ),
+        ];
+        let on_end = GenerateTextOnToolExecutionEnd::new(move |event| {
+            let end_events = Arc::clone(&end_events_for_callback);
+            async move {
+                end_events.lock().expect("end events lock").push(event);
+            }
+        });
+
+        let (tool_results, tool_execution_ms) = execute_tool_calls_for_test_with_context(
+            &tools,
+            execute_tool_call_test_call(),
+            JsonObject::new(),
+            None,
+            None,
+            Some(&on_end),
+        );
+
+        let end_events = end_events.lock().expect("end events lock");
+        assert_eq!(end_events.len(), 1);
+        assert_eq!(end_events[0].tool_output, tool_results[0]);
+        assert_eq!(end_events[0].tool_output.is_error, Some(true));
+        assert_eq!(end_events[0].tool_output.output, json!("test error"));
+        assert_eq!(
+            tool_execution_ms.get("call-1"),
+            Some(&end_events[0].tool_execution_ms)
+        );
+    }
+
+    #[test]
+    fn execute_tool_call_should_not_break_execution_when_end_callback_panics_on_success() {
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema())
+                .with_execute(|_input, _options| async move { Ok(json!("test-result")) }),
+        ];
+        let on_end =
+            GenerateTextOnToolExecutionEnd::new(|_event| async move { panic!("callback error") });
+
+        let (tool_results, _) = execute_tool_calls_for_test_with_context(
+            &tools,
+            execute_tool_call_test_call(),
+            JsonObject::new(),
+            None,
+            None,
+            Some(&on_end),
+        );
+
+        assert_eq!(tool_results[0].output, json!("test-result"));
+    }
+
+    #[test]
+    fn execute_tool_call_should_not_break_execution_when_end_callback_panics_on_error() {
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema()).with_execute(
+                |_input, _options| async move {
+                    Err::<JsonValue, ToolExecutionError>(ToolExecutionError::new("tool error"))
+                },
+            ),
+        ];
+        let on_end =
+            GenerateTextOnToolExecutionEnd::new(|_event| async move { panic!("callback error") });
+
+        let (tool_results, _) = execute_tool_calls_for_test_with_context(
+            &tools,
+            execute_tool_call_test_call(),
+            JsonObject::new(),
+            None,
+            None,
+            Some(&on_end),
+        );
+
+        assert_eq!(tool_results[0].is_error, Some(true));
+        assert_eq!(tool_results[0].output, json!("tool error"));
+    }
+
+    #[test]
+    fn execute_tool_call_should_record_tool_execution_duration_on_success() {
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema()).with_execute(
+                |_input, _options| async move {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    Ok(json!("test-result"))
+                },
+            ),
+        ];
+        let end_events = Arc::new(Mutex::new(Vec::<GenerateTextToolExecutionEndEvent>::new()));
+        let end_events_for_callback = Arc::clone(&end_events);
+        let on_end = GenerateTextOnToolExecutionEnd::new(move |event| {
+            let end_events = Arc::clone(&end_events_for_callback);
+            async move {
+                end_events.lock().expect("end events lock").push(event);
+            }
+        });
+
+        let (_, tool_execution_ms) = execute_tool_calls_for_test_with_context(
+            &tools,
+            execute_tool_call_test_call(),
+            JsonObject::new(),
+            None,
+            None,
+            Some(&on_end),
+        );
+
+        let elapsed = tool_execution_ms["call-1"];
+        assert!(elapsed >= 1);
+        assert_eq!(
+            end_events.lock().expect("end events lock")[0].tool_execution_ms,
+            elapsed
+        );
+    }
+
+    #[test]
+    fn execute_tool_call_should_record_tool_execution_duration_on_error() {
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema()).with_execute(
+                |_input, _options| async move {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    Err::<JsonValue, ToolExecutionError>(ToolExecutionError::new("error"))
+                },
+            ),
+        ];
+        let end_events = Arc::new(Mutex::new(Vec::<GenerateTextToolExecutionEndEvent>::new()));
+        let end_events_for_callback = Arc::clone(&end_events);
+        let on_end = GenerateTextOnToolExecutionEnd::new(move |event| {
+            let end_events = Arc::clone(&end_events_for_callback);
+            async move {
+                end_events.lock().expect("end events lock").push(event);
+            }
+        });
+
+        let (_, tool_execution_ms) = execute_tool_calls_for_test_with_context(
+            &tools,
+            execute_tool_call_test_call(),
+            JsonObject::new(),
+            None,
+            None,
+            Some(&on_end),
+        );
+
+        let elapsed = tool_execution_ms["call-1"];
+        assert!(elapsed >= 1);
+        assert_eq!(
+            end_events.lock().expect("end events lock")[0].tool_execution_ms,
+            elapsed
+        );
+    }
+
+    #[test]
+    fn execute_tool_call_should_return_none_when_tools_is_empty() {
+        let (tool_results, tool_execution_ms) =
+            execute_tool_calls_for_test(&[], execute_tool_call_test_call(), JsonObject::new());
+
+        assert!(tool_results.is_empty());
+        assert!(tool_execution_ms.is_empty());
+    }
+
+    #[test]
+    fn execute_tool_call_should_return_none_when_tool_is_not_found_in_tools() {
+        let tools = vec![
+            Tool::new("testTool", execute_tool_call_value_schema())
+                .with_execute(|_input, _options| async move { Ok(json!("test-result")) }),
+        ];
+        let mut tool_call = execute_tool_call_test_call();
+        tool_call.tool_name = "nonexistent".to_string();
+
+        let (tool_results, tool_execution_ms) =
+            execute_tool_calls_for_test(&tools, tool_call, JsonObject::new());
+
+        assert!(tool_results.is_empty());
+        assert!(tool_execution_ms.is_empty());
     }
 
     fn warning_logger_text_result(

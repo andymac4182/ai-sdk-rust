@@ -604,6 +604,10 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ### Recent First-Phase Proof Slices
 
+- 2026-05-23: `packages/ai` `executeToolCall` callback/sandbox parity
+  added named counterparts for sandbox forwarding, missing-tool/empty-tools
+  no-op behavior, tool-execution start/end callback payloads, callback panic
+  tolerance, and returned/event duration propagation.
 - 2026-05-23: `packages/ai` `executeToolCall` basic parity added named
   counterparts for no-execute tools, successful tool-result shaping,
   provider/tool metadata propagation on success and error, dynamic result
@@ -3433,8 +3437,23 @@ focused tests for each portable behavior before changing rows to `verified`.
    `execute_tool_call_should_set_dynamic_true_for_dynamic_tools_on_success_and_error`,
    and
    `execute_tool_call_should_return_tool_error_when_tool_context_schema_fails_validation`;
-   remaining callback arrays, timeout/abort-signal wiring, telemetry wrapper,
-   and preliminary async-generator result cases stay in the follow-up queue.
+   the callback/sandbox slice added
+   `execute_tool_call_should_pass_sandbox_to_tool_execution`,
+   `execute_tool_call_should_call_start_callback_with_correct_data_before_execution`,
+   `execute_tool_call_should_not_break_execution_when_start_callback_panics`,
+   `execute_tool_call_should_call_end_callback_with_success_data_when_tool_succeeds`,
+   `execute_tool_call_should_call_end_callback_with_error_data_when_tool_fails`,
+   `execute_tool_call_should_not_break_execution_when_end_callback_panics_on_success`,
+   `execute_tool_call_should_not_break_execution_when_end_callback_panics_on_error`,
+   `execute_tool_call_should_record_tool_execution_duration_on_success`,
+   `execute_tool_call_should_record_tool_execution_duration_on_error`,
+   `execute_tool_call_should_return_none_when_tools_is_empty`, and
+   `execute_tool_call_should_return_none_when_tool_is_not_found_in_tools`;
+   exact mocked JavaScript `now()` sequencing is replaced by native Rust
+   monotonic duration equality between callback event and returned performance
+   map. Remaining callback arrays, timeout/abort-signal wiring, telemetry
+   wrapper, and preliminary async-generator result cases stay in the follow-up
+   queue.
    The upstream `generate-text/prune-messages.test.ts` cases now have named
    Rust counterparts in `prune_messages_should_*`, including all reasoning
    removal, before-last-message reasoning removal, all tool-call/result/error
