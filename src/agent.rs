@@ -4,6 +4,10 @@ use std::future::Future;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use crate::chat_transport::{
+    ChatTransportError, ConvertUiMessagesToModelMessagesOptions,
+    convert_ui_messages_to_model_messages_with_tools,
+};
 use crate::generate_text::{
     ActiveTools, GenerateTextFinishEvent, GenerateTextInclude, GenerateTextOnFinish,
     GenerateTextOnStart, GenerateTextOnStepFinish, GenerateTextOnStepStart,
@@ -22,8 +26,11 @@ use crate::language_model::{
 use crate::prompt::{Instructions, Prompt, PromptInput, TimeoutConfiguration};
 use crate::provider::{InvalidPromptError, ProviderOptions};
 use crate::provider_utils::ExperimentalSandbox;
-use crate::stream_text::{StreamTextOptions, StreamTextResult, stream_text};
+use crate::stream_text::{
+    StreamTextOptions, StreamTextResult, StreamTextUiMessageStreamOptions, stream_text,
+};
 use crate::telemetry::TelemetryOptions;
+use crate::ui_message_stream::{UiMessage, UiMessageStreamResponse, UiMessageStreamResponseInit};
 
 /// Upstream version tag for `ToolLoopAgent`.
 pub const TOOL_LOOP_AGENT_VERSION: &str = "agent-v1";
@@ -164,6 +171,113 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgent<'a, M> {
 
         prepared
     }
+}
+
+/// Options for [`create_agent_ui_stream_response`].
+pub struct AgentUiStreamResponseOptions<'options, 'agent, M: LanguageModel + ?Sized> {
+    /// Agent used to stream the response.
+    pub agent: &'options ToolLoopAgent<'agent, M>,
+
+    /// Existing UI messages to convert into the next model prompt.
+    pub ui_messages: Vec<UiMessage>,
+
+    /// HTTP response initialization options.
+    pub response_init: UiMessageStreamResponseInit,
+
+    /// UI-message stream conversion options.
+    pub ui_message_stream_options: StreamTextUiMessageStreamOptions,
+
+    /// Per-call sandbox passed through to local tool execution.
+    pub experimental_sandbox: Option<Arc<dyn ExperimentalSandbox>>,
+}
+
+impl<'options, 'agent, M: LanguageModel + ?Sized>
+    AgentUiStreamResponseOptions<'options, 'agent, M>
+{
+    /// Creates response options for an agent and UI-message history.
+    pub fn new(
+        agent: &'options ToolLoopAgent<'agent, M>,
+        ui_messages: impl IntoIterator<Item = UiMessage>,
+    ) -> Self {
+        Self {
+            agent,
+            ui_messages: ui_messages.into_iter().collect(),
+            response_init: UiMessageStreamResponseInit::new(),
+            ui_message_stream_options: StreamTextUiMessageStreamOptions::default(),
+            experimental_sandbox: None,
+        }
+    }
+
+    /// Sets HTTP response initialization options.
+    pub fn with_response_init(mut self, response_init: UiMessageStreamResponseInit) -> Self {
+        self.response_init = response_init;
+        self
+    }
+
+    /// Sets UI-message stream conversion options.
+    pub fn with_ui_message_stream_options(
+        mut self,
+        ui_message_stream_options: StreamTextUiMessageStreamOptions,
+    ) -> Self {
+        self.ui_message_stream_options = ui_message_stream_options;
+        self
+    }
+
+    /// Sets a per-call sandbox.
+    pub fn with_experimental_sandbox(
+        mut self,
+        experimental_sandbox: Arc<dyn ExperimentalSandbox>,
+    ) -> Self {
+        self.experimental_sandbox = Some(experimental_sandbox);
+        self
+    }
+}
+
+/// Streams an agent response as upstream-compatible UI-message SSE chunks.
+///
+/// This ports the portable core of upstream `createAgentUIStreamResponse`.
+/// Prior UI messages are converted back into model messages, assistant tool
+/// outputs are resolved through matching Rust tool `toModelOutput` callbacks,
+/// the agent is streamed in-process, and the collected UI-message chunks are
+/// encoded with the standard UI-message stream response headers.
+pub async fn create_agent_ui_stream_response<M>(
+    options: AgentUiStreamResponseOptions<'_, '_, M>,
+) -> Result<UiMessageStreamResponse, ChatTransportError>
+where
+    M: LanguageModel + ?Sized,
+    M::Stream: IntoIterator<Item = LanguageModelStreamPart>,
+{
+    let AgentUiStreamResponseOptions {
+        agent,
+        ui_messages,
+        response_init,
+        mut ui_message_stream_options,
+        experimental_sandbox,
+    } = options;
+
+    let model_messages = convert_ui_messages_to_model_messages_with_tools(
+        &ui_messages,
+        ConvertUiMessagesToModelMessagesOptions::default(),
+        &agent.settings.tools,
+    )
+    .await?;
+
+    let mut call_options = ToolLoopAgentCallOptions::from_messages(model_messages);
+    if let Some(experimental_sandbox) = experimental_sandbox {
+        call_options = call_options.with_experimental_sandbox(experimental_sandbox);
+    }
+
+    let result = agent
+        .stream(call_options)
+        .await
+        .map_err(|error| ChatTransportError::Agent(error.to_string()))?;
+
+    if ui_message_stream_options.original_messages.is_none() {
+        ui_message_stream_options =
+            ui_message_stream_options.with_original_messages(ui_messages.clone());
+    }
+
+    Ok(result.to_ui_message_stream_response_with_options(response_init, ui_message_stream_options))
 }
 
 /// Shared settings for a [`ToolLoopAgent`].
@@ -1239,11 +1353,13 @@ mod tests {
     use crate::language_model::{
         FinishReason, LanguageModelAbortController, LanguageModelAbortSignal,
         LanguageModelAssistantContentPart, LanguageModelCallOptions, LanguageModelContent,
-        LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelStreamFinish,
-        LanguageModelStreamPart, LanguageModelStreamResult, LanguageModelSystemMessage,
-        LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextPart,
-        LanguageModelTextStart, LanguageModelToolCall, LanguageModelUsage,
-        LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelMessage,
+        LanguageModelStreamFinish, LanguageModelStreamPart, LanguageModelStreamResult,
+        LanguageModelSystemMessage, LanguageModelText, LanguageModelTextDelta,
+        LanguageModelTextEnd, LanguageModelTextPart, LanguageModelTextStart, LanguageModelToolCall,
+        LanguageModelToolContentPart, LanguageModelToolResultContentPart,
+        LanguageModelToolResultOutput, LanguageModelUsage, LanguageModelUserContentPart,
+        LanguageModelUserMessage,
     };
     use crate::mock_models::MockLanguageModel;
     use crate::prompt::TimeoutConfigurationOptions;
@@ -2329,6 +2445,133 @@ mod tests {
             part,
             TextStreamPart::ToolApprovalRequest(request) if request.tool_call_id == "call-1"
         )));
+    }
+
+    #[test]
+    fn create_agent_ui_stream_response_uses_tool_model_output_for_ui_tool_results() {
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("Done"));
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model).with_tool(
+            Tool::new("example", value_schema()).with_to_model_output(|options| async move {
+                let value = options
+                    .output
+                    .get("value")
+                    .and_then(JsonValue::as_str)
+                    .expect("tool output contains value");
+                LanguageModelToolResultOutput::content(vec![
+                    LanguageModelToolResultContentPart::Text(LanguageModelTextPart::new(
+                        value.to_string(),
+                    )),
+                ])
+            }),
+        ));
+        let ui_messages = vec![
+            UiMessage::new("msg-1", crate::ui_message_stream::UiMessageRole::User).with_part(
+                json!({
+                    "type": "text",
+                    "text": "Hello, world!"
+                }),
+            ),
+            UiMessage::new("msg-2", crate::ui_message_stream::UiMessageRole::Assistant).with_part(
+                json!({
+                    "type": "tool-example",
+                    "toolCallId": "call-1",
+                    "state": "output-available",
+                    "input": { "input": "Hello, world!" },
+                    "output": { "value": "Example tool: Hello, world!" }
+                }),
+            ),
+        ];
+
+        let response = poll_ready(create_agent_ui_stream_response(
+            AgentUiStreamResponseOptions::new(&agent, ui_messages),
+        ))
+        .expect("agent UI stream response succeeds");
+
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].prompt.len(), 3);
+        match &calls[0].prompt[2] {
+            LanguageModelMessage::Tool(message) => {
+                assert_eq!(message.content.len(), 1);
+                match &message.content[0] {
+                    LanguageModelToolContentPart::ToolResult(result) => {
+                        assert_eq!(result.tool_call_id, "call-1");
+                        assert_eq!(result.tool_name, "example");
+                        assert!(matches!(
+                            &result.output,
+                            LanguageModelToolResultOutput::Content { value }
+                                if value == &vec![LanguageModelToolResultContentPart::Text(
+                                    LanguageModelTextPart::new("Example tool: Hello, world!")
+                                )]
+                        ));
+                    }
+                    other => panic!("expected tool result, got {other:?}"),
+                }
+            }
+            other => panic!("expected tool message, got {other:?}"),
+        }
+
+        let decoded = response.decoded_body().expect("response body decodes");
+        assert!(decoded.iter().any(|chunk| {
+            chunk.contains(r#""type":"start""#) && chunk.contains(r#""messageId":"msg-2""#)
+        }));
+        assert!(
+            decoded
+                .iter()
+                .any(|chunk| chunk.contains(r#""type":"finish""#))
+        );
+    }
+
+    #[test]
+    fn create_agent_ui_stream_response_calls_on_finish_with_auto_original_messages() {
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("Done"));
+        let agent = ToolLoopAgent::for_model(&model);
+        let finish_events = Arc::new(Mutex::new(Vec::<
+            crate::ui_message_stream::UiMessageStreamFinishCallbackEvent,
+        >::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+        let ui_messages = vec![
+            UiMessage::new("msg-1", crate::ui_message_stream::UiMessageRole::User).with_part(
+                json!({
+                    "type": "text",
+                    "text": "Run test"
+                }),
+            ),
+            UiMessage::new("msg-2", crate::ui_message_stream::UiMessageRole::Assistant).with_part(
+                json!({
+                    "type": "tool-testTool",
+                    "toolCallId": "call-1",
+                    "state": "output-available",
+                    "input": { "value": "test" },
+                    "output": { "result": "success" }
+                }),
+            ),
+        ];
+
+        let response = poll_ready(create_agent_ui_stream_response(
+            AgentUiStreamResponseOptions::new(&agent, ui_messages).with_ui_message_stream_options(
+                StreamTextUiMessageStreamOptions::new().with_on_finish(move |event| {
+                    finish_events_for_callback
+                        .lock()
+                        .expect("finish events lock")
+                        .push(event);
+                }),
+            ),
+        ))
+        .expect("agent UI stream response succeeds");
+
+        assert!(
+            response
+                .decoded_body()
+                .expect("response body decodes")
+                .iter()
+                .any(|chunk| chunk.contains(r#""type":"finish""#))
+        );
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert_eq!(finish_events[0].messages.len(), 2);
+        assert_eq!(finish_events[0].messages[0].id, "msg-1");
+        assert_eq!(finish_events[0].response_message.id, "msg-2");
     }
 
     #[test]
