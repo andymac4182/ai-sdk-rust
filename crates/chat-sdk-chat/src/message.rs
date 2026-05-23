@@ -151,6 +151,47 @@ impl Message {
         }
     }
 
+    /// Whether the message carries any attachments. 1:1 with the
+    /// inline `msg.attachments.length > 0` check upstream uses at
+    /// adapter callsites to gate attachment-rendering paths.
+    pub fn has_attachments(&self) -> bool {
+        !self.attachments.is_empty()
+    }
+
+    /// Count of attachments on the message. Trivial accessor matching
+    /// upstream `msg.attachments.length`.
+    pub fn attachment_count(&self) -> usize {
+        self.attachments.len()
+    }
+
+    /// Count of link previews on the message. Matches upstream
+    /// `msg.links.length`.
+    pub fn link_count(&self) -> usize {
+        self.links.len()
+    }
+
+    /// Whether this message has been edited. Convenience matching the
+    /// upstream `msg.metadata.edited === true` check.
+    pub fn is_edited(&self) -> bool {
+        self.metadata.edited
+    }
+
+    /// Whether the bot is @-mentioned in this message. Matches the
+    /// upstream `msg.isMention === true` predicate; treats `None` and
+    /// `Some(false)` as false (no mention).
+    pub fn mentions_bot(&self) -> bool {
+        self.is_mention.unwrap_or(false)
+    }
+
+    /// User key with a caller-provided fallback. Matches upstream's
+    /// inline `msg.userKey ?? fallback` coalescing used by emoji /
+    /// fallback-text renderers.
+    pub fn user_key_or(&self, fallback: &str) -> String {
+        self.user_key
+            .clone()
+            .unwrap_or_else(|| fallback.to_string())
+    }
+
     /// Convert to a wire-shape [`SerializedMessage`] with inline
     /// attachment payloads stripped. 1:1 with upstream
     /// `Message.toJSON()`'s `data` / `fetchData` strip behavior. Use
@@ -517,6 +558,73 @@ mod tests {
             stripped.attachments[0].url.as_deref(),
             Some("https://example.com/f.pdf")
         );
+    }
+
+    // ---------- slice 113: pure accessor helpers ----------
+
+    #[test]
+    fn has_attachments_is_false_for_an_empty_attachment_list() {
+        let msg = sample_message();
+        assert!(!msg.has_attachments());
+        assert_eq!(msg.attachment_count(), 0);
+    }
+
+    #[test]
+    fn has_attachments_is_true_when_attachments_exist() {
+        let mut msg = sample_message();
+        msg.attachments = vec![Attachment {
+            data: None,
+            fetch_metadata: None,
+            height: None,
+            mime_type: None,
+            name: Some("f.pdf".to_string()),
+            size: None,
+            kind: AttachmentKind::File,
+            url: None,
+            width: None,
+        }];
+        assert!(msg.has_attachments());
+        assert_eq!(msg.attachment_count(), 1);
+    }
+
+    #[test]
+    fn link_count_counts_link_previews() {
+        let mut msg = sample_message();
+        assert_eq!(msg.link_count(), 0);
+        msg.links = vec![LinkPreview {
+            url: "https://example.com".to_string(),
+            description: None,
+            image_url: None,
+            site_name: None,
+            title: None,
+        }];
+        assert_eq!(msg.link_count(), 1);
+    }
+
+    #[test]
+    fn is_edited_reflects_metadata_edited_flag() {
+        let mut msg = sample_message();
+        assert!(!msg.is_edited());
+        msg.metadata.edited = true;
+        assert!(msg.is_edited());
+    }
+
+    #[test]
+    fn mentions_bot_treats_none_and_false_as_false() {
+        let mut msg = sample_message();
+        assert!(!msg.mentions_bot());
+        msg.is_mention = Some(false);
+        assert!(!msg.mentions_bot());
+        msg.is_mention = Some(true);
+        assert!(msg.mentions_bot());
+    }
+
+    #[test]
+    fn user_key_or_returns_fallback_when_no_user_key_is_set() {
+        let mut msg = sample_message();
+        assert_eq!(msg.user_key_or("anon"), "anon");
+        msg.user_key = Some("user:slack:U999".to_string());
+        assert_eq!(msg.user_key_or("anon"), "user:slack:U999");
     }
 
     #[test]
