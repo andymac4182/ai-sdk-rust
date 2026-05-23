@@ -76,6 +76,14 @@ impl SlackAdapterOptions {
 pub struct SlackAdapter {
     options: SlackAdapterOptions,
     http: chat_sdk_adapter_shared::runtime::reqwest::Client,
+    /// Slack Connect (external) channel ids the adapter has
+    /// observed. 1:1 with upstream's private
+    /// `_externalChannels = new Set<string>()`. Populated by
+    /// webhook/conversations.info handlers (deferred in the Rust
+    /// port); consulted by [`get_channel_visibility`] /
+    /// [`is_external_channel`].
+    external_channels:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl SlackAdapter {
@@ -85,6 +93,9 @@ impl SlackAdapter {
         Self {
             options,
             http: chat_sdk_adapter_shared::runtime::default_http_client(),
+            external_channels: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
         }
     }
 
@@ -147,6 +158,59 @@ impl SlackAdapter {
     /// to `formatConverter.fromAst(content)`.
     pub fn render_formatted(&self, ast: &chat_sdk_chat::markdown::Node) -> String {
         crate::markdown::SlackFormatConverter::new().from_ast(ast)
+    }
+
+    /// Mark a Slack channel id as a Slack Connect (external)
+    /// channel. 1:1 with upstream's private `_externalChannels.add`
+    /// callsites in webhook + conversations.info handlers. Called
+    /// by adapter HTTP code; tests can call it directly to drive
+    /// [`get_channel_visibility`].
+    pub fn mark_external_channel(&self, channel_id: &str) {
+        if let Ok(mut set) = self.external_channels.lock() {
+            set.insert(channel_id.to_string());
+        }
+    }
+
+    /// Whether the given channel id was marked as a Slack Connect
+    /// channel via [`mark_external_channel`]. Used by
+    /// [`get_channel_visibility`]; exposed for callers that want to
+    /// branch on Connect status without rebuilding the visibility
+    /// enum.
+    pub fn is_external_channel(&self, channel_id: &str) -> bool {
+        self.external_channels
+            .lock()
+            .map(|set| set.contains(channel_id))
+            .unwrap_or(false)
+    }
+
+    /// Get the visibility scope of the channel that contains the
+    /// given Slack thread id. 1:1 port of upstream
+    /// `getChannelVisibility(threadId)`:
+    ///
+    /// - external if [`mark_external_channel`] was previously
+    ///   called for this channel (Slack Connect membership).
+    /// - private if the channel id starts with `G` (private
+    ///   channel) or `D` (DM).
+    /// - workspace if the channel id starts with `C` (public
+    ///   channel).
+    /// - unknown for anything else, or when `thread_id` doesn't
+    ///   decode.
+    pub fn get_channel_visibility(
+        &self,
+        thread_id: &str,
+    ) -> chat_sdk_chat::types::ChannelVisibility {
+        use chat_sdk_chat::types::ChannelVisibility;
+        let Some(decoded) = decode_thread_id(thread_id) else {
+            return ChannelVisibility::Unknown;
+        };
+        if self.is_external_channel(&decoded.channel_id) {
+            return ChannelVisibility::External;
+        }
+        match decoded.channel_id.chars().next() {
+            Some('G') | Some('D') => ChannelVisibility::Private,
+            Some('C') => ChannelVisibility::Workspace,
+            _ => ChannelVisibility::Unknown,
+        }
     }
 }
 
@@ -706,6 +770,69 @@ mod tests {
 
     #[test]
     // ---------- renderFormatted (1 upstream case) ----------
+    #[test]
+    // ---------- getChannelVisibility (4 upstream cases) ----------
+    // 1:1 with upstream's `getChannelVisibility(threadId)` behavior:
+    // external if `_externalChannels.has(channel)`, else private for
+    // G/D prefixes, workspace for C, unknown otherwise.
+
+    #[test]
+    fn get_channel_visibility_returns_workspace_for_public_channels() {
+        use chat_sdk_chat::types::ChannelVisibility;
+        let adapter = SlackAdapter::new(SlackAdapterOptions::new("t", "s"));
+        assert_eq!(
+            adapter.get_channel_visibility("slack:C12345:1700000000.000200"),
+            ChannelVisibility::Workspace
+        );
+    }
+
+    #[test]
+    fn get_channel_visibility_returns_private_for_g_and_d_prefixed_channels() {
+        use chat_sdk_chat::types::ChannelVisibility;
+        let adapter = SlackAdapter::new(SlackAdapterOptions::new("t", "s"));
+        assert_eq!(
+            adapter.get_channel_visibility("slack:G99999:1700000000.000200"),
+            ChannelVisibility::Private
+        );
+        assert_eq!(
+            adapter.get_channel_visibility("slack:DABCDE:1700000000.000200"),
+            ChannelVisibility::Private
+        );
+    }
+
+    #[test]
+    fn get_channel_visibility_returns_external_after_mark_external_channel() {
+        use chat_sdk_chat::types::ChannelVisibility;
+        let adapter = SlackAdapter::new(SlackAdapterOptions::new("t", "s"));
+        adapter.mark_external_channel("C12345");
+        assert!(adapter.is_external_channel("C12345"));
+        assert_eq!(
+            adapter.get_channel_visibility("slack:C12345:1700000000.000200"),
+            ChannelVisibility::External
+        );
+    }
+
+    #[test]
+    fn get_channel_visibility_returns_unknown_for_unrecognized_prefixes_and_non_slack_ids() {
+        use chat_sdk_chat::types::ChannelVisibility;
+        let adapter = SlackAdapter::new(SlackAdapterOptions::new("t", "s"));
+        // Channel ids that don't start with C/G/D fall through to
+        // Unknown — matches upstream's default branch.
+        assert_eq!(
+            adapter.get_channel_visibility("slack:X1234:1700000000.000200"),
+            ChannelVisibility::Unknown
+        );
+        // Non-Slack thread ids fail to decode -> Unknown.
+        assert_eq!(
+            adapter.get_channel_visibility("discord:G:C:T"),
+            ChannelVisibility::Unknown
+        );
+        assert_eq!(
+            adapter.get_channel_visibility(""),
+            ChannelVisibility::Unknown
+        );
+    }
+
     #[test]
     fn render_formatted_should_render_markdown_from_ast() {
         use chat_sdk_chat::markdown::{Node, paragraph, root, text};
