@@ -299,4 +299,174 @@ mod tests {
             serde_json::from_value(json!({"id": "t1", "status": "complete"})).unwrap();
         assert!(matches!(fields, UpdateTaskInput::Fields(_)));
     }
+
+    // ---------- slice 93: Plan data struct (non-adapter portions) ----------
+
+    #[test]
+    fn plan_new_creates_a_plan_with_initial_first_task_in_progress() {
+        let plan = Plan::new(StartPlanOptions {
+            initial_message: "Investigate the bug".into(),
+        });
+        assert_eq!(plan.title(), "Investigate the bug");
+        assert_eq!(plan.tasks().len(), 1);
+        assert_eq!(plan.tasks()[0].status, PlanTaskStatus::InProgress);
+    }
+
+    #[test]
+    fn plan_new_with_empty_initial_message_falls_back_to_default_title() {
+        let plan = Plan::new(StartPlanOptions {
+            initial_message: "".into(),
+        });
+        assert_eq!(plan.title(), "Plan");
+    }
+
+    #[test]
+    fn plan_fallback_text_emits_clipboard_icon_plus_per_task_status_icon() {
+        let plan = Plan::new(StartPlanOptions {
+            initial_message: "Ship the release".into(),
+        });
+        let text = plan.fallback_text();
+        assert!(text.starts_with("\u{1F4CB} Ship the release"));
+        // First task is in_progress -> shows the rotation icon.
+        assert!(text.contains("\u{1F504}"));
+    }
+
+    #[test]
+    fn plan_current_task_returns_the_last_in_progress_task() {
+        let plan = Plan::new(StartPlanOptions {
+            initial_message: "Plan title".into(),
+        });
+        let current = plan.current_task().expect("plan always has a task");
+        assert_eq!(current.status, PlanTaskStatus::InProgress);
+        assert_eq!(current.title, "Plan title");
+    }
+
+    #[test]
+    fn plan_post_data_returns_the_full_plan_model() {
+        let plan = Plan::new(StartPlanOptions {
+            initial_message: "Investigate".into(),
+        });
+        let data = plan.post_data();
+        assert_eq!(data.title, "Investigate");
+        assert_eq!(data.tasks.len(), 1);
+    }
+}
+
+/// In-memory plan with a task list. 1:1 port (in progress) of upstream
+/// `class Plan implements PostableObject<PlanModel>`. The adapter-bound
+/// dispatch (post / edit / add_task / update_task / complete) lives
+/// behind the not-yet-extended Adapter trait and will land in a
+/// follow-up slice. The portable surface — constructor, model
+/// accessors, fallback text — ships now.
+#[derive(Debug, Clone)]
+pub struct Plan {
+    model: PlanModel,
+}
+
+impl Plan {
+    /// 1:1 port of upstream `new Plan(options): Plan`. Derives the
+    /// plan title from `options.initial_message` via
+    /// [`content_to_plain_text`], falling back to `"Plan"` for empty
+    /// input. Creates a single seed task with the same title, status
+    /// `in_progress`, and a stable identifier.
+    pub fn new(options: StartPlanOptions) -> Self {
+        let derived_title = content_to_plain_text(Some(&options.initial_message));
+        let title = if derived_title.is_empty() {
+            "Plan".to_string()
+        } else {
+            derived_title
+        };
+        let first_task = PlanModelTask {
+            details: None,
+            id: generate_task_id(),
+            output: None,
+            status: PlanTaskStatus::InProgress,
+            title: title.clone(),
+        };
+        Self {
+            model: PlanModel {
+                tasks: vec![first_task],
+                title,
+            },
+        }
+    }
+
+    /// Title of the plan. 1:1 with upstream `get title(): string`.
+    pub fn title(&self) -> &str {
+        &self.model.title
+    }
+
+    /// Snapshot of every task in render order. 1:1 with upstream
+    /// `get tasks(): readonly PlanTask[]`. The returned [`PlanTask`]
+    /// objects mirror the upstream readonly view (id + status + title
+    /// only, no details/output).
+    pub fn tasks(&self) -> Vec<PlanTask> {
+        self.model
+            .tasks
+            .iter()
+            .map(|t| PlanTask {
+                id: t.id.clone(),
+                status: t.status,
+                title: t.title.clone(),
+            })
+            .collect()
+    }
+
+    /// Currently active task. 1:1 with upstream `get currentTask():
+    /// PlanTask | null`. Walks tasks from end to start looking for
+    /// the last `in_progress`, falling back to the final task.
+    pub fn current_task(&self) -> Option<PlanTask> {
+        let active = self
+            .model
+            .tasks
+            .iter()
+            .rev()
+            .find(|t| t.status == PlanTaskStatus::InProgress)
+            .or_else(|| self.model.tasks.last())?;
+        Some(PlanTask {
+            id: active.id.clone(),
+            status: active.status,
+            title: active.title.clone(),
+        })
+    }
+
+    /// Plain-text fallback for adapters that don't support PlanModel.
+    /// 1:1 port of upstream `getFallbackText(): string`. Output shape:
+    /// `📋 Title\n<status-icon> task1\n<status-icon> task2\n…`.
+    pub fn fallback_text(&self) -> String {
+        let mut lines: Vec<String> = Vec::with_capacity(1 + self.model.tasks.len());
+        let title = if self.model.title.is_empty() {
+            "Plan"
+        } else {
+            self.model.title.as_str()
+        };
+        lines.push(format!("\u{1F4CB} {title}"));
+        for task in &self.model.tasks {
+            let icon = match task.status {
+                PlanTaskStatus::Complete => "\u{2705}",
+                PlanTaskStatus::InProgress => "\u{1F504}",
+                PlanTaskStatus::Error => "\u{274C}",
+                PlanTaskStatus::Pending => "\u{2B1C}",
+            };
+            lines.push(format!("{icon} {}", task.title));
+        }
+        lines.join("\n")
+    }
+
+    /// Snapshot of the underlying [`PlanModel`] for adapter dispatch.
+    /// 1:1 port of upstream `getPostData(): PlanModel`.
+    pub fn post_data(&self) -> PlanModel {
+        self.model.clone()
+    }
+}
+
+fn generate_task_id() -> String {
+    // Upstream uses crypto.randomUUID(); the Rust port uses the
+    // existing `rand` workspace dep via a short hex token. Adopters
+    // can swap in a UUID crate if uniqueness across processes matters
+    // (the in-memory port only needs uniqueness within a single Plan).
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("task-{n:016x}")
 }
