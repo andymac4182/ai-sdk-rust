@@ -9,6 +9,7 @@
 
 pub mod cards;
 pub mod markdown;
+pub mod thread_id;
 pub mod utils;
 
 use async_trait::async_trait;
