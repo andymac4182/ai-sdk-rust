@@ -24,6 +24,7 @@ use crate::language_model::{
     LanguageModelResponseFormat, LanguageModelStreamPart, LanguageModelStreamResult,
     LanguageModelUsage,
 };
+use crate::logger::{LogWarningsOptions, log_warnings};
 use crate::prompt::{Prompt, prompt_has_url_files, standardize_prompt};
 use crate::provider::{ApiCallError, InvalidPromptError, ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{
@@ -791,6 +792,10 @@ where
         flush_pending_text_delta(&mut pending_text_delta, &mut text_stream, &mut parts);
     }
 
+    log_warnings(
+        &LogWarningsOptions::new(warnings.clone()).with_scope(model.provider(), model.model_id()),
+    );
+
     let object =
         match parse_generated_object(&text, schema.clone(), enum_values.as_deref(), array_output) {
             ParseJsonResult::Success { value, .. } => Some(value),
@@ -1278,6 +1283,7 @@ mod tests {
         LanguageModelSystemMessage, LanguageModelTextDelta, LanguageModelTextPart,
         LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
     };
+    use crate::logger::{LogWarningsOptions, take_log_warning_calls_for_tests};
     use crate::mock_models::MockLanguageModel;
     use crate::provider_utils::{Schema, ValidationResult, json_schema};
     use crate::telemetry::{
@@ -2719,6 +2725,52 @@ mod tests {
         ));
 
         assert_eq!(result.warnings, expected_warnings);
+    }
+
+    #[test]
+    fn stream_object_calls_log_warnings_with_the_correct_warnings() {
+        let expected_warnings = vec![
+            Warning::Other {
+                message: "Setting is not supported".to_string(),
+            },
+            Warning::Unsupported {
+                feature: "temperature".to_string(),
+                details: Some("Temperature parameter not supported".to_string()),
+            },
+        ];
+        let model = MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(
+            object_stream_with_warnings(expected_warnings.clone()),
+        ));
+        take_log_warning_calls_for_tests();
+
+        let _result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
+
+        assert_eq!(
+            take_log_warning_calls_for_tests(),
+            vec![
+                LogWarningsOptions::new(expected_warnings)
+                    .with_scope("mock-provider", "mock-model-id")
+            ]
+        );
+    }
+
+    #[test]
+    fn stream_object_calls_log_warnings_with_empty_array_when_no_warnings_are_present() {
+        let model = MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(
+            object_stream_with_warnings(Vec::new()),
+        ));
+        take_log_warning_calls_for_tests();
+
+        let _result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
+
+        assert_eq!(
+            take_log_warning_calls_for_tests(),
+            vec![LogWarningsOptions::new(Vec::new()).with_scope("mock-provider", "mock-model-id")]
+        );
     }
 
     #[test]

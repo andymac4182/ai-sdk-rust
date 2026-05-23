@@ -1,6 +1,9 @@
 use crate::warning::Warning;
 use std::sync::{LazyLock, Mutex};
 
+#[cfg(test)]
+use std::cell::RefCell;
+
 /// Informational message emitted before the first warning batch.
 pub const FIRST_WARNING_INFO_MESSAGE: &str = "AI SDK Warning System: To turn off warning logging, set the AI_SDK_LOG_WARNINGS global to false.";
 
@@ -82,6 +85,11 @@ pub struct WarningLogger {
 
 static WARNING_LOGGER: LazyLock<Mutex<WarningLogger>> =
     LazyLock::new(|| Mutex::new(WarningLogger::new()));
+
+#[cfg(test)]
+thread_local! {
+    static LOG_WARNING_CALLS: RefCell<Vec<LogWarningsOptions>> = const { RefCell::new(Vec::new()) };
+}
 
 impl Default for WarningLogger {
     fn default() -> Self {
@@ -188,10 +196,18 @@ pub fn format_warning(warning: &Warning, provider: Option<&str>, model: Option<&
 
 /// Logs warnings with the process-wide AI SDK warning logger state.
 pub fn log_warnings(options: &LogWarningsOptions) -> Vec<WarningLogRecord> {
+    #[cfg(test)]
+    LOG_WARNING_CALLS.with(|calls| calls.borrow_mut().push(options.clone()));
+
     WARNING_LOGGER
         .lock()
         .expect("warning logger mutex is not poisoned")
         .log_warnings(options)
+}
+
+#[cfg(test)]
+pub(crate) fn take_log_warning_calls_for_tests() -> Vec<LogWarningsOptions> {
+    LOG_WARNING_CALLS.with(|calls| std::mem::take(&mut *calls.borrow_mut()))
 }
 
 /// Calls a custom warning logger with the original options when warnings exist.
@@ -233,9 +249,8 @@ fn warning_log_kind(warning: &Warning) -> WarningLogKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        FIRST_WARNING_INFO_MESSAGE, LogWarningsOptions, WarningLogKind, WarningLogRecord,
-        WarningLogger, format_warning, log_warnings, log_warnings_with_custom_logger,
-        reset_log_warnings_state, set_log_warnings_enabled,
+        FIRST_WARNING_INFO_MESSAGE, LogWarningsOptions, WARNING_LOGGER, WarningLogKind,
+        WarningLogRecord, WarningLogger, format_warning, log_warnings_with_custom_logger,
     };
     use crate::warning::Warning;
 
@@ -361,16 +376,19 @@ mod tests {
 
     #[test]
     fn process_wide_log_warnings_matches_upstream_first_call_state() {
-        reset_log_warnings_state();
-        set_log_warnings_enabled(true);
+        let mut logger = WARNING_LOGGER
+            .lock()
+            .expect("warning logger mutex is not poisoned");
+        logger.reset();
+        logger.set_enabled(true);
 
-        let first = log_warnings(
+        let first = logger.log_warnings(
             &LogWarningsOptions::new(vec![Warning::Other {
                 message: "first".to_string(),
             }])
             .with_scope("provider", "model"),
         );
-        let second = log_warnings(
+        let second = logger.log_warnings(
             &LogWarningsOptions::new(vec![Warning::Other {
                 message: "second".to_string(),
             }])
@@ -380,16 +398,16 @@ mod tests {
         assert!(matches!(first.first(), Some(WarningLogRecord::Info(_))));
         assert!(!matches!(second.first(), Some(WarningLogRecord::Info(_))));
 
-        set_log_warnings_enabled(false);
+        logger.set_enabled(false);
         assert_eq!(
-            log_warnings(&LogWarningsOptions::new(vec![Warning::Other {
+            logger.log_warnings(&LogWarningsOptions::new(vec![Warning::Other {
                 message: "suppressed".to_string(),
             }])),
             Vec::new()
         );
 
-        set_log_warnings_enabled(true);
-        reset_log_warnings_state();
+        logger.set_enabled(true);
+        logger.reset();
     }
 
     #[test]

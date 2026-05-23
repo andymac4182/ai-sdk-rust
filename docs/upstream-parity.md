@@ -1224,6 +1224,14 @@ focused tests for each portable behavior before changing rows to `verified`.
   `src/generate_object.rs`, mapping upstream
   `callbacks > error handling in callbacks > should not break the stream when
   a callback throws` for synchronous callback failures.
+- 2026-05-23: `streamObject` warning logger parity added
+  `stream_object_calls_log_warnings_with_the_correct_warnings` and
+  `stream_object_calls_log_warnings_with_empty_array_when_no_warnings_are_present`
+  in `src/stream_object.rs`, plus scoped warning logger invocation from
+  `stream_object`. These map upstream `warnings > should call logWarnings with
+  the correct warnings` and `warnings > should call logWarnings with empty
+  array when no warnings are present` by proving the logger receives the
+  provider warnings, empty-warning calls, provider id, and model id.
 - 2026-05-21: `streamObject` full-stream result parity added
   `stream_object_result_full_stream_matches_upstream_object_chunks` in
   `src/stream_object.rs`, mapping upstream `result.fullStream` object-output
@@ -1328,10 +1336,8 @@ focused tests for each portable behavior before changing rows to `verified`.
   `stream_object_on_step_finish_provides_raw_object_text_and_usage`, and
   `stream_object_callbacks_fire_in_upstream_order_with_model_call` in
   `src/stream_object.rs`, mapping the upstream warning-resolution cases and
-  the portable callback order/event payload cases. Upstream `logWarnings` spy
-  assertions continue to map to the root logger deterministic record tests, and
-  the JavaScript callback-throws assertion remains a JS exception/promise
-  behavior rather than a Rust panic-unwind contract.
+  the portable callback order/event payload cases. The `logWarnings` spy cases
+  and callback-throws case now have direct 2026-05-23 Rust counterparts.
 - 2026-05-22: `streamObject` callback correlation parity added
   `stream_object_callbacks_correlate_all_events_with_same_call_id` in
   `src/stream_object.rs`, mapping the upstream `callback ordering` case that
@@ -3005,6 +3011,9 @@ focused tests for each portable behavior before changing rows to `verified`.
    `stream_object_callbacks_correlate_all_events_with_same_call_id`.
    The upstream callback error-handling case now has the named Rust counterpart
    `stream_object_callback_panics_do_not_break_stream`.
+   The upstream warning logger spy cases now have named Rust counterparts in
+   `stream_object_calls_log_warnings_with_the_correct_warnings` and
+   `stream_object_calls_log_warnings_with_empty_array_when_no_warnings_are_present`.
    The upstream `partialObjectStream` provider-error suppression case now has
    the named Rust counterpart
    `stream_object_partial_object_stream_suppresses_provider_errors`.
