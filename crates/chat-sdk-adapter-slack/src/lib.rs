@@ -692,7 +692,6 @@ mod tests {
         assert!(decode_thread_id("slack:C123:").is_none());
     }
 
-    #[test]
     // ---------- channel_id_from_thread_id + is_dm ----------
     // 1:1 with upstream's `channelIdFromThreadId(threadId)` (returns
     // `slack:<channel>`) and `isDM(threadId)` (true iff the underlying

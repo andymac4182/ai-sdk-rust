@@ -60,6 +60,41 @@ pub fn optional_string(value: &serde_json::Value) -> Option<&str> {
     }
 }
 
+/// Look up a header by name, case-insensitively. 1:1 port of
+/// upstream `getHeader(headers, name)`. The Rust port takes a slice
+/// of `(name, value)` pairs (the same shape `reqwest::header::
+/// HeaderMap::iter()` and most HTTP libraries expose) so callers can
+/// pass either an iterator-style headers map or a `Vec<(_, _)>`.
+pub fn get_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    let lower = name.to_ascii_lowercase();
+    for (k, v) in headers {
+        if k.to_ascii_lowercase() == lower {
+            return Some(v.as_str());
+        }
+    }
+    None
+}
+
+/// Decoded Slack retry metadata. 1:1 with upstream `SlackRetry`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlackRetry {
+    pub num: i64,
+    pub reason: Option<String>,
+}
+
+/// Extract Slack retry metadata from the `x-slack-retry-num` /
+/// `x-slack-retry-reason` headers. 1:1 port of upstream
+/// `getRetry(headers)`: returns `None` when the retry-num header is
+/// missing or non-finite.
+pub fn get_retry(headers: &[(String, String)]) -> Option<SlackRetry> {
+    let retry_num = get_header(headers, "x-slack-retry-num")?;
+    let num: i64 = retry_num.parse().ok()?;
+    Some(SlackRetry {
+        num,
+        reason: get_header(headers, "x-slack-retry-reason").map(str::to_string),
+    })
+}
+
 /// Error returned by [`parse_json_body`]. 1:1 with upstream
 /// `class SlackWebhookParseError extends Error`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,6 +261,62 @@ pub fn verify_slack_signature(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------- getHeader / getRetry (additive) ----------
+    // No standalone upstream tests; the helpers are exercised through
+    // parse.test.ts. The Rust suite asserts the case-insensitive
+    // lookup behavior and the retry-num parse-or-skip path directly.
+
+    fn h(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn get_header_is_case_insensitive() {
+        let hs = h(&[("Content-Type", "application/json")]);
+        assert_eq!(get_header(&hs, "content-type"), Some("application/json"));
+        assert_eq!(get_header(&hs, "CONTENT-TYPE"), Some("application/json"));
+    }
+
+    #[test]
+    fn get_header_returns_none_for_missing() {
+        let hs = h(&[("Content-Type", "application/json")]);
+        assert_eq!(get_header(&hs, "x-slack-signature"), None);
+    }
+
+    #[test]
+    fn get_retry_parses_num_and_reason() {
+        let hs = h(&[
+            ("X-Slack-Retry-Num", "2"),
+            ("X-Slack-Retry-Reason", "timeout"),
+        ]);
+        let retry = get_retry(&hs).expect("retry present");
+        assert_eq!(retry.num, 2);
+        assert_eq!(retry.reason.as_deref(), Some("timeout"));
+    }
+
+    #[test]
+    fn get_retry_returns_none_when_num_header_missing() {
+        let hs = h(&[("X-Slack-Retry-Reason", "timeout")]);
+        assert!(get_retry(&hs).is_none());
+    }
+
+    #[test]
+    fn get_retry_returns_none_when_num_not_finite() {
+        let hs = h(&[("X-Slack-Retry-Num", "not-a-number")]);
+        assert!(get_retry(&hs).is_none());
+    }
+
+    #[test]
+    fn get_retry_carries_no_reason_when_reason_header_missing() {
+        let hs = h(&[("X-Slack-Retry-Num", "5")]);
+        let retry = get_retry(&hs).expect("retry present");
+        assert_eq!(retry.num, 5);
+        assert_eq!(retry.reason, None);
+    }
 
     // ---------- is_form_body: behavior matches upstream isFormBody ----------
 
