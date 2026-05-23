@@ -10,6 +10,7 @@
 //! timestamp, so the encoding is symmetric.
 
 pub mod crypto;
+pub mod webhook;
 
 use async_trait::async_trait;
 use chat_sdk_chat::types::Adapter;
