@@ -237,3 +237,34 @@ Slices reviewed: slice 32 cards leaf elements (`f1ecdc8`), slice 33 modals leaf 
 - The `markdown` module is 33/122 cases. The remaining cases are mostly `stringify_markdown` (writing the inverse of the parser) which markdown-rs doesn't ship. That's a substantial slice (probably 2-3 of its own) and worth its own architectural-decision pass: either write a hand-rolled stringifier matching upstream's `remark-stringify` rules, or skip `stringify_markdown` and document it as "use upstream remark-stringify via a separate Rust crate when needed by adapter".
 - The `modals` module's `ModalElement` + `ModalChild` union is straightforward now that the `CardChild` pattern is canonical - should ship as one slice mirroring slice 35.
 - `chat-sdk-adapter-shared` is stuck at 25% because its remaining three modules (`adapter-utils`/`buffer-utils`/`card-utils`) all import from `chat`'s `cards.ts`. With slice 35 those imports are now available, so `chat-sdk-adapter-shared` is unblocked too.
+
+### 2026-05-23 - slices 37..41
+
+Slices reviewed: slice 37 modals data shape (Modal builder + ModalChild union + filter_modal_children + VALID_MODAL_CHILD_TYPES), slice 39 buffer_utils (to_buffer + to_buffer_sync + buffer_to_data_uri), slice 40 adapter_utils (extract_card + extract_files + extract_postable_attachments via typed AdapterPostableMessage), slice 41 crypto (AES-256-GCM encrypt/decrypt + decode_key + is_encrypted_token_data). Slice 36 was the last refinement.
+
+**What the brief got wrong or left out**
+
+- **`markdown` crate features for serde-derived structs.** Slice 40 added `PostableAst { ast: Root, ... }` to `chat-sdk-chat::types`. `Root` (and friends) don't implement `Serialize`/`Deserialize` by default; the `markdown` crate gates those impls behind a `json` feature. Brief should flag this whenever a new types-layer struct references an mdast type: `markdown = { version = "1.0.0", features = ["json"] }`.
+- **Untagged enum variant ordering matters when one variant is a primitive.** `AdapterPostableMessage` is `String | PostableRaw | PostableMarkdown | PostableAst | PostableCard | CardElement`. With `#[serde(untagged)]`, place the structured variants (`Raw`, `Markdown`, `Ast`, `Card`, `CardElement`) BEFORE the primitive `Text(String)` variant. Reversed order can cause a JSON string to match a struct variant via permissive coercion. Add as a sub-rule under priority 5(d) (discriminated-union recipe).
+- **Trust nothing about field shapes — always grep the Rust struct.** Slice 40's tests assumed `Attachment.name: String` (matching upstream) but the Rust port has `name: Option<String>` (it's optional in the type-layered port). Same for `FileUpload.data` which is `FileBytes` not `Option<FileBytes>`. Cost: 4 compile errors before the test suite passed. Lesson: before writing tests against any types-layer struct, run `grep -nB1 -A12 "^pub struct X" crates/chat-sdk-chat/src/types.rs` to confirm the actual field signatures.
+- **Builder signatures may differ from upstream.** Slice 40's `card_text("Content")` failed: the Rust signature is `card_text(content, style: Option<TextStyle>)`, but upstream's is just `CardText(content)`. The TS port elided the style arg into `?:`. Rust ports of TS builders should preserve `Option<T>` args verbatim — but call sites in tests and other modules need to pass `None` explicitly. Add as priority 5(e): when porting builders with optional args, pass `None` at call sites; don't add a `..Default::default()` shim unless upstream uses one.
+- **`serde_json` graduates from dev-deps to deps when a public API touches `serde_json::Value`.** Slice 41's `is_encrypted_token_data(&Value) -> bool` forced this. Brief should call out: if a module's public surface returns/accepts `serde_json::Value`, that crate's `serde_json` line must be in `[dependencies]`, not `[dev-dependencies]`.
+- **`crypto.ts` has NO upstream test file** — but it still needs to be ported to mark adapter-shared verified. The 15 colocated Rust tests are *additive* (roundtrip, IV-randomness, tampered-tag detection, key-decode happy/error paths, shape check, serde roundtrip). Ledger format change: when an upstream `.ts` ships without a `.test.ts`, mark the Rust coverage as "additive" in the ledger, not "1:1 of N cases". This keeps the test-floor accounting honest.
+- **Adapter-shared closed in 4 slices once the dependency walls fell.** Slices 38 (card_utils), 39 (buffer_utils), 40 (adapter_utils), 41 (crypto) — paced ~one source file per slice. The unblockers were slice 30 (markdown::table_element_to_ascii) and slice 35 (CardElement data shape). Lesson for the next phase-1 push (`packages/tests`, `packages/state-memory`): identify the architectural dependency that's gating everything, ship that as a dedicated infra slice, then watch the dependent modules collapse in single-file-per-slice slices.
+
+**Stale or misleading guidance**
+
+- The slice-31 refinement said "`chat-sdk-adapter-shared` is stuck at 25% because its remaining three modules ... all import from `chat`'s `cards.ts`." That blocker is now resolved (slice 35 + slice 30); adapter-shared just shipped to 85% over 4 slices. Update brief to reflect that the unblocker pattern (`ship the data shape, then ship the consumers`) is repeatable.
+- The "10 src files" count in the adapter-shared ledger row is wrong — there are 6 source `.ts` files (adapter-utils, buffer-utils, card-utils, crypto, errors, index) + 2 build configs (tsup.config, vitest.config). Brief should require src counts to match `find packages/<x>/src -name "*.ts" -not -name "*.test.ts" | wc -l`.
+- The refinement-cadence rule says "every 5 merge-backs". This pass covers 4 slices (37, 39, 40, 41 — slice 38 was card_utils which already counted toward the slice-36 refinement window). Working interpretation: count slices since the prior refinement, not raw merge-backs, and trigger when the count crosses 5. Add to brief.
+
+**Edits applied**
+
+- `scripts/codex-goal-chat/port-chat-sdk.md`: pending — apply on the next non-refinement slice cycle to avoid bloating this loop pass.
+- `scripts/codex-goal-chat/goal-condition.md`: stable.
+
+**Open refinements deferred**
+
+- `crypto.rs` uses `aes-gcm` crate. Brief doesn't yet enumerate "crypto-grade" dependency rules (e.g. minimum versions, `RustCrypto` org preference). If more crypto code lands, write a short policy note.
+- The adapter-shared ledger row enumerates `adapter_utils`, `buffer_utils`, `card_utils`, `crypto`, `errors` modules — that's the natural progression for *any* `packages/<x>` row. Brief could templatize the row format to enforce "N/M test files mapped + per-module case counts".
+- Next phase-1 push: `packages/tests` (Vitest factories/matchers — needs a Rust analogue strategy; probably skip the test framework parity and port the *factories* as plain helper functions) and `packages/state-memory` (1 src + 1 test file, mechanical). Decision pending on packages/tests strategy.
