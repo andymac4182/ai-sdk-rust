@@ -7870,17 +7870,18 @@ mod tests {
         SingleToolApprovalOptions, StaticToolCall, StaticToolError, StaticToolOutputDenied,
         StaticToolResult, StepToolApprovalResponse, StepToolApprovals, ToolApprovalConfiguration,
         ToolApprovalRequestOutput, ToolApprovalResponseOutput, ToolApprovalStatus,
-        ToolApprovalStatusKind, ToolCallNotFoundForApprovalError, ToolCallRepairError,
-        ToolCallRepairOptions, ToolCallRepairOriginalError, ToolExecutionEndEvent,
-        ToolExecutionStartEvent, ToolInputRefinementError, ToolModelOutputErrorMode, TypedToolCall,
-        TypedToolError, TypedToolOutputDenied, TypedToolResult, UiMessageStreamError,
-        UnsupportedModelVersionError, calculate_tokens_per_second, collect_tool_approvals,
-        create_tool_model_output, experimental_filter_active_tools, filter_active_tools,
-        generate_text, has_tool_call, is_loop_finished, is_step_count, is_stop_condition_met,
-        mark_invalid_tool_inputs, mark_runtime_dynamic_tool_calls, mark_tool_call_metadata,
-        mark_tool_call_titles, mark_unavailable_tool_calls, normalize_tool_approval_status,
-        prune_messages, resolve_tool_approval, response_messages_for_step, step_count_is,
-        sum_token_counts, validate_tool_context,
+        ToolApprovalStatusKind, ToolCallNotFoundForApprovalError, ToolCallRepair,
+        ToolCallRepairError, ToolCallRepairOptions, ToolCallRepairOriginalError,
+        ToolExecutionEndEvent, ToolExecutionStartEvent, ToolInputRefinement,
+        ToolInputRefinementError, ToolModelOutputErrorMode, TypedToolCall, TypedToolError,
+        TypedToolOutputDenied, TypedToolResult, UiMessageStreamError, UnsupportedModelVersionError,
+        calculate_tokens_per_second, collect_tool_approvals, create_tool_model_output,
+        experimental_filter_active_tools, filter_active_tools, generate_text, has_tool_call,
+        is_loop_finished, is_step_count, is_stop_condition_met, mark_invalid_tool_inputs,
+        mark_runtime_dynamic_tool_calls, mark_tool_call_metadata, mark_tool_call_titles,
+        mark_unavailable_tool_calls, normalize_tool_approval_status, prune_messages,
+        refine_tool_inputs, repair_tool_calls, resolve_tool_approval, response_messages_for_step,
+        step_count_is, sum_token_counts, validate_tool_context,
     };
     use crate::file_data::{FileData, FileDataContent};
     use crate::headers::Headers;
@@ -11046,6 +11047,50 @@ mod tests {
     }
 
     #[test]
+    fn parse_tool_call_should_refine_input_after_successfully_parsing_a_valid_tool_call() {
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string" }
+            },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let mut tool_calls = vec![GenerateTextToolCall::from_language_model_tool_call(
+            &model_tool_call("123", "testTool", json!({ "value": " raw " })),
+        )];
+        let available_tools = vec![LanguageModelTool::Function(LanguageModelFunctionTool::new(
+            "testTool",
+            input_schema,
+        ))];
+        let mut refinements = BTreeMap::new();
+        refinements.insert(
+            "testTool".to_string(),
+            ToolInputRefinement::new(|mut input| async move {
+                let value = input
+                    .get("value")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                if let Some(object) = input.as_object_mut() {
+                    object.insert("value".to_string(), JsonValue::String(value));
+                }
+                Ok(input)
+            }),
+        );
+
+        mark_invalid_tool_inputs(&mut tool_calls, Some(&available_tools));
+        poll_ready(refine_tool_inputs(&mut tool_calls, &refinements));
+
+        assert_eq!(tool_calls[0].input, json!({ "value": "raw" }));
+        assert_eq!(tool_calls[0].invalid, None);
+        assert_eq!(tool_calls[0].error, None);
+    }
+
+    #[test]
     fn parse_tool_call_should_successfully_parse_a_valid_provider_executed_dynamic_tool_call() {
         let provider_metadata =
             test_provider_metadata("testProvider", json!({ "signature": "sig" }));
@@ -11415,6 +11460,85 @@ mod tests {
     }
 
     #[test]
+    fn parse_tool_call_repair_should_invoke_repair_tool_when_provided_and_use_its_result() {
+        let original_tool_call = LanguageModelToolCall::new("123", "testTool", "invalid json");
+        let content = vec![LanguageModelContent::ToolCall(original_tool_call.clone())];
+        let mut tool_calls = vec![GenerateTextToolCall::from_language_model_tool_call(
+            &original_tool_call,
+        )];
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "param1": { "type": "string" },
+                "param2": { "type": "number" }
+            },
+            "required": ["param1", "param2"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let tools = vec![Tool::new("testTool", input_schema.clone())];
+        let available_tools = vec![LanguageModelTool::Function(LanguageModelFunctionTool::new(
+            "testTool",
+            input_schema.clone(),
+        ))];
+        let repair_options = Arc::new(Mutex::new(Vec::<ToolCallRepairOptions>::new()));
+        let repair_options_for_closure = Arc::clone(&repair_options);
+        let repair = ToolCallRepair::new(move |options| {
+            let repair_options = Arc::clone(&repair_options_for_closure);
+            async move {
+                repair_options
+                    .lock()
+                    .expect("repair options lock")
+                    .push(options);
+                Ok::<Option<LanguageModelToolCall>, String>(Some(LanguageModelToolCall::new(
+                    "123",
+                    "testTool",
+                    r#"{"param1":"test","param2":42}"#,
+                )))
+            }
+        });
+        let messages = vec![user_message("test message")];
+
+        poll_ready(repair_tool_calls(
+            &mut tool_calls,
+            &content,
+            Some(&repair),
+            &tools,
+            Some(&available_tools),
+            &messages,
+        ));
+
+        let repair_options = repair_options.lock().expect("repair options lock");
+        assert_eq!(repair_options.len(), 1);
+        assert_eq!(repair_options[0].tool_call.tool_name, "testTool");
+        assert_eq!(repair_options[0].tool_call.input, "invalid json");
+        assert_eq!(
+            repair_options[0].input_schema("testTool"),
+            Some(&input_schema)
+        );
+        assert_eq!(repair_options[0].messages, messages);
+        assert!(matches!(
+            &repair_options[0].error,
+            ToolCallRepairOriginalError::InvalidToolInput(error)
+                if error.tool_name() == "testTool" && error.tool_input() == "invalid json"
+        ));
+        drop(repair_options);
+
+        assert_eq!(tool_calls[0].tool_call_id, "123");
+        assert_eq!(tool_calls[0].tool_name, "testTool");
+        assert_eq!(
+            tool_calls[0].input,
+            json!({
+                "param1": "test",
+                "param2": 42
+            })
+        );
+        assert_eq!(tool_calls[0].invalid, None);
+        assert_eq!(tool_calls[0].error, None);
+    }
+
+    #[test]
     fn parse_tool_call_repair_should_invoke_repair_tool_when_input_schema_validation_fails() {
         let model = ToolLoopLanguageModel::with_tool_call("weather", r#"{"city":42}"#);
         let input_schema = json!({
@@ -11475,6 +11599,162 @@ mod tests {
         assert_eq!(result.tool_calls[0].input, json!({ "city": "Brisbane" }));
         assert_eq!(result.tool_calls[0].invalid, None);
         assert_eq!(result.tool_results[0].output["city"], "Brisbane");
+    }
+
+    #[test]
+    fn parse_tool_call_repair_should_pass_instructions_to_repair_tool_call() {
+        let model = ToolLoopLanguageModel::with_tool_call("testTool", "invalid json");
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "param1": { "type": "string" },
+                "param2": { "type": "number" }
+            },
+            "required": ["param1", "param2"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let repair_options = Arc::new(Mutex::new(Vec::<ToolCallRepairOptions>::new()));
+        let repair_options_for_closure = Arc::clone(&repair_options);
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::from_prompt(
+                &model,
+                Prompt::from_prompt("test message").with_instructions("test instructions"),
+            )
+            .expect("prompt standardizes")
+            .with_tool(
+                Tool::new("testTool", input_schema)
+                    .with_execute(|input, _options| async move { Ok(input) }),
+            )
+            .with_tool_call_repair(move |options| {
+                let repair_options = Arc::clone(&repair_options_for_closure);
+                async move {
+                    repair_options
+                        .lock()
+                        .expect("repair options lock")
+                        .push(options);
+                    Ok::<Option<LanguageModelToolCall>, String>(Some(LanguageModelToolCall::new(
+                        "call-1",
+                        "testTool",
+                        r#"{"param1":"test","param2":42}"#,
+                    )))
+                }
+            })
+            .with_max_steps(2),
+        ));
+
+        let repair_options = repair_options.lock().expect("repair options lock");
+        assert_eq!(repair_options.len(), 1);
+        assert_eq!(
+            repair_options[0].messages,
+            vec![
+                LanguageModelMessage::System(LanguageModelSystemMessage::new("test instructions")),
+                user_message("test message")
+            ]
+        );
+        drop(repair_options);
+
+        assert_eq!(
+            result.tool_calls[0].input,
+            json!({
+                "param1": "test",
+                "param2": 42
+            })
+        );
+        assert_eq!(result.tool_calls[0].invalid, None);
+    }
+
+    #[test]
+    fn parse_tool_call_repair_should_rethrow_error_if_tool_call_repair_returns_null() {
+        let original_tool_call = LanguageModelToolCall::new("123", "testTool", "invalid json");
+        let content = vec![LanguageModelContent::ToolCall(original_tool_call.clone())];
+        let mut tool_calls = vec![GenerateTextToolCall::from_language_model_tool_call(
+            &original_tool_call,
+        )];
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "param1": { "type": "string" },
+                "param2": { "type": "number" }
+            },
+            "required": ["param1", "param2"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let tools = vec![Tool::new("testTool", input_schema.clone())];
+        let available_tools = vec![LanguageModelTool::Function(LanguageModelFunctionTool::new(
+            "testTool",
+            input_schema,
+        ))];
+        let repair = ToolCallRepair::new(|_options| async move {
+            Ok::<Option<LanguageModelToolCall>, String>(None)
+        });
+        let messages = vec![user_message("test message")];
+
+        poll_ready(repair_tool_calls(
+            &mut tool_calls,
+            &content,
+            Some(&repair),
+            &tools,
+            Some(&available_tools),
+            &messages,
+        ));
+
+        assert_eq!(tool_calls[0].input, json!("invalid json"));
+        assert_eq!(tool_calls[0].dynamic, Some(true));
+        assert_eq!(tool_calls[0].invalid, Some(true));
+        let error = tool_calls[0].error.as_deref().expect("error is present");
+        assert!(error.contains("Invalid input for tool testTool"));
+        assert!(error.contains("JSON parsing failed"));
+    }
+
+    #[test]
+    fn parse_tool_call_repair_should_throw_tool_call_repair_error_if_repair_tool_call_throws() {
+        let original_tool_call = LanguageModelToolCall::new("123", "testTool", "invalid json");
+        let content = vec![LanguageModelContent::ToolCall(original_tool_call.clone())];
+        let mut tool_calls = vec![GenerateTextToolCall::from_language_model_tool_call(
+            &original_tool_call,
+        )];
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "param1": { "type": "string" },
+                "param2": { "type": "number" }
+            },
+            "required": ["param1", "param2"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let tools = vec![Tool::new("testTool", input_schema.clone())];
+        let available_tools = vec![LanguageModelTool::Function(LanguageModelFunctionTool::new(
+            "testTool",
+            input_schema,
+        ))];
+        let repair = ToolCallRepair::new(|_options| async move {
+            Err::<Option<LanguageModelToolCall>, _>("test error")
+        });
+        let messages = vec![user_message("test message")];
+
+        poll_ready(repair_tool_calls(
+            &mut tool_calls,
+            &content,
+            Some(&repair),
+            &tools,
+            Some(&available_tools),
+            &messages,
+        ));
+
+        assert_eq!(tool_calls[0].input, json!("invalid json"));
+        assert_eq!(tool_calls[0].dynamic, Some(true));
+        assert_eq!(tool_calls[0].invalid, Some(true));
+        assert_eq!(
+            tool_calls[0].error.as_deref(),
+            Some("Error repairing tool call: test error")
+        );
     }
 
     #[test]
