@@ -25,6 +25,11 @@ pub const DEFAULT_API_BASE: &str = "https://discord.com/api/v10";
 /// Sentinel guild id used by upstream to encode DMs.
 pub const DM_GUILD: &str = "@me";
 
+/// Maximum content length the Discord create-message endpoint
+/// accepts in a single send. 1:1 with upstream's private
+/// `DISCORD_MAX_CONTENT_LENGTH = 2000`.
+pub const DISCORD_MAX_CONTENT_LENGTH: usize = 2000;
+
 /// Options for [`DiscordAdapter::new`].
 #[derive(Debug, Clone)]
 pub struct DiscordAdapterOptions {
@@ -578,6 +583,12 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn discord_max_content_length_matches_upstream() {
+        // 1:1 with upstream's private `DISCORD_MAX_CONTENT_LENGTH = 2000`.
+        assert_eq!(DISCORD_MAX_CONTENT_LENGTH, 2000);
+    }
+
     #[test]
     fn interaction_response_type_constants_match_upstream() {
         // 1:1 with upstream `InteractionResponseType = { ... }`.
