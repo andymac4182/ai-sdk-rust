@@ -74,6 +74,334 @@ pub fn parse_markdown(input: &str) -> Result<Node, ParseMarkdownError> {
     markdown::to_mdast(input, &options).map_err(|e| ParseMarkdownError(e.to_string()))
 }
 
+/// Options for [`stringify_markdown_with`]. 1:1 with the subset of
+/// upstream `remark-stringify` options used by the per-adapter
+/// `FormatConverter` overrides (Telegram MarkdownV2, WhatsApp). The
+/// upstream default is `{}`; per-adapter callers override `emphasis`
+/// (`"_"` vs `"*"`) and `bullet` (`"-"` vs `"*"`).
+#[derive(Debug, Clone)]
+pub struct StringifyMarkdownOptions {
+    /// Emphasis (italic) wrap char. Upstream default `"*"`; the chat-sdk
+    /// per-adapter call sites use `"_"` for WhatsApp / Slack mrkdwn.
+    pub emphasis: char,
+    /// Unordered-list bullet char. Upstream default `"*"`; the chat-sdk
+    /// per-adapter call sites use `"-"` for Telegram MarkdownV2 / WhatsApp.
+    pub bullet: char,
+}
+
+impl Default for StringifyMarkdownOptions {
+    fn default() -> Self {
+        Self {
+            emphasis: '*',
+            bullet: '*',
+        }
+    }
+}
+
+/// Stringify an mdast [`Node`] back to a Markdown string. 1:1 port of
+/// upstream `stringifyMarkdown(node, options?)` (a thin wrapper around
+/// `unified().use(remarkGfm).use(remarkStringify).stringify(...)`).
+///
+/// This is a minimal hand-written stringifier that covers the variants
+/// the chat-sdk adapters round-trip in their `markdown.test.ts` files:
+/// text, paragraph, strong, emphasis, inline code, code block, link,
+/// list, list item, root, heading, blockquote, thematic break, line
+/// break, image, delete (strikethrough), html.
+///
+/// **Round-trip note:** like `remark-stringify`, the output is
+/// *equivalent* Markdown rather than byte-identical to the input.
+/// Standard transforms apply: heading depth coerced to `[1, 6]`,
+/// nested-list indentation normalised, code blocks always fenced with
+/// triple backticks, and so on.
+pub fn stringify_markdown(node: &Node) -> String {
+    stringify_markdown_with(node, &StringifyMarkdownOptions::default())
+}
+
+/// Like [`stringify_markdown`] but takes explicit options. 1:1 with
+/// upstream `stringifyMarkdown(node, options)`.
+pub fn stringify_markdown_with(node: &Node, options: &StringifyMarkdownOptions) -> String {
+    let mut out = String::new();
+    write_node(&mut out, node, options, 0);
+    // Trim a single trailing newline so callers that follow up with
+    // `.trim()` (the upstream `fromAst` pattern) get the same shape.
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+fn write_node(out: &mut String, node: &Node, options: &StringifyMarkdownOptions, list_depth: usize) {
+    match node {
+        Node::Root(root) => {
+            write_block_children(out, &root.children, options, list_depth);
+        }
+        Node::Paragraph(p) => {
+            for child in &p.children {
+                write_inline(out, child, options);
+            }
+        }
+        Node::Heading(h) => {
+            let depth = h.depth.clamp(1, 6) as usize;
+            for _ in 0..depth {
+                out.push('#');
+            }
+            out.push(' ');
+            for child in &h.children {
+                write_inline(out, child, options);
+            }
+        }
+        Node::Code(c) => {
+            out.push_str("```");
+            if let Some(lang) = &c.lang {
+                out.push_str(lang);
+            }
+            out.push('\n');
+            out.push_str(&c.value);
+            if !c.value.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str("```");
+        }
+        Node::Blockquote(b) => {
+            let mut nested = String::new();
+            write_block_children(&mut nested, &b.children, options, list_depth);
+            for line in nested.split_inclusive('\n') {
+                if line.is_empty() {
+                    out.push('>');
+                    out.push('\n');
+                } else {
+                    out.push('>');
+                    out.push(' ');
+                    out.push_str(line);
+                }
+            }
+            // Trim a single trailing newline so the joiner adds the right
+            // gap.
+            if out.ends_with('\n') {
+                out.pop();
+            }
+        }
+        Node::List(list) => {
+            for (i, child) in list.children.iter().enumerate() {
+                if i > 0 {
+                    out.push('\n');
+                }
+                let prefix = if list.ordered {
+                    let start = list.start.unwrap_or(1);
+                    format!("{}. ", start as usize + i)
+                } else {
+                    format!("{} ", options.bullet)
+                };
+                out.push_str(&prefix);
+                let indent: String =
+                    std::iter::repeat_n(' ', prefix.chars().count()).collect();
+                let mut item_buf = String::new();
+                write_node(&mut item_buf, child, options, list_depth + 1);
+                // Indent every line after the first.
+                for (j, line) in item_buf.split('\n').enumerate() {
+                    if j > 0 {
+                        out.push('\n');
+                        if !line.is_empty() {
+                            out.push_str(&indent);
+                        }
+                    }
+                    out.push_str(line);
+                }
+            }
+        }
+        Node::ListItem(li) => {
+            write_block_children(out, &li.children, options, list_depth);
+        }
+        Node::ThematicBreak(_) => {
+            out.push_str("---");
+        }
+        Node::Break(_) => {
+            out.push('\n');
+        }
+        Node::Html(h) => {
+            out.push_str(&h.value);
+        }
+        Node::Yaml(_) | Node::Toml(_) | Node::Definition(_) | Node::FootnoteDefinition(_) => {
+            // Frontmatter / link refs / footnotes: skip in the minimal port.
+            // Adapters don't round-trip these in their markdown.test.ts.
+        }
+        // Inline nodes that show up at the root level (rare; valid mdast).
+        Node::Text(_)
+        | Node::Strong(_)
+        | Node::Emphasis(_)
+        | Node::InlineCode(_)
+        | Node::Link(_)
+        | Node::LinkReference(_)
+        | Node::Delete(_)
+        | Node::Image(_)
+        | Node::ImageReference(_)
+        | Node::FootnoteReference(_) => {
+            write_inline(out, node, options);
+        }
+        // Tables: format as GFM pipe table. The adapters' card renderers
+        // use `table_to_ascii` for table elements rather than embedding
+        // raw markdown tables, so this branch is rarely exercised.
+        Node::Table(t) => {
+            write_gfm_table(out, t, options);
+        }
+        // Container variants nested inside tables / inline contexts; the
+        // mdast spec keeps them rare at the block level.
+        Node::TableRow(_) | Node::TableCell(_) => {
+            // Already handled by `write_gfm_table` when the parent is Table.
+        }
+        Node::MdxFlowExpression(_)
+        | Node::MdxJsxFlowElement(_)
+        | Node::MdxJsxTextElement(_)
+        | Node::MdxTextExpression(_)
+        | Node::MdxjsEsm(_) => {
+            // MDX-only — not used in chat-sdk's portable subset.
+        }
+        Node::InlineMath(_) | Node::Math(_) => {
+            // Math extension — defer until any adapter requires it.
+        }
+    }
+}
+
+fn write_inline(out: &mut String, node: &Node, options: &StringifyMarkdownOptions) {
+    match node {
+        Node::Text(t) => out.push_str(&t.value),
+        Node::Strong(s) => {
+            out.push_str("**");
+            for child in &s.children {
+                write_inline(out, child, options);
+            }
+            out.push_str("**");
+        }
+        Node::Emphasis(e) => {
+            out.push(options.emphasis);
+            for child in &e.children {
+                write_inline(out, child, options);
+            }
+            out.push(options.emphasis);
+        }
+        Node::Delete(d) => {
+            out.push_str("~~");
+            for child in &d.children {
+                write_inline(out, child, options);
+            }
+            out.push_str("~~");
+        }
+        Node::InlineCode(c) => {
+            out.push('`');
+            out.push_str(&c.value);
+            out.push('`');
+        }
+        Node::Link(l) => {
+            out.push('[');
+            for child in &l.children {
+                write_inline(out, child, options);
+            }
+            out.push_str("](");
+            out.push_str(&l.url);
+            if let Some(title) = &l.title
+                && !title.is_empty()
+            {
+                out.push_str(" \"");
+                out.push_str(title);
+                out.push('"');
+            }
+            out.push(')');
+        }
+        Node::Image(img) => {
+            out.push_str("![");
+            out.push_str(&img.alt);
+            out.push_str("](");
+            out.push_str(&img.url);
+            out.push(')');
+        }
+        Node::Break(_) => out.push('\n'),
+        Node::Html(h) => out.push_str(&h.value),
+        // Block nodes that occasionally appear inside an inline-rendering
+        // context (e.g. Paragraph inside a ListItem rendered inline) get
+        // their block forms expanded.
+        other => write_node(out, other, options, 0),
+    }
+}
+
+fn write_block_children(
+    out: &mut String,
+    children: &[Node],
+    options: &StringifyMarkdownOptions,
+    list_depth: usize,
+) {
+    for (i, child) in children.iter().enumerate() {
+        if i > 0 {
+            // Inside a list item, block siblings are separated by a single
+            // newline; everywhere else they get a blank line between them.
+            if list_depth > 0 {
+                out.push('\n');
+            } else {
+                out.push_str("\n\n");
+            }
+        }
+        write_node(out, child, options, list_depth);
+    }
+}
+
+fn write_gfm_table(out: &mut String, t: &Table, options: &StringifyMarkdownOptions) {
+    let rows: Vec<Vec<String>> = t
+        .children
+        .iter()
+        .filter_map(|row| {
+            if let Node::TableRow(row) = row {
+                Some(
+                    row.children
+                        .iter()
+                        .map(|cell| {
+                            let mut buf = String::new();
+                            if let Node::TableCell(c) = cell {
+                                for child in &c.children {
+                                    write_inline(&mut buf, child, options);
+                                }
+                            }
+                            buf
+                        })
+                        .collect(),
+                )
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if rows.is_empty() {
+        return;
+    }
+
+    let col_count = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let header = &rows[0];
+    out.push_str("| ");
+    for i in 0..col_count {
+        if i > 0 {
+            out.push_str(" | ");
+        }
+        out.push_str(header.get(i).map(String::as_str).unwrap_or(""));
+    }
+    out.push_str(" |\n| ");
+    for i in 0..col_count {
+        if i > 0 {
+            out.push_str(" | ");
+        }
+        out.push_str("---");
+    }
+    out.push_str(" |");
+    for row in &rows[1..] {
+        out.push_str("\n| ");
+        for i in 0..col_count {
+            if i > 0 {
+                out.push_str(" | ");
+            }
+            out.push_str(row.get(i).map(String::as_str).unwrap_or(""));
+        }
+        out.push_str(" |");
+    }
+}
+
 /// Build a [`Text`] node. 1:1 port of upstream `text(value): Text`.
 pub fn text(value: impl Into<String>) -> Text {
     Text {
@@ -2213,5 +2541,114 @@ mod tests {
         ] {
             assert!(plain.contains(token), "missing {token}: {plain:?}");
         }
+    }
+
+    // ---------- stringify_markdown ----------
+
+    #[test]
+    fn stringify_markdown_plain_text() {
+        let ast = parse_markdown("Hello world").unwrap();
+        assert_eq!(stringify_markdown(&ast), "Hello world");
+    }
+
+    #[test]
+    fn stringify_markdown_bold() {
+        let ast = parse_markdown("**bold text**").unwrap();
+        assert_eq!(stringify_markdown(&ast), "**bold text**");
+    }
+
+    #[test]
+    fn stringify_markdown_emphasis_default_star() {
+        let ast = parse_markdown("*italic*").unwrap();
+        assert_eq!(stringify_markdown(&ast), "*italic*");
+    }
+
+    #[test]
+    fn stringify_markdown_emphasis_with_underscore_option() {
+        let ast = parse_markdown("*italic*").unwrap();
+        let opts = StringifyMarkdownOptions {
+            emphasis: '_',
+            bullet: '*',
+        };
+        assert_eq!(stringify_markdown_with(&ast, &opts), "_italic_");
+    }
+
+    #[test]
+    fn stringify_markdown_inline_code() {
+        let ast = parse_markdown("`code`").unwrap();
+        assert_eq!(stringify_markdown(&ast), "`code`");
+    }
+
+    #[test]
+    fn stringify_markdown_link() {
+        let ast = parse_markdown("[Link](https://example.com)").unwrap();
+        assert_eq!(stringify_markdown(&ast), "[Link](https://example.com)");
+    }
+
+    #[test]
+    fn stringify_markdown_strikethrough() {
+        let ast = parse_markdown("~~done~~").unwrap();
+        assert_eq!(stringify_markdown(&ast), "~~done~~");
+    }
+
+    #[test]
+    fn stringify_markdown_paragraph_with_mixed_inline() {
+        let ast = parse_markdown("Hello **world** and *italic*.").unwrap();
+        let result = stringify_markdown(&ast);
+        assert!(result.contains("**world**"));
+        assert!(result.contains("*italic*"));
+    }
+
+    #[test]
+    fn stringify_markdown_thematic_break() {
+        let ast = parse_markdown("---").unwrap();
+        assert_eq!(stringify_markdown(&ast), "---");
+    }
+
+    #[test]
+    fn stringify_markdown_heading_levels() {
+        for depth in 1..=6 {
+            let input = format!("{} Heading", "#".repeat(depth));
+            let ast = parse_markdown(&input).unwrap();
+            assert_eq!(stringify_markdown(&ast), input);
+        }
+    }
+
+    #[test]
+    fn stringify_markdown_unordered_list_default_star() {
+        let ast = parse_markdown("- one\n- two\n- three").unwrap();
+        let s = stringify_markdown(&ast);
+        // Default bullet is '*'
+        assert!(s.contains("* one"));
+        assert!(s.contains("* two"));
+        assert!(s.contains("* three"));
+    }
+
+    #[test]
+    fn stringify_markdown_unordered_list_dash_option() {
+        let ast = parse_markdown("- one\n- two").unwrap();
+        let opts = StringifyMarkdownOptions {
+            emphasis: '*',
+            bullet: '-',
+        };
+        let s = stringify_markdown_with(&ast, &opts);
+        assert!(s.contains("- one"));
+        assert!(s.contains("- two"));
+    }
+
+    #[test]
+    fn stringify_markdown_code_block_with_lang() {
+        let ast = parse_markdown("```rust\nfn main() {}\n```").unwrap();
+        let s = stringify_markdown(&ast);
+        assert!(s.starts_with("```rust"));
+        assert!(s.contains("fn main()"));
+        assert!(s.ends_with("```"));
+    }
+
+    #[test]
+    fn stringify_markdown_round_trips_paragraph_break() {
+        let input = "first paragraph\n\nsecond paragraph";
+        let ast = parse_markdown(input).unwrap();
+        assert_eq!(stringify_markdown(&ast), input);
     }
 }

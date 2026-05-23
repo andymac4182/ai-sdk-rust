@@ -12,7 +12,9 @@
 //! landed yet; they're deferred to a follow-up slice on
 //! chat-sdk-chat.
 
-use chat_sdk_chat::markdown::{Node, ParseMarkdownError, parse_markdown};
+use chat_sdk_chat::markdown::{
+    Node, ParseMarkdownError, parse_markdown, stringify_markdown,
+};
 
 /// 1:1 port of upstream `class LinearFormatConverter extends
 /// BaseFormatConverter`. The converter is stateless; the methods
@@ -36,6 +38,14 @@ impl LinearFormatConverter {
         parse_markdown(markdown)
     }
 
+    /// Stringify an mdast [`Node`] back to standard Markdown. 1:1
+    /// with upstream `fromAst(ast)`. Linear uses standard GFM so
+    /// this delegates to
+    /// [`chat_sdk_chat::markdown::stringify_markdown`].
+    pub fn from_ast(&self, node: &Node) -> String {
+        stringify_markdown(node)
+    }
+
     /// Render a "postable" input that's already a plain string.
     /// 1:1 with the `typeof message === "string"` branch of
     /// upstream `renderPostable(message)`.
@@ -47,6 +57,22 @@ impl LinearFormatConverter {
     /// `"raw" in message` branch of upstream `renderPostable`.
     pub fn render_postable_raw(&self, raw: &str) -> String {
         raw.to_string()
+    }
+
+    /// Render a `{markdown}` postable input. 1:1 with the
+    /// `"markdown" in message` branch of upstream
+    /// `renderPostable`. The upstream `fromMarkdown(markdown)`
+    /// helper parses + stringifies via remark; the Rust port
+    /// does the same to normalise the input.
+    pub fn render_postable_markdown(&self, markdown: &str) -> Result<String, ParseMarkdownError> {
+        let ast = parse_markdown(markdown)?;
+        Ok(stringify_markdown(&ast))
+    }
+
+    /// Render an `{ast}` postable input. 1:1 with the
+    /// `"ast" in message` branch of upstream `renderPostable`.
+    pub fn render_postable_ast(&self, ast: &Node) -> String {
+        stringify_markdown(ast)
     }
 }
 
@@ -117,11 +143,48 @@ mod tests {
         assert_eq!(result, "raw content");
     }
 
-    // {markdown} and {ast} branches of renderPostable depend on
-    // chat-sdk-chat's stringify_markdown which hasn't landed yet.
-    // The fromAst describe-block tests (round-trip simple AST,
-    // bold, links) similarly require stringify_markdown. Both are
-    // deferred to a follow-up slice on chat-sdk-chat.
+    // ---------- fromAst (3 ported upstream cases) ----------
+
+    #[test]
+    fn should_stringify_a_simple_ast() {
+        let converter = LinearFormatConverter::new();
+        let ast = converter.to_ast("Hello world").unwrap();
+        let result = converter.from_ast(&ast);
+        assert!(result.contains("Hello world"));
+    }
+
+    #[test]
+    fn should_round_trip_bold_text() {
+        let converter = LinearFormatConverter::new();
+        let ast = converter.to_ast("**bold text**").unwrap();
+        let result = converter.from_ast(&ast);
+        assert!(result.contains("**bold text**"));
+    }
+
+    #[test]
+    fn should_round_trip_links() {
+        let converter = LinearFormatConverter::new();
+        let ast = converter.to_ast("[Link](https://example.com)").unwrap();
+        let result = converter.from_ast(&ast);
+        assert!(result.contains("[Link](https://example.com)"));
+    }
+
+    // ---------- renderPostable (2 ported upstream cases for {markdown}/{ast}) ----------
+
+    #[test]
+    fn should_render_a_markdown_message() {
+        let converter = LinearFormatConverter::new();
+        let result = converter.render_postable_markdown("**bold** text").unwrap();
+        assert!(result.contains("bold"));
+    }
+
+    #[test]
+    fn should_render_an_ast_message() {
+        let converter = LinearFormatConverter::new();
+        let ast = converter.to_ast("Hello from AST").unwrap();
+        let result = converter.render_postable_ast(&ast);
+        assert!(result.contains("Hello from AST"));
+    }
 
     // ---------- additive Rust-side ----------
 
