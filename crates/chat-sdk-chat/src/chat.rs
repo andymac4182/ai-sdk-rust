@@ -59,6 +59,62 @@ pub const DEDUPE_TTL_MS: u64 = 5 * 60 * 1000;
 /// `MODAL_CONTEXT_TTL_MS = 24 * 60 * 60 * 1000` (24 h).
 pub const MODAL_CONTEXT_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 
+/// Whether `user_id` matches the Slack member-id pattern. 1:1 with
+/// upstream's private `SLACK_USER_ID_REGEX = /^[UW][A-Z0-9]+$/`.
+/// Slack member ids start with `U` (user) or `W` (workspace owner)
+/// followed by uppercase alphanumerics. Used by the chat singleton's
+/// `adapterFor(userId)` router to dispatch to the Slack adapter.
+pub fn is_slack_user_id(user_id: &str) -> bool {
+    let mut chars = user_id.chars();
+    let Some(first) = chars.next() else { return false };
+    if first != 'U' && first != 'W' {
+        return false;
+    }
+    let rest = chars.as_str();
+    !rest.is_empty()
+        && rest
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+}
+
+/// Whether `user_id` matches the Discord snowflake pattern. 1:1
+/// with upstream's private
+/// `DISCORD_SNOWFLAKE_REGEX = /^\d{17,19}$/`.
+pub fn is_discord_snowflake(user_id: &str) -> bool {
+    let len = user_id.len();
+    (17..=19).contains(&len) && user_id.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Whether `user_id` matches the Linear user-uuid v4 pattern. 1:1
+/// with upstream's private
+/// `LINEAR_UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i`.
+/// Case-insensitive hex with the canonical 8-4-4-4-12 dash pattern.
+pub fn is_linear_uuid(user_id: &str) -> bool {
+    let bytes = user_id.as_bytes();
+    if bytes.len() != 36 {
+        return false;
+    }
+    for (i, &b) in bytes.iter().enumerate() {
+        let is_dash_pos = matches!(i, 8 | 13 | 18 | 23);
+        if is_dash_pos {
+            if b != b'-' {
+                return false;
+            }
+        } else if !b.is_ascii_hexdigit() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether `user_id` is a non-empty digit-only string. 1:1 with
+/// upstream's private `NUMERIC_REGEX = /^\d+$/`. Used as the first
+/// pass before dispatching numeric ids to Discord / Telegram /
+/// GitHub.
+pub fn is_numeric_user_id(user_id: &str) -> bool {
+    !user_id.is_empty() && user_id.chars().all(|c| c.is_ascii_digit())
+}
+
 /// Top-level chat handle. 1:1 port (in progress) of upstream
 /// `class Chat`.
 #[derive(Clone)]
@@ -294,6 +350,69 @@ mod tests {
     }
 
     #[test]
+    // ---------- user-id pattern predicates ----------
+    // 1:1 with upstream's private regexes used by `adapterFor(userId)`
+    // routing. No standalone upstream tests; the predicates are
+    // exercised through the router which needs ChatImpl + multiple
+    // adapter registrations to wire up. Test the predicates directly
+    // so future router slices can rely on them.
+
+    #[test]
+    fn is_slack_user_id_accepts_u_and_w_prefixed_uppercase_alphanum() {
+        assert!(is_slack_user_id("U0123ABC"));
+        assert!(is_slack_user_id("WABCDEF1"));
+        // No `U` or `W` prefix.
+        assert!(!is_slack_user_id("X0123ABC"));
+        // Empty after prefix.
+        assert!(!is_slack_user_id("U"));
+        // Lowercase rejected (matches upstream `[A-Z0-9]+`).
+        assert!(!is_slack_user_id("Uabcdef1"));
+        // Dashes / underscores rejected.
+        assert!(!is_slack_user_id("U_ABC"));
+        // Empty string.
+        assert!(!is_slack_user_id(""));
+    }
+
+    #[test]
+    fn is_discord_snowflake_accepts_17_to_19_digit_strings() {
+        assert!(is_discord_snowflake(&"1".repeat(17)));
+        assert!(is_discord_snowflake(&"1".repeat(18)));
+        assert!(is_discord_snowflake(&"1".repeat(19)));
+        // Out of range.
+        assert!(!is_discord_snowflake(&"1".repeat(16)));
+        assert!(!is_discord_snowflake(&"1".repeat(20)));
+        // Non-digit char.
+        assert!(!is_discord_snowflake("12345678901234567a"));
+        // Empty.
+        assert!(!is_discord_snowflake(""));
+    }
+
+    #[test]
+    fn is_linear_uuid_accepts_canonical_v4_layout_case_insensitively() {
+        // Canonical v4 layout, lowercase.
+        assert!(is_linear_uuid("8f1f3c7e-d4e1-4f9a-bf2b-1c3d4e5f6a7b"));
+        // Uppercase hex.
+        assert!(is_linear_uuid("8F1F3C7E-D4E1-4F9A-BF2B-1C3D4E5F6A7B"));
+        // Wrong length.
+        assert!(!is_linear_uuid("8f1f3c7e-d4e1-4f9a-bf2b-1c3d4e5f6a7"));
+        assert!(!is_linear_uuid("8f1f3c7e-d4e1-4f9a-bf2b-1c3d4e5f6a7b0"));
+        // Dash in wrong position.
+        assert!(!is_linear_uuid("8f1f3c7ed-4e1-4f9a-bf2b-1c3d4e5f6a7b"));
+        // Non-hex char.
+        assert!(!is_linear_uuid("zzzzzzzz-d4e1-4f9a-bf2b-1c3d4e5f6a7b"));
+        // Empty.
+        assert!(!is_linear_uuid(""));
+    }
+
+    #[test]
+    fn is_numeric_user_id_accepts_non_empty_digit_strings() {
+        assert!(is_numeric_user_id("1"));
+        assert!(is_numeric_user_id("123456789"));
+        assert!(!is_numeric_user_id(""));
+        assert!(!is_numeric_user_id("12a3"));
+        assert!(!is_numeric_user_id("-1"));
+    }
+
     #[test]
     fn chat_ttl_constants_match_upstream() {
         // 1:1 with upstream's private `DEFAULT_LOCK_TTL_MS = 30_000`,
