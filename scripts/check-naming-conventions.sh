@@ -74,6 +74,10 @@ allowed_identifier_token() {
     return 0
   fi
 
+  if [[ "$token" == "helper" && ( "$name" == EmojiHelper || "$name" == BaseEmojiHelper || "$name" == ExtendedEmojiHelper ) ]]; then
+    return 0
+  fi
+
   return 1
 }
 

@@ -619,6 +619,61 @@ pub fn card_link(url: impl Into<String>, label: impl Into<String>) -> LinkElemen
     }
 }
 
+/// Generate fallback text for a [`CardChild`]. 1:1 port of upstream
+/// `cardChildToFallbackText(child): string | null`. Exported so adapter
+/// card converters can call it for unknown child shapes. Returns
+/// `None` when the child is intentionally suppressed (e.g.
+/// [`ActionsElement`]) or has no plain-text representation.
+pub fn card_child_to_fallback_text(child: &CardChild) -> Option<String> {
+    match child {
+        CardChild::Text(t) => Some(t.content.clone()),
+        CardChild::Link(l) => Some(format!("{} ({})", l.label, l.url)),
+        CardChild::Fields(f) => Some(
+            f.children
+                .iter()
+                .map(|field| format!("{}: {}", field.label, field.value))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        CardChild::Actions(_) => None,
+        CardChild::Table(t) => Some(crate::markdown::table_element_to_ascii(&t.headers, &t.rows)),
+        CardChild::Section(s) => Some(
+            s.children
+                .iter()
+                .filter_map(card_child_to_fallback_text)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        // Upstream returns null for image/divider in the fallback
+        // generator (they have no native plain-text rendering here).
+        CardChild::Image(_) | CardChild::Divider(_) => None,
+    }
+}
+
+/// Generate plain-text fallback from a [`CardElement`]. 1:1 port of
+/// upstream `cardToFallbackText(card): string`.
+///
+/// Used for platforms/clients that can't render rich cards and for
+/// the `SentMessage.text` property. Default formatting matches
+/// upstream: `**title**`, no inter-section line break override (newline
+/// only), no emoji conversion (adapter-shared exposes the
+/// platform-aware variant with options).
+pub fn card_to_fallback_text(card: &CardElement) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(title) = &card.title {
+        parts.push(format!("**{title}**"));
+    }
+    if let Some(subtitle) = &card.subtitle {
+        parts.push(subtitle.clone());
+    }
+    for child in &card.children {
+        if let Some(text) = card_child_to_fallback_text(child) {
+            parts.push(text);
+        }
+    }
+    parts.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     //! Subset port of `packages/chat/src/cards.test.ts` (slice 32):
@@ -628,6 +683,73 @@ mod tests {
     //! slices alongside the corresponding API additions.
 
     use super::*;
+
+    #[test]
+    fn card_to_fallback_text_emits_bold_title_and_subtitle_and_text_children() {
+        let c = card(CardOptions {
+            title: Some("Order".to_string()),
+            subtitle: Some("Processing".to_string()),
+            children: Some(vec![card_text("Detail line", None).into()]),
+            ..Default::default()
+        });
+        assert_eq!(
+            card_to_fallback_text(&c),
+            "**Order**\nProcessing\nDetail line"
+        );
+    }
+
+    #[test]
+    fn card_to_fallback_text_omits_actions_children_from_fallback_output() {
+        let c = card(CardOptions {
+            title: Some("With actions".to_string()),
+            children: Some(vec![
+                card_text("Body", None).into(),
+                actions(vec![
+                    button(ButtonOptions {
+                        label: "Approve".to_string(),
+                        id: "ok".to_string(),
+                        ..Default::default()
+                    })
+                    .into(),
+                ])
+                .into(),
+            ]),
+            ..Default::default()
+        });
+        assert_eq!(card_to_fallback_text(&c), "**With actions**\nBody");
+    }
+
+    #[test]
+    fn card_child_to_fallback_text_for_link_renders_label_and_url() {
+        let child: CardChild = card_link("https://example.com", "Home").into();
+        assert_eq!(
+            card_child_to_fallback_text(&child),
+            Some("Home (https://example.com)".to_string())
+        );
+    }
+
+    #[test]
+    fn card_child_to_fallback_text_for_fields_joins_label_value_pairs() {
+        let child: CardChild = fields(vec![field("Name", "Ada"), field("Role", "Pioneer")]).into();
+        assert_eq!(
+            card_child_to_fallback_text(&child),
+            Some("Name: Ada\nRole: Pioneer".to_string())
+        );
+    }
+
+    #[test]
+    fn card_child_to_fallback_text_for_section_recurses_and_skips_actions() {
+        let child: CardChild = section(vec![
+            card_text("First", None).into(),
+            actions(vec![]).into(),
+            card_text("Second", None).into(),
+        ])
+        .into();
+        assert_eq!(
+            card_child_to_fallback_text(&child),
+            Some("First\nSecond".to_string())
+        );
+    }
 
     #[test]
     fn button_style_enum_uses_upstream_lowercase_strings() {
