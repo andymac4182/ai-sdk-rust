@@ -197,9 +197,52 @@ mod tests {
 
     #[test]
     fn finalize_markdown_helper_collapses_bold_and_rewrites_mentions() {
+        assert_eq!(finalize_markdown("**bold** @U12345"), "*bold* <@U12345>");
+    }
+
+    // ---------- toPlainText, 5 upstream cases ----------
+    // Upstream `toPlainText` is a deprecated alias for `extractPlainText`,
+    // so these cases exercise our [`SlackFormatConverter::extract_plain_text`].
+
+    #[test]
+    fn to_plain_text_should_remove_bold_markers() {
         assert_eq!(
-            finalize_markdown("**bold** @U12345"),
-            "*bold* <@U12345>"
+            converter().extract_plain_text("Hello *world*!"),
+            "Hello world!"
         );
+    }
+
+    #[test]
+    fn to_plain_text_should_remove_italic_markers() {
+        assert_eq!(
+            converter().extract_plain_text("Hello _world_!"),
+            "Hello world!"
+        );
+    }
+
+    #[test]
+    fn to_plain_text_should_extract_link_text() {
+        assert_eq!(
+            converter().extract_plain_text("Check <https://example.com|this>"),
+            "Check this"
+        );
+    }
+
+    #[test]
+    fn to_plain_text_should_format_user_mentions() {
+        let result = converter().extract_plain_text("Hey <@U123>!");
+        assert!(result.contains("@U123"), "got: {result}");
+    }
+
+    #[test]
+    fn to_plain_text_should_handle_complex_messages() {
+        let input = "*Bold* and _italic_ with <https://x.com|link> and <@U123|user>";
+        let result = converter().extract_plain_text(input);
+        assert!(result.contains("Bold"), "got: {result}");
+        assert!(result.contains("italic"), "got: {result}");
+        assert!(result.contains("link"), "got: {result}");
+        assert!(result.contains("user"), "got: {result}");
+        assert!(!result.contains('*'), "got: {result}");
+        assert!(!result.contains('<'), "got: {result}");
     }
 }

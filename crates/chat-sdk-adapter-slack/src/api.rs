@@ -301,7 +301,10 @@ mod tests {
         let forbidden_chat = concat!("use ", "chat_sdk_chat::");
         let forbidden_shared = concat!("use ", "chat_sdk_adapter_shared::");
         let forbidden_super = concat!("use ", "super::lib");
-        assert!(!source.contains(forbidden_chat), "api.rs imports chat_sdk_chat");
+        assert!(
+            !source.contains(forbidden_chat),
+            "api.rs imports chat_sdk_chat"
+        );
         assert!(
             !source.contains(forbidden_shared),
             "api.rs imports chat_sdk_adapter_shared"
