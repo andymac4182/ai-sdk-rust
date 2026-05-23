@@ -8806,7 +8806,8 @@ mod tests {
     };
     use ai_sdk_provider::{
         ApiCallError, FileData, FileDataContent, ImageModelFile, JsonObject, JsonSchema, JsonValue,
-        ProviderMetadata, ProviderReference, TypeValidationContext, TypeValidationError, Warning,
+        ProviderMetadata, ProviderOptions, ProviderReference, TypeValidationContext,
+        TypeValidationError, Warning,
     };
     use serde_json::json;
     use url::Url;
@@ -9271,7 +9272,7 @@ mod tests {
     #[test]
     fn content_part_file_part_data_narrows_exhaustively_across_the_4_tagged_arms() {
         let reference = test_provider_reference(&[("openai", "file-abc")]);
-        let data = vec![
+        let data = [
             FileData::Data {
                 data: FileDataContent::Bytes(vec![1, 2, 3]),
             },
@@ -10560,6 +10561,31 @@ mod tests {
         .as_object()
         .expect("schema is an object")
         .clone()
+    }
+
+    fn zod_empty_object_schema() -> JsonSchema {
+        schema_object(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "additionalProperties": false,
+            "properties": {},
+            "type": "object"
+        }))
+    }
+
+    fn zod_city_object_schema() -> JsonSchema {
+        schema_object(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "additionalProperties": false,
+            "properties": {
+                "city": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "city"
+            ],
+            "type": "object"
+        }))
     }
 
     fn object_schema_json() -> String {
@@ -22677,7 +22703,7 @@ mod tests {
             .as_object()
             .expect("args are an object")
             .clone();
-        let tools = vec![
+        let tools = [
             Tool::new("weather", object_schema()),
             dynamic_tool("runtimeWeather", object_schema()),
             Tool::provider_defined(
@@ -23037,43 +23063,295 @@ mod tests {
     }
 
     #[test]
-    fn prepare_tools_returns_none_for_empty_tool_sets() {
+    fn prepare_tools_should_return_undefined_when_tools_are_not_provided() {
         assert_eq!(prepare_tools(Vec::<Tool>::new().iter()), None);
     }
 
     #[test]
-    fn prepare_tools_converts_high_level_tools() {
+    fn prepare_tools_should_return_all_tools() {
+        let tools = vec![
+            tool("tool1", zod_empty_object_schema()).with_description("Tool 1 description"),
+            tool("tool2", zod_city_object_schema()).with_description("Tool 2 description"),
+        ];
+
+        assert_eq!(
+            serde_json::to_value(prepare_tools(&tools).expect("tools are prepared"))
+                .expect("tools serialize"),
+            json!([
+                {
+                    "description": "Tool 1 description",
+                    "inputSchema": {
+                        "$schema": "http://json-schema.org/draft-07/schema#",
+                        "additionalProperties": false,
+                        "properties": {},
+                        "type": "object"
+                    },
+                    "name": "tool1",
+                    "type": "function"
+                },
+                {
+                    "description": "Tool 2 description",
+                    "inputSchema": {
+                        "$schema": "http://json-schema.org/draft-07/schema#",
+                        "additionalProperties": false,
+                        "properties": {
+                            "city": {
+                                "type": "string"
+                            }
+                        },
+                        "required": [
+                            "city"
+                        ],
+                        "type": "object"
+                    },
+                    "name": "tool2",
+                    "type": "function"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn prepare_tools_should_handle_provider_defined_tools() {
         let provider_tool_args = json!({ "key": "value" })
             .as_object()
             .expect("args are an object")
             .clone();
         let tools = vec![
-            Tool::new("weather", object_schema()),
-            dynamic_tool("runtimeWeather", object_schema()),
+            tool("tool1", zod_empty_object_schema()).with_description("Tool 1 description"),
+            tool("tool2", zod_city_object_schema()).with_description("Tool 2 description"),
             Tool::provider_defined(
                 "providerTool",
                 "provider.tool-id",
                 provider_tool_args.clone(),
-                object_schema(),
+                zod_empty_object_schema(),
             ),
         ];
 
         assert_eq!(
-            prepare_tools(&tools),
-            Some(vec![
-                LanguageModelTool::Function(LanguageModelFunctionTool::new(
-                    "weather",
-                    object_schema()
-                )),
-                LanguageModelTool::Function(LanguageModelFunctionTool::new(
-                    "runtimeWeather",
-                    object_schema()
-                )),
-                LanguageModelTool::Provider(LanguageModelProviderTool::new(
-                    "provider.tool-id",
-                    "providerTool",
-                    provider_tool_args
-                ))
+            serde_json::to_value(prepare_tools(&tools).expect("tools are prepared"))
+                .expect("tools serialize"),
+            json!([
+                {
+                    "description": "Tool 1 description",
+                    "inputSchema": {
+                        "$schema": "http://json-schema.org/draft-07/schema#",
+                        "additionalProperties": false,
+                        "properties": {},
+                        "type": "object"
+                    },
+                    "name": "tool1",
+                    "type": "function"
+                },
+                {
+                    "description": "Tool 2 description",
+                    "inputSchema": {
+                        "$schema": "http://json-schema.org/draft-07/schema#",
+                        "additionalProperties": false,
+                        "properties": {
+                            "city": {
+                                "type": "string"
+                            }
+                        },
+                        "required": [
+                            "city"
+                        ],
+                        "type": "object"
+                    },
+                    "name": "tool2",
+                    "type": "function"
+                },
+                {
+                    "args": {
+                        "key": "value"
+                    },
+                    "id": "provider.tool-id",
+                    "name": "providerTool",
+                    "type": "provider"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn prepare_tools_should_pass_through_provider_options() {
+        let provider_options = ProviderOptions::from([(
+            "aProvider".to_string(),
+            json!({
+                "aSetting": "aValue"
+            })
+            .as_object()
+            .expect("provider options are an object")
+            .clone(),
+        )]);
+        let tools = vec![
+            tool("tool1", zod_empty_object_schema())
+                .with_description("Tool 1 description")
+                .with_provider_options(provider_options),
+        ];
+
+        assert_eq!(
+            serde_json::to_value(prepare_tools(&tools).expect("tools are prepared"))
+                .expect("tools serialize"),
+            json!([
+                {
+                    "description": "Tool 1 description",
+                    "inputSchema": {
+                        "$schema": "http://json-schema.org/draft-07/schema#",
+                        "additionalProperties": false,
+                        "properties": {},
+                        "type": "object"
+                    },
+                    "name": "tool1",
+                    "providerOptions": {
+                        "aProvider": {
+                            "aSetting": "aValue"
+                        }
+                    },
+                    "type": "function"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn prepare_tools_should_pass_through_strict_mode_settings() {
+        let tools = vec![
+            tool("tool1", zod_empty_object_schema())
+                .with_description("Tool 1 description")
+                .with_strict(true),
+        ];
+
+        assert_eq!(
+            serde_json::to_value(prepare_tools(&tools).expect("tools are prepared"))
+                .expect("tools serialize"),
+            json!([
+                {
+                    "description": "Tool 1 description",
+                    "inputSchema": {
+                        "$schema": "http://json-schema.org/draft-07/schema#",
+                        "additionalProperties": false,
+                        "properties": {},
+                        "type": "object"
+                    },
+                    "name": "tool1",
+                    "strict": true,
+                    "type": "function"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn prepare_tools_should_pass_through_input_examples() {
+        let input_example = json!({
+            "city": "New York"
+        })
+        .as_object()
+        .expect("input example is an object")
+        .clone();
+        let tools = vec![
+            tool("tool1", zod_city_object_schema())
+                .with_description("Tool 1 description")
+                .with_input_example(input_example),
+        ];
+
+        assert_eq!(
+            serde_json::to_value(prepare_tools(&tools).expect("tools are prepared"))
+                .expect("tools serialize"),
+            json!([
+                {
+                    "description": "Tool 1 description",
+                    "inputExamples": [
+                        {
+                            "input": {
+                                "city": "New York"
+                            }
+                        }
+                    ],
+                    "inputSchema": {
+                        "$schema": "http://json-schema.org/draft-07/schema#",
+                        "additionalProperties": false,
+                        "properties": {
+                            "city": {
+                                "type": "string"
+                            }
+                        },
+                        "required": [
+                            "city"
+                        ],
+                        "type": "object"
+                    },
+                    "name": "tool1",
+                    "type": "function"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn prepare_tools_should_resolve_function_descriptions_from_tools_context_and_sandbox() {
+        let sandbox: Arc<dyn ExperimentalSandbox> = Arc::new(StaticSandbox::new("test-sandbox"));
+        let mut tools_context = JsonObject::new();
+        tools_context.insert(
+            "contextual".to_string(),
+            json!({
+                "userName": "Ada"
+            }),
+        );
+
+        let contextual = dynamic_tool("contextual", zod_empty_object_schema())
+            .with_dynamic_description(|options| {
+                let user_name = options
+                    .context
+                    .as_ref()
+                    .and_then(|context| context.get("userName"))
+                    .and_then(JsonValue::as_str)
+                    .expect("user name is present");
+
+                format!("User is {user_name}")
+            });
+        let with_sandbox = dynamic_tool("withSandbox", zod_empty_object_schema())
+            .with_dynamic_description(|options| {
+                let description = options
+                    .experimental_sandbox
+                    .as_ref()
+                    .map(|sandbox| sandbox.description())
+                    .unwrap_or("none");
+
+                format!("Env: {description}")
+            });
+        let tools = vec![contextual, with_sandbox];
+
+        assert_eq!(
+            serde_json::to_value(
+                prepare_tools_with_context(&tools, Some(&tools_context), Some(&sandbox))
+                    .expect("tools are prepared")
+            )
+            .expect("tools serialize"),
+            json!([
+                {
+                    "description": "User is Ada",
+                    "inputSchema": {
+                        "$schema": "http://json-schema.org/draft-07/schema#",
+                        "additionalProperties": false,
+                        "properties": {},
+                        "type": "object"
+                    },
+                    "name": "contextual",
+                    "type": "function"
+                },
+                {
+                    "description": "Env: test-sandbox",
+                    "inputSchema": {
+                        "$schema": "http://json-schema.org/draft-07/schema#",
+                        "additionalProperties": false,
+                        "properties": {},
+                        "type": "object"
+                    },
+                    "name": "withSandbox",
+                    "type": "function"
+                }
             ])
         );
     }
