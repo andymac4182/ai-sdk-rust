@@ -9,6 +9,7 @@
 pub mod cards;
 pub mod errors;
 pub mod markdown;
+pub mod thread_id;
 
 use async_trait::async_trait;
 use chat_sdk_chat::types::Adapter;
