@@ -6,6 +6,16 @@ This repository is starting from a minimal Rust 2024 library crate with CI in
 place. The public API will grow in small, tested slices as the TypeScript SDK is
 ported into Rust-native modules.
 
+This repo also hosts a parallel port of the Vercel **Chat SDK**
+([`vercel/chat`](https://github.com/vercel/chat)) under `crates/chat-sdk-*`,
+driven by its own Codex `/goal` session — see
+[`scripts/codex-goal-chat/`](scripts/codex-goal-chat/) and
+[`docs/upstream-parity-chat.md`](docs/upstream-parity-chat.md). The two `/goal`
+sessions are designed to run concurrently, with file ownership partitioned by
+prefix (`ai-sdk-*` vs `chat-sdk-*`, `upstream-parity.md` vs
+`upstream-parity-chat.md`) and a shared merge lock to serialize pushes to
+`main`.
+
 ## Development
 
 ```sh
@@ -84,6 +94,24 @@ Worktrees are created under:
 If `.env.local` exists in the main checkout, the script symlinks it into the
 worktree so ignored gateway credentials are available for optional integration
 tests without being pushed.
+
+## Chat SDK `/goal` Runner (sibling port)
+
+To run the parallel Vercel Chat SDK port instead of (or alongside) the AI SDK
+port:
+
+```sh
+scripts/run-codex-goal-chat-port.sh
+```
+
+This creates a worktree under
+`/Users/andrewmcclenaghan/dev/andymac4182/ai-sdk-rust-chat-worktrees`, copies
+the compact `/goal` condition to your clipboard, and starts Codex pointing at
+[`scripts/codex-goal-chat/port-chat-sdk.md`](scripts/codex-goal-chat/port-chat-sdk.md).
+The chat session is constrained to `crates/chat-sdk-*` plus the
+`*-chat.md`/`*-chat.tsv` doc family, and shares the same
+`/tmp/ai-sdk-rust-main-merge.lock` so the two sessions serialize their pushes
+to `main`.
 
 ## GNHF Codex Runner
 
