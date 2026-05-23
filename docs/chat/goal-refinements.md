@@ -2395,3 +2395,108 @@ converter); 218 Teams cards.rs fallback-text wrapper (2 cases).
   slices 213 / 216. Touches adapter HTTP code; deferred.
 - **Slack cards.test.ts Block Kit renderer** (34 of 36 cases remaining
   after slice 212).
+
+### 2026-05-24 - slices 219..225
+
+Slices reviewed: 219 Discord cards.rs fallback-text port (7 cases);
+220 GChat cards.rs fallback-text wrapper (2 cases); 221 WhatsApp
+cardToWhatsApp interactive renderer (5 cases) - **all 23 of 23
+WhatsApp cards.test.ts cases now ported**; 222 chat-sdk-chat
+callback_url processCardCallbackUrls + resolveCallbackUrl (9 cases);
+223 chat modals filterModalChildren non-object items case (1 case);
+224 docs-only correction (Slack format/index parity count 14 -> 16);
+225 chat thread_history strip-raw + limit (2 cases) - **all 7 of 7
+portable thread-history.test.ts cases now ported** (8th is JS-only
+module-aliasing test).
+
+**What the brief got wrong or left out**
+
+- **`StoredCallback { url, originalValue? }` shape is the upstream wire
+  format**, not the simpler plain-string the original
+  `CallbackUrlStore::resolve` stores. The Rust port now has both:
+  `CallbackUrlStore::issue/resolve` (legacy, kept for simpler callsites)
+  and free functions `process_card_callback_urls` /
+  `resolve_callback_url` (new, upstream-matching shape with
+  `original_value` field). Coexistence pattern - documented as
+  deferred migration. Brief should note: when the upstream API
+  evolves to a richer shape (object vs string), prefer adding new
+  free fns over breaking the existing struct's signature.
+- **Card-fallback-text wrapper sweep is complete.** Per the
+  refinement template tested in slice 212/218 (Slack/Teams thin
+  wrappers): Discord (slice 219) was actually a custom impl
+  because Discord's field rendering is `**label**: value` not the
+  shared `label: value`. GChat (slice 220) used the thin shared
+  wrapper. GitHub and Linear have no `cardToFallbackText` upstream -
+  their card renderers (`cardToGitHubMarkdown` /
+  `cardToLinearMarkdown`) are already the canonical text form.
+  Brief should reflect this so future refinements don't re-audit
+  these adapters for missing fallback wrappers.
+- **WhatsApp Cloud API interactive payload shape stayed
+  Rust-additive.** Slice 221 added `WhatsAppCardResult` (enum),
+  `WhatsAppInteractiveMessage`, `WhatsAppInteractiveHeader/Body/
+  Action`, `WhatsAppReplyButton`, `WhatsAppReplyButtonReply`.
+  All `pub` for downstream HTTP wire-format consumers. Truncation
+  uses Unicode-scalar counts (`chars().count()`) to match
+  JavaScript `string.length` semantics for BMP-only content.
+  Brief should mention: when porting wire-format types with
+  truncation, default to Unicode-scalar count not byte count -
+  upstream tests expect JS-string-length parity.
+- **`thread_history` `raw` field nulling** is a wire-format
+  invariant - tests assert `stored[0]["raw"]` is `null`, not
+  `undefined` (TS) or `Value::Null` vs missing field. The Rust
+  port uses `serde_json::Value::Null` explicitly to match.
+  Brief should add: when porting state-storage shapes, use
+  `Value::Null` not field-skipping to match upstream's `value =
+  null` semantics.
+- **`get_messages` signature evolution** was straightforward to
+  refactor because there were no out-of-module callers. Brief
+  should add: low-risk signature changes can land safely when
+  the module is small and self-contained - check with `grep -rn`
+  before deciding to add a new method vs widen the existing one.
+
+**Stale or misleading guidance**
+
+- The brief's `Order adapters by contract complexity: smallest first`
+  ordering is now ~221 slices stale. With all 9 adapters having
+  ported markdown converters, all 4 having cardToFallbackText, and
+  WhatsApp having complete cards.test.ts coverage, the remaining
+  work is no longer ordered by "adapter complexity." It's now
+  ordered by *renderer complexity*: Slack Block Kit (largest),
+  Teams Adaptive Cards, Discord Embeds, Messenger Templates. The
+  brief should treat the adapter list as a 1:1 completion grid
+  rather than a sequential queue.
+- The `12/19 portable` count for `chat-sdk-chat/src/message.rs` is
+  an *underestimate* - the actual Rust test count (26 non-helper
+  test fns covering 12+ upstream cases plus 14+ additive variants)
+  is comfortably above the upstream surface area for the portable
+  subset. The "7 require Adapter/WORKFLOW integration" framing is
+  correct; the "12/19" tally over-counts the unported gap. Should
+  be re-tallied next refinement.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+
+**Open refinements deferred**
+
+- **Migrate `CallbackUrlStore::resolve` callers** to the new
+  module-level `resolve_callback_url` once any consumer needs the
+  `original_value` field. Currently no internal Rust caller does;
+  no migration pressure.
+- **`postToCallbackUrl` HTTP** (3 cases) - blocked on reqwest
+  wire-up decision.
+- **Teams Adaptive Cards renderer** (26 cases) - largest remaining
+  Teams cards.test.ts chunk.
+- **Slack `cardToBlockKit`** (34 cases) + **modalToSlackView** (21
+  cases) + **webhook/index.test.ts** (~150 cases) - largest
+  remaining Slack test surface.
+- **Discord `cardToDiscordPayload` Embed + Action Row renderer**
+  (31 cases) - remaining Discord cards.test.ts.
+- **Messenger Generic Template + Button Template + constraint
+  handling** (~50 cases) - remaining Messenger cards.test.ts.
+- **All adapter `index.test.ts` integration suites** - largest
+  total backlog. Each requires `ChatImpl`/`ThreadImpl`/`ChannelImpl`
+  ports plus HTTP client mocking.
+- **chat-sdk-chat `ChannelImpl` / `ThreadImpl` / `ChatImpl` /
+  `serialization` / `streaming-markdown`** - blocked on the same
+  infrastructure (~470 cases combined).
