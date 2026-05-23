@@ -11,3 +11,5 @@
 //! `modals` modules in later slices.
 
 pub mod errors;
+pub mod logger;
+pub mod types;
