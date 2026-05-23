@@ -7,13 +7,75 @@
 //! require Slack-specific payload types and follow in later
 //! slices, alongside the full `nodeToMrkdwn` walker.
 
+use chat_sdk_chat::emoji::{PlaceholderPlatform, convert_emoji_placeholders};
 use chat_sdk_chat::markdown::{
     Node, ParseMarkdownError, parse_markdown, stringify_markdown, to_plain_text,
 };
+use chat_sdk_chat::types::AdapterPostableMessage;
 
-use crate::format::{
-    link_bare_slack_mentions, markdown_bold_to_slack_mrkdwn, slack_mrkdwn_to_markdown,
-};
+use crate::format::{markdown_bold_to_slack_mrkdwn, slack_mrkdwn_to_markdown};
+
+/// 1:1 port of upstream `BARE_MENTION_REGEX = /(?<![<\w])@(\w+)/g` from
+/// `adapter-slack/src/markdown.ts`. Rewrites `@word` to `<@word>` whenever
+/// the preceding char isn't `<` (avoids double-wrapping `<@U123>`) and
+/// isn't a word char (preserves `user@example.com` and `domain@host`).
+///
+/// More permissive than [`link_bare_slack_mentions`] which only matches
+/// Slack ID shapes (`U` / `W` + digits).
+fn rewrite_bare_mentions(text: &str) -> String {
+    fn is_word(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'_'
+    }
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'@' {
+            let prev_ok = i == 0 || (bytes[i - 1] != b'<' && !is_word(bytes[i - 1]));
+            if prev_ok {
+                let mut j = i + 1;
+                while j < bytes.len() && is_word(bytes[j]) {
+                    j += 1;
+                }
+                if j > i + 1 {
+                    out.push_str("<@");
+                    out.push_str(&text[i + 1..j]);
+                    out.push('>');
+                    i = j;
+                    continue;
+                }
+            }
+        }
+        // Push this char and advance by its utf-8 length.
+        let ch_len = if bytes[i] < 0x80 {
+            1
+        } else if bytes[i] < 0xc0 {
+            1
+        } else if bytes[i] < 0xe0 {
+            2
+        } else if bytes[i] < 0xf0 {
+            3
+        } else {
+            4
+        };
+        out.push_str(&text[i..i + ch_len]);
+        i += ch_len;
+    }
+    out
+}
+
+/// 1:1 port of upstream
+/// `type SlackTextPayload = { text: string } | { markdown_text: string }`.
+/// Slack's chat.postMessage accepts either `text` (legacy mrkdwn-ish, up to
+/// ~40k chars) or `markdown_text` (native CommonMark render, ~12k cap,
+/// mutually exclusive with `text` / `blocks`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlackTextPayload {
+    /// `{ text: string }` — plain text branch.
+    Text(String),
+    /// `{ markdown_text: string }` — Slack-rendered markdown branch.
+    MarkdownText(String),
+}
 
 /// 1:1 port of upstream
 /// `class SlackFormatConverter extends BaseFormatConverter`.
@@ -77,25 +139,59 @@ impl SlackFormatConverter {
     pub fn render_postable_raw(&self, raw: &str) -> String {
         finalize_plain(raw)
     }
+
+    /// Build the Slack API payload fields for a message. 1:1 port of
+    /// upstream `toSlackPayload(message)`:
+    ///
+    /// - `string` / `{ raw }` → `{ text }` (plain — preserves literal
+    ///   `*`, `_`, etc.)
+    /// - `{ markdown }` / `{ ast }` → `{ markdown_text }` (Slack renders
+    ///   natively)
+    ///
+    /// Bare `@user` mentions are rewritten to `<@user>` and
+    /// `{{emoji:NAME}}` placeholders are normalized for Slack in all
+    /// branches via [`finalize_plain`].
+    pub fn to_slack_payload(&self, message: &AdapterPostableMessage) -> SlackTextPayload {
+        match message {
+            AdapterPostableMessage::Text(s) => SlackTextPayload::Text(finalize_plain(s)),
+            AdapterPostableMessage::Raw(r) => SlackTextPayload::Text(finalize_plain(&r.raw)),
+            AdapterPostableMessage::Markdown(m) => {
+                SlackTextPayload::MarkdownText(finalize_plain(&m.markdown))
+            }
+            AdapterPostableMessage::Ast(a) => {
+                let root = Node::Root(a.ast.clone());
+                let md = stringify_markdown(&root);
+                SlackTextPayload::MarkdownText(finalize_plain(&md))
+            }
+            // Card / CardElement variants don't route through this method
+            // upstream (they're rendered via toSlackBlocks); upstream returns
+            // `{ text: "" }` for the fall-through, so do the same.
+            AdapterPostableMessage::Card(_) | AdapterPostableMessage::CardElement(_) => {
+                SlackTextPayload::Text(String::new())
+            }
+        }
+    }
 }
 
-/// Finalize a plain-text Slack message. 1:1 with upstream's
-/// `this.finalize(text)` for string / raw branches in
-/// `toSlackPayload`: rewrites bare `@USER` mentions to
-/// `<@USER>` so Slack renders them as proper mentions.
+/// Finalize a Slack message text. 1:1 with upstream's private
+/// `this.finalize(text)`: rewrites bare `@USER` mentions to `<@USER>`
+/// then converts `{{emoji:NAME}}` placeholders to Slack's `:name:`
+/// shortcode form. Used by both the plain-text and markdown branches
+/// of `to_slack_payload` (upstream applies the same finalize to both).
 fn finalize_plain(text: &str) -> String {
-    link_bare_slack_mentions(text)
+    let with_mentions = rewrite_bare_mentions(text);
+    convert_emoji_placeholders(&with_mentions, PlaceholderPlatform::Slack, None)
 }
 
-/// Finalize a markdown Slack message. 1:1 with upstream's
-/// `this.finalize(text)` for `markdown` / `ast` branches in
-/// `toSlackPayload`: applies `markdownBoldToSlackMrkdwn` on top
-/// of the bare-mention rewrite so `**bold**` -> `*bold*` for
-/// Slack's mrkdwn renderer.
+/// Finalize text for the legacy Slack mrkdwn surface (e.g.
+/// `response_url` payloads). Adds `markdownBoldToSlackMrkdwn` on top of
+/// [`finalize_plain`] so `**bold**` -> `*bold*` for Slack's mrkdwn
+/// renderer. Used by the upcoming `to_response_url_text` markdown / ast
+/// branches.
 #[allow(dead_code)]
 fn finalize_markdown(text: &str) -> String {
-    let with_mentions = link_bare_slack_mentions(text);
-    markdown_bold_to_slack_mrkdwn(&with_mentions)
+    let with_mentions_and_emoji = finalize_plain(text);
+    markdown_bold_to_slack_mrkdwn(&with_mentions_and_emoji)
 }
 
 #[cfg(test)]
@@ -198,6 +294,112 @@ mod tests {
     #[test]
     fn finalize_markdown_helper_collapses_bold_and_rewrites_mentions() {
         assert_eq!(finalize_markdown("**bold** @U12345"), "*bold* <@U12345>");
+    }
+
+    // ---------- mentions / toSlackPayload, 7 upstream cases ----------
+
+    use chat_sdk_chat::types::{PostableMarkdown, PostableRaw};
+
+    fn payload_text(p: &SlackTextPayload) -> &str {
+        match p {
+            SlackTextPayload::Text(s) => s.as_str(),
+            SlackTextPayload::MarkdownText(s) => s.as_str(),
+        }
+    }
+
+    #[test]
+    fn mentions_does_not_double_wrap_existing_slack_user_mentions_in_plain_strings() {
+        let msg: AdapterPostableMessage = "Hey <@U12345>. Please select".into();
+        let p = converter().to_slack_payload(&msg);
+        assert_eq!(
+            p,
+            SlackTextPayload::Text("Hey <@U12345>. Please select".into())
+        );
+    }
+
+    #[test]
+    fn mentions_does_not_double_wrap_existing_mentions_in_markdown() {
+        let msg = AdapterPostableMessage::Markdown(PostableMarkdown {
+            markdown: "Hey <@U12345>. Please select".into(),
+            attachments: None,
+            files: None,
+        });
+        let p = converter().to_slack_payload(&msg);
+        assert_eq!(
+            p,
+            SlackTextPayload::MarkdownText("Hey <@U12345>. Please select".into())
+        );
+    }
+
+    #[test]
+    fn mentions_rewrites_bare_mentions_in_plain_strings() {
+        let msg: AdapterPostableMessage = "Hey @george. Please select".into();
+        let p = converter().to_slack_payload(&msg);
+        assert_eq!(
+            p,
+            SlackTextPayload::Text("Hey <@george>. Please select".into())
+        );
+    }
+
+    #[test]
+    fn mentions_rewrites_bare_mentions_in_markdown() {
+        let msg = AdapterPostableMessage::Markdown(PostableMarkdown {
+            markdown: "Hey @george. Please select".into(),
+            attachments: None,
+            files: None,
+        });
+        let p = converter().to_slack_payload(&msg);
+        assert_eq!(
+            p,
+            SlackTextPayload::MarkdownText("Hey <@george>. Please select".into())
+        );
+    }
+
+    #[test]
+    fn mentions_does_not_mangle_email_addresses_in_plain_strings() {
+        let msg: AdapterPostableMessage = "Contact user@example.com for help".into();
+        let p = converter().to_slack_payload(&msg);
+        assert_eq!(
+            p,
+            SlackTextPayload::Text("Contact user@example.com for help".into())
+        );
+    }
+
+    #[test]
+    fn mentions_does_not_mangle_mailto_links() {
+        let msg: AdapterPostableMessage = "Email <mailto:user@example.com>".into();
+        let p = converter().to_slack_payload(&msg);
+        assert_eq!(
+            p,
+            SlackTextPayload::Text("Email <mailto:user@example.com>".into())
+        );
+    }
+
+    #[test]
+    fn mentions_converts_mentions_adjacent_to_non_word_punctuation() {
+        let msg: AdapterPostableMessage = "(cc @george, @anne)".into();
+        let p = converter().to_slack_payload(&msg);
+        assert_eq!(p, SlackTextPayload::Text("(cc <@george>, <@anne>)".into()));
+    }
+
+    // ---------- additive: raw + ast routing, emoji finalize ----------
+
+    #[test]
+    fn to_slack_payload_raw_routes_to_text_branch_with_finalize() {
+        let msg = AdapterPostableMessage::Raw(PostableRaw {
+            raw: "Hey @U1".into(),
+            attachments: None,
+            files: None,
+        });
+        let p = converter().to_slack_payload(&msg);
+        assert_eq!(p, SlackTextPayload::Text("Hey <@U1>".into()));
+    }
+
+    #[test]
+    fn to_slack_payload_finalize_converts_emoji_placeholders_for_slack() {
+        let msg: AdapterPostableMessage = "{{emoji:smile}} hi".into();
+        let p = converter().to_slack_payload(&msg);
+        assert_eq!(payload_text(&p), ":smile: hi");
     }
 
     // ---------- toPlainText, 5 upstream cases ----------
