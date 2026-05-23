@@ -2070,4 +2070,43 @@ mod tests {
         }
         assert_eq!(count_inline_code(&node), 3);
     }
+
+    // ---------- slice 87: 4 more 1:1 markdown.test.ts cases ----------
+
+    #[test]
+    fn parse_markdown_blockquote_followed_by_paragraph_distinct_root_children() {
+        let node = parse_markdown("> quote\n\nplain paragraph").expect("parses");
+        let root = match &node {
+            Node::Root(r) => r,
+            _ => unreachable!(),
+        };
+        assert_eq!(root.children.len(), 2);
+        assert!(matches!(root.children[0], Node::Blockquote(_)));
+        assert!(matches!(root.children[1], Node::Paragraph(_)));
+    }
+
+    #[test]
+    fn parse_markdown_indented_code_block_with_trailing_blank_line() {
+        let node = parse_markdown("    let x = 1;\n\n    let y = 2;").expect("parses");
+        fn has_code(n: &Node) -> bool {
+            matches!(n, Node::Code(_)) || get_node_children(n).iter().any(has_code)
+        }
+        assert!(has_code(&node));
+        let plain = to_plain_text(&node);
+        assert!(plain.contains("let x = 1;") || plain.contains("let y = 2;"));
+    }
+
+    #[test]
+    fn parse_markdown_paragraph_with_only_link_collapses_text_to_link_label() {
+        let node = parse_markdown("[just a link](https://example.com)").expect("parses");
+        assert_eq!(to_plain_text(&node), "just a link");
+    }
+
+    #[test]
+    fn parse_markdown_text_with_html_entities_decode_to_real_chars() {
+        let node = parse_markdown("less &lt; than and greater &gt; than").expect("parses");
+        let plain = to_plain_text(&node);
+        assert!(plain.contains("<"));
+        assert!(plain.contains(">"));
+    }
 }
