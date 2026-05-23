@@ -20,20 +20,24 @@ use crate::openai_compatible::{
 };
 use crate::provider::{
     NoSuchModelError, Provider, ProviderMetadata, ProviderWithFiles, ProviderWithSkills,
-    ProviderWithSpeechModel,
+    ProviderWithSpeechModel, ProviderWithTranscriptionModel,
 };
 use crate::provider_utils::{
     FetchErrorInfo, FormData, FormDataInputValue, FormDataValue, HandledFetchError,
     PostFormDataToApiOptions, PostJsonToApiOptions, ProviderApiResponseHandlerError,
     ResponseHandlerResult, convert_base64_to_bytes, convert_to_form_data,
-    create_binary_response_handler, create_json_response_handler, post_form_data_to_api,
-    post_json_to_api, without_trailing_slash,
+    create_binary_response_handler, create_json_response_handler, media_type_to_extension,
+    post_form_data_to_api, post_json_to_api, without_trailing_slash,
 };
 use crate::skills::{
     Skills, SkillsFileData, SkillsUploadSkillCallOptions, SkillsUploadSkillResult,
 };
 use crate::speech_model::{
     SpeechModel, SpeechModelCallOptions, SpeechModelRequest, SpeechModelResponse, SpeechModelResult,
+};
+use crate::transcription_model::{
+    TranscriptionModel, TranscriptionModelCallOptions, TranscriptionModelResponse,
+    TranscriptionModelResult, TranscriptionModelSegment,
 };
 use crate::warning::Warning;
 use time::OffsetDateTime;
@@ -164,6 +168,58 @@ pub struct OpenAISkillResponse {
     pub updated_at: Option<u64>,
 }
 
+/// Response returned by OpenAI's `/audio/transcriptions` endpoint.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAITranscriptionResponse {
+    /// Complete transcript text.
+    pub text: String,
+
+    /// Detected language name or code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+
+    /// Audio duration in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<f64>,
+
+    /// Segment-level timestamps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segments: Option<Vec<OpenAITranscriptionSegment>>,
+
+    /// Word-level timestamps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub words: Option<Vec<OpenAITranscriptionWord>>,
+}
+
+/// OpenAI transcription segment item.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAITranscriptionSegment {
+    /// Segment start time in seconds.
+    pub start: f64,
+
+    /// Segment end time in seconds.
+    pub end: f64,
+
+    /// Segment text.
+    pub text: String,
+}
+
+/// OpenAI transcription word item.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAITranscriptionWord {
+    /// Word text.
+    pub word: String,
+
+    /// Word start time in seconds.
+    pub start: f64,
+
+    /// Word end time in seconds.
+    pub end: f64,
+}
+
 /// OpenAI files upload interface.
 #[derive(Clone)]
 pub struct OpenAIFiles {
@@ -226,6 +282,45 @@ pub struct OpenAISpeechModel {
 }
 
 impl OpenAISpeechModel {
+    fn new(
+        provider: impl Into<String>,
+        model_id: impl Into<String>,
+        base_url: impl Into<String>,
+        headers: Headers,
+        transport: OpenAICompatibleTransport,
+    ) -> Self {
+        Self {
+            provider: provider.into(),
+            model_id: model_id.into(),
+            base_url: base_url.into(),
+            headers,
+            transport,
+            current_date: None,
+        }
+    }
+
+    /// Injects the response timestamp provider. This is primarily useful for deterministic tests.
+    pub fn with_current_date(
+        mut self,
+        current_date: impl Fn() -> OffsetDateTime + Send + Sync + 'static,
+    ) -> Self {
+        self.current_date = Some(Arc::new(current_date));
+        self
+    }
+}
+
+/// OpenAI transcription model for `/audio/transcriptions`.
+#[derive(Clone)]
+pub struct OpenAITranscriptionModel {
+    provider: String,
+    model_id: String,
+    base_url: String,
+    headers: Headers,
+    transport: OpenAICompatibleTransport,
+    current_date: Option<Arc<dyn Fn() -> OffsetDateTime + Send + Sync>>,
+}
+
+impl OpenAITranscriptionModel {
     fn new(
         provider: impl Into<String>,
         model_id: impl Into<String>,
@@ -469,6 +564,26 @@ impl OpenAIProvider {
         self.speech(model_id)
     }
 
+    /// Creates an OpenAI transcription model.
+    pub fn transcription(&self, model_id: impl Into<String>) -> OpenAITranscriptionModel {
+        let provider_name = openai_provider_name(&self.settings);
+        OpenAITranscriptionModel::new(
+            format!("{provider_name}.transcription"),
+            model_id,
+            openai_base_url(&self.settings),
+            openai_headers(&self.settings),
+            self.transport
+                .as_ref()
+                .map(Arc::clone)
+                .unwrap_or_else(default_openai_files_transport),
+        )
+    }
+
+    /// Creates an OpenAI transcription model.
+    pub fn transcription_model(&self, model_id: impl Into<String>) -> OpenAITranscriptionModel {
+        self.transcription(model_id)
+    }
+
     /// Creates the OpenAI files upload interface.
     pub fn files(&self) -> OpenAIFiles {
         let provider_name = openai_provider_name(&self.settings);
@@ -659,6 +774,79 @@ impl SpeechModel for OpenAISpeechModel {
             }
 
             result
+        })
+    }
+}
+
+impl ProviderWithTranscriptionModel for OpenAIProvider {
+    type TranscriptionModel = OpenAITranscriptionModel;
+
+    fn transcription_model(
+        &self,
+        model_id: &str,
+    ) -> Result<Self::TranscriptionModel, NoSuchModelError> {
+        Ok(OpenAIProvider::transcription_model(self, model_id))
+    }
+}
+
+impl TranscriptionModel for OpenAITranscriptionModel {
+    type GenerateFuture<'a>
+        = Pin<Box<dyn Future<Output = TranscriptionModelResult> + Send + 'a>>
+    where
+        Self: 'a;
+
+    fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    fn do_generate(&self, options: TranscriptionModelCallOptions) -> Self::GenerateFuture<'_> {
+        let provider = self.provider.clone();
+        let model_id = self.model_id.clone();
+        let base_url = self.base_url.clone();
+        let mut headers = self.headers.clone();
+        let transport = Arc::clone(&self.transport);
+        let current_date = self.current_date.as_ref().map(Arc::clone);
+
+        Box::pin(async move {
+            let timestamp = current_date
+                .as_ref()
+                .map(|current_date| current_date())
+                .unwrap_or_else(OffsetDateTime::now_utc);
+            let (form_data, warnings) = openai_transcription_form_data(&model_id, &options);
+
+            if let Some(request_headers) = &options.headers {
+                for (name, value) in request_headers {
+                    headers.insert(name.clone(), value.clone());
+                }
+            }
+
+            let response = post_form_data_to_api(
+                PostFormDataToApiOptions::new(
+                    format!("{base_url}/audio/transcriptions"),
+                    form_data,
+                )
+                .with_headers(headers.into_iter().map(|(name, value)| (name, Some(value))))
+                .with_optional_abort_signal(options.abort_signal),
+                move |request| transport(request),
+                |request, response| {
+                    create_json_response_handler::<OpenAITranscriptionResponse, _, _>(
+                        response.json_response_handler_options(request),
+                        |value| serde_json::from_value(value.clone()),
+                    )
+                    .map_err(ProviderApiResponseHandlerError::from)
+                },
+                move |request, response| {
+                    Ok(openai_failed_response_handler(&provider, request, response))
+                },
+            )
+            .await
+            .expect("OpenAI transcription failed");
+
+            openai_transcription_result(model_id, timestamp, response, warnings)
         })
     }
 }
@@ -1005,6 +1193,198 @@ fn openai_speech_output_format_is_supported(output_format: &str) -> bool {
     )
 }
 
+fn openai_transcription_form_data(
+    model_id: &str,
+    options: &TranscriptionModelCallOptions,
+) -> (FormData, Vec<Warning>) {
+    let mut form_data = FormData::new();
+    form_data.append("model", FormDataValue::text(model_id));
+    form_data.append(
+        "file",
+        FormDataValue::bytes(openai_file_upload_data_bytes(&options.audio)),
+    );
+
+    if let Some(openai_options) = options
+        .provider_options
+        .as_ref()
+        .and_then(|provider_options| provider_options.get("openai"))
+    {
+        if let Some(JsonValue::Array(include)) = openai_options.get("include") {
+            for value in include.iter().filter_map(JsonValue::as_str) {
+                form_data.append("include[]", FormDataValue::text(value));
+            }
+        }
+        if let Some(language) = openai_options.get("language").and_then(JsonValue::as_str) {
+            form_data.append("language", FormDataValue::text(language));
+        }
+        if let Some(prompt) = openai_options.get("prompt").and_then(JsonValue::as_str) {
+            form_data.append("prompt", FormDataValue::text(prompt));
+        }
+
+        form_data.append(
+            "response_format",
+            FormDataValue::text(openai_transcription_response_format(model_id)),
+        );
+
+        let temperature = openai_options
+            .get("temperature")
+            .map(openai_form_data_value)
+            .unwrap_or_else(|| "0".to_string());
+        form_data.append("temperature", FormDataValue::text(temperature));
+
+        if let Some(JsonValue::Array(granularities)) = openai_options.get("timestampGranularities")
+        {
+            for value in granularities.iter().filter_map(JsonValue::as_str) {
+                form_data.append("timestamp_granularities[]", FormDataValue::text(value));
+            }
+        }
+    }
+
+    let _filename = format!("audio.{}", media_type_to_extension(&options.media_type));
+
+    (form_data, Vec::new())
+}
+
+fn openai_transcription_response_format(model_id: &str) -> &'static str {
+    if matches!(model_id, "gpt-4o-transcribe" | "gpt-4o-mini-transcribe") {
+        "json"
+    } else {
+        "verbose_json"
+    }
+}
+
+fn openai_form_data_value(value: &JsonValue) -> String {
+    match value {
+        JsonValue::String(value) => value.clone(),
+        JsonValue::Number(value) => value.to_string(),
+        JsonValue::Bool(value) => value.to_string(),
+        _ => value.to_string(),
+    }
+}
+
+fn openai_transcription_result(
+    model_id: String,
+    timestamp: OffsetDateTime,
+    response: ResponseHandlerResult<OpenAITranscriptionResponse>,
+    warnings: Vec<Warning>,
+) -> TranscriptionModelResult {
+    let response_headers = response.response_headers.clone();
+    let raw_value = response.raw_value.clone();
+    let OpenAITranscriptionResponse {
+        text,
+        language,
+        duration,
+        segments,
+        words,
+    } = response.value;
+
+    let segments = segments
+        .map(|segments| {
+            segments
+                .into_iter()
+                .map(|segment| {
+                    TranscriptionModelSegment::new(segment.text, segment.start, segment.end)
+                })
+                .collect()
+        })
+        .or_else(|| {
+            words.map(|words| {
+                words
+                    .into_iter()
+                    .map(|word| TranscriptionModelSegment::new(word.word, word.start, word.end))
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+
+    let mut transcription_response = TranscriptionModelResponse::new(timestamp, model_id);
+    if let Some(response_headers) = response_headers {
+        transcription_response.headers = Some(response_headers);
+    }
+    if let Some(raw_value) = raw_value {
+        transcription_response.body = Some(raw_value);
+    }
+
+    let mut result = TranscriptionModelResult::new(text, segments, transcription_response);
+    if let Some(language) = language.and_then(|language| openai_transcription_language(&language)) {
+        result = result.with_language(language);
+    }
+    if let Some(duration) = duration {
+        result = result.with_duration_in_seconds(duration);
+    }
+    for warning in warnings {
+        result = result.with_warning(warning);
+    }
+
+    result
+}
+
+fn openai_transcription_language(language: &str) -> Option<String> {
+    let code = match language {
+        "afrikaans" => "af",
+        "arabic" => "ar",
+        "armenian" => "hy",
+        "azerbaijani" => "az",
+        "belarusian" => "be",
+        "bosnian" => "bs",
+        "bulgarian" => "bg",
+        "catalan" => "ca",
+        "chinese" => "zh",
+        "croatian" => "hr",
+        "czech" => "cs",
+        "danish" => "da",
+        "dutch" => "nl",
+        "english" => "en",
+        "estonian" => "et",
+        "finnish" => "fi",
+        "french" => "fr",
+        "galician" => "gl",
+        "german" => "de",
+        "greek" => "el",
+        "hebrew" => "he",
+        "hindi" => "hi",
+        "hungarian" => "hu",
+        "icelandic" => "is",
+        "indonesian" => "id",
+        "italian" => "it",
+        "japanese" => "ja",
+        "kannada" => "kn",
+        "kazakh" => "kk",
+        "korean" => "ko",
+        "latvian" => "lv",
+        "lithuanian" => "lt",
+        "macedonian" => "mk",
+        "malay" => "ms",
+        "marathi" => "mr",
+        "maori" => "mi",
+        "nepali" => "ne",
+        "norwegian" => "no",
+        "persian" => "fa",
+        "polish" => "pl",
+        "portuguese" => "pt",
+        "romanian" => "ro",
+        "russian" => "ru",
+        "serbian" => "sr",
+        "slovak" => "sk",
+        "slovenian" => "sl",
+        "spanish" => "es",
+        "swahili" => "sw",
+        "swedish" => "sv",
+        "tagalog" => "tl",
+        "tamil" => "ta",
+        "thai" => "th",
+        "turkish" => "tr",
+        "ukrainian" => "uk",
+        "urdu" => "ur",
+        "vietnamese" => "vi",
+        "welsh" => "cy",
+        code if code.len() == 2 => code,
+        _ => return None,
+    };
+
+    Some(code.to_string())
+}
+
 fn openai_failed_response_handler(
     provider: &str,
     request: &crate::provider_utils::ProviderApiRequest,
@@ -1139,7 +1519,7 @@ mod tests {
     use crate::prompt::Prompt;
     use crate::provider::{
         Provider, ProviderOptions, ProviderWithFiles, ProviderWithSkills, ProviderWithSpeechModel,
-        SpecificationVersion,
+        ProviderWithTranscriptionModel, SpecificationVersion,
     };
     use crate::provider_utils::{
         FormDataValue, ParseJsonResult, ProviderApiRequest, ProviderApiRequestBody,
@@ -1147,6 +1527,9 @@ mod tests {
     };
     use crate::skills::{Skills, SkillsFile, SkillsFileData, SkillsUploadSkillCallOptions};
     use crate::speech_model::{SpeechModel, SpeechModelCallOptions};
+    use crate::transcription_model::{
+        TranscriptionModel, TranscriptionModelCallOptions, TranscriptionModelSegment,
+    };
     use crate::warning::Warning;
     use serde_json::{Map, json};
     use std::future::Future;
@@ -2332,6 +2715,452 @@ mod tests {
     }
 
     #[test]
+    fn openai_transcription_should_pass_the_model() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_transcription_test_provider(
+            Arc::clone(&captured_requests),
+            openai_transcription_fixture(),
+        );
+
+        let _result = poll_ready(
+            provider
+                .transcription("whisper-1")
+                .do_generate(openai_transcription_call_options()),
+        );
+
+        let request = captured_openai_request(&captured_requests);
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(
+            request.url,
+            "https://api.openai.test/v1/audio/transcriptions"
+        );
+        let form_data = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_form_data)
+            .expect("form data body is captured");
+        assert_eq!(
+            form_data.get("model"),
+            Some(&FormDataValue::text("whisper-1"))
+        );
+        assert_eq!(
+            form_data.get("file"),
+            Some(&FormDataValue::bytes(vec![1_u8, 2, 3, 4]))
+        );
+    }
+
+    #[test]
+    fn openai_transcription_should_pass_headers() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_transcription_test_provider(
+            Arc::clone(&captured_requests),
+            openai_transcription_fixture(),
+        );
+
+        let _result = poll_ready(
+            provider.transcription("whisper-1").do_generate(
+                openai_transcription_call_options()
+                    .with_header("Custom-Request-Header", "request-header-value"),
+            ),
+        );
+
+        let request = captured_openai_request(&captured_requests);
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("value")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("custom-request-header")
+                .map(String::as_str),
+            Some("request-header-value")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("openai-organization")
+                .map(String::as_str),
+            Some("org_test")
+        );
+        assert_eq!(
+            request.headers.get("openai-project").map(String::as_str),
+            Some("proj_test")
+        );
+        assert!(
+            request
+                .headers
+                .get("user-agent")
+                .is_some_and(|value| value.contains("ai-sdk/openai/0.1.0"))
+        );
+    }
+
+    #[test]
+    fn openai_transcription_should_extract_the_transcription_text() {
+        let provider = openai_transcription_test_provider(
+            Arc::new(Mutex::new(Vec::new())),
+            openai_transcription_fixture(),
+        );
+
+        let result = poll_ready(
+            provider
+                .transcription("whisper-1")
+                .do_generate(openai_transcription_call_options()),
+        );
+
+        assert_eq!(
+            result.text,
+            "Galileo was an American robotic space program that studied the planet Jupiter and its moons, as well as several other solar system bodies."
+        );
+    }
+
+    #[test]
+    fn openai_transcription_should_include_response_data_with_timestamp_model_id_and_headers() {
+        let provider = openai_transcription_test_provider(
+            Arc::new(Mutex::new(Vec::new())),
+            openai_transcription_fixture(),
+        );
+        let test_date =
+            OffsetDateTime::parse("1970-01-01T00:00:00Z", &Rfc3339).expect("date parses");
+
+        let result = poll_ready(
+            provider
+                .transcription("whisper-1")
+                .with_current_date(move || test_date)
+                .do_generate(openai_transcription_call_options()),
+        );
+
+        assert_eq!(result.response.timestamp, test_date);
+        assert_eq!(result.response.model_id, "whisper-1");
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("test-request-id")
+        );
+        assert_eq!(result.response.body, Some(openai_transcription_fixture()));
+    }
+
+    #[test]
+    fn openai_transcription_should_use_real_date_when_no_custom_date_provider_is_specified() {
+        let provider = openai_transcription_test_provider(
+            Arc::new(Mutex::new(Vec::new())),
+            openai_transcription_fixture(),
+        );
+        let before = OffsetDateTime::now_utc();
+
+        let result = poll_ready(
+            provider
+                .transcription("whisper-1")
+                .do_generate(openai_transcription_call_options()),
+        );
+        let after = OffsetDateTime::now_utc();
+
+        assert!(result.response.timestamp >= before);
+        assert!(result.response.timestamp <= after);
+        assert_eq!(result.response.model_id, "whisper-1");
+    }
+
+    #[test]
+    fn openai_transcription_should_pass_response_format_when_timestamp_granularities_is_set() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_transcription_test_provider(
+            Arc::clone(&captured_requests),
+            openai_transcription_fixture(),
+        );
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "timestampGranularities": ["word"]
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let _result = poll_ready(provider.transcription("whisper-1").do_generate(
+            openai_transcription_call_options().with_provider_options(provider_options),
+        ));
+
+        let form_data = captured_openai_request(&captured_requests)
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_form_data)
+            .expect("form data body is captured")
+            .clone();
+        assert_eq!(
+            form_data.get("response_format"),
+            Some(&FormDataValue::text("verbose_json"))
+        );
+        assert_eq!(
+            form_data.get("temperature"),
+            Some(&FormDataValue::text("0"))
+        );
+        assert_eq!(
+            form_data.get("timestamp_granularities[]"),
+            Some(&FormDataValue::text("word"))
+        );
+    }
+
+    #[test]
+    fn openai_transcription_should_not_set_verbose_json_for_gpt_4o_transcribe() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_transcription_test_provider(
+            Arc::clone(&captured_requests),
+            openai_transcription_fixture(),
+        );
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "timestampGranularities": ["word"]
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let _result = poll_ready(provider.transcription("gpt-4o-transcribe").do_generate(
+            openai_transcription_call_options().with_provider_options(provider_options),
+        ));
+
+        let form_data = captured_openai_request(&captured_requests)
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_form_data)
+            .expect("form data body is captured")
+            .clone();
+        assert_eq!(
+            form_data.get("response_format"),
+            Some(&FormDataValue::text("json"))
+        );
+        assert_eq!(
+            form_data.get("timestamp_granularities[]"),
+            Some(&FormDataValue::text("word"))
+        );
+    }
+
+    #[test]
+    fn openai_transcription_should_pass_timestamp_granularities_when_specified() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_transcription_test_provider(
+            Arc::clone(&captured_requests),
+            openai_transcription_fixture(),
+        );
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "timestampGranularities": ["segment"]
+            }
+        }))
+        .expect("provider options deserialize");
+
+        let _result = poll_ready(provider.transcription("whisper-1").do_generate(
+            openai_transcription_call_options().with_provider_options(provider_options),
+        ));
+
+        let form_data = captured_openai_request(&captured_requests)
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_form_data)
+            .expect("form data body is captured")
+            .clone();
+        assert_eq!(
+            form_data.get("timestamp_granularities[]"),
+            Some(&FormDataValue::text("segment"))
+        );
+    }
+
+    #[test]
+    fn openai_transcription_should_work_when_no_words_language_or_duration_are_returned() {
+        let provider = openai_transcription_test_provider(
+            Arc::new(Mutex::new(Vec::new())),
+            json!({
+                "task": "transcribe",
+                "text": "Hello from the Vercel AI SDK!",
+                "_request_id": "req_1234"
+            }),
+        );
+
+        let result = poll_ready(
+            provider
+                .transcription("whisper-1")
+                .do_generate(openai_transcription_call_options()),
+        );
+
+        assert_eq!(result.text, "Hello from the Vercel AI SDK!");
+        assert_eq!(result.segments, Vec::<TranscriptionModelSegment>::new());
+        assert_eq!(result.language, None);
+        assert_eq!(result.duration_in_seconds, None);
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn openai_transcription_should_parse_segments_when_provided_in_response() {
+        let provider = openai_transcription_test_provider(
+            Arc::new(Mutex::new(Vec::new())),
+            json!({
+                "task": "transcribe",
+                "text": "Hello world. How are you?",
+                "segments": [
+                    {
+                        "id": 0,
+                        "seek": 0,
+                        "start": 0.0,
+                        "end": 2.5,
+                        "text": "Hello world.",
+                        "tokens": [1234, 5678],
+                        "temperature": 0.0,
+                        "avg_logprob": -0.5,
+                        "compression_ratio": 1.2,
+                        "no_speech_prob": 0.1
+                    },
+                    {
+                        "id": 1,
+                        "seek": 250,
+                        "start": 2.5,
+                        "end": 5.0,
+                        "text": " How are you?",
+                        "tokens": [9012, 3456],
+                        "temperature": 0.0,
+                        "avg_logprob": -0.6,
+                        "compression_ratio": 1.1,
+                        "no_speech_prob": 0.05
+                    }
+                ],
+                "language": "en",
+                "duration": 5.0
+            }),
+        );
+
+        let result = poll_ready(
+            provider
+                .transcription("whisper-1")
+                .do_generate(openai_transcription_call_options()),
+        );
+
+        assert_eq!(
+            result.segments,
+            vec![
+                TranscriptionModelSegment::new("Hello world.", 0.0, 2.5),
+                TranscriptionModelSegment::new(" How are you?", 2.5, 5.0),
+            ]
+        );
+        assert_eq!(result.text, "Hello world. How are you?");
+        assert_eq!(result.duration_in_seconds, Some(5.0));
+    }
+
+    #[test]
+    fn openai_transcription_should_fallback_to_words_when_segments_are_not_available() {
+        let provider = openai_transcription_test_provider(
+            Arc::new(Mutex::new(Vec::new())),
+            json!({
+                "task": "transcribe",
+                "text": "Hello world",
+                "words": [
+                    { "word": "Hello", "start": 0.0, "end": 1.0 },
+                    { "word": "world", "start": 1.0, "end": 2.0 }
+                ],
+                "language": "en",
+                "duration": 2.0
+            }),
+        );
+
+        let result = poll_ready(
+            provider
+                .transcription("whisper-1")
+                .do_generate(openai_transcription_call_options()),
+        );
+
+        assert_eq!(
+            result.segments,
+            vec![
+                TranscriptionModelSegment::new("Hello", 0.0, 1.0),
+                TranscriptionModelSegment::new("world", 1.0, 2.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn openai_transcription_should_handle_empty_segments_array() {
+        let provider = openai_transcription_test_provider(
+            Arc::new(Mutex::new(Vec::new())),
+            json!({
+                "task": "transcribe",
+                "text": "Hello world",
+                "segments": [],
+                "language": "en",
+                "duration": 2.0
+            }),
+        );
+
+        let result = poll_ready(
+            provider
+                .transcription("whisper-1")
+                .do_generate(openai_transcription_call_options()),
+        );
+
+        assert_eq!(result.segments, Vec::<TranscriptionModelSegment>::new());
+        assert_eq!(result.text, "Hello world");
+    }
+
+    #[test]
+    fn openai_transcription_should_handle_segments_with_missing_optional_fields() {
+        let provider = openai_transcription_test_provider(
+            Arc::new(Mutex::new(Vec::new())),
+            json!({
+                "task": "transcribe",
+                "text": "Test",
+                "segments": [
+                    {
+                        "id": 0,
+                        "seek": 0,
+                        "start": 0.0,
+                        "end": 1.0,
+                        "text": "Test",
+                        "tokens": [1234],
+                        "temperature": 0.0,
+                        "avg_logprob": -0.5,
+                        "compression_ratio": 1.0,
+                        "no_speech_prob": 0.1
+                    }
+                ],
+                "_request_id": "req_1234"
+            }),
+        );
+
+        let result = poll_ready(
+            provider
+                .transcription("whisper-1")
+                .do_generate(openai_transcription_call_options()),
+        );
+
+        assert_eq!(
+            result.segments,
+            vec![TranscriptionModelSegment::new("Test", 0.0, 1.0)]
+        );
+        assert_eq!(result.language, None);
+        assert_eq!(result.duration_in_seconds, None);
+    }
+
+    #[test]
+    fn openai_transcription_should_set_specification_version_and_provider() {
+        let provider = openai_transcription_test_provider(
+            Arc::new(Mutex::new(Vec::new())),
+            openai_transcription_fixture(),
+        );
+        let transcription =
+            ProviderWithTranscriptionModel::transcription_model(&provider, "whisper-1")
+                .expect("transcription model resolves");
+
+        assert_eq!(
+            transcription.specification_version(),
+            SpecificationVersion::V4
+        );
+        assert_eq!(transcription.provider(), "openai.transcription");
+        assert_eq!(transcription.model_id(), "whisper-1");
+    }
+
+    #[test]
     fn openai_provider_uses_default_base_url_name_override_and_provider_trait() {
         let provider = OpenAIProvider::new().with_name("custom-openai");
 
@@ -2352,6 +3181,13 @@ mod tests {
         let trait_speech =
             ProviderWithSpeechModel::speech_model(&provider, "tts-1").expect("speech model exists");
         assert_eq!(trait_speech.provider(), "custom-openai.speech");
+        let trait_transcription =
+            ProviderWithTranscriptionModel::transcription_model(&provider, "whisper-1")
+                .expect("transcription model exists");
+        assert_eq!(
+            trait_transcription.provider(),
+            "custom-openai.transcription"
+        );
     }
 
     #[test]
@@ -2494,6 +3330,67 @@ mod tests {
             .with_project("proj_test")
             .with_header("custom-header", "value")
             .with_transport(transport)
+    }
+
+    fn openai_transcription_test_provider(
+        captured_requests: Arc<Mutex<Vec<ProviderApiRequest>>>,
+        response_body: JsonValue,
+    ) -> OpenAIProvider {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(move |request| -> OpenAICompatibleTransportFuture {
+                captured_requests
+                    .lock()
+                    .expect("captured requests mutex is not poisoned")
+                    .push(request);
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    response_body.to_string(),
+                )
+                .with_headers(Headers::from([
+                    ("content-type".to_string(), "application/json".to_string()),
+                    ("x-ratelimit-remaining".to_string(), "123".to_string()),
+                    ("x-request-id".to_string(), "test-request-id".to_string()),
+                ])))))
+            });
+
+        OpenAIProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://api.openai.test/v1/")
+            .with_organization("org_test")
+            .with_project("proj_test")
+            .with_header("custom-header", "value")
+            .with_transport(transport)
+    }
+
+    fn openai_transcription_call_options() -> TranscriptionModelCallOptions {
+        TranscriptionModelCallOptions::new(FileDataContent::Bytes(vec![1, 2, 3, 4]), "audio/wav")
+    }
+
+    fn openai_transcription_fixture() -> JsonValue {
+        json!({
+            "task": "transcribe",
+            "language": "english",
+            "duration": 36.709999084472656_f64,
+            "text": "Galileo was an American robotic space program that studied the planet Jupiter and its moons, as well as several other solar system bodies.",
+            "words": [
+                {
+                    "word": "Galileo",
+                    "start": 0,
+                    "end": 0.6600000262260437_f64
+                },
+                {
+                    "word": "was",
+                    "start": 0.6600000262260437_f64,
+                    "end": 0.8999999761581421_f64
+                }
+            ],
+            "usage": {
+                "type": "duration",
+                "seconds": 37
+            }
+        })
     }
 
     fn openai_skill_upload_options(data: SkillsFileData) -> SkillsUploadSkillCallOptions {
