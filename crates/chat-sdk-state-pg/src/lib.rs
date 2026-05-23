@@ -99,6 +99,18 @@ impl PgStateAdapter {
     }
 }
 
+/// Generate a unique lock token. 1:1 port of upstream's private
+/// `generateToken()`: `pg_${crypto.randomUUID()}`. Uses
+/// `uuid::Uuid::new_v4()` to match Node's `crypto.randomUUID()`
+/// (also a v4 UUID).
+///
+/// Exposed at module scope (rather than private as upstream) so the
+/// shape can be unit-tested without driving through `acquireLock`
+/// which requires a live Postgres connection.
+pub fn generate_token() -> String {
+    format!("pg_{}", uuid::Uuid::new_v4())
+}
+
 #[async_trait]
 impl StateAdapter for PgStateAdapter {
     async fn get(&self, _key: &str) -> StateResult<Option<serde_json::Value>> {
@@ -137,6 +149,31 @@ impl StateAdapter for PgStateAdapter {
 mod tests {
     use super::*;
     use futures_executor::block_on;
+
+    #[test]
+    // ---------- generate_token (additive) ----------
+    // No standalone upstream tests; the helper is exercised through
+    // `acquireLock`. The Rust suite locks in the shape.
+
+    #[test]
+    fn generate_token_has_pg_prefix_and_v4_uuid_suffix() {
+        let t = generate_token();
+        assert!(t.starts_with("pg_"), "got: {t}");
+        // pg_<uuid> -> 3 chars + 36 char UUID.
+        assert_eq!(t.len(), 3 + 36, "got: {t}");
+        // The suffix parses as a UUID.
+        let suffix = &t[3..];
+        let parsed = uuid::Uuid::parse_str(suffix).expect("uuid parses");
+        assert_eq!(parsed.get_version_num(), 4, "expected v4 uuid: {suffix}");
+    }
+
+    #[test]
+    fn generate_token_produces_unique_values_across_calls() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..1000 {
+            assert!(seen.insert(generate_token()));
+        }
+    }
 
     #[test]
     fn options_new_stores_database_url_and_defaults_prefix() {
