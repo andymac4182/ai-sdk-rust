@@ -381,6 +381,173 @@ pub struct UserInfo {
     pub user_name: String,
 }
 
+/// Duration shorthand `e.g. "7d", "30m", "2h", "45s"`. 1:1 port of
+/// upstream `export type DurationString = `${number}${"s" | "m" | "h" | "d"}``.
+///
+/// TypeScript expresses this as a template-literal type; Rust uses a
+/// validated `String` newtype with [`FromStr`]/[`std::fmt::Display`] and a
+/// `unit()` accessor. Construction goes through [`Self::parse`] so invalid
+/// shapes can never reach the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DurationString(String);
+
+/// Unit suffix on a [`DurationString`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DurationUnit {
+    Seconds,
+    Minutes,
+    Hours,
+    Days,
+}
+
+impl DurationUnit {
+    /// Single-character upstream suffix (`'s'`, `'m'`, `'h'`, `'d'`).
+    pub const fn suffix(self) -> char {
+        match self {
+            Self::Seconds => 's',
+            Self::Minutes => 'm',
+            Self::Hours => 'h',
+            Self::Days => 'd',
+        }
+    }
+
+    fn from_char(c: char) -> Option<Self> {
+        Some(match c {
+            's' => Self::Seconds,
+            'm' => Self::Minutes,
+            'h' => Self::Hours,
+            'd' => Self::Days,
+            _ => return None,
+        })
+    }
+}
+
+/// Error from [`DurationString::parse`] when the input does not match
+/// upstream `${number}${"s"|"m"|"h"|"d"}` shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidDurationString(pub String);
+
+impl std::fmt::Display for InvalidDurationString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "invalid DurationString {:?}: expected `<number>(s|m|h|d)`",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for InvalidDurationString {}
+
+impl DurationString {
+    /// Parse `"45s"`, `"30m"`, `"2h"`, `"7d"`, etc. into a validated
+    /// [`DurationString`]. Returns [`InvalidDurationString`] on malformed
+    /// input.
+    pub fn parse(input: &str) -> Result<Self, InvalidDurationString> {
+        let bytes = input.as_bytes();
+        if bytes.len() < 2 {
+            return Err(InvalidDurationString(input.to_string()));
+        }
+        let last = input.chars().last().expect("non-empty");
+        if DurationUnit::from_char(last).is_none() {
+            return Err(InvalidDurationString(input.to_string()));
+        }
+        let number = &input[..input.len() - 1];
+        if number.is_empty() || number.parse::<u64>().is_err() {
+            return Err(InvalidDurationString(input.to_string()));
+        }
+        Ok(Self(input.to_string()))
+    }
+
+    /// Build a [`DurationString`] from explicit components without going
+    /// through string parsing.
+    pub fn from_parts(value: u64, unit: DurationUnit) -> Self {
+        Self(format!("{}{}", value, unit.suffix()))
+    }
+
+    /// Borrowed view of the raw `"<n>(s|m|h|d)"` shorthand.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Numeric component, e.g. `7` for `"7d"`. Always parses because
+    /// construction validated it.
+    pub fn value(&self) -> u64 {
+        self.0[..self.0.len() - 1]
+            .parse()
+            .expect("validated at construction")
+    }
+
+    /// Unit component, e.g. [`DurationUnit::Days`] for `"7d"`.
+    pub fn unit(&self) -> DurationUnit {
+        DurationUnit::from_char(self.0.chars().last().expect("validated"))
+            .expect("validated at construction")
+    }
+}
+
+impl std::fmt::Display for DurationString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::str::FromStr for DurationString {
+    type Err = InvalidDurationString;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+    }
+}
+
+impl Serialize for DurationString {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for DurationString {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Retention policy on stored transcripts. 1:1 port of the upstream
+/// `number | DurationString` union on [`TranscriptsConfig::retention`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RetentionPolicy {
+    /// Raw millisecond TTL (upstream `number`).
+    Millis(u64),
+    /// Duration shorthand (`"7d"`, `"30m"`, …).
+    Duration(DurationString),
+}
+
+/// Transcript-storage configuration. 1:1 port of upstream
+/// `interface TranscriptsConfig`. Every field is optional matching upstream
+/// `?:` notation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TranscriptsConfig {
+    /// Hard cap; older messages evicted on append. Default 200.
+    #[serde(
+        rename = "maxPerUser",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_per_user: Option<u32>,
+    /// Default retention applied as the list TTL. Refreshed on every
+    /// append. Omit for no expiry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<RetentionPolicy>,
+    /// Persist `formatted` (mdast) on each transcript entry. Default false
+    /// to keep storage small.
+    #[serde(
+        rename = "storeFormatted",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub store_formatted: Option<bool>,
+}
+
 /// State-backend lock token. 1:1 port of upstream
 /// `interface Lock { expiresAt: number; threadId: string; token: string }`.
 ///
@@ -802,6 +969,95 @@ mod tests {
         assert!(json.contains("\"fullName\":\"Grace\""));
         let back: UserInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(back, user);
+    }
+
+    #[test]
+    fn duration_string_parses_valid_shapes() {
+        let cases = [
+            ("45s", 45, DurationUnit::Seconds),
+            ("30m", 30, DurationUnit::Minutes),
+            ("2h", 2, DurationUnit::Hours),
+            ("7d", 7, DurationUnit::Days),
+            ("0s", 0, DurationUnit::Seconds),
+            ("123456d", 123456, DurationUnit::Days),
+        ];
+        for (input, value, unit) in cases {
+            let d = DurationString::parse(input).unwrap();
+            assert_eq!(d.as_str(), input);
+            assert_eq!(d.value(), value);
+            assert_eq!(d.unit(), unit);
+            assert_eq!(d.to_string(), input);
+        }
+    }
+
+    #[test]
+    fn duration_string_rejects_invalid_shapes() {
+        for bad in [
+            "",     // empty
+            "s",    // missing number
+            "5",    // missing unit
+            "5x",   // invalid unit
+            "ms",   // non-numeric prefix
+            "5dd",  // trailing chars
+            "-1d",  // negative
+            "1.5d", // decimal
+        ] {
+            assert!(
+                DurationString::parse(bad).is_err(),
+                "expected {bad:?} to fail to parse"
+            );
+        }
+    }
+
+    #[test]
+    fn duration_string_from_parts_round_trips_through_parse() {
+        let built = DurationString::from_parts(15, DurationUnit::Minutes);
+        assert_eq!(built.as_str(), "15m");
+        let reparsed = DurationString::parse(built.as_str()).unwrap();
+        assert_eq!(built, reparsed);
+    }
+
+    #[test]
+    fn duration_string_serializes_as_plain_string() {
+        let d = DurationString::parse("7d").unwrap();
+        let json = serde_json::to_string(&d).unwrap();
+        assert_eq!(json, "\"7d\"");
+        let back: DurationString = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, d);
+        assert!(serde_json::from_str::<DurationString>("\"5x\"").is_err());
+    }
+
+    #[test]
+    fn retention_policy_discriminates_number_and_duration_string() {
+        let millis = RetentionPolicy::Millis(60_000);
+        assert_eq!(serde_json::to_string(&millis).unwrap(), "60000");
+        let parsed: RetentionPolicy = serde_json::from_str("60000").unwrap();
+        assert_eq!(parsed, millis);
+
+        let duration = RetentionPolicy::Duration(DurationString::parse("7d").unwrap());
+        assert_eq!(serde_json::to_string(&duration).unwrap(), "\"7d\"");
+        let parsed: RetentionPolicy = serde_json::from_str("\"7d\"").unwrap();
+        assert_eq!(parsed, duration);
+    }
+
+    #[test]
+    fn transcripts_config_minimum_and_full_shapes_round_trip() {
+        let default_cfg = TranscriptsConfig::default();
+        assert_eq!(serde_json::to_string(&default_cfg).unwrap(), "{}");
+
+        let full = TranscriptsConfig {
+            max_per_user: Some(100),
+            retention: Some(RetentionPolicy::Duration(
+                DurationString::parse("30d").unwrap(),
+            )),
+            store_formatted: Some(true),
+        };
+        let json = serde_json::to_string(&full).unwrap();
+        assert!(json.contains("\"maxPerUser\":100"));
+        assert!(json.contains("\"retention\":\"30d\""));
+        assert!(json.contains("\"storeFormatted\":true"));
+        let back: TranscriptsConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, full);
     }
 
     #[test]
