@@ -1275,4 +1275,54 @@ mod tests {
         let value = serde_json::to_value(&c).unwrap();
         assert!(is_card_element(&value));
     }
+
+    // ---------- slice 102: 4 more 1:1 cards.test.ts cases ----------
+
+    #[test]
+    fn is_card_element_returns_false_for_non_card_objects() {
+        for value in [
+            serde_json::json!({"type": "text", "content": "hi"}),
+            serde_json::json!({"type": "button"}),
+            serde_json::json!({}),
+            serde_json::json!(null),
+        ] {
+            assert!(!is_card_element(&value));
+        }
+    }
+
+    #[test]
+    fn card_with_all_options_carries_title_subtitle_and_image_url() {
+        let c = card(CardOptions {
+            title: Some("Order".to_string()),
+            subtitle: Some("Processing".to_string()),
+            image_url: Some("https://example.com/img.png".to_string()),
+            children: None,
+        });
+        assert_eq!(c.title.as_deref(), Some("Order"));
+        assert_eq!(c.subtitle.as_deref(), Some("Processing"));
+        assert_eq!(c.image_url.as_deref(), Some("https://example.com/img.png"));
+    }
+
+    #[test]
+    fn image_with_alt_attribute_emits_alt_field_in_serialized_form() {
+        let elem = image(
+            "https://example.com/avatar.png",
+            Some("Profile photo".to_string()),
+        );
+        let json = serde_json::to_string(&elem).unwrap();
+        assert!(json.contains("\"alt\":\"Profile photo\""));
+        assert!(json.contains("\"type\":\"image\""));
+    }
+
+    #[test]
+    fn button_with_callback_url_serializes_callback_url_in_camel_case() {
+        let elem = button(ButtonOptions {
+            id: "ok".to_string(),
+            label: "OK".to_string(),
+            callback_url: Some("https://example.com/cb".to_string()),
+            ..Default::default()
+        });
+        let json = serde_json::to_string(&elem).unwrap();
+        assert!(json.contains("\"callbackUrl\":\"https://example.com/cb\""));
+    }
 }
