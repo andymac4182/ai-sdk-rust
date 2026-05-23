@@ -7,6 +7,7 @@
 //! `team_key` (e.g. "ENG") plus the GraphQL issue UUID is sufficient
 //! to address comments through Linear's API.
 
+pub mod cards;
 pub mod utils;
 
 use async_trait::async_trait;
