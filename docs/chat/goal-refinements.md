@@ -1747,3 +1747,120 @@ reply option + pre-minted bearer, 14 -> 17 tests, 10% -> 15%).
   (*bold* vs **bold**), Telegram MarkdownV2 (escape rules),
   GChat. All depend on chat-sdk-chat's `stringify_markdown`
   which isn't yet implemented; that's a chat-sdk-chat slice.
+
+### 2026-05-24 — slices 178..182
+
+**What the brief got wrong or left out**
+
+- **The `chat:{a, v?}` JSON-in-string callback codec is shared
+  across 3 upstream adapters with identical semantics.**
+  `Telegram/cards.ts`, `WhatsApp/cards.ts`, and
+  `Messenger/cards.ts` each define their own
+  `encodeXxxCallbackData` / `decodeXxxCallbackData` with the same
+  shape: `chat:{a: actionId, v?: value}`. Differences:
+  Telegram enforces a 64-byte cap; WhatsApp/Messenger don't. The
+  empty-data fallback string differs (`telegram_callback`,
+  `whatsapp_callback`, `messenger_callback`).
+  Slices 178/179/180 ported all three with near-identical Rust
+  implementations + 9+8+10 upstream test cases. A shared helper
+  in `chat-sdk-adapter-shared` would consolidate these into one
+  generic codec but would lose the per-adapter empty-fallback
+  string. Defer the de-duplication; current per-adapter
+  implementation is more 1:1 with upstream's per-package code
+  organization.
+
+- **Slack's pure-function helpers split across four submodules
+  port well as individual slices.** Each of `crypto.ts`,
+  `webhook/utils.ts`, `api/index.ts` (pure subset), and
+  the cards/post_object helpers is its own focused module with
+  its own upstream tests. Slices 170/174/181/169 ported these
+  one at a time, lifting slack-adapter from 15% to 47%. The
+  same pattern likely applies to Linear (utils/cards already
+  done in slices 171/177; ~2 test files remain) and Teams
+  (errors already done in slice 172; ~5 test files remain).
+
+- **`escapeMarkdownV2` style helpers port as a single small
+  slice.** Slice 182 ported 4 pure helpers from
+  `adapter-telegram/src/markdown.ts` covering ~14 upstream
+  cases (the parametric loop over 19 special chars + 4 escape
+  semantics + 4 findUnescapedPositions + 5 endsWithOrphan).
+  No dependency on chat-sdk-chat's deferred `stringify_markdown`
+  - the helpers stand alone. Slack/Linear/GChat/Teams/WhatsApp
+  each have similar escape helpers worth a sweep.
+
+**Stale or misleading guidance**
+
+- The brief's matrix tracks methods (post_message, edit_message,
+  ...) and a single "Adapter method matrix" with 8 columns. The
+  reality after slices 158-182 is: methods are largely complete
+  (post_message + edit/delete/react/typing + fetch_subject + some
+  post_object across 9 adapters); the dominant remaining work
+  is **per-test-file completion of helper modules**:
+  cards/markdown/webhook/api/crypto/utils. Recommend tracking
+  test-file completion in a separate per-adapter matrix.
+
+- The deferral list in the previous refinement entry undercounted
+  pure-helper opportunities. Many upstream `<module>.test.ts`
+  files have a "describe block" devoted to a tiny pure helper
+  that can port standalone (escape fns, callback codecs, length
+  limits, etc.). Look for these first; the deeper AST <->
+  markdown converters need `stringify_markdown` and can wait.
+
+**Edits applied**
+
+- `crates/chat-sdk-adapter-telegram/src/cards.rs` (slice 178):
+  inline-keyboard renderer + callback-data codec. 9 upstream
+  cases.
+- `crates/chat-sdk-adapter-whatsapp/src/cards.rs` (slice 179):
+  text-fallback renderer + callback-codec. 8 upstream cases + 2
+  additive.
+- `crates/chat-sdk-adapter-messenger/src/cards.rs` (slice 180):
+  text renderer + callback-codec. 10 upstream cases + 1 additive.
+- `crates/chat-sdk-adapter-slack/src/api.rs` (slice 181): pure
+  helpers SlackApiResponse / SlackApiError /
+  encode_slack_api_body / assert_slack_ok + URL-encoder. 1
+  upstream case + 5 additive.
+- `crates/chat-sdk-adapter-telegram/src/markdown.rs` (slice 182):
+  4 MarkdownV2 helpers + length-limit constants. 14 upstream
+  cases + 2 additive.
+- Per-adapter parity rows + estimates: slack 45->47, telegram
+  38->44, whatsapp 28->34, messenger 32->38.
+
+**Open refinements deferred**
+
+- **Test-floor budget update**: ~1000 cases remaining (was
+  ~1200). Per-adapter test-file completion:
+  - adapter-slack: crypto 14/14, webhook utils 11/N, api 1/13;
+    remaining cards (36), markdown (31), modals (33), webhook
+    index (~150), api index (12), api boundary (1), format
+    index (~), format boundary (1), index (~), webhook
+    boundary (1). ~9 files / ~265 cases.
+  - adapter-linear: utils 3/3, cards 12/12; remaining markdown
+    (~), index (~). ~2 files.
+  - adapter-teams: errors 12/12; remaining cards (~), graph-api
+    (~), index (~), markdown (~), modals (~). ~5 files.
+  - adapter-gchat: 6 test files. ~all.
+  - adapter-discord: gateway 0/1 (heavy mocks - js-only-adjacent
+    candidate); remaining cards (38), markdown (50), index
+    (157). ~3 files.
+  - adapter-github: cards 12/12; remaining markdown (23), index
+    (~). ~2 files.
+  - adapter-telegram: cards 9/9, markdown 14/N; remaining the
+    rest of markdown + index (87). ~2-3 files.
+  - adapter-messenger: cards 10/45; remaining cards rest (~35) +
+    markdown (~) + index (~). ~3 files.
+  - adapter-whatsapp: cards 8/23; remaining cards rest (~15) +
+    markdown (26) + index (65). ~3 files.
+  - chat: many partial.
+
+- **`stringify_markdown` in chat-sdk-chat**: blocks the AST <->
+  markdown converters for ~5 adapters (Telegram, WhatsApp,
+  Messenger, GChat, GitHub, Linear). Each would unlock the rest
+  of their `markdown.test.ts` cases.
+
+- **State-backend client wire-up**: still 10% (NotConnected
+  placeholder).
+
+- **HMAC-SHA256 signature verification**: Slack `webhook/
+  verify.ts`, GitHub HMAC-SHA256, Discord Ed25519, WhatsApp +
+  Messenger HMAC variants.
