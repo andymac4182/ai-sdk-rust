@@ -2351,10 +2351,28 @@ impl<'a> ResolveToolApprovalOptions<'a> {
 /// `not-applicable`.
 pub async fn resolve_tool_approval(
     options: ResolveToolApprovalOptions<'_>,
-) -> NormalizedToolApprovalStatus {
+) -> Result<NormalizedToolApprovalStatus, TypeValidationError> {
+    let matching_tool = options.tools.and_then(|tools| {
+        tools
+            .iter()
+            .find(|tool| tool.name == options.tool_call.tool_name)
+    });
+
+    let validated_tool_context = if let Some(tool) = matching_tool {
+        let context = options
+            .tools_context
+            .and_then(|tools_context| tools_context.get(&options.tool_call.tool_name));
+        validate_tool_context(&tool.name, context, tool.context_schema())?
+    } else {
+        options
+            .tools_context
+            .and_then(|tools_context| tools_context.get(&options.tool_call.tool_name))
+            .cloned()
+    };
+
     if let Some(configuration) = options.tool_approval {
         if let Some(approve) = &configuration.generic_callback {
-            return normalize_tool_approval_status(
+            return Ok(normalize_tool_approval_status(
                 approve(GenericToolApprovalOptions {
                     tool_call: options.tool_call.clone(),
                     tools: options.tools.map(|tools| tools.to_vec()),
@@ -2363,66 +2381,53 @@ pub async fn resolve_tool_approval(
                     runtime_context: options.runtime_context.cloned().unwrap_or_default(),
                 })
                 .await,
-            );
+            ));
         }
 
         if let Some(status) = configuration.tool_status(&options.tool_call.tool_name) {
-            return normalize_tool_approval_status(Some(status.clone()));
+            return Ok(normalize_tool_approval_status(Some(status.clone())));
         }
 
         if let Some(approve) = configuration
             .tool_callbacks
             .get(&options.tool_call.tool_name)
         {
-            let tool_context = options
-                .tools_context
-                .and_then(|tools_context| tools_context.get(&options.tool_call.tool_name))
-                .cloned();
-
-            return normalize_tool_approval_status(
+            return Ok(normalize_tool_approval_status(
                 approve(
                     options.tool_call.input.clone(),
                     SingleToolApprovalOptions {
                         tool_call_id: options.tool_call.tool_call_id.clone(),
                         messages: options.messages.cloned().unwrap_or_default(),
-                        tool_context,
+                        tool_context: validated_tool_context.clone(),
                         runtime_context: options.runtime_context.cloned().unwrap_or_default(),
                     },
                 )
                 .await,
-            );
+            ));
         }
     }
 
-    if let Some(tool) = options.tools.and_then(|tools| {
-        tools
-            .iter()
-            .find(|tool| tool.name == options.tool_call.tool_name)
-    }) {
-        let context = options
-            .tools_context
-            .and_then(|tools_context| tools_context.get(&options.tool_call.tool_name))
-            .cloned();
+    if let Some(tool) = matching_tool {
         let mut needs_approval_options = ToolNeedsApprovalOptions::new(
             options.tool_call.tool_call_id.clone(),
             options.messages.cloned().unwrap_or_default(),
         );
-        if let Some(context) = context {
+        if let Some(context) = validated_tool_context {
             needs_approval_options = needs_approval_options.with_context(context);
         }
 
         if let Some(needs_approval) =
             tool.resolve_needs_approval(options.tool_call.input.clone(), needs_approval_options)
         {
-            return if needs_approval.await {
+            return Ok(if needs_approval.await {
                 NormalizedToolApprovalStatus::UserApproval
             } else {
                 NormalizedToolApprovalStatus::NotApplicable
-            };
+            });
         }
     }
 
-    NormalizedToolApprovalStatus::NotApplicable
+    Ok(NormalizedToolApprovalStatus::NotApplicable)
 }
 
 /// Error returned when a model tries to call a tool that is not available.
@@ -6299,7 +6304,8 @@ pub(crate) async fn resolve_tool_approvals_for_step(
                 .with_tools_context(tools_context)
                 .with_runtime_context(runtime_context),
         )
-        .await;
+        .await
+        .unwrap_or(NormalizedToolApprovalStatus::NotApplicable);
 
         match status {
             NormalizedToolApprovalStatus::NotApplicable => {}
@@ -8807,7 +8813,8 @@ mod tests {
             ResolveToolApprovalOptions::new(&tool_call)
                 .with_tools(&tools)
                 .with_tool_approval(&configuration),
-        ));
+        ))
+        .expect("approval resolves");
 
         assert_eq!(
             status,
@@ -8826,13 +8833,15 @@ mod tests {
         assert_eq!(
             poll_ready(resolve_tool_approval(
                 ResolveToolApprovalOptions::new(&tool_call).with_tools(&approval_required)
-            )),
+            ))
+            .expect("approval resolves"),
             NormalizedToolApprovalStatus::UserApproval
         );
         assert_eq!(
             poll_ready(resolve_tool_approval(
                 ResolveToolApprovalOptions::new(&tool_call).with_tools(&approval_not_required)
-            )),
+            ))
+            .expect("approval resolves"),
             NormalizedToolApprovalStatus::NotApplicable
         );
     }
@@ -8869,7 +8878,8 @@ mod tests {
                 .with_tools(&tools)
                 .with_messages(&prompt)
                 .with_tools_context(&tools_context),
-        ));
+        ))
+        .expect("approval resolves");
 
         assert_eq!(status, NormalizedToolApprovalStatus::UserApproval);
         let seen = seen.lock().expect("seen lock");
@@ -8888,14 +8898,16 @@ mod tests {
         assert_eq!(
             poll_ready(resolve_tool_approval(ResolveToolApprovalOptions::new(
                 &tool_call
-            ))),
+            )))
+            .expect("approval resolves"),
             NormalizedToolApprovalStatus::NotApplicable
         );
         assert_eq!(
             poll_ready(resolve_tool_approval(
                 ResolveToolApprovalOptions::new(&tool_call)
                     .with_tools(&[Tool::new("search", approval_tool_schema())])
-            )),
+            ))
+            .expect("approval resolves"),
             NormalizedToolApprovalStatus::NotApplicable
         );
     }
@@ -8932,7 +8944,8 @@ mod tests {
                 .with_messages(&prompt)
                 .with_tools_context(&tools_context)
                 .with_runtime_context(&runtime_context),
-        ));
+        ))
+        .expect("approval resolves");
 
         assert_eq!(
             status,
@@ -8979,7 +8992,8 @@ mod tests {
                 .with_messages(&prompt)
                 .with_tools_context(&tools_context)
                 .with_runtime_context(&runtime_context),
-        ));
+        ))
+        .expect("approval resolves");
 
         assert_eq!(
             status,
@@ -8996,6 +9010,192 @@ mod tests {
             &json!({ "allow": false })
         );
         assert_eq!(options.runtime_context, runtime_context);
+    }
+
+    #[test]
+    fn resolve_tool_approval_passes_validated_context_to_user_defined_approval_callback() {
+        let tool_call = approval_tool_call("weather");
+        let context_schema = FlexibleSchema::from(
+            Schema::new(
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "apiKey": { "type": "string" }
+                    },
+                    "required": ["apiKey"]
+                })
+                .as_object()
+                .expect("schema is an object")
+                .clone(),
+            )
+            .with_validator(|value| {
+                if value.get("apiKey").and_then(JsonValue::as_str).is_some() {
+                    let mut validated = value.as_object().expect("context is an object").clone();
+                    validated.insert("region".to_string(), json!("us-east-1"));
+                    ValidationResult::success(JsonValue::Object(validated))
+                } else {
+                    ValidationResult::failure("expected apiKey string")
+                }
+            }),
+        );
+        let tools =
+            vec![Tool::new("weather", approval_tool_schema()).with_context_schema(context_schema)];
+        let seen_context = Arc::new(Mutex::new(None::<JsonValue>));
+        let seen_context_for_callback = Arc::clone(&seen_context);
+        let configuration = ToolApprovalConfiguration::new().with_tool_approval_function(
+            "weather",
+            move |_input, options| {
+                let seen_context = Arc::clone(&seen_context_for_callback);
+                async move {
+                    seen_context
+                        .lock()
+                        .expect("seen context lock")
+                        .replace(options.tool_context.expect("validated context"));
+                    Some(ToolApprovalStatusKind::Approved.into())
+                }
+            },
+        );
+        let tools_context =
+            JsonObject::from_iter([("weather".to_string(), json!({ "apiKey": "secret" }))]);
+
+        let status = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration)
+                .with_tools_context(&tools_context),
+        ))
+        .expect("approval resolves");
+
+        assert_eq!(status, NormalizedToolApprovalStatus::approved());
+        assert_eq!(
+            seen_context
+                .lock()
+                .expect("seen context lock")
+                .as_ref()
+                .expect("context captured"),
+            &json!({
+                "apiKey": "secret",
+                "region": "us-east-1"
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_tool_approval_validates_context_before_user_defined_approval_callback() {
+        let tool_call = approval_tool_call("weather");
+        let context_schema = FlexibleSchema::from(
+            Schema::new(
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "apiKey": { "type": "string" }
+                    },
+                    "required": ["apiKey"]
+                })
+                .as_object()
+                .expect("schema is an object")
+                .clone(),
+            )
+            .with_validator(|value| {
+                if value.get("apiKey").and_then(JsonValue::as_str).is_some() {
+                    ValidationResult::success(value.clone())
+                } else {
+                    ValidationResult::failure("expected apiKey string")
+                }
+            }),
+        );
+        let tools =
+            vec![Tool::new("weather", approval_tool_schema()).with_context_schema(context_schema)];
+        let called = Arc::new(AtomicBool::new(false));
+        let called_for_callback = Arc::clone(&called);
+        let configuration = ToolApprovalConfiguration::new().with_tool_approval_function(
+            "weather",
+            move |_input, _options| {
+                called_for_callback.store(true, Ordering::SeqCst);
+                ready(Some(ToolApprovalStatusKind::UserApproval.into()))
+            },
+        );
+        let tools_context =
+            JsonObject::from_iter([("weather".to_string(), json!({ "apiKey": 123 }))]);
+
+        let error = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tool_approval(&configuration)
+                .with_tools_context(&tools_context),
+        ))
+        .expect_err("context validation fails");
+
+        assert!(!called.load(Ordering::SeqCst));
+        assert_eq!(error.value(), &json!({ "apiKey": 123 }));
+        assert_eq!(
+            error.context().and_then(|context| context.field.as_deref()),
+            Some("tool context")
+        );
+        assert_eq!(
+            error
+                .context()
+                .and_then(|context| context.entity_name.as_deref()),
+            Some("weather")
+        );
+    }
+
+    #[test]
+    fn resolve_tool_approval_validates_context_before_tool_defined_approval_callback() {
+        let tool_call = approval_tool_call("weather");
+        let context_schema = FlexibleSchema::from(
+            Schema::new(
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "apiKey": { "type": "string" }
+                    },
+                    "required": ["apiKey"]
+                })
+                .as_object()
+                .expect("schema is an object")
+                .clone(),
+            )
+            .with_validator(|value| {
+                if value.get("apiKey").and_then(JsonValue::as_str).is_some() {
+                    ValidationResult::success(value.clone())
+                } else {
+                    ValidationResult::failure("expected apiKey string")
+                }
+            }),
+        );
+        let called = Arc::new(AtomicBool::new(false));
+        let called_for_callback = Arc::clone(&called);
+        let tools = vec![
+            Tool::new("weather", approval_tool_schema())
+                .with_context_schema(context_schema)
+                .with_needs_approval_function(move |_input, _options| {
+                    called_for_callback.store(true, Ordering::SeqCst);
+                    ready(true)
+                }),
+        ];
+        let tools_context =
+            JsonObject::from_iter([("weather".to_string(), json!({ "apiKey": 123 }))]);
+
+        let error = poll_ready(resolve_tool_approval(
+            ResolveToolApprovalOptions::new(&tool_call)
+                .with_tools(&tools)
+                .with_tools_context(&tools_context),
+        ))
+        .expect_err("context validation fails");
+
+        assert!(!called.load(Ordering::SeqCst));
+        assert_eq!(error.value(), &json!({ "apiKey": 123 }));
+        assert_eq!(
+            error.context().and_then(|context| context.field.as_deref()),
+            Some("tool context")
+        );
+        assert_eq!(
+            error
+                .context()
+                .and_then(|context| context.entity_name.as_deref()),
+            Some("weather")
+        );
     }
 
     #[test]

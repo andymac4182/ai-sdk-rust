@@ -604,6 +604,16 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ### Recent First-Phase Proof Slices
 
+- 2026-05-23: `packages/ai` `resolveToolApproval` context-validation
+  parity added named Rust counterparts
+  `resolve_tool_approval_passes_validated_context_to_user_defined_approval_callback`,
+  `resolve_tool_approval_validates_context_before_user_defined_approval_callback`,
+  and
+  `resolve_tool_approval_validates_context_before_tool_defined_approval_callback`.
+  Rust now validates a matching tool's `contextSchema` before per-tool
+  user-defined or tool-defined approval callbacks, passes the validated context
+  to the callback, and returns `TypeValidationError` without invoking the
+  callback on invalid context.
 - 2026-05-23: `packages/ai` `createAgentUIStreamResponse` parity added
   named Rust counterparts
   `create_agent_ui_stream_response_uses_tool_model_output_for_ui_tool_results`
@@ -3510,6 +3520,15 @@ focused tests for each portable behavior before changing rows to `verified`.
    counterparts in `validate_tool_context_*`, including no-schema passthrough,
    validated context return values, and `TypeValidationError` context metadata
    for invalid tool context.
+   The upstream `generate-text/resolve-tool-approval.test.ts` context-schema
+   cases now have named Rust counterparts in
+   `resolve_tool_approval_passes_validated_context_to_user_defined_approval_callback`,
+   `resolve_tool_approval_validates_context_before_user_defined_approval_callback`,
+   and
+   `resolve_tool_approval_validates_context_before_tool_defined_approval_callback`,
+   proving validated tool context is passed to approval callbacks and invalid
+   context fails before invoking user-defined or tool-defined approval
+   callbacks.
    The upstream `generate-text/sum-token-counts.test.ts` cases now have named
    Rust counterparts in `sum_token_counts_should_*`. The upstream
    `generate-text/calculate-tokens-per-second.test.ts` portable cases now have
