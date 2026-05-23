@@ -87,6 +87,24 @@ pub fn user_transcript_key(user_key: &str) -> String {
     format!("{KEY_PREFIX}{user_key}")
 }
 
+/// Predicate — does this state-store key belong to a user transcript
+/// list? 1:1 with upstream's inline
+/// `key.startsWith(KEY_PREFIX)` checks used by transcripts
+/// list/iteration paths.
+pub fn is_user_transcript_key(key: &str) -> bool {
+    key.starts_with(KEY_PREFIX)
+}
+
+/// Extract the user key from a stored transcript list key. Inverse of
+/// [`user_transcript_key`]. Returns `None` for inputs that don't carry
+/// the [`KEY_PREFIX`].
+///
+/// This mirrors the inline `key.slice(KEY_PREFIX.length)` upstream
+/// uses when iterating cross-user transcript keys.
+pub fn user_key_from_transcript_key(key: &str) -> Option<&str> {
+    key.strip_prefix(KEY_PREFIX)
+}
+
 /// Parse an upstream duration into milliseconds. 1:1 port of upstream
 /// `parseDuration(value): number | undefined`.
 ///
@@ -209,5 +227,44 @@ mod tests {
     fn user_transcript_key_concatenates_prefix_and_user_key() {
         assert_eq!(user_transcript_key("U123"), "transcripts:user:U123");
         assert_eq!(user_transcript_key(""), "transcripts:user:");
+    }
+
+    // ---------- slice 110: prefix predicate + inverse helper ----------
+
+    #[test]
+    fn is_user_transcript_key_detects_the_prefix() {
+        assert!(is_user_transcript_key("transcripts:user:U123"));
+        assert!(is_user_transcript_key("transcripts:user:"));
+    }
+
+    #[test]
+    fn is_user_transcript_key_rejects_unrelated_keys() {
+        assert!(!is_user_transcript_key("transcripts:other:U123"));
+        assert!(!is_user_transcript_key("msg-history:U123"));
+        assert!(!is_user_transcript_key(""));
+    }
+
+    #[test]
+    fn user_key_from_transcript_key_strips_the_prefix() {
+        assert_eq!(
+            user_key_from_transcript_key("transcripts:user:U123"),
+            Some("U123")
+        );
+        assert_eq!(user_key_from_transcript_key("transcripts:user:"), Some(""));
+    }
+
+    #[test]
+    fn user_key_from_transcript_key_returns_none_for_non_transcript_keys() {
+        assert!(user_key_from_transcript_key("msg-history:U123").is_none());
+        assert!(user_key_from_transcript_key("U123").is_none());
+        assert!(user_key_from_transcript_key("").is_none());
+    }
+
+    #[test]
+    fn user_transcript_key_and_inverse_round_trip() {
+        for user in ["U123", "slack:U999", "", "some:colon:user"] {
+            let key = user_transcript_key(user);
+            assert_eq!(user_key_from_transcript_key(&key), Some(user));
+        }
     }
 }
