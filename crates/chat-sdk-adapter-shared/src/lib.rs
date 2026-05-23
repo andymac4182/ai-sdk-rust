@@ -10,4 +10,5 @@
 //! naming-conventions exception in
 //! [`scripts/check-naming-conventions.sh`](../../scripts/check-naming-conventions.sh).
 
+pub mod card_utils;
 pub mod errors;
