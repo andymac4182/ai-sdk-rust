@@ -1864,3 +1864,115 @@ reply option + pre-minted bearer, 14 -> 17 tests, 10% -> 15%).
 - **HMAC-SHA256 signature verification**: Slack `webhook/
   verify.ts`, GitHub HMAC-SHA256, Discord Ed25519, WhatsApp +
   Messenger HMAC variants.
+
+### 2026-05-24 — slices 186..190
+
+**What the brief got wrong or left out**
+
+- **`stringify_markdown` was the single highest-leverage
+  unblock.** Slice 186 added a hand-written mdast stringifier to
+  chat-sdk-chat (no `mdast_util_to_markdown` Rust crate available;
+  the upstream `markdown` Rust crate has no inverse). 14 tests in
+  chat-sdk-chat. This unblocked Linear/GitHub/Messenger/WhatsApp/
+  GChat markdown converters - 4 ports landed in slices 186-190
+  with **65 newly-ported upstream test cases across 5 adapter
+  crates**. The brief should have surfaced this dependency
+  earlier; future "blocked on chat-sdk-chat" entries should be
+  audited at the start of each session for cross-adapter unblock
+  potential.
+
+- **The Slack-style "single<->double marker upgrade" scanner
+  pattern is reused across 3 adapters** (Slack mrkdwn,
+  WhatsApp, GChat). Each upstream `toAst(text)` regex pipeline
+  becomes the same Rust char-by-char scanner with adapter-
+  specific deltas (Slack also handles `<@U|label>` mention
+  rewrites). If the pattern shows up a 4th time, lift it into
+  `chat-sdk-adapter-shared`.
+
+- **Custom node-walker converters (GChat / Discord / Teams) are
+  larger than pass-through ones (Linear / GitHub / Messenger).**
+  GChat's `nodeToGChat` is ~80 LOC of pattern-match emission.
+  Discord's would output JSON embeds. Teams's adapter-cards
+  output Adaptive Cards JSON. Each is its own slice with its
+  own test surface.
+
+**Stale or misleading guidance**
+
+- The brief's "test-floor budget" estimate from slice 178's
+  refinement said ~1000 cases remain. After slices 186-190
+  porting ~75 markdown.test.ts cases, the realistic count is
+  closer to ~700-800. Recompute on the next refinement once
+  Telegram / Discord / Teams markdown converters land.
+
+- The "stringify_markdown blocks 5+ adapters" note in slice
+  185's refinement is now a closed item - this entry confirms
+  the unblock and lists the landed slices.
+
+**Edits applied**
+
+- `crates/chat-sdk-chat/src/markdown.rs` (slice 186): added
+  `stringify_markdown` + `StringifyMarkdownOptions` (emphasis +
+  bullet) + 14 round-trip tests. 581 chat tests total (was 567).
+- `crates/chat-sdk-adapter-linear/src/markdown.rs` (slice 186):
+  added `from_ast`, `render_postable_markdown`,
+  `render_postable_ast` + 5 ported cases. markdown.test.ts now
+  13/13.
+- `crates/chat-sdk-adapter-github/src/markdown.rs` (slice 187):
+  full `GitHubFormatConverter`. 18 upstream cases ported.
+- `crates/chat-sdk-adapter-messenger/src/markdown.rs` (slice
+  188): full `MessengerFormatConverter`. 10 of 11 upstream cases
+  ported; the 11th is a Rust-type-safety case.
+- `crates/chat-sdk-adapter-whatsapp/src/markdown.rs` (slice
+  189): full `WhatsAppFormatConverter` including the single/
+  double marker scanners (`from_whatsapp_format`,
+  `to_whatsapp_format`) + walk_ast visitor for heading /
+  thematic-break / table coercion. 19 of 26 upstream cases.
+- `crates/chat-sdk-adapter-gchat/src/markdown.rs` (slice 190):
+  full `GoogleChatFormatConverter` including the single/double
+  marker scanners + custom recursive `node_to_gchat` walker. 23
+  of 29 upstream cases.
+
+**Open refinements deferred**
+
+- **Telegram MarkdownV2 fromAst**: the most complex of the
+  remaining markdown converters. Upstream's 415-line
+  `markdown.ts` walks the AST while tracking escape contexts
+  (inside-code-block escapes differ from outside-entity escapes,
+  and `\.\.\.` ellipsis appending is non-trivial). The slice
+  182 helpers (`escape_markdown_v2`, `find_unescaped_positions`,
+  `ends_with_orphan_backslash`) are the foundation; the walker
+  is the next 1-2 slices of work.
+
+- **GChat nested-list rendering (6 deferred cases)**: the
+  `render_list` helper in slice 190 handles single-level lists
+  correctly but doesn't fully match upstream's
+  `BaseFormatConverter::renderList` for multi-level / mixed
+  ordered+unordered nesting. Defer until upstream's
+  `BaseFormatConverter` lands in chat-sdk-chat.
+
+- **Discord embeds**: Discord's `cards.ts` (348 LOC) outputs
+  Discord Embed JSON + Action Row components, not markdown.
+  Discord markdown.test.ts (50 tests) is mostly markdown
+  pass-through. Each is a substantial slice.
+
+- **Teams Adaptive Cards**: Teams's `cards.ts` outputs
+  Adaptive Card JSON. ~372 LOC. Substantial.
+
+- **WhatsApp interactive-message branch**: `cardToWhatsApp`
+  returns a button-interactive payload (`{type: "interactive",
+  interactive: {type: "button", header, body, action}}`). Needs
+  WhatsApp-specific JSON shape types. ~5 of 23 deferred
+  cards.test.ts cases.
+
+- **State backend client wire-up**: state-redis / state-ioredis
+  / state-pg still at 10%. Each needs its real client crate +
+  integration tests.
+
+- **HMAC-SHA256 signature verification**: Slack `webhook/
+  verify.ts`, GitHub HMAC-SHA256, WhatsApp / Messenger HMAC.
+
+- **chat-sdk-chat `BaseFormatConverter`**: Several adapter
+  ports inline the `fromAstWithNodeConverter` / `renderList` /
+  `defaultNodeToText` helpers because the base class isn't
+  ported yet. A `BaseFormatConverter` Rust port would
+  de-duplicate.
