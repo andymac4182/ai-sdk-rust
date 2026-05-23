@@ -43,6 +43,22 @@ use crate::chat_singleton::{ChatSingleton, set_chat_singleton};
 use crate::thread::Thread;
 use crate::types::{Adapter, StateAdapter};
 
+/// Default TTL the chat singleton uses for the per-thread lock the
+/// concurrency layer acquires before invoking each handler. 1:1
+/// with upstream's private `DEFAULT_LOCK_TTL_MS = 30_000` (30 s).
+pub const DEFAULT_LOCK_TTL_MS: u64 = 30_000;
+
+/// Default TTL for message-dedupe entries. Used to suppress
+/// duplicate inbound webhooks that the platform retries within
+/// this window. 1:1 with upstream's private
+/// `DEDUPE_TTL_MS = 5 * 60 * 1000` (5 min).
+pub const DEDUPE_TTL_MS: u64 = 5 * 60 * 1000;
+
+/// Default TTL for modal-context state stored alongside open
+/// modals. 1:1 with upstream's private
+/// `MODAL_CONTEXT_TTL_MS = 24 * 60 * 60 * 1000` (24 h).
+pub const MODAL_CONTEXT_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+
 /// Top-level chat handle. 1:1 port (in progress) of upstream
 /// `class Chat`.
 #[derive(Clone)]
@@ -275,6 +291,18 @@ mod tests {
             })
             .collect();
         Chat::new(ChatOptions { state, adapters })
+    }
+
+    #[test]
+    #[test]
+    fn chat_ttl_constants_match_upstream() {
+        // 1:1 with upstream's private `DEFAULT_LOCK_TTL_MS = 30_000`,
+        // `DEDUPE_TTL_MS = 5 * 60 * 1000`, `MODAL_CONTEXT_TTL_MS =
+        // 24 * 60 * 60 * 1000`. The wall-clock seconds these encode
+        // matter for adopter HTTP-handler tuning.
+        assert_eq!(DEFAULT_LOCK_TTL_MS, 30_000);
+        assert_eq!(DEDUPE_TTL_MS, 5 * 60 * 1000);
+        assert_eq!(MODAL_CONTEXT_TTL_MS, 24 * 60 * 60 * 1000);
     }
 
     #[test]
