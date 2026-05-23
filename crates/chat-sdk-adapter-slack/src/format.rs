@@ -214,15 +214,348 @@ pub fn seconds_from_date_ms(ms: i64) -> i64 {
     ms.div_euclid(1000)
 }
 
+/// Convert Slack mrkdwn to standard Markdown. 1:1 port of upstream
+/// `slackMrkdwnToMarkdown(mrkdwn)` - rewrites Slack's
+/// `<@U123|label>`, `<#C123|label>`, `<url|label>` link/mention
+/// tokens into Markdown equivalents, then translates Slack's
+/// single-asterisk bold (`*x*`) -> `**x**` and single-tilde
+/// strikethrough (`~x~`) -> `~~x~~`, and finally
+/// HTML-unescapes via [`unescape_slack_text`].
+pub fn slack_mrkdwn_to_markdown(mrkdwn: &str) -> String {
+    let s = replace_slack_user_with_label(mrkdwn);
+    let s = replace_slack_user_no_label(&s);
+    let s = replace_slack_channel_with_label(&s);
+    let s = replace_slack_channel_no_label(&s);
+    let s = replace_slack_link_with_label(&s);
+    let s = replace_slack_link_no_label(&s);
+    let s = replace_slack_bold_to_markdown(&s);
+    let s = replace_slack_strike_to_markdown(&s);
+    unescape_slack_text(&s)
+}
+
+/// Convert standard Markdown bold (`**x**`) to Slack mrkdwn
+/// bold (`*x*`). 1:1 port of upstream
+/// `markdownBoldToSlackMrkdwn(markdown)`.
+pub fn markdown_bold_to_slack_mrkdwn(markdown: &str) -> String {
+    let bytes: Vec<char> = markdown.chars().collect();
+    let mut out = String::with_capacity(markdown.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + 1 < bytes.len() && bytes[i] == '*' && bytes[i + 1] == '*' {
+            // Find matching `**` after at least 1 char.
+            let mut j = i + 2;
+            while j + 1 < bytes.len() {
+                if bytes[j] == '*' && bytes[j + 1] == '*' {
+                    break;
+                }
+                j += 1;
+            }
+            if j + 1 < bytes.len() && bytes[j] == '*' && bytes[j + 1] == '*' && j > i + 2 {
+                out.push('*');
+                out.extend(&bytes[i + 2..j]);
+                out.push('*');
+                i = j + 2;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Replace bare `@U123` tokens with `<@U123>`. 1:1 port of
+/// upstream `linkBareSlackMentions(text)` - matches Slack ID
+/// patterns (`@[A-Z][A-Z0-9_]+`) NOT preceded by `<` or a word
+/// character (so plain emails `user@example.com` and angle-
+/// wrapped `<@U123>` are skipped).
+pub fn link_bare_slack_mentions(text: &str) -> String {
+    let bytes: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == '@' {
+            let prev_ok = i == 0 || (bytes[i - 1] != '<' && !is_word_char(bytes[i - 1]));
+            // First char of an ID must be uppercase ASCII letter; the
+            // rest must be [A-Z0-9_] and there must be at least 1
+            // following char (upstream `[A-Z][A-Z0-9_]+`).
+            if prev_ok && i + 1 < bytes.len() && bytes[i + 1].is_ascii_uppercase() {
+                let mut j = i + 2;
+                while j < bytes.len() && is_slack_id_char(bytes[j]) {
+                    j += 1;
+                }
+                if j > i + 2 {
+                    out.push_str("<@");
+                    out.extend(&bytes[i + 1..j]);
+                    out.push('>');
+                    i = j;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
+fn is_word_char(ch: char) -> bool {
+    // 1:1 with JS `\w`: ASCII alphanumeric + underscore.
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn is_slack_id_char(ch: char) -> bool {
+    ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_'
+}
+
+// ---------- private regex-equivalent scanners (slack_mrkdwn_to_markdown) ----------
+
+/// Replace `<@USER|label>` -> `@label`.
+fn replace_slack_user_with_label(text: &str) -> String {
+    replace_id_link(text, "<@", false, |id, label| {
+        format!("@{}", label.unwrap_or(id))
+    })
+}
+
+/// Replace `<@USER>` -> `@USER`. Must run after the with-label
+/// pass (the with-label pass strips `<@USER|...>`).
+fn replace_slack_user_no_label(text: &str) -> String {
+    replace_id_link(text, "<@", true, |id, _| format!("@{id}"))
+}
+
+/// Replace `<#CHANNEL|label>` -> `#label`.
+fn replace_slack_channel_with_label(text: &str) -> String {
+    replace_id_link(text, "<#", false, |id, label| {
+        format!("#{}", label.unwrap_or(id))
+    })
+}
+
+/// Replace `<#CHANNEL>` -> `#CHANNEL`.
+fn replace_slack_channel_no_label(text: &str) -> String {
+    replace_id_link(text, "<#", true, |id, _| format!("#{id}"))
+}
+
+/// Replace `<url|label>` -> `[label](url)`. Only matches http(s)
+/// URLs to mirror upstream's `(https?:\/\/[^|<>]+)` anchor.
+fn replace_slack_link_with_label(text: &str) -> String {
+    replace_url_link(text, false, |url, label| match label {
+        Some(label) => format!("[{label}]({url})"),
+        None => format!("<{url}>"),
+    })
+}
+
+/// Replace `<url>` (no label) -> `url`. Must run after the
+/// with-label pass.
+fn replace_slack_link_no_label(text: &str) -> String {
+    replace_url_link(text, true, |url, _| url.to_string())
+}
+
+/// Generic `<prefix><id>[|label]>` scanner. When
+/// `no_label_only` is true, only matches tokens without a `|`
+/// (used as the second pass after with-label).
+fn replace_id_link(
+    text: &str,
+    prefix: &str,
+    no_label_only: bool,
+    render: impl Fn(&str, Option<&str>) -> String,
+) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(idx) = rest.find(prefix) {
+        out.push_str(&rest[..idx]);
+        let after_prefix = &rest[idx + prefix.len()..];
+        // Scan an id: [A-Z0-9_]+
+        let id_end = after_prefix
+            .find(|c: char| !is_slack_id_char(c))
+            .unwrap_or(after_prefix.len());
+        if id_end == 0 {
+            // Not a valid token; emit prefix as-is and continue.
+            out.push_str(prefix);
+            rest = after_prefix;
+            continue;
+        }
+        let id = &after_prefix[..id_end];
+        let after_id = &after_prefix[id_end..];
+        if let Some(after_pipe) = after_id.strip_prefix('|') {
+            if no_label_only {
+                // Skip this match - we only want no-label tokens
+                // in this pass.
+                out.push_str(prefix);
+                out.push_str(id);
+                rest = after_id;
+                continue;
+            }
+            let close = after_pipe.find('>');
+            if let Some(end) = close {
+                let label = &after_pipe[..end];
+                // Forbid `<` or `>` inside the label (upstream regex
+                // anchors `[^<>]+`).
+                if !label.contains('<') && !label.contains('>') && !label.is_empty() {
+                    out.push_str(&render(id, Some(label)));
+                    rest = &after_pipe[end + 1..];
+                    continue;
+                }
+            }
+            // Bad shape; passthrough.
+            out.push_str(prefix);
+            out.push_str(id);
+            rest = after_id;
+            continue;
+        }
+        if after_id.starts_with('>') {
+            if !no_label_only {
+                // Skip - we only want with-label tokens in this pass.
+                out.push_str(prefix);
+                out.push_str(id);
+                rest = after_id;
+                continue;
+            }
+            out.push_str(&render(id, None));
+            rest = &after_id[1..];
+            continue;
+        }
+        // Bad shape; passthrough.
+        out.push_str(prefix);
+        out.push_str(id);
+        rest = after_id;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Generic `<url[|label]>` scanner for http(s) URLs. When
+/// `no_label_only` is true, only matches tokens without a `|`.
+fn replace_url_link(
+    text: &str,
+    no_label_only: bool,
+    render: impl Fn(&str, Option<&str>) -> String,
+) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(idx) = rest.find('<') {
+        out.push_str(&rest[..idx]);
+        let after = &rest[idx + 1..];
+        let is_http = after.starts_with("https://") || after.starts_with("http://");
+        if !is_http {
+            out.push('<');
+            rest = after;
+            continue;
+        }
+        // URL body: stop at `|` (only when with-label) / `<` / `>`.
+        let url_end = after
+            .find(|c: char| c == '|' || c == '<' || c == '>')
+            .unwrap_or(after.len());
+        let url = &after[..url_end];
+        let rest_after_url = &after[url_end..];
+        if let Some(after_pipe) = rest_after_url.strip_prefix('|') {
+            if no_label_only {
+                out.push('<');
+                rest = after;
+                continue;
+            }
+            let close = after_pipe.find('>');
+            if let Some(end) = close {
+                let label = &after_pipe[..end];
+                if !label.contains('<') && !label.contains('>') && !label.is_empty() {
+                    out.push_str(&render(url, Some(label)));
+                    rest = &after_pipe[end + 1..];
+                    continue;
+                }
+            }
+            out.push('<');
+            rest = after;
+            continue;
+        }
+        if rest_after_url.starts_with('>') {
+            if !no_label_only {
+                out.push('<');
+                rest = after;
+                continue;
+            }
+            out.push_str(&render(url, None));
+            rest = &rest_after_url[1..];
+            continue;
+        }
+        out.push('<');
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Slack `*bold*` -> Markdown `**bold**`. Upstream regex:
+/// `/(?<![_*\\])\*([^*\n]+)\*(?![_*])/g`. Lookbehind is rejection
+/// of `_`/`*`/`\` before the opener; lookahead is rejection of
+/// `_`/`*` after the closer.
+fn replace_slack_bold_to_markdown(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '*' {
+            let prev_ok = i == 0 || !matches!(chars[i - 1], '_' | '*' | '\\');
+            if prev_ok {
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] != '*' && chars[j] != '\n' {
+                    j += 1;
+                }
+                if j > i + 1 && j < chars.len() && chars[j] == '*' {
+                    let next_ok = j + 1 == chars.len() || !matches!(chars[j + 1], '_' | '*');
+                    if next_ok {
+                        out.push_str("**");
+                        out.extend(&chars[i + 1..j]);
+                        out.push_str("**");
+                        i = j + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Slack `~strike~` -> Markdown `~~strike~~`. Upstream regex:
+/// `/(?<!~)~([^~\n]+)~(?!~)/g`.
+fn replace_slack_strike_to_markdown(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '~' {
+            let prev_ok = i == 0 || chars[i - 1] != '~';
+            if prev_ok {
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] != '~' && chars[j] != '\n' {
+                    j += 1;
+                }
+                if j > i + 1 && j < chars.len() && chars[j] == '~' {
+                    let next_ok = j + 1 == chars.len() || chars[j + 1] != '~';
+                    if next_ok {
+                        out.push_str("~~");
+                        out.extend(&chars[i + 1..j]);
+                        out.push_str("~~");
+                        i = j + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
 // ---------- private validators ----------
 
 fn assert_slack_text_object_text(text: &str) -> Result<(), SlackFormatError> {
     let len = text.chars().count();
     if !(1..=TEXT_OBJECT_MAX_LENGTH).contains(&len) {
         return Err(SlackFormatError {
-            message: format!(
-                "text must be between 1 and {TEXT_OBJECT_MAX_LENGTH} characters"
-            ),
+            message: format!("text must be between 1 and {TEXT_OBJECT_MAX_LENGTH} characters"),
         });
     }
     Ok(())
@@ -230,7 +563,11 @@ fn assert_slack_text_object_text(text: &str) -> Result<(), SlackFormatError> {
 
 fn assert_slack_id(value: &str, name: &str) -> Result<(), SlackFormatError> {
     // 1:1 with upstream's /^[A-Z0-9_]+$/
-    if value.is_empty() || !value.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') {
+    if value.is_empty()
+        || !value
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    {
         return Err(SlackFormatError {
             message: format!("{name} must be a Slack ID"),
         });
@@ -367,6 +704,46 @@ mod tests {
             )
             .unwrap(),
             "<!date^1710000000^{time}^https://example.com|4pm>"
+        );
+    }
+
+    #[test]
+    fn normalizes_slack_mrkdwn_to_markdown() {
+        let result = slack_mrkdwn_to_markdown(
+            "Hey <@U123|jane> in <#C123|general>, see <https://example.com|this> and *bold* ~done~",
+        );
+        assert_eq!(
+            result,
+            "Hey @jane in #general, see [this](https://example.com) and **bold** ~~done~~"
+        );
+    }
+
+    #[test]
+    fn normalizes_bare_slack_links_to_markdown_urls() {
+        assert_eq!(
+            slack_mrkdwn_to_markdown("See <https://example.com>"),
+            "See https://example.com"
+        );
+    }
+
+    #[test]
+    fn converts_basic_markdown_bold_to_slack_mrkdwn_bold() {
+        assert_eq!(
+            markdown_bold_to_slack_mrkdwn("The **domain** is example.com"),
+            "The *domain* is example.com"
+        );
+    }
+
+    #[test]
+    fn links_bare_mention_like_tokens_without_touching_emails() {
+        assert_eq!(
+            link_bare_slack_mentions("(cc @U123, @U456)"),
+            "(cc <@U123>, <@U456>)"
+        );
+        assert_eq!(link_bare_slack_mentions("@george"), "@george");
+        assert_eq!(
+            link_bare_slack_mentions("user@example.com"),
+            "user@example.com"
         );
     }
 
