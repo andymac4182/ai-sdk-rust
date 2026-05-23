@@ -592,7 +592,7 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 | Upstream area | Test files scanned | Status | Notes |
 | --- | ---: | --- | --- |
-| `packages/ai` | 128 | in-progress | Many non-streaming high-level API tests are represented in Rust, including non-language high-level abort-signal forwarding for embedding, image, speech, video, transcription, reranking calls, current-provider model resolution, and named token-rate/token-count/header/deep-equal/merge-object/split-array/start-index/cosine/abort/callback/serial-job/prepare-retries/request-timeout/language-model-call-options/tool-choice/tool-model-output/filter-active-tools/simulate-readable-stream/server-response/async-iterable-stream/stitchable-stream/download utility counterparts; initial ToolLoopAgent wrapper and callback-merging coverage exists, and the legacy v2/v3 model/provider adapter inventory is documented as JavaScript package compatibility, while stream, UI, remaining agent call-options schema/type-level parity, and broader edge coverage remain. |
+| `packages/ai` | 128 | in-progress | Many non-streaming high-level API tests are represented in Rust, including non-language high-level abort-signal forwarding for embedding, image, speech, video, transcription, reranking calls, current-provider model resolution, and named token-rate/token-count/header/deep-equal/merge-object/split-array/start-index/cosine/abort/callback/serial-job/prepare-retries/request-timeout/language-model-call-options/tool-choice/tool-model-output/filter-active-tools/collect-tool-approvals/validate-tool-context/simulate-readable-stream/server-response/async-iterable-stream/stitchable-stream/download utility counterparts; initial ToolLoopAgent wrapper and callback-merging coverage exists, and the legacy v2/v3 model/provider adapter inventory is documented as JavaScript package compatibility, while stream, UI, remaining agent call-options schema/type-level parity, and broader edge coverage remain. |
 | Provider package tests | 228 | in-progress | Gateway, Vercel AI Gateway OpenAI-compatible, Vercel v0, OpenAI-compatible non-language abort request forwarding, OpenAI foundation, Open Responses foundation, DeepInfra foundation, TogetherAI, Hugging Face, Cerebras, Baseten, Voyage, Luma, RevAI, AssemblyAI, Azure, ByteDance, Mistral, Black Forest Labs, Hume, and Deepgram provider tests now exist. Concrete provider package test files remain largely unported across OpenAI's broader Responses streaming/tools/files/speech/transcription surfaces, Hugging Face SSE/tool parity, Anthropic, Google, Bedrock, xAI, and the remaining provider packages. |
 | `packages/provider` | 1 | in-progress | Upstream `get-error-message.test.ts` now has a one-to-one Rust test split for every portable original case, including null/undefined, strings, named/custom errors, custom `toString`, and JSON-like values. The package row remains in progress while v2/v3 compatibility surfaces and exact stream abstractions remain unported. |
 | `packages/provider-utils` | 77 | in-progress | Many provider support behaviors are represented in the matching `ai-sdk-provider-utils` crate, including one-to-one `filterNullable`, `removeUndefinedEntries`, complete portable `validateTypes`/`safeValidateTypes`, complete portable `secureJsonParse`, complete portable `parseJSON`/`safeParseJSON`/`isParsableJson`, complete portable `injectJsonInstruction`, exact `mediaTypeToExtension` table rows, complete portable `normalizeHeaders` cases, complete portable `mapReasoningToProvider*` cases, complete portable `resolve` cases, complete portable `createToolNameMapping` cases, complete portable `withUserAgentSuffix`, `getRuntimeEnvironmentUserAgent`, `isUrlSupported`, `validateDownloadUrl`, `downloadBlob`/`DownloadError`, `getFromApi`, `delay`, `executeTool`, `isExecutableTool`, portable `asSchema`/`StandardSchema`, `readResponseWithSizeLimit`, `responseHandler`, `handleFetchError`, `convertAsyncIteratorToReadableStream`, `isJSONSerializable`, `StreamingToolCallTracker`, `serializeModelOptions`, and provider-utils `content-part` type-contract cases, complete portable `createIdGenerator`/`generateId` cases, complete portable `DelayedPromise` cases, portable `isProviderReference` cases, and complete portable `resolveProviderReference` cases plus abort propagation for GET, JSON, form-data, and generic POST request helpers, but exact browser stream/fetch parity and Zod adapter snapshots are incomplete or JavaScript-specific. |
@@ -604,6 +604,24 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ### Recent First-Phase Proof Slices
 
+- 2026-05-23: `packages/ai` tool approval prompt utility parity added a
+  `validate_tool_context` helper around the existing tool-execution context
+  validation path and split the `collectToolApprovals` coverage into named
+  upstream counterparts. Rust now has named tests for every upstream
+  `generate-text/validate-tool-context.test.ts` case:
+  `validate_tool_context_returns_the_tool_context_as_is_when_no_context_schema_is_defined`,
+  `validate_tool_context_returns_the_validated_tool_context_when_the_context_schema_matches`,
+  and
+  `validate_tool_context_throws_type_validation_error_when_the_context_schema_validation_fails`.
+  Rust also has named counterparts for every upstream
+  `generate-text/collect-tool-approvals.test.ts` case:
+  `collect_tool_approvals_should_not_return_any_tool_approvals_when_the_last_message_is_not_a_tool_message`,
+  `collect_tool_approvals_should_ignore_approval_request_without_response`,
+  `collect_tool_approvals_should_return_approved_approval_with_approved_response`,
+  `collect_tool_approvals_should_return_processed_approval_with_approved_response_and_tool_result`,
+  and
+  `collect_tool_approvals_should_return_denied_approval_with_denied_response`.
+  The existing Rust-only invalid-reference error guard remains additive.
 - 2026-05-23: `packages/ai` `filterActiveTools` parity split the prior
   grouped Rust coverage into named one-to-one counterparts for every upstream
   `generate-text/filter-active-tools.test.ts` cases:
@@ -3220,6 +3238,15 @@ focused tests for each portable behavior before changing rows to `verified`.
    named Rust counterparts in `filter_active_tools_should_*`, including missing
    tools, missing active tool list, empty active tool list, and filtering with
    provider-defined tool preservation.
+   The upstream `generate-text/collect-tool-approvals.test.ts` cases now have
+   named Rust counterparts in `collect_tool_approvals_should_*`, including no
+   approvals for a non-tool last message, ignoring unanswered approval
+   requests, approved responses, processed approved responses with tool
+   results, and denied responses with reasons. The upstream
+   `generate-text/validate-tool-context.test.ts` cases now have named Rust
+   counterparts in `validate_tool_context_*`, including no-schema passthrough,
+   validated context return values, and `TypeValidationError` context metadata
+   for invalid tool context.
    The upstream `model/resolve-model.test.ts` current-provider cases now have
    named Rust counterparts in `resolve_*_model_should_*`, covering direct model
    identity, Gateway fallback model-id resolution, explicit default-provider
