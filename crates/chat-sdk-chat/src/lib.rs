@@ -10,6 +10,7 @@
 //! shapes* they produce are portable and will land in the `cards` and
 //! `modals` modules in later slices.
 
+pub mod chat_singleton;
 pub mod errors;
 pub mod logger;
 pub mod types;

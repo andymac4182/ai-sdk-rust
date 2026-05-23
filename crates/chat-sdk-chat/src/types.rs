@@ -594,6 +594,34 @@ pub struct TranscriptsConfig {
     pub store_formatted: Option<bool>,
 }
 
+/// Adapter trait — the abstraction every chat platform (`slack`, `teams`,
+/// `discord`, …) implements. 1:1 port of upstream `interface Adapter`.
+///
+/// **Layered port.** Upstream `Adapter` has ~20 methods (`getUser`,
+/// `getChannelInfo`, `openModal`, etc.) that depend on `cards`, `modals`,
+/// `message`, `channel`, `thread`, and the JSX runtime. Those methods will
+/// land on this trait as their dependency modules are ported. For now the
+/// trait is intentionally empty — it exists so types referencing
+/// `dyn Adapter` (the singleton holder, the future event payloads, …) can
+/// compile against an opaque object. Each adapter slice MUST extend this
+/// trait with the upstream method(s) it adds, never define a new trait.
+///
+/// Implementors must be `Send + Sync` since adapters are shared across
+/// async tasks; the supertrait bounds enforce that statically.
+pub trait Adapter: Send + Sync + std::fmt::Debug {}
+
+/// State-backend trait — the storage abstraction (`state-memory`,
+/// `state-redis`, `state-ioredis`, `state-pg`, …). 1:1 port of upstream
+/// `interface StateAdapter`.
+///
+/// **Layered port.** Upstream `StateAdapter` has ~20 methods covering
+/// connect/disconnect, locks, lists, queues, key/value cache, subscriptions.
+/// Those land here as the matching `state-*` crates are ported. The trait is
+/// intentionally empty today so the singleton and future state-consumer
+/// types can hold a `dyn StateAdapter`. Each state-port slice MUST extend
+/// this trait, never define a new trait.
+pub trait StateAdapter: Send + Sync + std::fmt::Debug {}
+
 /// State-backend lock token. 1:1 port of upstream
 /// `interface Lock { expiresAt: number; threadId: string; token: string }`.
 ///
