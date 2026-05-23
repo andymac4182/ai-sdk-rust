@@ -3,12 +3,12 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 33.3%
-- Portable package average: 19.9%
+- Average estimated completion: 33.8%
+- Portable package average: 20.6%
 - Closed package rows: 5 / 18
 - Strict portable verified rows: 2 / 15
-- In-progress rows: 1
-- Not-started rows: 12
+- In-progress rows: 2
+- Not-started rows: 11
 
 ## 100% Closed
 
@@ -24,7 +24,8 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
-| `@chat-sdk/chat` | 99% | In progress | core SDK package | Crate + colocated tests across 13 modules: errors 17 + logger 13 + chat_singleton 5 + emoji 42/42 (1:1) + markdown... |
+| `@chat-sdk/chat` | 99% | In progress | core SDK package | Crate + colocated tests across 16 modules: errors 17 + logger 13 + chat_singleton 5 + emoji 42/42 (1:1) + markdown... |
+| `@chat-sdk/adapter-telegram` | 10% | In progress | adapter package | Crate scaffold (slice 130): TelegramAdapter impl-ing chat_sdk_chat::types::Adapter (name = "telegram"),... |
 
 ## Not Started
 
@@ -37,7 +38,6 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | `@chat-sdk/adapter-linear` | 0% | Not started | adapter package |
 | `@chat-sdk/adapter-github` | 0% | Not started | adapter package |
 | `@chat-sdk/adapter-messenger` | 0% | Not started | adapter package |
-| `@chat-sdk/adapter-telegram` | 0% | Not started | adapter package |
 | `@chat-sdk/adapter-whatsapp` | 0% | Not started | adapter package |
 | `@chat-sdk/state-redis` | 0% | Not started | state backend (Redis) |
 | `@chat-sdk/state-ioredis` | 0% | Not started | state backend (ioredis) |
