@@ -11,6 +11,7 @@
 
 pub mod api;
 pub mod crypto;
+pub mod format;
 pub mod webhook;
 
 use async_trait::async_trait;
