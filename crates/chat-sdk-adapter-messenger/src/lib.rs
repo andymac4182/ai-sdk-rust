@@ -33,6 +33,39 @@ pub const THREAD_ID_PREFIX: &str = "messenger:";
 /// `const DEFAULT_GRAPH_BASE = "https://graph.facebook.com"`.
 pub const DEFAULT_GRAPH_BASE: &str = "https://graph.facebook.com";
 
+/// Maximum message length Messenger Send API accepts in a single
+/// send. 1:1 with upstream's `MESSENGER_MESSAGE_LIMIT = 2000`.
+/// Used by the adapter's private `truncateMessage` helper (deferred
+/// in the Rust port — it's called only from the HTTP send path).
+pub const MESSENGER_MESSAGE_LIMIT: usize = 2000;
+
+/// Truncate `text` to at most [`MESSENGER_MESSAGE_LIMIT`]
+/// characters, appending `"..."` (3 chars) when the input exceeds
+/// the limit. 1:1 port of upstream's private
+/// `truncateMessage(text)`:
+///
+/// ```text
+/// if (text.length <= MESSENGER_MESSAGE_LIMIT) return text;
+/// return `${text.slice(0, MESSENGER_MESSAGE_LIMIT - 3)}...`;
+/// ```
+///
+/// Exposed at module scope (rather than private as upstream) so the
+/// limit + truncation semantics can be unit-tested without driving
+/// through `postMessage` which requires an HTTP send.
+pub fn truncate_message(text: &str) -> String {
+    if text.len() <= MESSENGER_MESSAGE_LIMIT {
+        return text.to_string();
+    }
+    // Slice on byte index that lands on a char boundary to avoid
+    // splitting multi-byte chars. For ASCII (the upstream test
+    // surface), this is identical to byte-cut.
+    let mut cut = MESSENGER_MESSAGE_LIMIT - 3;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}...", &text[..cut])
+}
+
 /// Options for [`MessengerAdapter::new`]. 1:1 with upstream
 /// `interface MessengerAdapterOptions`.
 #[derive(Debug, Clone)]
@@ -446,6 +479,40 @@ mod tests {
 
     #[test]
     // ---------- openDM (1 upstream case) ----------
+    #[test]
+    // ---------- truncate_message (additive) ----------
+    // No standalone upstream tests; the helper is exercised through
+    // `postMessage` HTTP send. The Rust suite locks in the
+    // MESSENGER_MESSAGE_LIMIT-based truncation semantics.
+
+    #[test]
+    fn truncate_message_returns_short_text_unchanged() {
+        assert_eq!(truncate_message("hello"), "hello");
+    }
+
+    #[test]
+    fn truncate_message_returns_exactly_2000_chars_unchanged() {
+        let text = "a".repeat(MESSENGER_MESSAGE_LIMIT);
+        assert_eq!(truncate_message(&text), text);
+    }
+
+    #[test]
+    fn truncate_message_truncates_with_ellipsis_when_over_limit() {
+        let text = "a".repeat(MESSENGER_MESSAGE_LIMIT + 1);
+        let result = truncate_message(&text);
+        assert_eq!(result.len(), MESSENGER_MESSAGE_LIMIT);
+        assert!(result.ends_with("..."));
+        assert!(result.starts_with(&"a".repeat(MESSENGER_MESSAGE_LIMIT - 3)));
+    }
+
+    #[test]
+    fn truncate_message_handles_much_longer_text() {
+        let text = "x".repeat(5000);
+        let result = truncate_message(&text);
+        assert_eq!(result.len(), MESSENGER_MESSAGE_LIMIT);
+        assert!(result.ends_with("..."));
+    }
+
     #[test]
     fn open_dm_encodes_the_thread_id_for_the_recipient() {
         // 1:1 with upstream's `openDM(userId)` which is the same
