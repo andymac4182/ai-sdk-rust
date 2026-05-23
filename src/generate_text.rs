@@ -12485,206 +12485,286 @@ mod tests {
         );
     }
 
-    #[test]
-    fn prune_messages_removes_reasoning_before_last_message() {
-        let messages = vec![
+    fn prune_messages_fixture_1() -> Vec<LanguageModelMessage> {
+        vec![
+            user_message("Weather in Tokyo and Busan?"),
             LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
                 LanguageModelAssistantContentPart::Reasoning(LanguageModelReasoningPart::new(
-                    "hidden",
-                )),
-                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new("visible")),
-            ])),
-            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
-                LanguageModelAssistantContentPart::Reasoning(LanguageModelReasoningPart::new(
-                    "final reasoning",
-                )),
-                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new("final")),
-            ])),
-        ];
-
-        let pruned = prune_messages(
-            PruneMessagesOptions::new(messages).with_reasoning(PruneReasoning::BeforeLastMessage),
-        );
-
-        let LanguageModelMessage::Assistant(first) = &pruned[0] else {
-            panic!("first message is assistant");
-        };
-        let LanguageModelMessage::Assistant(second) = &pruned[1] else {
-            panic!("second message is assistant");
-        };
-
-        assert_eq!(first.content.len(), 1);
-        assert!(matches!(
-            &first.content[0],
-            LanguageModelAssistantContentPart::Text(_)
-        ));
-        assert_eq!(second.content.len(), 2);
-        assert!(matches!(
-            &second.content[0],
-            LanguageModelAssistantContentPart::Reasoning(_)
-        ));
-    }
-
-    #[test]
-    fn prune_messages_removes_all_tool_parts_and_empty_messages_by_default() {
-        let messages = vec![
-            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
-                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
-                    "call-weather",
-                    "weather",
-                    json!({ "city": "Brisbane" }),
-                )),
-            ])),
-            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
-                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
-                    "call-weather",
-                    "weather",
-                    LanguageModelToolResultOutput::text("sunny"),
-                )),
-            ])),
-            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
-                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("next")),
-            ])),
-        ];
-
-        let pruned = prune_messages(
-            PruneMessagesOptions::new(messages).with_tool_calls(PruneToolCalls::All),
-        );
-
-        assert_eq!(pruned.len(), 1);
-        assert!(matches!(&pruned[0], LanguageModelMessage::User(_)));
-    }
-
-    #[test]
-    fn prune_messages_keeps_tool_references_needed_by_trailing_messages() {
-        let messages = vec![
-            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
-                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
-                    "call-old",
-                    "weather",
-                    json!({}),
+                    "I need to get the weather in Tokyo and Busan.",
                 )),
                 LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
-                    "call-keep",
-                    "search",
-                    json!({}),
-                )),
-            ])),
-            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
-                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
-                    "call-old",
-                    "weather",
-                    LanguageModelToolResultOutput::text("old"),
-                )),
-                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
-                    "call-keep",
-                    "search",
-                    LanguageModelToolResultOutput::text("keep"),
-                )),
-            ])),
-            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
-                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new("latest")),
-                LanguageModelAssistantContentPart::ToolResult(LanguageModelToolResultPart::new(
-                    "call-keep",
-                    "search",
-                    LanguageModelToolResultOutput::text("latest"),
-                )),
-            ])),
-        ];
-
-        let pruned = prune_messages(
-            PruneMessagesOptions::new(messages).with_tool_calls(PruneToolCalls::BeforeLastMessage),
-        );
-
-        let LanguageModelMessage::Assistant(first) = &pruned[0] else {
-            panic!("first message is assistant");
-        };
-        let LanguageModelMessage::Tool(second) = &pruned[1] else {
-            panic!("second message is tool");
-        };
-        let LanguageModelMessage::Assistant(third) = &pruned[2] else {
-            panic!("third message is assistant");
-        };
-
-        assert_eq!(first.content.len(), 1);
-        assert!(matches!(
-            &first.content[0],
-            LanguageModelAssistantContentPart::ToolCall(part)
-                if part.tool_call_id == "call-keep"
-        ));
-        assert_eq!(second.content.len(), 1);
-        assert!(matches!(
-            &second.content[0],
-            LanguageModelToolContentPart::ToolResult(part)
-                if part.tool_call_id == "call-keep"
-        ));
-        assert_eq!(third.content.len(), 2);
-    }
-
-    #[test]
-    fn prune_messages_tool_specific_rules_preserve_other_tools() {
-        let messages = vec![
-            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
-                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
-                    "call-weather",
-                    "weather",
-                    json!({}),
+                    "call-1",
+                    "get-weather-tool-1",
+                    json!("{\"city\": \"Tokyo\"}"),
                 )),
                 LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
-                    "call-search",
-                    "search",
-                    json!({}),
+                    "call-2",
+                    "get-weather-tool-2",
+                    json!("{\"city\": \"Busan\"}"),
                 )),
                 LanguageModelAssistantContentPart::ToolApprovalRequest(
-                    LanguageModelToolApprovalRequestPart::new("approval-weather", "call-weather"),
-                ),
-                LanguageModelAssistantContentPart::ToolApprovalRequest(
-                    LanguageModelToolApprovalRequestPart::new("approval-search", "call-search"),
+                    LanguageModelToolApprovalRequestPart::new("approval-1", "call-2"),
                 ),
             ])),
             LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
-                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
-                    "call-weather",
-                    "weather",
-                    LanguageModelToolResultOutput::text("sunny"),
-                )),
                 LanguageModelToolContentPart::ToolApprovalResponse(
-                    LanguageModelToolApprovalResponsePart::new("approval-search", true),
+                    LanguageModelToolApprovalResponsePart::new("approval-1", true),
+                ),
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call-1",
+                    "get-weather-tool-1",
+                    LanguageModelToolResultOutput::text("sunny"),
+                )),
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call-2",
+                    "get-weather-tool-2",
+                    LanguageModelToolResultOutput::error_text(
+                        "Error: Fetching weather data failed",
+                    ),
+                )),
+            ])),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::Reasoning(LanguageModelReasoningPart::new(
+                    "I have got the weather in Tokyo and Busan.",
+                )),
+                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                    "The weather in Tokyo is sunny. I could not get the weather in Busan.",
+                )),
+            ])),
+        ]
+    }
+
+    fn prune_messages_fixture_2() -> Vec<LanguageModelMessage> {
+        vec![
+            user_message("Weather in Tokyo and Busan?"),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::Reasoning(LanguageModelReasoningPart::new(
+                    "I need to get the weather in Tokyo and Busan.",
+                )),
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call-1",
+                    "get-weather-tool-1",
+                    json!("{\"city\": \"Tokyo\"}"),
+                )),
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call-2",
+                    "get-weather-tool-2",
+                    json!("{\"city\": \"Busan\"}"),
+                )),
+                LanguageModelAssistantContentPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequestPart::new("approval-1", "call-1"),
                 ),
             ])),
-        ];
+        ]
+    }
 
+    fn prune_messages_multi_turn_tool_call_fixture() -> Vec<LanguageModelMessage> {
+        vec![
+            user_message("ask me a question"),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                    "What can i help you with",
+                )),
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "toolu_01P9s4havAQSjDmS4eWT1N2V",
+                    "AskUserQuestion",
+                    json!({
+                        "question": "What would you like help with today?",
+                        "options": ["Tool 1 Option 1", "Tool 1 Option 2", "Tool 1 Option 3"]
+                    }),
+                )),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "toolu_01P9s4havAQSjDmS4eWT1N2V",
+                    "AskUserQuestion",
+                    LanguageModelToolResultOutput::text("Something else"),
+                )),
+            ])),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "toolu_01TMAuwWKLmBoQtx7K88dxsQ",
+                    "AskUserQuestion",
+                    json!({
+                        "question": "Ok what else?",
+                        "options": ["Tool 2 Option 1", "Tool 2 Option 2", "Tool 2 Option 3"]
+                    }),
+                )),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "toolu_01TMAuwWKLmBoQtx7K88dxsQ",
+                    "AskUserQuestion",
+                    LanguageModelToolResultOutput::text("Other - I'll describe it"),
+                )),
+            ])),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                    "What would you like to discuss or work on?",
+                )),
+            ])),
+            user_message("never mind. lets end this conversation"),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                    "ok, have a nice day",
+                )),
+            ])),
+            user_message("thank you"),
+        ]
+    }
+
+    fn message_has_reasoning(message: &LanguageModelMessage) -> bool {
+        matches!(message, LanguageModelMessage::Assistant(message) if message
+            .content
+            .iter()
+            .any(|part| matches!(part, LanguageModelAssistantContentPart::Reasoning(_))))
+    }
+
+    fn count_tool_related_parts(messages: &[LanguageModelMessage]) -> usize {
+        messages
+            .iter()
+            .map(|message| match message {
+                LanguageModelMessage::Assistant(message) => message
+                    .content
+                    .iter()
+                    .filter(|part| {
+                        matches!(
+                            part,
+                            LanguageModelAssistantContentPart::ToolCall(_)
+                                | LanguageModelAssistantContentPart::ToolResult(_)
+                                | LanguageModelAssistantContentPart::ToolApprovalRequest(_)
+                        )
+                    })
+                    .count(),
+                LanguageModelMessage::Tool(message) => message.content.len(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    fn has_tool_call_or_result_id(messages: &[LanguageModelMessage], tool_call_id: &str) -> bool {
+        messages.iter().any(|message| match message {
+            LanguageModelMessage::Assistant(message) => message.content.iter().any(|part| {
+                matches!(part, LanguageModelAssistantContentPart::ToolCall(part) if part.tool_call_id == tool_call_id)
+                    || matches!(part, LanguageModelAssistantContentPart::ToolResult(part) if part.tool_call_id == tool_call_id)
+            }),
+            LanguageModelMessage::Tool(message) => message.content.iter().any(|part| {
+                matches!(part, LanguageModelToolContentPart::ToolResult(part) if part.tool_call_id == tool_call_id)
+            }),
+            _ => false,
+        })
+    }
+
+    fn has_approval_id(messages: &[LanguageModelMessage], approval_id: &str) -> bool {
+        messages.iter().any(|message| match message {
+            LanguageModelMessage::Assistant(message) => message.content.iter().any(|part| {
+                matches!(part, LanguageModelAssistantContentPart::ToolApprovalRequest(part) if part.approval_id == approval_id)
+            }),
+            LanguageModelMessage::Tool(message) => message.content.iter().any(|part| {
+                matches!(part, LanguageModelToolContentPart::ToolApprovalResponse(part) if part.approval_id == approval_id)
+            }),
+            _ => false,
+        })
+    }
+
+    #[test]
+    fn prune_messages_should_prune_all_reasoning_parts() {
+        let messages = prune_messages_fixture_1();
+        let original_tool_part_count = count_tool_related_parts(&messages);
+
+        let pruned =
+            prune_messages(PruneMessagesOptions::new(messages).with_reasoning(PruneReasoning::All));
+
+        assert_eq!(pruned.len(), 4);
+        assert!(!pruned.iter().any(message_has_reasoning));
+        assert_eq!(count_tool_related_parts(&pruned), original_tool_part_count);
+    }
+
+    #[test]
+    fn prune_messages_should_prune_the_trailing_message() {
         let pruned = prune_messages(
-            PruneMessagesOptions::new(messages)
-                .with_tool_calls(PruneToolCalls::Rules(vec![
-                    PruneToolCallRule::all().with_tools(["weather"]),
-                ]))
-                .with_empty_messages(PruneEmptyMessages::Keep),
+            PruneMessagesOptions::new(prune_messages_fixture_1())
+                .with_reasoning(PruneReasoning::BeforeLastMessage),
         );
 
-        let LanguageModelMessage::Assistant(first) = &pruned[0] else {
-            panic!("first message is assistant");
-        };
-        let LanguageModelMessage::Tool(second) = &pruned[1] else {
-            panic!("second message is tool");
-        };
+        assert!(!message_has_reasoning(&pruned[1]));
+        assert!(message_has_reasoning(&pruned[3]));
+    }
 
-        assert_eq!(first.content.len(), 2);
-        assert!(matches!(
-            &first.content[0],
-            LanguageModelAssistantContentPart::ToolCall(part)
-                if part.tool_name == "search"
-        ));
-        assert!(matches!(
-            &first.content[1],
-            LanguageModelAssistantContentPart::ToolApprovalRequest(part)
-                if part.approval_id == "approval-search"
-        ));
-        assert_eq!(second.content.len(), 1);
-        assert!(matches!(
-            &second.content[0],
-            LanguageModelToolContentPart::ToolApprovalResponse(_)
-        ));
+    #[test]
+    fn prune_messages_should_prune_all_tool_calls_results_errors_and_approvals() {
+        let pruned = prune_messages(
+            PruneMessagesOptions::new(prune_messages_fixture_1())
+                .with_tool_calls(PruneToolCalls::All),
+        );
+
+        assert_eq!(count_tool_related_parts(&pruned), 0);
+        assert_eq!(pruned.len(), 3);
+        assert!(
+            !pruned
+                .iter()
+                .any(|message| matches!(message, LanguageModelMessage::Tool(_)))
+        );
+    }
+
+    #[test]
+    fn prune_messages_should_prune_tool_calls_before_last_message() {
+        let messages = prune_messages_fixture_2();
+
+        let pruned = prune_messages(
+            PruneMessagesOptions::new(messages.clone())
+                .with_tool_calls(PruneToolCalls::BeforeLastMessage),
+        );
+
+        assert_eq!(pruned, messages);
+    }
+
+    #[test]
+    fn prune_messages_should_prune_tool_calls_and_results_from_multi_turn_conversation_when_last_message_has_no_tool_calls()
+     {
+        let pruned = prune_messages(
+            PruneMessagesOptions::new(prune_messages_multi_turn_tool_call_fixture())
+                .with_tool_calls(PruneToolCalls::BeforeLastMessage),
+        );
+
+        assert_eq!(count_tool_related_parts(&pruned), 0);
+        assert_eq!(pruned.len(), 6);
+        assert!(
+            !pruned
+                .iter()
+                .any(|message| matches!(message, LanguageModelMessage::Tool(_)))
+        );
+    }
+
+    #[test]
+    fn prune_messages_should_prune_all_tool_calls_results_errors_and_approvals_before_last_two_messages()
+     {
+        let messages = prune_messages_fixture_1();
+
+        let pruned = prune_messages(
+            PruneMessagesOptions::new(messages.clone())
+                .with_tool_calls(PruneToolCalls::BeforeLastMessages(2)),
+        );
+
+        assert_eq!(pruned, messages);
+    }
+
+    #[test]
+    fn prune_messages_should_prune_all_tool_calls_results_errors_and_approvals_for_two_tool_settings()
+     {
+        let pruned = prune_messages(
+            PruneMessagesOptions::new(prune_messages_fixture_1()).with_tool_calls(
+                PruneToolCalls::Rules(vec![
+                    PruneToolCallRule::all().with_tools(["get-weather-tool-1"]),
+                    PruneToolCallRule::before_last_messages(2).with_tools(["get-weather-tool-2"]),
+                ]),
+            ),
+        );
+
+        assert_eq!(pruned.len(), 4);
+        assert!(!has_tool_call_or_result_id(&pruned, "call-1"));
+        assert!(has_tool_call_or_result_id(&pruned, "call-2"));
+        assert!(has_approval_id(&pruned, "approval-1"));
     }
 
     #[test]
