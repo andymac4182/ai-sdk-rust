@@ -204,6 +204,109 @@ pub enum WellKnownEmoji {
     Rainbow,
 }
 
+/// String value that may also appear on the wire as an array of strings.
+/// Upstream uses `string | string[]` for [`EmojiFormats`] fields because
+/// some emoji names map to multiple platform-specific shortcodes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum StringOrList {
+    /// Single shortcode (`"+1"`, `"thumbs_up"`, …).
+    One(String),
+    /// Multiple equivalent shortcodes the platform accepts for one emoji.
+    Many(Vec<String>),
+}
+
+/// Platform-specific emoji shortcodes for a single emoji. 1:1 port of
+/// upstream `interface EmojiFormats { gchat: string | string[]; slack: string | string[] }`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmojiFormats {
+    /// Google Chat Unicode emoji (e.g. `"👍"`, `"❤️"`).
+    pub gchat: StringOrList,
+    /// Slack emoji shortcode without colons (e.g. `"+1"`, `"heart"`).
+    pub slack: StringOrList,
+}
+
+/// Full emoji identifier covering both well-known shortcodes and the
+/// user-extensible custom-emoji namespace. 1:1 port of upstream
+/// `export type Emoji = WellKnownEmoji | keyof CustomEmojiMap`.
+///
+/// Upstream's `interface CustomEmojiMap {}` is a TypeScript module-
+/// augmentation hook with no Rust equivalent; the [`Self::Custom`] variant
+/// fills that role by accepting any string shortcode at runtime. On the
+/// wire both variants are flat strings (untagged) so JSON shape matches
+/// the upstream `string` union exactly.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Emoji {
+    WellKnown(WellKnownEmoji),
+    Custom(String),
+}
+
+/// User-supplied mapping from [`Emoji`] to its platform-specific shortcodes.
+/// 1:1 port of upstream
+/// `export type EmojiMapConfig = Partial<Record<Emoji, EmojiFormats>>`.
+pub type EmojiMapConfig = std::collections::HashMap<Emoji, EmojiFormats>;
+
+/// Immutable emoji value with object identity (upstream singletons).
+///
+/// 1:1 port of upstream `interface EmojiValue` — see
+/// `packages/chat/src/types.ts` and `packages/chat/src/emoji.ts`. The
+/// upstream object identity guarantee (`emoji.thumbs_up === emoji.thumbs_up`)
+/// will be enforced by the future `emoji.rs` module via an interning
+/// registry; this type definition only captures the data and JSON shape.
+///
+/// Serializes as a plain string equal to the upstream
+/// `toJSON()` / `toString()` placeholder.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EmojiValue {
+    /// Normalized emoji shortcode (e.g. `"thumbs_up"`).
+    pub name: String,
+}
+
+impl EmojiValue {
+    /// Construct an [`EmojiValue`] from its normalized shortcode.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+
+    /// Render the upstream placeholder string used in formatted messages
+    /// and as the `toString()` / `toJSON()` value.
+    pub fn placeholder(&self) -> String {
+        format!(":{}:", self.name)
+    }
+}
+
+impl std::fmt::Display for EmojiValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.placeholder())
+    }
+}
+
+impl Serialize for EmojiValue {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Upstream toJSON() returns the `:name:` placeholder, not the raw
+        // name. Preserving that on the wire keeps message-formatting parity.
+        serializer.serialize_str(&self.placeholder())
+    }
+}
+
+impl<'de> Deserialize<'de> for EmojiValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let placeholder = String::deserialize(deserializer)?;
+        let name = placeholder
+            .strip_prefix(':')
+            .and_then(|s| s.strip_suffix(':'))
+            .ok_or_else(|| {
+                serde::de::Error::custom(format!(
+                    "expected EmojiValue placeholder `:name:`, got {placeholder:?}"
+                ))
+            })?;
+        Ok(Self {
+            name: name.to_string(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Rust-specific serde round-trip coverage for the standalone type
@@ -338,5 +441,94 @@ mod tests {
     fn thread_state_ttl_ms_matches_upstream_constant() {
         // Upstream: 30 * 24 * 60 * 60 * 1000 = 2_592_000_000.
         assert_eq!(THREAD_STATE_TTL_MS, 2_592_000_000);
+    }
+
+    #[test]
+    fn string_or_list_round_trips_single_and_array() {
+        let one = StringOrList::One("thumbs_up".to_string());
+        assert_eq!(serde_json::to_string(&one).unwrap(), "\"thumbs_up\"");
+        let back: StringOrList = serde_json::from_str("\"thumbs_up\"").unwrap();
+        assert_eq!(back, one);
+
+        let many = StringOrList::Many(vec!["+1".to_string(), "thumbs_up".to_string()]);
+        assert_eq!(
+            serde_json::to_string(&many).unwrap(),
+            "[\"+1\",\"thumbs_up\"]"
+        );
+        let back: StringOrList = serde_json::from_str("[\"+1\",\"thumbs_up\"]").unwrap();
+        assert_eq!(back, many);
+    }
+
+    #[test]
+    fn emoji_formats_serializes_with_string_union() {
+        let formats = EmojiFormats {
+            gchat: StringOrList::One("👍".to_string()),
+            slack: StringOrList::Many(vec!["+1".to_string(), "thumbs_up".to_string()]),
+        };
+        let json = serde_json::to_string(&formats).unwrap();
+        assert_eq!(json, "{\"gchat\":\"👍\",\"slack\":[\"+1\",\"thumbs_up\"]}");
+        let back: EmojiFormats = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, formats);
+    }
+
+    #[test]
+    fn emoji_well_known_and_custom_are_untagged_strings() {
+        assert_eq!(
+            serde_json::to_string(&Emoji::WellKnown(WellKnownEmoji::ThumbsUp)).unwrap(),
+            "\"thumbs_up\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Emoji::Custom("my_logo".to_string())).unwrap(),
+            "\"my_logo\""
+        );
+
+        // Untagged round-trip: known shortcodes prefer the WellKnown variant,
+        // unknown strings fall through to Custom.
+        let known: Emoji = serde_json::from_str("\"thumbs_up\"").unwrap();
+        assert_eq!(known, Emoji::WellKnown(WellKnownEmoji::ThumbsUp));
+        let custom: Emoji = serde_json::from_str("\"my_logo\"").unwrap();
+        assert_eq!(custom, Emoji::Custom("my_logo".to_string()));
+    }
+
+    #[test]
+    fn emoji_map_config_serializes_as_object() {
+        let mut config: EmojiMapConfig = std::collections::HashMap::new();
+        config.insert(
+            Emoji::Custom("custom_emoji".to_string()),
+            EmojiFormats {
+                gchat: StringOrList::One("🎯".to_string()),
+                slack: StringOrList::One("custom".to_string()),
+            },
+        );
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"custom_emoji\""));
+        let back: EmojiMapConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, config);
+    }
+
+    #[test]
+    fn emoji_value_to_string_and_placeholder_match_upstream() {
+        let value = EmojiValue::new("thumbs_up");
+        assert_eq!(value.name, "thumbs_up");
+        assert_eq!(value.placeholder(), ":thumbs_up:");
+        assert_eq!(value.to_string(), ":thumbs_up:");
+    }
+
+    #[test]
+    fn emoji_value_serializes_as_placeholder_string() {
+        let value = EmojiValue::new("heart");
+        let json = serde_json::to_string(&value).unwrap();
+        assert_eq!(json, "\":heart:\"");
+        let back: EmojiValue = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, value);
+    }
+
+    #[test]
+    fn emoji_value_deserialization_rejects_malformed_placeholder() {
+        let bad = serde_json::from_str::<EmojiValue>("\"thumbs_up\"");
+        assert!(
+            bad.is_err(),
+            "expected placeholder without colons to fail to deserialize"
+        );
     }
 }
