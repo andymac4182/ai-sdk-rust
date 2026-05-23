@@ -6,6 +6,7 @@
 //! The thread id encoding is `discord:<guild_id>:<channel_id>` (DMs
 //! use the literal `@me` for the guild id).
 
+pub mod markdown;
 pub mod webhook;
 
 use async_trait::async_trait;
