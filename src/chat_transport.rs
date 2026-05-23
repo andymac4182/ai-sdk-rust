@@ -2,6 +2,7 @@ use std::fmt;
 
 use crate::agent::{ToolLoopAgent, ToolLoopAgentCallOptions, ToolLoopAgentModelSettings};
 use crate::file_data::{FileData, ProviderReference};
+use crate::generate_text::{GenerateTextTool, ToolModelOutputErrorMode, create_tool_model_output};
 use crate::headers::Headers;
 use crate::json::{JsonObject, JsonValue};
 use crate::language_model::{
@@ -16,7 +17,7 @@ use crate::language_model::{
 };
 use crate::prompt::Prompt;
 use crate::provider::ProviderOptions;
-use crate::provider_utils::{ParseJsonResult, normalize_headers, parse_json_event_stream};
+use crate::provider_utils::{ParseJsonResult, Tool, normalize_headers, parse_json_event_stream};
 use crate::stream_text::StreamTextUiMessageStreamOptions;
 use crate::ui_message_stream::{
     UiMessage, UiMessageChunk, UiMessageRole, transform_text_to_ui_message_stream,
@@ -364,6 +365,25 @@ where
     convert_ui_messages_to_model_messages_internal(messages, options, Some(convert_data_part))
 }
 
+/// Converts portable UI messages into model messages and resolves local tool
+/// outputs through upstream `toModelOutput` callbacks when a matching tool is
+/// provided.
+pub async fn convert_ui_messages_to_model_messages_with_tools(
+    messages: &[UiMessage],
+    options: ConvertUiMessagesToModelMessagesOptions,
+    tools: &[GenerateTextTool],
+) -> Result<LanguageModelPrompt, ChatTransportError> {
+    let mut model_messages = Vec::new();
+
+    for message in messages {
+        model_messages.extend(
+            convert_ui_message_to_model_messages_with_tools(message, options, None, tools).await?,
+        );
+    }
+
+    Ok(model_messages)
+}
+
 fn convert_ui_messages_to_model_messages_internal(
     messages: &[UiMessage],
     options: ConvertUiMessagesToModelMessagesOptions,
@@ -380,6 +400,30 @@ fn convert_ui_messages_to_model_messages_internal(
     }
 
     Ok(model_messages)
+}
+
+async fn convert_ui_message_to_model_messages_with_tools(
+    message: &UiMessage,
+    options: ConvertUiMessagesToModelMessagesOptions,
+    convert_data_part: Option<&UiMessageDataPartConverter<'_>>,
+    tools: &[GenerateTextTool],
+) -> Result<Vec<LanguageModelMessage>, ChatTransportError> {
+    if message.id.is_empty() {
+        return Err(ChatTransportError::InvalidMessage(
+            "UI message id must not be empty.".to_string(),
+        ));
+    }
+
+    match message.role {
+        UiMessageRole::System => convert_system_ui_message(message).map(|message| vec![message]),
+        UiMessageRole::User => {
+            convert_user_ui_message(message, convert_data_part).map(|message| vec![message])
+        }
+        UiMessageRole::Assistant => {
+            convert_assistant_ui_message_with_tools(message, options, convert_data_part, tools)
+                .await
+        }
+    }
 }
 
 fn convert_ui_message_to_model_messages(
@@ -489,6 +533,42 @@ fn convert_assistant_ui_message(
     Ok(model_messages)
 }
 
+async fn convert_assistant_ui_message_with_tools(
+    message: &UiMessage,
+    options: ConvertUiMessagesToModelMessagesOptions,
+    convert_data_part: Option<&UiMessageDataPartConverter<'_>>,
+    tools: &[GenerateTextTool],
+) -> Result<Vec<LanguageModelMessage>, ChatTransportError> {
+    let mut model_messages = Vec::new();
+    let mut block = Vec::new();
+
+    for part in &message.parts {
+        let kind = ui_message_part_type(part)?;
+        if kind == "step-start" {
+            flush_assistant_ui_message_block_with_tools(
+                &mut model_messages,
+                &mut block,
+                convert_data_part,
+                tools,
+            )
+            .await?;
+        } else if should_ignore_incomplete_tool_part(part, kind, options)? {
+            continue;
+        } else {
+            block.push(part);
+        }
+    }
+    flush_assistant_ui_message_block_with_tools(
+        &mut model_messages,
+        &mut block,
+        convert_data_part,
+        tools,
+    )
+    .await?;
+
+    Ok(model_messages)
+}
+
 fn should_ignore_incomplete_tool_part(
     part: &JsonValue,
     kind: &str,
@@ -561,6 +641,99 @@ fn flush_assistant_ui_message_block(
             }
             kind if kind == "dynamic-tool" || kind.starts_with("tool-") => {
                 convert_assistant_tool_ui_part(part, kind, &mut content, &mut tool_content)?;
+            }
+            kind if ui_message_part_is_data(kind) => {
+                if let Some(converted) = convert_ui_message_data_part(part, convert_data_part)? {
+                    push_converted_assistant_data_part(&mut content, converted);
+                }
+            }
+            _ => {
+                return Err(ChatTransportError::InvalidMessage(format!(
+                    "Unsupported UI message part type `{kind}` for assistant message."
+                )));
+            }
+        }
+    }
+
+    model_messages.push(LanguageModelMessage::Assistant(
+        LanguageModelAssistantMessage::new(content),
+    ));
+
+    if !tool_content.is_empty() {
+        model_messages.push(LanguageModelMessage::Tool(LanguageModelToolMessage::new(
+            tool_content,
+        )));
+    }
+
+    block.clear();
+    Ok(())
+}
+
+async fn flush_assistant_ui_message_block_with_tools(
+    model_messages: &mut Vec<LanguageModelMessage>,
+    block: &mut Vec<&JsonValue>,
+    convert_data_part: Option<&UiMessageDataPartConverter<'_>>,
+    tools: &[GenerateTextTool],
+) -> Result<(), ChatTransportError> {
+    if block.is_empty() {
+        return Ok(());
+    }
+
+    let mut content = Vec::new();
+    let mut tool_content = Vec::new();
+
+    for part in block.iter().copied() {
+        let kind = ui_message_part_type(part)?;
+        match kind {
+            "text" => {
+                let mut text_part = LanguageModelTextPart::new(ui_message_text(part)?);
+                if let Some(provider_options) = ui_message_provider_options(part)? {
+                    text_part = text_part.with_provider_options(provider_options);
+                }
+                content.push(LanguageModelAssistantContentPart::Text(text_part));
+            }
+            "reasoning" => {
+                let mut reasoning_part = LanguageModelReasoningPart::new(ui_message_text(part)?);
+                if let Some(provider_options) = ui_message_provider_options(part)? {
+                    reasoning_part = reasoning_part.with_provider_options(provider_options);
+                }
+                content.push(LanguageModelAssistantContentPart::Reasoning(reasoning_part));
+            }
+            "reasoning-file" => {
+                let mut reasoning_file = LanguageModelReasoningFilePart::new(
+                    LanguageModelFileData::Url {
+                        url: ui_message_url(part)?,
+                    },
+                    ui_message_media_type(part)?,
+                );
+                if let Some(provider_options) = ui_message_provider_options(part)? {
+                    reasoning_file = reasoning_file.with_provider_options(provider_options);
+                }
+                content.push(LanguageModelAssistantContentPart::ReasoningFile(
+                    reasoning_file,
+                ));
+            }
+            "custom" => {
+                let mut custom_part = LanguageModelCustomPart::new(ui_message_custom_kind(part)?);
+                if let Some(provider_options) = ui_message_provider_options(part)? {
+                    custom_part = custom_part.with_provider_options(provider_options);
+                }
+                content.push(LanguageModelAssistantContentPart::Custom(custom_part));
+            }
+            "file" => {
+                content.push(LanguageModelAssistantContentPart::File(
+                    ui_message_file_part(part)?,
+                ));
+            }
+            kind if kind == "dynamic-tool" || kind.starts_with("tool-") => {
+                convert_assistant_tool_ui_part_with_tools(
+                    part,
+                    kind,
+                    &mut content,
+                    &mut tool_content,
+                    tools,
+                )
+                .await?;
             }
             kind if ui_message_part_is_data(kind) => {
                 if let Some(converted) = convert_ui_message_data_part(part, convert_data_part)? {
@@ -802,6 +975,135 @@ fn convert_assistant_tool_ui_part(
     Ok(())
 }
 
+async fn convert_assistant_tool_ui_part_with_tools(
+    part: &JsonValue,
+    kind: &str,
+    assistant_content: &mut Vec<LanguageModelAssistantContentPart>,
+    tool_content: &mut Vec<LanguageModelToolContentPart>,
+    tools: &[GenerateTextTool],
+) -> Result<(), ChatTransportError> {
+    let state = ui_message_string_field(part, "state")?;
+    if state == "input-streaming" {
+        return Ok(());
+    }
+
+    let tool_name = ui_message_tool_name(part, kind)?;
+    let tool_call_id = ui_message_string_field(part, "toolCallId")?;
+    let provider_executed = ui_message_optional_bool(part, "providerExecuted")?.unwrap_or(false);
+    let input = tool_part_input(part, state);
+    let call_provider_options =
+        ui_message_provider_options_from_field(part, "callProviderMetadata")?;
+    let approval = ui_message_tool_approval(part)?;
+
+    let mut tool_call = LanguageModelToolCallPart::new(
+        tool_call_id.to_string(),
+        tool_name.to_string(),
+        input.clone(),
+    );
+    if provider_executed {
+        tool_call = tool_call.with_provider_executed(true);
+    }
+    if let Some(provider_options) = call_provider_options.clone() {
+        tool_call = tool_call.with_provider_options(provider_options);
+    }
+    assistant_content.push(LanguageModelAssistantContentPart::ToolCall(tool_call));
+
+    if let Some(approval) = &approval {
+        let mut approval_request =
+            LanguageModelToolApprovalRequestPart::new(&approval.id, tool_call_id);
+        if let Some(is_automatic) = approval.is_automatic {
+            approval_request = approval_request.with_automatic(is_automatic);
+        }
+        assistant_content.push(LanguageModelAssistantContentPart::ToolApprovalRequest(
+            approval_request,
+        ));
+
+        if let Some(approved) = approval.approved {
+            let mut approval_response =
+                LanguageModelToolApprovalResponsePart::new(&approval.id, approved);
+            if provider_executed {
+                approval_response = approval_response.with_provider_executed(true);
+            }
+            if let Some(reason) = &approval.reason {
+                approval_response = approval_response.with_reason(reason.clone());
+            }
+            tool_content.push(LanguageModelToolContentPart::ToolApprovalResponse(
+                approval_response,
+            ));
+
+            if state == "approval-responded" && !approved {
+                let mut output = LanguageModelToolResultOutput::execution_denied();
+                if let Some(reason) = &approval.reason {
+                    output = output.with_reason(reason.clone());
+                }
+                let mut result_part = LanguageModelToolResultPart::new(
+                    tool_call_id.to_string(),
+                    tool_name.to_string(),
+                    output,
+                );
+                if let Some(provider_options) = call_provider_options.clone() {
+                    result_part = result_part.with_provider_options(provider_options);
+                }
+                tool_content.push(LanguageModelToolContentPart::ToolResult(result_part));
+            }
+        }
+    }
+
+    match state {
+        "output-available" | "output-error" => {
+            let result_provider_options =
+                ui_message_provider_options_from_field(part, "resultProviderMetadata")?
+                    .or(call_provider_options);
+            let output = tool_result_output_from_ui_part_with_tools(
+                part,
+                state,
+                provider_executed,
+                tool_call_id,
+                tool_name,
+                tools,
+            )
+            .await?;
+            let mut result_part = LanguageModelToolResultPart::new(
+                tool_call_id.to_string(),
+                tool_name.to_string(),
+                output,
+            );
+            if let Some(provider_options) = result_provider_options {
+                result_part = result_part.with_provider_options(provider_options);
+            }
+
+            if provider_executed {
+                assistant_content.push(LanguageModelAssistantContentPart::ToolResult(result_part));
+            } else {
+                tool_content.push(LanguageModelToolContentPart::ToolResult(result_part));
+            }
+        }
+        "output-denied" => {
+            let reason = approval
+                .as_ref()
+                .and_then(|approval| approval.reason.clone())
+                .unwrap_or_else(|| "Tool call execution denied.".to_string());
+            let mut result_part = LanguageModelToolResultPart::new(
+                tool_call_id.to_string(),
+                tool_name.to_string(),
+                LanguageModelToolResultOutput::error_text(reason),
+            );
+            if let Some(provider_options) = call_provider_options {
+                result_part = result_part.with_provider_options(provider_options);
+            }
+            tool_content.push(LanguageModelToolContentPart::ToolResult(result_part));
+        }
+        "input-available" | "approval-requested" | "approval-responded" => {}
+        other => {
+            return Err(ChatTransportError::InvalidMessage(format!(
+                "Unsupported UI tool part state `{other}`."
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 fn ui_message_tool_name<'a>(
     part: &'a JsonValue,
     kind: &'a str,
@@ -917,6 +1219,37 @@ fn tool_result_output_from_ui_part(
     Ok(match output {
         JsonValue::String(value) => LanguageModelToolResultOutput::text(value),
         value => LanguageModelToolResultOutput::json(value),
+    })
+}
+
+async fn tool_result_output_from_ui_part_with_tools(
+    part: &JsonValue,
+    state: &str,
+    provider_executed: bool,
+    tool_call_id: &str,
+    tool_name: &str,
+    tools: &[GenerateTextTool],
+) -> Result<LanguageModelToolResultOutput, ChatTransportError> {
+    if state == "output-error" || provider_executed {
+        return tool_result_output_from_ui_part(part, state, provider_executed);
+    }
+
+    let input = tool_part_input(part, state);
+    let output = ui_message_field(part, "output").cloned();
+    Ok(create_tool_model_output(
+        tool_call_id,
+        &input,
+        output.as_ref(),
+        rust_tool_by_name(tools, tool_name),
+        ToolModelOutputErrorMode::None,
+    )
+    .await)
+}
+
+fn rust_tool_by_name<'a>(tools: &'a [GenerateTextTool], name: &str) -> Option<&'a Tool> {
+    tools.iter().find_map(|tool| match tool {
+        GenerateTextTool::Rust(tool) if tool.name == name => Some(tool.as_ref()),
+        _ => None,
     })
 }
 

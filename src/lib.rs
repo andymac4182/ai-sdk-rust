@@ -65,8 +65,9 @@ pub mod voyage;
 pub mod warning;
 
 pub use agent::{
-    TOOL_LOOP_AGENT_VERSION, ToolLoopAgent, ToolLoopAgentCallOptions, ToolLoopAgentModelSettings,
-    ToolLoopAgentPrepareCall, ToolLoopAgentPreparedCall, ToolLoopAgentSettings,
+    AgentUiStreamResponseOptions, TOOL_LOOP_AGENT_VERSION, ToolLoopAgent, ToolLoopAgentCallOptions,
+    ToolLoopAgentModelSettings, ToolLoopAgentPrepareCall, ToolLoopAgentPreparedCall,
+    ToolLoopAgentSettings, create_agent_ui_stream_response,
 };
 pub use baseten::{
     BasetenProvider, BasetenProviderSettings, DEFAULT_BASETEN_BASE_URL, baseten, create_baseten,
@@ -82,7 +83,7 @@ pub use chat_transport::{
     HttpChatTransportOptions, HttpChatTransportRequest, PrepareReconnectToStreamRequestOptions,
     PrepareSendMessagesRequestOptions, PreparedReconnectToStreamRequest,
     PreparedSendMessagesRequest, RequestCredentials, TextStreamChatTransport,
-    convert_ui_messages_to_model_messages,
+    convert_ui_messages_to_model_messages, convert_ui_messages_to_model_messages_with_tools,
 };
 pub use completion_transport::{
     CompletionRequestOptions, CompletionStreamProtocol, CompletionTransport,
