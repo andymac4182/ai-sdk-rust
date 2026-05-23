@@ -9,6 +9,8 @@
 //! uses). For top-level messages, `thread_ts` is the message's own
 //! timestamp, so the encoding is symmetric.
 
+pub mod crypto;
+
 use async_trait::async_trait;
 use chat_sdk_chat::types::Adapter;
 
