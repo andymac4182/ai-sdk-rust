@@ -2757,3 +2757,88 @@ module-aliasing test).
   embeds, Messenger templates, Teams Adaptive Cards, chat
   ChannelImpl/ThreadImpl/ChatImpl, adapter index.test.ts
   integration suites, `postToCallbackUrl` HTTP) remain blocked.
+
+### 2026-05-24 - slices 242..246
+
+**Slices covered**
+
+- 242 `render_formatted(&Node) -> String` helper across 8 adapters
+  (github / discord / gchat / linear / messenger / slack / teams /
+  telegram); 1:1 with upstream `adapter.renderFormatted(content) =
+  formatConverter.fromAst(content)`. 8 cases (one per adapter).
+- 243 `open_dm(user_id) -> String|Option<String>` for the three
+  DM-only adapters (Messenger / WhatsApp / Telegram). Telegram
+  returns `None` for non-numeric user ids (Rust encoder requires
+  `i64`; upstream silently coerces). 4 cases.
+- 244 Slack `get_channel_visibility(thread_id) -> ChannelVisibility`
+  + `mark_external_channel(channel)` + `is_external_channel(channel)`
+  state-bearing helpers, with `Arc<Mutex<HashSet<String>>>` field
+  for Slack Connect membership. 4 cases.
+- 245 Doc-comment refresh in adapter-shared `card_utils.rs`: the
+  "Tests for the deferred `createEmojiConverter` and
+  `cardToFallbackText` follow when their `chat::emoji`/`chat::cards`
+  JSX-layer dependencies land" comment was stale — both helpers
+  have been tested for many slices.
+- 246 state-redis `generate_token() -> String` (`redis_<unix_ms>_<13
+  char base36>`). Adds `rand = "0.8"` dep. 3 cases.
+
+**What the brief got wrong or left out**
+
+- `renderFormatted` is on every adapter and is a trivial
+  delegation, but the brief didn't call it out as a single
+  cross-adapter port. Doing all 8 in one slice (242) was the
+  right shape — should be the default pattern for trait-thin
+  wrappers (`renderFormatted`, `openDM`, `markAsRead`, ...).
+- `getChannelVisibility` requires state (`_externalChannels`
+  HashSet). The Rust port now uses `Arc<Mutex<HashSet<String>>>` to
+  keep `SlackAdapter: Clone` while sharing the set across clones.
+  Future stateful helpers on adapters should follow this pattern.
+- Some "deferred" doc-comments outlive their blockers (slice 245).
+  Future refinement cycles should grep for `deferred`/`TODO`/`when X
+  lands` notes in Rust modules and prune ones whose blockers landed
+  already. Stale deferred comments mislead future contributors and
+  inflate the apparent backlog.
+- The state-redis `generate_token` token shape (`redis_<ms>_<13
+  base36>`) is identical in spirit to state-memory's `mem_<ms>_<13
+  alphanumeric>` (slice 45), but the alphabet differs: state-memory
+  used `Alphanumeric` (62-char), upstream Redis uses base36 (36-char
+  via `.toString(36)`). The Rust port now matches upstream exactly.
+- Adapter helpers that aren't on the chat-sdk `Adapter` trait need
+  to be discoverable for downstream callers. The growing per-adapter
+  helper surface (renderFormatted, channelId+isDM, openDM, splitMessage,
+  applyTelegramEntities, getChannelVisibility, ...) means each adapter
+  has both a trait surface and an inherent surface — the test
+  framework should distinguish them in tallies.
+
+**Stale or misleading guidance**
+
+- The brief's "trait methods covered: N/8" counts still don't
+  include the inherent helpers landed since slice 227. After 19
+  helper ports the tally is meaningfully wrong; the per-adapter
+  parity rows should switch to a two-column "trait / inherent" tally
+  or just one combined "adapter helpers" tally.
+- The brief notes a "Migrate legacy `lib.rs::encode_thread_id`
+  callsites" deferred item for Linear and Teams. After slices 237
+  (Teams thread_id.rs) and 239 (Linear channelId via new struct),
+  the legacy form is no longer used in the new helper code paths —
+  only the HTTP code in each adapter's `lib.rs` still uses it.
+  Migration unlocks `channelIdFromThreadId` semantics matching
+  upstream exactly.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+
+**Open refinements deferred**
+
+- **Slack Block Kit cards** (34 cases), **Discord embeds** (31),
+  **Messenger templates** (~50), **Teams Adaptive Cards** (26),
+  **chat-sdk-chat ChannelImpl/ThreadImpl/ChatImpl** (~470), all
+  adapter `index.test.ts` integration suites — all still blocked.
+- **state-redis / state-ioredis / state-pg client wire-up**
+  remains blocked on workspace runtime decision (tokio + bb8-redis
+  vs deadpool + …). Slice 246 added `rand` for `generate_token` —
+  similar approach for `bb8-redis` client when the runtime
+  decision lands.
+- **postToCallbackUrl HTTP** (3 cases) — still needs a mock-fetch
+  trait abstraction (see refinement for slices 232..236).
