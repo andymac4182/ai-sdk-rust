@@ -1952,6 +1952,46 @@ mod tests {
     }
 
     #[test]
+    fn stream_object_result_full_stream_sends_finish_provider_metadata_and_timestamp() {
+        let mut provider_metadata = ProviderMetadata::new();
+        let mut test_provider_metadata = serde_json::Map::new();
+        test_provider_metadata.insert("testKey".to_string(), json!("testValue"));
+        provider_metadata.insert("testProvider".to_string(), test_provider_metadata);
+        let timestamp = time::OffsetDateTime::UNIX_EPOCH;
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ResponseMetadata(
+                    LanguageModelStreamResponseMetadata::new()
+                        .with_id("id-0")
+                        .with_model_id("mock-model-id")
+                        .with_timestamp(timestamp),
+                ),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    r#"{ "content": "Hello, world!" }"#,
+                )),
+                LanguageModelStreamPart::Finish(
+                    LanguageModelStreamFinish::new(usage(), finish_reason())
+                        .with_provider_metadata(provider_metadata.clone()),
+                ),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt()).with_schema(answer_schema()),
+        ));
+
+        let Some(ObjectStreamPart::Finish(finish)) = result.parts.last() else {
+            panic!("full stream ends with finish part");
+        };
+        assert_eq!(finish.finish_reason, FinishReason::Stop);
+        assert_eq!(finish.usage, usage());
+        assert_eq!(finish.response.id.as_deref(), Some("id-0"));
+        assert_eq!(finish.response.model_id.as_deref(), Some("mock-model-id"));
+        assert_eq!(finish.response.timestamp, Some(timestamp));
+        assert_eq!(finish.provider_metadata, Some(provider_metadata));
+    }
+
+    #[test]
     fn stream_object_result_text_stream_and_response_match_upstream_object_chunks() {
         let model = MockLanguageModel::new()
             .with_stream_result(LanguageModelStreamResult::new(object_stream()));
