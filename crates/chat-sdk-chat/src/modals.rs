@@ -29,7 +29,20 @@
 //! requires `SelectElement` and `RadioSelectElement` to be visible — see
 //! the slice-32 cards module header for the deferred surface.
 
+use crate::cards::{FieldsElement, TextElement};
 use serde::{Deserialize, Serialize};
+
+/// Set of `type` discriminator strings the [`ModalChild`] union accepts.
+/// 1:1 port of upstream
+/// `export const VALID_MODAL_CHILD_TYPES = ["text_input", "select", "external_select", "radio_select", "text", "fields"]`.
+pub const VALID_MODAL_CHILD_TYPES: &[&str] = &[
+    "text_input",
+    "select",
+    "external_select",
+    "radio_select",
+    "text",
+    "fields",
+];
 
 /// Single-option payload for `SelectElement` / `RadioSelectElement` /
 /// `ExternalSelectElement::initialOption`. 1:1 port of upstream
@@ -160,9 +173,185 @@ pub enum RadioSelectKind {
     RadioSelect,
 }
 
+/// Children allowed inside a [`ModalElement`]. 1:1 port of upstream
+/// `export type ModalChild = TextInputElement | SelectElement |
+/// ExternalSelectElement | RadioSelectElement | TextElement |
+/// FieldsElement`. Modeled `#[serde(untagged)]` over the six variant
+/// structs — each carries its own discriminator field, so serde
+/// disambiguates without an outer wrapper. `From<T>` impls land for
+/// every variant to keep call sites readable.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ModalChild {
+    TextInput(TextInputElement),
+    Select(SelectElement),
+    ExternalSelect(ExternalSelectElement),
+    RadioSelect(RadioSelectElement),
+    Text(TextElement),
+    Fields(FieldsElement),
+}
+
+impl From<TextInputElement> for ModalChild {
+    fn from(value: TextInputElement) -> Self {
+        Self::TextInput(value)
+    }
+}
+impl From<SelectElement> for ModalChild {
+    fn from(value: SelectElement) -> Self {
+        Self::Select(value)
+    }
+}
+impl From<ExternalSelectElement> for ModalChild {
+    fn from(value: ExternalSelectElement) -> Self {
+        Self::ExternalSelect(value)
+    }
+}
+impl From<RadioSelectElement> for ModalChild {
+    fn from(value: RadioSelectElement) -> Self {
+        Self::RadioSelect(value)
+    }
+}
+impl From<TextElement> for ModalChild {
+    fn from(value: TextElement) -> Self {
+        Self::Text(value)
+    }
+}
+impl From<FieldsElement> for ModalChild {
+    fn from(value: FieldsElement) -> Self {
+        Self::Fields(value)
+    }
+}
+
+/// Root modal element. 1:1 port of upstream `interface ModalElement`.
+/// Discriminator `"modal"`. `title` and `callback_id` are required;
+/// every other field is optional and elided from the wire when None.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ModalElement {
+    #[serde(rename = "callbackId")]
+    pub callback_id: String,
+    /// URL to POST form values to when this modal is submitted.
+    #[serde(
+        rename = "callbackUrl",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub callback_url: Option<String>,
+    pub children: Vec<ModalChild>,
+    #[serde(
+        rename = "closeLabel",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub close_label: Option<String>,
+    #[serde(
+        rename = "notifyOnClose",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub notify_on_close: Option<bool>,
+    /// Arbitrary string carried through the modal lifecycle (e.g. a
+    /// serialized context JSON blob).
+    #[serde(
+        rename = "privateMetadata",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub private_metadata: Option<String>,
+    #[serde(
+        rename = "submitLabel",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub submit_label: Option<String>,
+    pub title: String,
+    #[serde(rename = "type")]
+    pub kind: ModalKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ModalKind {
+    #[default]
+    #[serde(rename = "modal")]
+    Modal,
+}
+
+/// Type guard for [`ModalElement`]. 1:1 port of upstream
+/// `isModalElement(value: unknown): value is ModalElement`.
+pub fn is_modal_element(value: &serde_json::Value) -> bool {
+    value
+        .get("type")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s == "modal")
+}
+
+/// Filter a heterogeneous array of JSON values down to the subset that
+/// parse as [`ModalChild`] (i.e. their `type` field is in
+/// [`VALID_MODAL_CHILD_TYPES`]). 1:1 port of upstream
+/// `filterModalChildren(children: unknown[]): ModalChild[]`.
+///
+/// Upstream `console.warn`s when any child is dropped; the Rust port
+/// surfaces the same information via the returned tuple's `dropped`
+/// count so callers can log or surface a warning through their own
+/// [`crate::logger::Logger`] instance instead of an SDK-side hard-coded
+/// `console.warn`.
+///
+/// Returns `(kept, dropped_count)` where `kept` is the validated
+/// children and `dropped_count` is the number of inputs whose `type`
+/// was not in [`VALID_MODAL_CHILD_TYPES`] (or which weren't JSON
+/// objects).
+pub fn filter_modal_children(children: &[serde_json::Value]) -> (Vec<ModalChild>, usize) {
+    let mut kept: Vec<ModalChild> = Vec::new();
+    let mut dropped = 0usize;
+    for child in children {
+        let valid = child
+            .get("type")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| VALID_MODAL_CHILD_TYPES.contains(&s));
+        if !valid {
+            dropped += 1;
+            continue;
+        }
+        match serde_json::from_value::<ModalChild>(child.clone()) {
+            Ok(modal_child) => kept.push(modal_child),
+            Err(_) => dropped += 1,
+        }
+    }
+    (kept, dropped)
+}
+
 // ============================================================================
 // Builders
 // ============================================================================
+
+/// Options for [`modal`]. Mirrors upstream `interface ModalOptions`.
+#[derive(Debug, Default, Clone)]
+pub struct ModalOptions {
+    pub callback_id: String,
+    pub callback_url: Option<String>,
+    pub children: Option<Vec<ModalChild>>,
+    pub close_label: Option<String>,
+    pub notify_on_close: Option<bool>,
+    pub private_metadata: Option<String>,
+    pub submit_label: Option<String>,
+    pub title: String,
+}
+
+/// 1:1 port of upstream `Modal(options): ModalElement`. The upstream
+/// `children ?? []` default lands here as
+/// `options.children.unwrap_or_default()`.
+pub fn modal(options: ModalOptions) -> ModalElement {
+    ModalElement {
+        callback_id: options.callback_id,
+        callback_url: options.callback_url,
+        children: options.children.unwrap_or_default(),
+        close_label: options.close_label,
+        notify_on_close: options.notify_on_close,
+        private_metadata: options.private_metadata,
+        submit_label: options.submit_label,
+        title: options.title,
+        kind: ModalKind::Modal,
+    }
+}
 
 /// Options for [`text_input`]. Mirrors upstream `interface TextInputOptions`.
 #[derive(Debug, Default, Clone)]
@@ -284,6 +473,171 @@ mod tests {
     //! filterModalChildren + isModalElement) ship in follow-up slices.
 
     use super::*;
+
+    #[test]
+    fn modal_builder_emits_required_fields_with_camelcase_wire() {
+        let elem = modal(ModalOptions {
+            callback_id: "form_1".to_string(),
+            callback_url: Some("https://example.com/submit".to_string()),
+            close_label: Some("Cancel".to_string()),
+            notify_on_close: Some(true),
+            private_metadata: Some(r#"{"ctx":"x"}"#.to_string()),
+            submit_label: Some("Submit".to_string()),
+            title: "Confirm".to_string(),
+            children: Some(vec![
+                text_input(TextInputOptions {
+                    id: "name".to_string(),
+                    label: "Name".to_string(),
+                    ..Default::default()
+                })
+                .into(),
+            ]),
+        });
+        let json = serde_json::to_string(&elem).unwrap();
+        assert!(json.contains("\"type\":\"modal\""));
+        assert!(json.contains("\"callbackId\":\"form_1\""));
+        assert!(json.contains("\"callbackUrl\":\"https://example.com/submit\""));
+        assert!(json.contains("\"closeLabel\":\"Cancel\""));
+        assert!(json.contains("\"notifyOnClose\":true"));
+        assert!(json.contains("\"privateMetadata\":\"{\\\"ctx\\\":\\\"x\\\"}\""));
+        assert!(json.contains("\"submitLabel\":\"Submit\""));
+        assert!(json.contains("\"title\":\"Confirm\""));
+        // The TextInput child should round-trip through the untagged union.
+        let back: ModalElement = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, elem);
+    }
+
+    #[test]
+    fn modal_builder_minimum_shape_emits_only_required_fields() {
+        let elem = modal(ModalOptions {
+            callback_id: "id".to_string(),
+            title: "T".to_string(),
+            ..Default::default()
+        });
+        let json = serde_json::to_string(&elem).unwrap();
+        assert!(!json.contains("callbackUrl"));
+        assert!(!json.contains("closeLabel"));
+        assert!(!json.contains("notifyOnClose"));
+        assert!(!json.contains("privateMetadata"));
+        assert!(!json.contains("submitLabel"));
+        // children: [] (empty array) is always emitted because the
+        // upstream type requires it.
+        assert!(json.contains("\"children\":[]"));
+        assert!(json.contains("\"callbackId\":\"id\""));
+        assert!(json.contains("\"title\":\"T\""));
+    }
+
+    #[test]
+    fn modal_child_untagged_round_trip_handles_every_variant() {
+        use crate::cards::{field, fields, text as cards_text};
+        let payload: Vec<ModalChild> = vec![
+            text_input(TextInputOptions {
+                id: "name".to_string(),
+                label: "Name".to_string(),
+                ..Default::default()
+            })
+            .into(),
+            select(SelectOptions {
+                id: "s".to_string(),
+                label: "S".to_string(),
+                options: vec![select_option("A", "a", None)],
+                ..Default::default()
+            })
+            .into(),
+            external_select(ExternalSelectOptions {
+                id: "es".to_string(),
+                label: "ES".to_string(),
+                ..Default::default()
+            })
+            .into(),
+            radio_select(RadioSelectOptions {
+                id: "rs".to_string(),
+                label: "RS".to_string(),
+                options: vec![select_option("X", "x", None)],
+                ..Default::default()
+            })
+            .into(),
+            cards_text("hello", None).into(),
+            fields(vec![field("k", "v")]).into(),
+        ];
+        let json = serde_json::to_string(&payload).unwrap();
+        let back: Vec<ModalChild> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.len(), payload.len());
+        assert!(matches!(back[0], ModalChild::TextInput(_)));
+        assert!(matches!(back[1], ModalChild::Select(_)));
+        assert!(matches!(back[2], ModalChild::ExternalSelect(_)));
+        assert!(matches!(back[3], ModalChild::RadioSelect(_)));
+        assert!(matches!(back[4], ModalChild::Text(_)));
+        assert!(matches!(back[5], ModalChild::Fields(_)));
+    }
+
+    #[test]
+    fn is_modal_element_distinguishes_modals_from_other_shapes() {
+        let modal_json = serde_json::to_value(modal(ModalOptions {
+            callback_id: "id".to_string(),
+            title: "T".to_string(),
+            ..Default::default()
+        }))
+        .unwrap();
+        assert!(is_modal_element(&modal_json));
+
+        let text_input_json = serde_json::to_value(text_input(TextInputOptions {
+            id: "id".to_string(),
+            label: "Label".to_string(),
+            ..Default::default()
+        }))
+        .unwrap();
+        assert!(!is_modal_element(&text_input_json));
+
+        assert!(!is_modal_element(&serde_json::json!({"foo": "bar"})));
+        assert!(!is_modal_element(&serde_json::Value::Null));
+    }
+
+    #[test]
+    fn filter_modal_children_drops_invalid_children_and_reports_count() {
+        let input = vec![
+            serde_json::to_value(text_input(TextInputOptions {
+                id: "k".to_string(),
+                label: "L".to_string(),
+                ..Default::default()
+            }))
+            .unwrap(),
+            // Invalid: card element type isn't in VALID_MODAL_CHILD_TYPES.
+            serde_json::json!({"type": "button", "id": "x", "label": "x"}),
+            // Invalid: no type field.
+            serde_json::json!({"foo": "bar"}),
+            // Invalid: not an object.
+            serde_json::Value::Null,
+            // Valid: select.
+            serde_json::to_value(select(SelectOptions {
+                id: "s".to_string(),
+                label: "S".to_string(),
+                options: vec![],
+                ..Default::default()
+            }))
+            .unwrap(),
+        ];
+        let (kept, dropped) = filter_modal_children(&input);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(dropped, 3);
+        assert!(matches!(kept[0], ModalChild::TextInput(_)));
+        assert!(matches!(kept[1], ModalChild::Select(_)));
+    }
+
+    #[test]
+    fn valid_modal_child_types_matches_upstream_constant() {
+        assert_eq!(
+            VALID_MODAL_CHILD_TYPES,
+            &[
+                "text_input",
+                "select",
+                "external_select",
+                "radio_select",
+                "text",
+                "fields"
+            ]
+        );
+    }
 
     #[test]
     fn select_option_round_trips_with_optional_description() {
