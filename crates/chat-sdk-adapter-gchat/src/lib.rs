@@ -1,0 +1,253 @@
+//! Google Chat adapter for chat-sdk.
+//!
+//! 1:1 port (in progress) of `packages/adapter-gchat/src/index.ts`.
+//!
+//! Google Chat models conversations as **spaces** (Google's term for
+//! a channel) with optional **threads** inside them. The thread id
+//! encoding is `gchat:<space_id>:<thread_id>` — when posting a new
+//! top-level message, `thread_id` is the empty string after the
+//! colon. Space DM mode uses the same encoding with a 1:1 space.
+
+use async_trait::async_trait;
+use chat_sdk_chat::types::Adapter;
+
+/// Adapter name discriminator.
+pub const ADAPTER_NAME: &str = "gchat";
+
+/// Thread-id prefix.
+pub const THREAD_ID_PREFIX: &str = "gchat:";
+
+/// Default Google Chat REST API base URL.
+pub const DEFAULT_API_BASE: &str = "https://chat.googleapis.com/v1";
+
+/// Options for [`GchatAdapter::new`].
+#[derive(Debug, Clone)]
+pub struct GchatAdapterOptions {
+    /// Service-account credentials JSON (the full
+    /// `service_account.json` payload). Required for OAuth2 token
+    /// minting against the Chat API.
+    pub service_account_json: String,
+    /// Subject email to impersonate when posting (domain-wide
+    /// delegation). Required for posting on behalf of a bot user.
+    pub subject_email: String,
+    /// Optional API base URL override.
+    pub api_base: Option<String>,
+}
+
+impl GchatAdapterOptions {
+    /// Construct options. API base URL defaults to
+    /// [`DEFAULT_API_BASE`].
+    pub fn new(service_account_json: impl Into<String>, subject_email: impl Into<String>) -> Self {
+        Self {
+            service_account_json: service_account_json.into(),
+            subject_email: subject_email.into(),
+            api_base: None,
+        }
+    }
+
+    /// Override the API base URL.
+    pub fn with_api_base(mut self, api_base: impl Into<String>) -> Self {
+        self.api_base = Some(api_base.into());
+        self
+    }
+
+    /// Effective API base URL with default applied.
+    pub fn effective_api_base(&self) -> &str {
+        self.api_base.as_deref().unwrap_or(DEFAULT_API_BASE)
+    }
+}
+
+/// Google Chat adapter.
+#[derive(Debug, Clone)]
+pub struct GchatAdapter {
+    options: GchatAdapterOptions,
+}
+
+impl GchatAdapter {
+    /// 1:1 port of upstream
+    /// `new GchatAdapter({ serviceAccountJson, subjectEmail, apiBase? })`.
+    pub fn new(options: GchatAdapterOptions) -> Self {
+        Self { options }
+    }
+
+    /// Read the service-account JSON.
+    pub fn service_account_json(&self) -> &str {
+        &self.options.service_account_json
+    }
+
+    /// Read the subject email.
+    pub fn subject_email(&self) -> &str {
+        &self.options.subject_email
+    }
+
+    /// Effective API base URL.
+    pub fn api_base(&self) -> &str {
+        self.options.effective_api_base()
+    }
+}
+
+#[async_trait]
+impl Adapter for GchatAdapter {
+    fn name(&self) -> &str {
+        ADAPTER_NAME
+    }
+}
+
+/// Encode a Google Chat thread id. 1:1 with upstream's inline format:
+/// `gchat:<space_id>:<thread_id>`. When `thread_id` is empty, the
+/// resulting id encodes a "post a new top-level message" target.
+pub fn encode_thread_id(space_id: &str, thread_id: &str) -> String {
+    format!("{THREAD_ID_PREFIX}{space_id}:{thread_id}")
+}
+
+/// Components of a decoded Google Chat thread id.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DecodedGchatThreadId {
+    /// Space identifier (`spaces/<id>` in Google API URL form).
+    pub space_id: String,
+    /// Thread identifier (may be empty for top-level posts).
+    pub thread_id: String,
+}
+
+impl DecodedGchatThreadId {
+    /// Whether this thread id encodes a top-level post (empty
+    /// `thread_id`). 1:1 with upstream's
+    /// `decoded.threadId === ""` check.
+    pub fn is_top_level(&self) -> bool {
+        self.thread_id.is_empty()
+    }
+}
+
+/// Decode a Google Chat thread id. Unlike most other adapters,
+/// an empty `thread_id` portion is legal and signals a top-level
+/// post; only the `space_id` is required to be non-empty.
+pub fn decode_thread_id(thread_id: &str) -> Option<DecodedGchatThreadId> {
+    let suffix = thread_id.strip_prefix(THREAD_ID_PREFIX)?;
+    let mut parts = suffix.splitn(2, ':');
+    let space = parts.next()?;
+    let thread = parts.next().unwrap_or("");
+    if space.is_empty() {
+        return None;
+    }
+    Some(DecodedGchatThreadId {
+        space_id: space.to_string(),
+        thread_id: thread.to_string(),
+    })
+}
+
+/// Predicate: does this thread id belong to the Google Chat adapter?
+pub fn is_gchat_thread_id(thread_id: &str) -> bool {
+    thread_id.starts_with(THREAD_ID_PREFIX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_executor::block_on;
+
+    #[test]
+    fn adapter_name_is_gchat() {
+        let adapter = GchatAdapter::new(GchatAdapterOptions::new("{}", "bot@example.com"));
+        assert_eq!(adapter.name(), "gchat");
+    }
+
+    #[test]
+    fn options_new_stores_credentials_and_defaults_api_base() {
+        let opts = GchatAdapterOptions::new("{}", "bot@example.com");
+        assert_eq!(opts.service_account_json, "{}");
+        assert_eq!(opts.subject_email, "bot@example.com");
+        assert_eq!(opts.effective_api_base(), DEFAULT_API_BASE);
+    }
+
+    #[test]
+    fn options_with_api_base_overrides_the_default() {
+        let opts = GchatAdapterOptions::new("{}", "bot@example.com")
+            .with_api_base("https://chat.example.test/v1");
+        assert_eq!(opts.effective_api_base(), "https://chat.example.test/v1");
+    }
+
+    #[test]
+    fn encode_thread_id_with_thread_id() {
+        assert_eq!(encode_thread_id("AAAA", "BBBB"), "gchat:AAAA:BBBB");
+    }
+
+    #[test]
+    fn encode_thread_id_with_empty_thread_id_signals_top_level() {
+        assert_eq!(encode_thread_id("AAAA", ""), "gchat:AAAA:");
+    }
+
+    #[test]
+    fn decode_thread_id_parses_space_and_thread() {
+        let decoded = decode_thread_id("gchat:AAAA:BBBB").unwrap();
+        assert_eq!(decoded.space_id, "AAAA");
+        assert_eq!(decoded.thread_id, "BBBB");
+        assert!(!decoded.is_top_level());
+    }
+
+    #[test]
+    fn decode_thread_id_handles_empty_thread_portion_as_top_level() {
+        let decoded = decode_thread_id("gchat:AAAA:").unwrap();
+        assert_eq!(decoded.space_id, "AAAA");
+        assert!(decoded.is_top_level());
+    }
+
+    #[test]
+    fn decode_thread_id_handles_missing_thread_portion_as_top_level() {
+        // Just "gchat:AAAA" with no trailing colon also legal.
+        let decoded = decode_thread_id("gchat:AAAA").unwrap();
+        assert_eq!(decoded.space_id, "AAAA");
+        assert!(decoded.is_top_level());
+    }
+
+    #[test]
+    fn decode_thread_id_returns_none_for_other_prefixes() {
+        assert!(decode_thread_id("slack:C1:1.0").is_none());
+        assert!(decode_thread_id("teams:1:2:3").is_none());
+        assert!(decode_thread_id("").is_none());
+    }
+
+    #[test]
+    fn decode_thread_id_returns_none_for_missing_space() {
+        assert!(decode_thread_id("gchat:").is_none());
+        assert!(decode_thread_id("gchat::BBBB").is_none());
+    }
+
+    #[test]
+    fn is_gchat_thread_id_detects_the_prefix() {
+        assert!(is_gchat_thread_id("gchat:AAAA:BBBB"));
+        assert!(!is_gchat_thread_id("teams:1"));
+        assert!(!is_gchat_thread_id(""));
+    }
+
+    #[test]
+    fn encode_decode_round_trip() {
+        for (s, t) in [("AAAA", "BBBB"), ("space-1", ""), ("a", "b")] {
+            let encoded = encode_thread_id(s, t);
+            let decoded = decode_thread_id(&encoded).unwrap();
+            assert_eq!(decoded.space_id, s);
+            assert_eq!(decoded.thread_id, t);
+        }
+    }
+
+    #[test]
+    fn adapter_default_methods_return_unsupported() {
+        let adapter = GchatAdapter::new(GchatAdapterOptions::new("{}", "bot@example.com"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.post_message("gchat:AAAA:BBBB", "hi"));
+        assert!(matches!(
+            err,
+            Err(AdapterError::Unsupported("post_message"))
+        ));
+    }
+
+    #[test]
+    fn adapter_credential_accessors() {
+        let adapter = GchatAdapter::new(
+            GchatAdapterOptions::new("{}", "bot@example.com")
+                .with_api_base("https://example.test/v1"),
+        );
+        assert_eq!(adapter.service_account_json(), "{}");
+        assert_eq!(adapter.subject_email(), "bot@example.com");
+        assert_eq!(adapter.api_base(), "https://example.test/v1");
+    }
+}
