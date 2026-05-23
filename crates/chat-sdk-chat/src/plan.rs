@@ -350,6 +350,77 @@ mod tests {
         assert_eq!(data.title, "Investigate");
         assert_eq!(data.tasks.len(), 1);
     }
+
+    #[test]
+    fn plan_add_task_appends_pending_task_with_derived_title() {
+        let mut plan = Plan::new(StartPlanOptions {
+            initial_message: "Plan".into(),
+        });
+        plan.add_task(AddTaskOptions {
+            children: None,
+            title: "Step 2".into(),
+        });
+        assert_eq!(plan.tasks().len(), 2);
+        assert_eq!(plan.tasks()[1].title, "Step 2");
+        assert_eq!(plan.tasks()[1].status, PlanTaskStatus::Pending);
+    }
+
+    #[test]
+    fn plan_update_task_in_model_targets_in_progress_task_by_default() {
+        let mut plan = Plan::new(StartPlanOptions {
+            initial_message: "Plan".into(),
+        });
+        plan.add_task(AddTaskOptions {
+            children: None,
+            title: "Step 2".into(),
+        });
+        let updated = plan
+            .update_task_in_model(UpdateTaskInput::Content("output text".into()))
+            .expect("found task");
+        assert_eq!(updated.title, "Plan");
+        assert!(updated.output.is_some());
+    }
+
+    #[test]
+    fn plan_update_task_in_model_targets_specific_id_when_provided() {
+        let mut plan = Plan::new(StartPlanOptions {
+            initial_message: "Plan".into(),
+        });
+        let added_id = plan
+            .add_task(AddTaskOptions {
+                children: None,
+                title: "Step 2".into(),
+            })
+            .id
+            .clone();
+        let updated = plan
+            .update_task_in_model(UpdateTaskInput::Fields(UpdateTaskFields {
+                id: Some(added_id.clone()),
+                output: None,
+                status: Some(PlanTaskStatus::Complete),
+            }))
+            .expect("found task by id");
+        assert_eq!(updated.id, added_id);
+        assert_eq!(updated.status, PlanTaskStatus::Complete);
+    }
+
+    #[test]
+    fn plan_complete_in_model_marks_non_error_tasks_as_complete() {
+        let mut plan = Plan::new(StartPlanOptions {
+            initial_message: "Plan".into(),
+        });
+        plan.add_task(AddTaskOptions {
+            children: None,
+            title: "Step 2".into(),
+        });
+        plan.complete_in_model(CompletePlanOptions {
+            complete_message: "All done".into(),
+        });
+        assert_eq!(plan.title(), "All done");
+        for task in plan.tasks() {
+            assert_eq!(task.status, PlanTaskStatus::Complete);
+        }
+    }
 }
 
 /// In-memory plan with a task list. 1:1 port (in progress) of upstream
@@ -457,6 +528,72 @@ impl Plan {
     /// 1:1 port of upstream `getPostData(): PlanModel`.
     pub fn post_data(&self) -> PlanModel {
         self.model.clone()
+    }
+
+    /// Append a new task to the plan's in-memory model. 1:1 port of
+    /// the model-update portion of upstream `addTask(options)`. The
+    /// adapter-side card refresh is deferred until the Adapter trait
+    /// extension; the in-memory model is updated immediately so
+    /// future readers see the new task.
+    pub fn add_task(&mut self, options: AddTaskOptions) -> &PlanModelTask {
+        let title = content_to_plain_text(Some(&options.title));
+        let task = PlanModelTask {
+            details: options.children,
+            id: generate_task_id(),
+            output: None,
+            status: PlanTaskStatus::Pending,
+            title,
+        };
+        self.model.tasks.push(task);
+        self.model.tasks.last().expect("just pushed a task")
+    }
+
+    /// Update the in-memory state of an existing task. 1:1 port of
+    /// the model-update portion of upstream `updateTask(input)`.
+    /// Returns `Some(&mut PlanModelTask)` when a matching task was
+    /// found (by `id` if provided; otherwise the last in-progress
+    /// task), `None` when nothing matched.
+    pub fn update_task_in_model(&mut self, input: UpdateTaskInput) -> Option<&mut PlanModelTask> {
+        let (target_id, output, status) = match input {
+            UpdateTaskInput::Content(content) => (None, Some(content), None),
+            UpdateTaskInput::Fields(f) => (f.id, f.output, f.status),
+        };
+
+        let position = if let Some(id) = target_id {
+            self.model.tasks.iter().position(|t| t.id == id)
+        } else {
+            self.model
+                .tasks
+                .iter()
+                .rposition(|t| t.status == PlanTaskStatus::InProgress)
+        };
+
+        let pos = position?;
+        let task = &mut self.model.tasks[pos];
+        if let Some(o) = output {
+            task.output = Some(o);
+        }
+        if let Some(s) = status {
+            task.status = s;
+        }
+        Some(task)
+    }
+
+    /// Mark the plan as complete, replacing the title with the supplied
+    /// final message. 1:1 port of the model-update portion of upstream
+    /// `complete({ completeMessage })`. All tasks not yet
+    /// [`PlanTaskStatus::Error`] transition to
+    /// [`PlanTaskStatus::Complete`].
+    pub fn complete_in_model(&mut self, options: CompletePlanOptions) {
+        let title = content_to_plain_text(Some(&options.complete_message));
+        if !title.is_empty() {
+            self.model.title = title;
+        }
+        for task in &mut self.model.tasks {
+            if task.status != PlanTaskStatus::Error {
+                task.status = PlanTaskStatus::Complete;
+            }
+        }
     }
 }
 
