@@ -4511,6 +4511,514 @@ mod tests {
     }
 
     #[test]
+    fn smooth_stream_should_split_larger_text_chunks() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new(
+                    "1",
+                    "Hello, World! This is an example text.",
+                )),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should split larger text chunks");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Hello, ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "World! ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "This ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "is ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "an ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "example ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "text.")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_keep_longer_whitespace_sequences_together() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "First line")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", " \n\n")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "  ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "  Multiple spaces")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "\n    Indented")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should preserve whitespace sequences");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "First ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "line \n\n")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "    Multiple ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "spaces\n    ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Indented")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_flush_text_buffer_before_tool_call_starts() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "I will check the")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", " weather in Lon")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "don.")),
+                TextStreamPart::ToolCall(smooth_stream_weather_tool_call()),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should flush before tool call");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "I ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "will ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "check ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "the ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "weather ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "in ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "London.")),
+                TextStreamPart::ToolCall(smooth_stream_weather_tool_call()),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_flush_text_buffer_before_streaming_tool_input_starts() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "I will check the")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", " weather in Lon")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "don.")),
+                TextStreamPart::ToolInputStart(LanguageModelToolInputStart::new("2", "weather")),
+                TextStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                    "2",
+                    "{ city: \"London\" }",
+                )),
+                TextStreamPart::ToolInputEnd(LanguageModelToolInputEnd::new("2")),
+                TextStreamPart::ToolCall(smooth_stream_weather_tool_call()),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should flush before streaming tool input");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "I ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "will ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "check ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "the ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "weather ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "in ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "London.")),
+                TextStreamPart::ToolInputStart(LanguageModelToolInputStart::new("2", "weather")),
+                TextStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                    "2",
+                    "{ city: \"London\" }",
+                )),
+                TextStreamPart::ToolInputEnd(LanguageModelToolInputEnd::new("2")),
+                TextStreamPart::ToolCall(smooth_stream_weather_tool_call()),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_not_return_chunks_with_just_spaces() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", " ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", " ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", " ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "foo")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should buffer leading spaces");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "   foo")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_split_text_by_lines_when_using_line_chunking_mode() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new(
+                    "1",
+                    "First line\nSecond line\nThird line with more text\n",
+                )),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Partial line")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new(
+                    "1",
+                    " continues\nFinal line\n",
+                )),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            SmoothStreamOptions::new().with_chunking(SmoothStreamChunking::Line),
+        )
+        .expect("line smoothing should split completed lines");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "First line\n")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Second line\n")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new(
+                    "1",
+                    "Third line with more text\n"
+                )),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new(
+                    "1",
+                    "Partial line continues\n"
+                )),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Final line\n")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_handle_text_without_line_endings_in_line_chunking_mode() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Text without")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", " any line")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", " breaks")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            SmoothStreamOptions::new().with_chunking(SmoothStreamChunking::Line),
+        )
+        .expect("line smoothing should flush incomplete final line");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new(
+                    "1",
+                    "Text without any line breaks"
+                )),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_support_custom_chunking_regexps_character_level() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Hello, world!")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            SmoothStreamOptions::new().with_chunking(SmoothStreamChunking::Pattern(
+                Regex::new(".").expect("character regex compiles"),
+            )),
+        )
+        .expect("pattern smoothing should split by character");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "H")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "e")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "l")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "l")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "o")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", ",")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", " ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "w")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "o")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "r")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "l")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "d")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "!")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_change_the_id_when_the_text_part_id_changes() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextStart(LanguageModelTextStart::new("2")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "I will check the")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", " weather in Lon")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "don.")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "I will check the")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", " weather in Lon")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "don.")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("2")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should flush before switching text ids");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextStart(LanguageModelTextStart::new("2")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "I ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "will ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "check ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "the ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "weather ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "in ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "London.")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "I ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "will ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "check ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "the ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "weather ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "in ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "London.")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("2")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_split_larger_reasoning_chunks() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new(
+                    "1",
+                    "First I need to analyze the problem. Then I will solve it.",
+                )),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should split larger reasoning chunks");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "First ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "I ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "need ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "to ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "analyze ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "the ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "problem. ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "Then ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "I ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "will ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "solve ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "it.")),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_flush_reasoning_buffer_before_tool_call() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new(
+                    "1",
+                    "I should check the",
+                )),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", " weather")),
+                TextStreamPart::ToolCall(smooth_stream_weather_tool_call()),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should flush reasoning before tool call");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "I ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "should ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "check ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "the ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "weather")),
+                TextStreamPart::ToolCall(smooth_stream_weather_tool_call()),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_use_line_chunking_for_reasoning() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new(
+                    "1",
+                    "Step 1: Analyze\nStep 2: Solve\n",
+                )),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+            ],
+            SmoothStreamOptions::new().with_chunking(SmoothStreamChunking::Line),
+        )
+        .expect("smooth stream should line chunk reasoning");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new(
+                    "1",
+                    "Step 1: Analyze\n"
+                )),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new(
+                    "1",
+                    "Step 2: Solve\n"
+                )),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_flush_text_buffer_when_switching_to_reasoning() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("2")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Hello ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "world")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("2", "Let me")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("2", " think")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("2")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should flush text before reasoning");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("2")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Hello ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "world")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("2", "Let ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("2", "me ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("2", "think")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("2")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_flush_reasoning_buffer_when_switching_to_text() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                TextStreamPart::TextStart(LanguageModelTextStart::new("2")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "Thinking ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "hard")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "The answer")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", " is 42")),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("2")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should flush reasoning before text");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                TextStreamPart::TextStart(LanguageModelTextStart::new("2")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "Thinking ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("1", "hard")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "The ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "answer ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "is ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("2", "42")),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("2")),
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_handle_multiple_switches_between_text_and_reasoning() {
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("r1")),
+                TextStreamPart::TextStart(LanguageModelTextStart::new("t1")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("r1", "Think ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("t1", "Hello ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("r1", "more ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("t1", "world ")),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("r1")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("t1")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("smooth stream should flush each text/reasoning switch");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::ReasoningStart(LanguageModelReasoningStart::new("r1")),
+                TextStreamPart::TextStart(LanguageModelTextStart::new("t1")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("r1", "Think ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("t1", "Hello ")),
+                TextStreamPart::ReasoningDelta(TextStreamReasoningDeltaPart::new("r1", "more ")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("t1", "world ")),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("r1")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("t1")),
+            ]
+        );
+    }
+
+    #[test]
     fn smooth_stream_marks_detected_chunks_for_default_delay() {
         let scheduled_parts = smooth_stream_scheduled_parts(
             vec![
@@ -4696,6 +5204,47 @@ mod tests {
                 TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
             ]
         );
+    }
+
+    #[test]
+    fn smooth_stream_preserves_provider_metadata_on_reasoning_start_for_redacted_thinking() {
+        let provider_metadata = ProviderMetadata::from([(
+            "anthropic".to_string(),
+            Map::from_iter([("redactedData".to_string(), json!("redacted-thinking-data"))]),
+        )]);
+        let reasoning_start =
+            LanguageModelReasoningStart::new("1").with_provider_metadata(provider_metadata.clone());
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::ReasoningStart(reasoning_start.clone()),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+            ],
+            SmoothStreamOptions::new(),
+        )
+        .expect("reasoning start metadata should pass through");
+
+        assert_eq!(
+            parts,
+            vec![
+                TextStreamPart::ReasoningStart(reasoning_start),
+                TextStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+            ]
+        );
+    }
+
+    fn smooth_stream_weather_tool_call() -> GenerateTextToolCall {
+        GenerateTextToolCall {
+            tool_call_id: "1".to_string(),
+            tool_name: "weather".to_string(),
+            input: json!({ "city": "London" }),
+            title: None,
+            provider_executed: None,
+            dynamic: None,
+            invalid: None,
+            error: None,
+            provider_metadata: None,
+            tool_metadata: None,
+        }
     }
 
     fn tool_calls_finish_reason() -> LanguageModelFinishReason {

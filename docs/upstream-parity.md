@@ -604,6 +604,34 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ### Recent First-Phase Proof Slices
 
+- 2026-05-23: `packages/ai` `smoothStream` portable edge-case parity
+  added named Rust counterparts for the remaining portable upstream
+  `generate-text/smooth-stream.test.ts` cases:
+  `smooth_stream_should_split_larger_text_chunks`,
+  `smooth_stream_should_keep_longer_whitespace_sequences_together`,
+  `smooth_stream_should_flush_text_buffer_before_tool_call_starts`,
+  `smooth_stream_should_flush_text_buffer_before_streaming_tool_input_starts`,
+  `smooth_stream_should_not_return_chunks_with_just_spaces`,
+  `smooth_stream_should_split_text_by_lines_when_using_line_chunking_mode`,
+  `smooth_stream_should_handle_text_without_line_endings_in_line_chunking_mode`,
+  `smooth_stream_should_support_custom_chunking_regexps_character_level`,
+  `smooth_stream_should_change_the_id_when_the_text_part_id_changes`,
+  `smooth_stream_should_split_larger_reasoning_chunks`,
+  `smooth_stream_should_flush_reasoning_buffer_before_tool_call`,
+  `smooth_stream_should_use_line_chunking_for_reasoning`,
+  `smooth_stream_should_flush_text_buffer_when_switching_to_reasoning`,
+  `smooth_stream_should_flush_reasoning_buffer_when_switching_to_text`,
+  `smooth_stream_should_handle_multiple_switches_between_text_and_reasoning`,
+  and
+  `smooth_stream_preserves_provider_metadata_on_reasoning_start_for_redacted_thinking`.
+  Rust now has one-to-one portable coverage for upstream word, line, regex,
+  callback-detector, delay, text-id switching, reasoning, interleaving, tool-call
+  flush, streamed tool-input flush, whitespace buffering, and Anthropic
+  reasoning metadata preservation behavior. Upstream invalid `chunking` option
+  construction is covered by Rust's typed `SmoothStreamChunking` API plus
+  detector/pattern validation tests; `Intl.Segmenter` cases remain
+  JavaScript-runtime-specific unless a future dependency-backed segmentation
+  strategy is intentionally added.
 - 2026-05-23: `packages/ai` restricted telemetry dispatcher parity added
   named Rust counterparts for every portable upstream
   `generate-text/restricted-telemetry-dispatcher.test.ts` case:
@@ -1913,6 +1941,30 @@ focused tests for each portable behavior before changing rows to `verified`.
   `src/stream_text.rs`, covering upstream `smoothStream` default `10ms`, custom
   numeric, and `null` `delayInMs` scheduling after detected smoothed chunks
   while keeping final buffer flushes immediate.
+- 2026-05-23: `streamText` smooth stream edge-case parity added
+  `smooth_stream_should_split_larger_text_chunks`,
+  `smooth_stream_should_keep_longer_whitespace_sequences_together`,
+  `smooth_stream_should_flush_text_buffer_before_tool_call_starts`,
+  `smooth_stream_should_flush_text_buffer_before_streaming_tool_input_starts`,
+  `smooth_stream_should_not_return_chunks_with_just_spaces`,
+  `smooth_stream_should_split_text_by_lines_when_using_line_chunking_mode`,
+  `smooth_stream_should_handle_text_without_line_endings_in_line_chunking_mode`,
+  `smooth_stream_should_support_custom_chunking_regexps_character_level`,
+  `smooth_stream_should_change_the_id_when_the_text_part_id_changes`,
+  `smooth_stream_should_split_larger_reasoning_chunks`,
+  `smooth_stream_should_flush_reasoning_buffer_before_tool_call`,
+  `smooth_stream_should_use_line_chunking_for_reasoning`,
+  `smooth_stream_should_flush_text_buffer_when_switching_to_reasoning`,
+  `smooth_stream_should_flush_reasoning_buffer_when_switching_to_text`,
+  `smooth_stream_should_handle_multiple_switches_between_text_and_reasoning`,
+  and
+  `smooth_stream_preserves_provider_metadata_on_reasoning_start_for_redacted_thinking`
+  in `src/stream_text.rs`, completing the portable upstream edge matrix around
+  longer text/reasoning chunks, whitespace-only buffering, line-only final
+  flushes, regex character chunking, text-id changes, tool-call flushes,
+  streamed tool-input flushes, text/reasoning switching, and redacted-thinking
+  provider metadata. Upstream `Intl.Segmenter` chunking remains documented as a
+  JavaScript runtime boundary for Rust's dependency-light native smoother.
 - 2026-05-20: `streamText` arbitrary transform parity added
   `stream_text_transform_updates_text_response_and_callbacks`,
   `stream_text_transform_applies_multiple_transforms_in_order`, and
@@ -3789,6 +3841,14 @@ focused tests for each portable behavior before changing rows to `verified`.
    `stream_text_calls_log_warnings_once_for_each_step_with_warnings_from_that_step`,
    and
    `stream_text_calls_log_warnings_with_empty_array_when_no_warnings_are_present`.
+   The portable upstream `smoothStream` edge matrix now has named Rust
+   counterparts for large text/reasoning splitting, whitespace buffering,
+   line-mode final flushes, regex character splitting, text-id switching,
+   tool-call and streamed tool-input flushes, text/reasoning switching,
+   multi-switch ordering, and reasoning-start provider metadata preservation.
+   Remaining `smoothStream` gaps are limited to JavaScript runtime boundaries:
+   invalid untyped `chunking` construction and `Intl.Segmenter` locale
+   segmentation.
 9. Continue `streamObject` parity with remaining output-strategy stream-result
    edge cases after the Gateway text/stream/UI path is stronger.
    The upstream object-output `result.fullStream` ordering case now has a named
