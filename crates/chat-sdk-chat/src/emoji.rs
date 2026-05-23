@@ -148,7 +148,7 @@ fn build_default_emoji_map() -> HashMap<&'static str, EmojiFormats> {
 }
 
 /// All well-known emoji shortcodes, in the upstream-documented order.
-/// Used by [`create_emoji`] to build the emoji helper.
+/// Used by [`create_emoji`] to build the emoji catalog.
 pub const WELL_KNOWN_EMOJI: &[&str] = &[
     // Reactions & Gestures
     "thumbs_up",
@@ -545,21 +545,21 @@ pub fn convert_emoji_placeholders(
     out
 }
 
-/// Create an emoji helper backed by [`get_emoji`] singletons. 1:1 port
+/// Create an emoji catalog backed by [`get_emoji`] singletons. 1:1 port
 /// of upstream `createEmoji(customEmoji?)`.
 ///
 /// All well-known emoji are pre-populated. Custom entries are added to
-/// the returned [`EmojiHelper`] AND registered with the global
+/// the returned [`EmojiCatalog`] AND registered with the global
 /// [`DEFAULT_EMOJI_RESOLVER`] so [`convert_emoji_placeholders`] can
 /// translate their placeholders.
-pub fn create_emoji(custom_emoji: Option<HashMap<String, EmojiFormats>>) -> EmojiHelper {
-    let mut helper = HashMap::with_capacity(WELL_KNOWN_EMOJI.len() + 16);
+pub fn create_emoji(custom_emoji: Option<HashMap<String, EmojiFormats>>) -> EmojiCatalog {
+    let mut catalog = HashMap::with_capacity(WELL_KNOWN_EMOJI.len() + 16);
     for name in WELL_KNOWN_EMOJI {
-        helper.insert((*name).to_string(), get_emoji(name));
+        catalog.insert((*name).to_string(), get_emoji(name));
     }
     if let Some(custom) = &custom_emoji {
         for key in custom.keys() {
-            helper.insert(key.clone(), get_emoji(key));
+            catalog.insert(key.clone(), get_emoji(key));
         }
     }
     if let Some(custom) = custom_emoji {
@@ -568,20 +568,20 @@ pub fn create_emoji(custom_emoji: Option<HashMap<String, EmojiFormats>>) -> Emoj
             .unwrap_or_else(|p| p.into_inner())
             .extend(custom);
     }
-    EmojiHelper { entries: helper }
+    EmojiCatalog { entries: catalog }
 }
 
 /// Map of name -> singleton [`EmojiValue`] returned by
 /// [`create_emoji`]. Closest Rust analogue to upstream's
-/// type-augmented `BaseEmojiHelper` object — Rust can't synthesize
+/// type-augmented emoji object - Rust can't synthesize
 /// fields from a type literal, so consumers access entries by name
-/// via [`EmojiHelper::get`] or the `Index` impl.
+/// via [`EmojiCatalog::get`] or the `Index` impl.
 #[derive(Debug, Clone)]
-pub struct EmojiHelper {
+pub struct EmojiCatalog {
     entries: HashMap<String, Arc<EmojiValue>>,
 }
 
-impl EmojiHelper {
+impl EmojiCatalog {
     /// Look up an emoji by name. Returns `None` if the name was not in
     /// the well-known set or among the custom entries.
     pub fn get(&self, name: &str) -> Option<Arc<EmojiValue>> {
@@ -589,26 +589,26 @@ impl EmojiHelper {
     }
 
     /// Look up a custom emoji singleton by name. 1:1 port of upstream
-    /// `helper.custom(name)`. Always returns an [`EmojiValue`] (creates
+    /// `catalog.custom(name)`. Always returns an [`EmojiValue`] (creates
     /// it via [`get_emoji`] if missing).
     pub fn custom(&self, name: &str) -> Arc<EmojiValue> {
         get_emoji(name)
     }
 }
 
-impl std::ops::Index<&str> for EmojiHelper {
+impl std::ops::Index<&str> for EmojiCatalog {
     type Output = Arc<EmojiValue>;
     fn index(&self, name: &str) -> &Self::Output {
         self.entries
             .get(name)
-            .unwrap_or_else(|| panic!("EmojiHelper has no entry for `{name}`"))
+            .unwrap_or_else(|| panic!("EmojiCatalog has no entry for `{name}`"))
     }
 }
 
-/// Global emoji helper. 1:1 port of upstream
+/// Global emoji catalog. 1:1 port of upstream
 /// `export const emoji = createEmoji()`. Lazily initialized.
-pub fn emoji() -> EmojiHelper {
-    static EMOJI: LazyLock<EmojiHelper> = LazyLock::new(|| create_emoji(None));
+pub fn emoji() -> EmojiCatalog {
+    static EMOJI: LazyLock<EmojiCatalog> = LazyLock::new(|| create_emoji(None));
     EMOJI.clone()
 }
 
@@ -813,10 +813,10 @@ mod tests {
         }
     }
 
-    // ---------- emoji helper ----------
+    // ---------- emoji catalog ----------
 
     #[test]
-    fn emoji_helper_exposes_well_known_emoji_values() {
+    fn emoji_catalog_exposes_well_known_emoji_values() {
         let e = emoji();
         assert_eq!(e["thumbs_up"].name, "thumbs_up");
         assert_eq!(e["fire"].name, "fire");
@@ -825,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn emoji_helper_to_string_returns_upstream_placeholder() {
+    fn emoji_catalog_to_string_returns_upstream_placeholder() {
         let e = emoji();
         assert_eq!(e["thumbs_up"].to_string(), "{{emoji:thumbs_up}}");
         assert_eq!(e["fire"].to_string(), "{{emoji:fire}}");
@@ -833,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn emoji_helper_has_object_identity_for_same_name() {
+    fn emoji_catalog_has_object_identity_for_same_name() {
         let e = emoji();
         let a = e.get("thumbs_up").unwrap();
         let b = e.get("thumbs_up").unwrap();
@@ -843,7 +843,7 @@ mod tests {
     }
 
     #[test]
-    fn emoji_helper_custom_method_returns_emoji_value() {
+    fn emoji_catalog_custom_method_returns_emoji_value() {
         let e = emoji();
         let unicorn = e.custom("unicorn");
         assert_eq!(unicorn.name, "unicorn");
@@ -854,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn emoji_helper_custom_returns_same_singleton_for_same_name() {
+    fn emoji_catalog_custom_returns_same_singleton_for_same_name() {
         let e = emoji();
         let first = e.custom("test_emoji_singleton");
         let second = e.custom("test_emoji_singleton");
@@ -967,7 +967,7 @@ mod tests {
     // ---------- create_emoji ----------
 
     #[test]
-    fn create_emoji_returns_helper_with_well_known_values() {
+    fn create_emoji_returns_catalog_with_well_known_values() {
         let e = create_emoji(None);
         assert_eq!(e["thumbs_up"].name, "thumbs_up");
         assert_eq!(e["fire"].name, "fire");
@@ -976,15 +976,15 @@ mod tests {
     }
 
     #[test]
-    fn create_emoji_helper_custom_returns_emoji_value() {
+    fn create_emoji_catalog_custom_returns_emoji_value() {
         let e = create_emoji(None);
-        let unicorn = e.custom("unicorn_helper");
-        assert_eq!(unicorn.name, "unicorn_helper");
-        assert_eq!(unicorn.to_string(), "{{emoji:unicorn_helper}}");
+        let unicorn = e.custom("unicorn_catalog");
+        assert_eq!(unicorn.name, "unicorn_catalog");
+        assert_eq!(unicorn.to_string(), "{{emoji:unicorn_catalog}}");
     }
 
     #[test]
-    fn create_emoji_adds_custom_emoji_to_helper_as_emoji_values() {
+    fn create_emoji_adds_custom_emoji_to_catalog_as_emoji_values() {
         let e = create_emoji(Some(custom(&[
             ("ce_unicorn", ef(s("ce_unicorn_face"), s("\u{1F984}"))),
             ("ce_company_logo", ef(s("ce_company"), s("\u{1F3E2}"))),
@@ -1017,7 +1017,7 @@ mod tests {
     }
 
     #[test]
-    fn create_emoji_returns_same_singleton_as_emoji_helper() {
+    fn create_emoji_returns_same_singleton_as_emoji_catalog() {
         let e = create_emoji(None);
         let h = emoji();
         assert!(Arc::ptr_eq(&e["thumbs_up"], &h["thumbs_up"]));

@@ -291,6 +291,7 @@ pub fn to_ui_message_chunk(part: &LanguageModelStreamPart) -> Option<UiMessageCh
             Some(UiMessageChunk::ToolApprovalRequest {
                 approval_id: part.approval_id.clone(),
                 tool_call_id: part.tool_call_id.clone(),
+                is_automatic: None,
                 provider_metadata: part.provider_metadata.clone(),
             })
         }
@@ -646,6 +647,7 @@ mod tests {
             Some(UiMessageChunk::ToolApprovalRequest {
                 approval_id: "approval-1".to_string(),
                 tool_call_id: "call-1".to_string(),
+                is_automatic: None,
                 provider_metadata: None,
             })
         );
