@@ -28,6 +28,7 @@ use crate::language_model::{
     LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
     OutputTokenUsage,
 };
+use crate::logger::{LogWarningsOptions, log_warnings};
 use crate::prompt::{Prompt, prompt_has_url_files, standardize_prompt};
 use crate::provider::{
     ApiCallError, InvalidPromptError, JsonParseError, TypeValidationContext, TypeValidationError,
@@ -5334,6 +5335,10 @@ pub async fn generate_text<M: LanguageModel + ?Sized>(
             step_model_info,
             result,
         );
+        log_warnings(
+            &LogWarningsOptions::new(step.warnings.clone())
+                .with_scope(step_model.provider(), step_model.model_id()),
+        );
         step.runtime_context = runtime_context.clone();
         step.tools_context = tools_context.clone();
         mark_unavailable_tool_calls(&mut step.tool_calls, step_call_options.tools.as_deref());
@@ -7702,6 +7707,7 @@ mod tests {
         LanguageModelToolResultOutput, LanguageModelToolResultPart, LanguageModelUsage,
         LanguageModelUserContentPart, LanguageModelUserMessage, OutputTokenUsage,
     };
+    use crate::logger::{LogWarningsOptions, take_log_warning_calls_for_tests};
     use crate::mock_models::MockLanguageModel;
     use crate::prompt::Prompt;
     use crate::provider::{
@@ -7715,6 +7721,7 @@ mod tests {
     use crate::telemetry::{
         TelemetryEvent, TelemetryEventKind, TelemetryIntegration, TelemetryOptions,
     };
+    use crate::warning::Warning;
     use serde_json::json;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
@@ -9068,6 +9075,155 @@ mod tests {
         LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
             LanguageModelUserContentPart::Text(LanguageModelTextPart::new(text)),
         ]))
+    }
+
+    fn warning_logger_usage() -> LanguageModelUsage {
+        LanguageModelUsage::default()
+    }
+
+    fn stop_finish_reason() -> LanguageModelFinishReason {
+        LanguageModelFinishReason {
+            unified: FinishReason::Stop,
+            raw: Some("stop".to_string()),
+        }
+    }
+
+    fn tool_calls_finish_reason() -> LanguageModelFinishReason {
+        LanguageModelFinishReason {
+            unified: FinishReason::ToolCalls,
+            raw: Some("tool_calls".to_string()),
+        }
+    }
+
+    fn warning_logger_text_result(
+        text: &str,
+        warnings: Vec<Warning>,
+    ) -> LanguageModelGenerateResult {
+        let mut result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::Text(LanguageModelText::new(text))],
+            stop_finish_reason(),
+            warning_logger_usage(),
+        );
+        for warning in warnings {
+            result = result.with_warning(warning);
+        }
+        result
+    }
+
+    fn warning_logger_tool_call_result(
+        tool_name: &str,
+        warnings: Vec<Warning>,
+    ) -> LanguageModelGenerateResult {
+        let mut result = LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::ToolCall(LanguageModelToolCall::new(
+                "call-1",
+                tool_name,
+                r#"{ "value": "test" }"#,
+            ))],
+            tool_calls_finish_reason(),
+            warning_logger_usage(),
+        );
+        for warning in warnings {
+            result = result.with_warning(warning);
+        }
+        result
+    }
+
+    fn warning_logger_tool() -> Tool {
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string" }
+            },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        Tool::new("testTool", input_schema)
+            .with_execute(|_input, _options| async move { Ok(json!("result")) })
+    }
+
+    #[test]
+    fn generate_text_calls_log_warnings_with_warnings_from_a_single_step() {
+        let expected_warnings = vec![
+            Warning::Other {
+                message: "Setting is not supported".to_string(),
+            },
+            Warning::Unsupported {
+                feature: "temperature".to_string(),
+                details: Some("Temperature parameter not supported".to_string()),
+            },
+        ];
+        let model = MockLanguageModel::new().with_generate_result(warning_logger_text_result(
+            "Hello, world!",
+            expected_warnings.clone(),
+        ));
+        take_log_warning_calls_for_tests();
+
+        let result = poll_ready(generate_text(GenerateTextOptions::new(
+            &model,
+            vec![user_message("Hello")],
+        )));
+
+        assert_eq!(result.text, "Hello, world!");
+        assert_eq!(
+            take_log_warning_calls_for_tests(),
+            vec![
+                LogWarningsOptions::new(expected_warnings)
+                    .with_scope("mock-provider", "mock-model-id")
+            ]
+        );
+    }
+
+    #[test]
+    fn generate_text_calls_log_warnings_once_for_each_step_with_warnings_from_that_step() {
+        let warning1 = vec![Warning::Other {
+            message: "warning1".to_string(),
+        }];
+        let warning2 = vec![Warning::Other {
+            message: "warning2".to_string(),
+        }];
+        let model = MockLanguageModel::new().with_generate_results([
+            warning_logger_tool_call_result("testTool", warning1.clone()),
+            warning_logger_text_result("Final response", warning2.clone()),
+        ]);
+        take_log_warning_calls_for_tests();
+
+        let result = poll_ready(generate_text(
+            GenerateTextOptions::new(&model, vec![user_message("Hello")])
+                .with_tool(warning_logger_tool())
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(result.text, "Final response");
+        assert_eq!(result.steps.len(), 2);
+        assert_eq!(
+            take_log_warning_calls_for_tests(),
+            vec![
+                LogWarningsOptions::new(warning1).with_scope("mock-provider", "mock-model-id"),
+                LogWarningsOptions::new(warning2).with_scope("mock-provider", "mock-model-id"),
+            ]
+        );
+    }
+
+    #[test]
+    fn generate_text_calls_log_warnings_with_empty_array_when_no_warnings_are_present() {
+        let model = MockLanguageModel::new()
+            .with_generate_result(warning_logger_text_result("Hello, world!", Vec::new()));
+        take_log_warning_calls_for_tests();
+
+        let result = poll_ready(generate_text(GenerateTextOptions::new(
+            &model,
+            vec![user_message("Hello")],
+        )));
+
+        assert_eq!(result.text, "Hello, world!");
+        assert_eq!(
+            take_log_warning_calls_for_tests(),
+            vec![LogWarningsOptions::new(Vec::new()).with_scope("mock-provider", "mock-model-id")]
+        );
     }
 
     #[test]

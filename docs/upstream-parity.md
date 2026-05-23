@@ -592,6 +592,17 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ### Recent First-Phase Proof Slices
 
+- 2026-05-23: `packages/ai` `generateText` and `streamText` warning logger
+  parity added named Rust counterparts
+  `generate_text_calls_log_warnings_with_warnings_from_a_single_step`,
+  `generate_text_calls_log_warnings_once_for_each_step_with_warnings_from_that_step`,
+  `generate_text_calls_log_warnings_with_empty_array_when_no_warnings_are_present`,
+  `stream_text_calls_log_warnings_with_warnings_from_a_single_step`,
+  `stream_text_calls_log_warnings_once_for_each_step_with_warnings_from_that_step`,
+  and `stream_text_calls_log_warnings_with_empty_array_when_no_warnings_are_present`
+  for the upstream single-step, per-step multi-step, and empty-warning
+  `logWarnings` spy cases. `generate_text` and `stream_text` now invoke the
+  shared warning logger with provider/model scope for each completed step.
 - 2026-05-23: `packages/ai` `streamText` UI-message response helper
   parity added named Rust counterparts
   `stream_text_result_to_ui_message_stream_masks_error_messages_by_default`,
@@ -1215,6 +1226,17 @@ focused tests for each portable behavior before changing rows to `verified`.
   correct warnings` and `should call logWarnings with empty array when no
   warnings are present` by proving the logger receives provider warnings,
   empty-warning calls, provider id, and model id.
+- 2026-05-23: `generateText` and `streamText` warning logger parity added
+  `generate_text_calls_log_warnings_with_warnings_from_a_single_step`,
+  `generate_text_calls_log_warnings_once_for_each_step_with_warnings_from_that_step`,
+  `generate_text_calls_log_warnings_with_empty_array_when_no_warnings_are_present`,
+  `stream_text_calls_log_warnings_with_warnings_from_a_single_step`,
+  `stream_text_calls_log_warnings_once_for_each_step_with_warnings_from_that_step`,
+  and `stream_text_calls_log_warnings_with_empty_array_when_no_warnings_are_present`
+  in `src/generate_text.rs` and `src/stream_text.rs`, plus scoped warning
+  logger invocation from each API. These map upstream `logWarnings` single-step,
+  per-step multi-step, and empty-warning spy cases by proving the logger
+  receives each step's warnings, empty-warning calls, provider id, and model id.
 - 2026-05-22: `streamObject` object-stream schema metadata parity added
   `stream_object_object_stream_uses_schema_name_and_description` in
   `src/stream_object.rs`, mapping upstream `output = "object" >
@@ -2994,6 +3016,18 @@ focused tests for each portable behavior before changing rows to `verified`.
    `stream_text_result_supports_text_ui_message_and_full_stream_from_single_result`,
    proving text-stream, full-stream, and UI-message views can be read from the
    same materialized `StreamTextResult`.
+   The upstream `generateText` warning logger single-step, per-step multi-step,
+   and empty-warning cases now have named Rust counterparts in
+   `generate_text_calls_log_warnings_with_warnings_from_a_single_step`,
+   `generate_text_calls_log_warnings_once_for_each_step_with_warnings_from_that_step`,
+   and
+   `generate_text_calls_log_warnings_with_empty_array_when_no_warnings_are_present`.
+   The upstream `streamText` warning logger single-step, per-step multi-step,
+   and empty-warning cases now have named Rust counterparts in
+   `stream_text_calls_log_warnings_with_warnings_from_a_single_step`,
+   `stream_text_calls_log_warnings_once_for_each_step_with_warnings_from_that_step`,
+   and
+   `stream_text_calls_log_warnings_with_empty_array_when_no_warnings_are_present`.
 8. Continue `streamObject` parity with remaining output-strategy stream-result
    edge cases after the Gateway text/stream/UI path is stronger.
    The upstream object-output `result.fullStream` ordering case now has a named
