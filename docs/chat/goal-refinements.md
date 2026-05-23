@@ -2205,3 +2205,110 @@ markdown.test.ts 41/41).
   this is the largest contiguous chunk of unported work for the
   whole port. Considering whether to use `bb8` or `deadpool` for
   connection pooling; no decision yet.
+
+### 2026-05-24 - slices 207..211
+
+Slices reviewed: 207 WhatsApp final 4 markdown.test.ts cases + chat-sdk-chat
+text escape; 208 WhatsApp cardToWhatsAppText 10 cases; 209 Messenger
+text-fallback 13 cases + Link/Table render handlers; 210 Telegram +16
+markdown.test.ts cases (links/images/blocks/nested/edge); 211 Telegram corpus
+validity invariants (2 cases). Net: WhatsApp/Messenger/Telegram all gained
+substantial test coverage; Telegram markdown.test.ts now 100% portable
+cases ported.
+
+**What the brief got wrong or left out**
+
+- **stringify_markdown must escape markdown-significant chars in Text nodes
+  to round-trip escaped content.** I discovered this in slice 207 when the
+  WhatsApp escape-preservation test failed: input `a \* b` round-trips
+  through parseMarkdown -> Text(value: "*") -> stringify, but my stringify
+  emitted `a * b` unescaped. Upstream remark-stringify always escapes
+  these chars. Fixed by adding `push_escaped_text` to chat-sdk-chat
+  covering `* _ ~ ` \\ [ ]`. Verified workspace-wide (587 chat-sdk-chat
+  tests + 9 adapter crates) - no regressions because other adapters use
+  their own platform-specific node walkers (`node_to_*_markdown`),
+  bypassing stringify_markdown entirely. Brief should add: when porting
+  text-node serialization, audit whether the upstream parser/stringifier
+  pair handles escape round-trips; the answer is almost always yes.
+- **`escape_whatsapp` already handled `\\` chars from slice 179**, but
+  upstream's `escapeWhatsApp` ALSO escapes the backslash itself
+  (`\\` -> `\\\\`). Reading the existing impl carefully matters - I
+  almost wrote a duplicate helper before noticing the existing one was
+  already correct. Brief should reinforce: *always read the existing
+  impl before extending.*
+- **WhatsApp's `from_whatsapp_format` needed `(?<![\\])` lookbehind**
+  in addition to the existing `(?<![marker])` lookbehind. Single
+  scanner-aware change; the brief's "lookbehind-aware char-by-char
+  scanner" pattern recipe is now battle-tested across 4 adapters
+  (WhatsApp/Slack/Telegram/Discord).
+- **Messenger's `CardChild::Link` and `CardChild::Table` variants were
+  unhandled in `render_child`** before slice 209. The original slice
+  180 happened before those variants existed in chat-sdk-chat's
+  `CardChild` enum (added later for parity with upstream). When the
+  variants landed, no adapter that used `render_child` was updated,
+  but no test exposed the gap until slice 209 ported the corresponding
+  upstream cases. Brief should note: when adding a variant to a shared
+  enum, search every `match` over that enum and either add an arm or
+  add `_ => panic!("unhandled X variant; please port")` to flag the gap.
+- **`MARKDOWNV2_SPECIAL_CHARS` parametric test collapses 18 upstream
+  `it()` cases into 1 Rust test.** This is fine for the
+  "every upstream test/case must have a matching Rust test" rule -
+  the Rust test asserts on all 18 chars individually via a loop with
+  per-iteration failure messages, so a regression on any one char is
+  pinpointed. Brief should add: *prefer parametric Rust tests over
+  individual `#[test]` fns when upstream uses a `for...of` test loop.
+  Use `assert!(.., "for char {ch:?}")` so test output identifies the
+  failing iteration.*
+- **Telegram corpus tests required a non-trivial regex-strip helper.**
+  Upstream uses chained `text.replace(/```.../g, "")` calls; the Rust
+  port reimplemented these as a hand-written `strip_code_blocks_inline_and_link_urls`
+  test helper (~50 LOC). Acceptable for test-only code, but should
+  not be promoted to a production helper without rethinking the API.
+
+**Stale or misleading guidance**
+
+- The brief's "Order adapters by contract complexity: smallest first"
+  ordering (line 91 of upstream-parity.md) is now outdated. After 211
+  slices, the smallest *remaining* unported chunks per adapter are
+  quite different from the original src-file-count order. A real-world
+  ordering based on actual remaining work would be:
+  1. Linear `utils.rs` follow-ups + GitHub small remaining (~50 LOC)
+  2. Messenger Generic Template (~25 cases, requires JSON shape)
+  3. WhatsApp interactive-message branch (5 cases)
+  4. Discord cards.test.ts (508 LOC)
+  5. Slack cards.test.ts (36 cases) + modals.test.ts (21 remaining)
+  6. Teams Adaptive Cards (372 LOC)
+  7. Slack webhook/index.test.ts (~150 cases)
+  8. All `index.test.ts` integration suites (largest)
+- The "verification ledger" + "estimates tsv" maintenance overhead is
+  significant. Every slice now requires touching 3 docs files. Brief
+  should mention: tooling (regenerator script) absorbs the third file;
+  only ledger + estimates are hand-edited per slice.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+- No edits to `port-chat-sdk.md` or `goal-condition.md` this round.
+
+**Open refinements deferred**
+
+- **Adapter `_ => vec![]` fallthrough in card renderers**: WhatsApp's
+  `render_child` still has `_ => vec![]` for Link/Table (slice 179) -
+  same pattern Messenger had before slice 209. Should audit all 9
+  adapter card renderers to add explicit Link/Table handlers, OR
+  remove the catch-all to force compile errors when new variants are
+  added.
+- **Slack cards.rs full Block Kit renderer**: 36 upstream cases
+  (cards.test.ts). Requires modelling Slack Block Kit JSON shapes
+  (`section`, `actions`, `image`, `divider`, `header` blocks).
+  Still the single largest unported test file across all adapters
+  by case count after Discord's index.test.ts (which is integration-
+  level and ~4500 LOC).
+- **State-backend client wire-up.** All 10%. Unchanged from prior
+  refinements. The decision tree: redis-rs vs deadpool/bb8 vs
+  fred — defer until the first state-* adapter is actually called
+  from a real chat-sdk-chat consumer.
+- **JSX-runtime js-only-documented exceptions might apply to more
+  files than currently flagged.** Telegram has a `.tsx` example, but
+  WhatsApp / Slack / others might too. Re-audit `examples/*-chat`
+  next refinement.
