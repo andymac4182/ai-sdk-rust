@@ -215,7 +215,45 @@ intentionally non-portable.
    per dependency module as that module lands. Each layer's slice
    extends `crates/chat-sdk-chat/src/types.rs` with the next batch of
    types it unblocks; do not block on porting `types.ts` whole.
-5. Add focused serialization/deserialization and behavior tests for every new
+5. **Land upstream interfaces with large method sets as placeholder
+   traits first.** For any `interface X` with more than ~5 methods that
+   would otherwise block downstream modules, ship an empty
+   `pub trait X: Send + Sync + Debug {}` in `types.rs` (or the owning
+   module) and grow the trait one slice at a time as each dependency
+   module lands. NEVER define a new trait for the same upstream
+   interface — every adapter/state slice extends the canonical
+   placeholder. Slice 14 of this port (`Adapter`, `StateAdapter`)
+   established the pattern.
+6. **Never panic while holding a `std::sync::Mutex` guard you might
+   want to reuse.** A panic inside a `lock().expect(...)`-then-`expect`
+   chain poisons the mutex for every sibling test that runs in
+   parallel. Snapshot the inner value under the lock, drop the guard,
+   *then* optionally panic. Every mutator that may run after a poisoned
+   lock should use `.unwrap_or_else(|poisoned| poisoned.into_inner())`
+   so a sibling test's panic cannot cascade. Slice 14's
+   `chat_singleton::get_chat_singleton` regressed this once before the
+   fix; do not let the pattern slip back.
+7. **Generic upstream types must include a typed-substitution test.**
+   `interface X<T = unknown>` ports as
+   `pub struct X<T = serde_json::Value>` plus *two* colocated tests:
+   one using the default `serde_json::Value` and one using a concrete
+   user-defined struct. The second test proves the generic is not
+   accidentally tied to `Value`. See slice 17's `RawMessage<TRaw>` for
+   the canonical example.
+8. **Every tagged-union enum gets one negative-path test.**
+   `#[serde(tag = "type", ...)]` enums must include a test that asserts
+   `serde_json::from_str(...)` returns `Err` for a JSON object missing
+   the discriminator. Mirrors the upstream TypeScript compile-time tag
+   check at Rust runtime. See slice 15's
+   `stream_chunk_untagged_object_fails_to_deserialize`.
+9. **`js-only-documented` is a real slice type.** Marking an upstream
+   surface non-portable in the ledger plus the JavaScript-only
+   Exceptions table counts as a normal slice if (a) the rationale is
+   non-trivial and concrete (cite the JS-only API used: React, Next.js,
+   `vi.fn`, Node Buffer, etc.) and (b) the ledger row and Exceptions
+   row land together. Pure-classification slices count toward the 5-
+   merge refinement cadence.
+10. Add focused serialization/deserialization and behavior tests for every new
    public contract.
 4. Port EVERY portable test from the original upstream TypeScript package
    into Rust before marking that package row `verified`. This is a hard

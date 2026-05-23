@@ -108,3 +108,37 @@ Slices reviewed: slice 7 Lock primitive (`13dc8b1`), slice 8 concurrency/Author/
 - A pre-push git hook on the main checkout could enforce naming + clippy + workspace-test atomically, removing the foot-gun entirely. Worth a slice once both sessions agree on the contract.
 - The progress-table generator currently aborts hard when `package-progress-estimates.tsv` mentions a package that is not `in-progress` — useful, but means a slice that flips a row from `in-progress` to `verified` must edit both files in lock-step. A future refinement could relax this.
 - Cross-session merge conflicts on the ledger row would be eliminated by splitting each package row into its own file under `docs/chat/packages/<name>.md` and stitching them via the generator. Not urgent yet (only one conflict so far).
+
+### 2026-05-23 — slices 14..18
+
+Slices reviewed: slice 14 chat_singleton + placeholder traits (`42dac89`), slice 15 StreamChunk/StreamOptions (`30a0d71`), slice 16 MessageSubject/ThreadInfo (`efd5d4f`), slice 17 RawMessage + transcript queries (`f00cba3`), slice 18 apps/docs + examples/nextjs-chat classified js-only-documented (`8044ef2`).
+
+**What the brief got wrong or left out**
+
+- **Mutex-protected globals + panic = test poisoning.** Slice 14 introduced a static `Mutex<Option<Arc<dyn ChatSingleton>>>` plus a `get_chat_singleton()` that panicked while *holding* the lock when no singleton was registered. The next test in the parallel runner saw a poisoned mutex, blew up on its own `.expect(...)` call, and dragged 2-3 sibling tests with it. Fix landed in the same slice — *snapshot under the lock, drop the lock, then optionally panic* — and every mutator switched to `unwrap_or_else(|poisoned| poisoned.into_inner())` so a separate test panic can't cascade. This pattern needs to be a brief priority: **never panic while holding a `std::sync::Mutex` guard you might want to reuse**.
+- **Placeholder traits unblock cross-module ports faster than expected.** Adding `pub trait Adapter: Send + Sync + Debug {}` and `pub trait StateAdapter: Send + Sync + Debug {}` to `types.rs` with zero methods let `chat_singleton` ship without needing the full Adapter/StateAdapter method set. Future module slices (cards/channel/message) can extend these traits incrementally. The brief should explicitly endorse "land the trait first, grow it per slice" as the canonical pattern for upstream interfaces with large method sets.
+- **`js-only-documented` is a real, productive slice.** Slice 18 classified `apps/docs` and `examples/nextjs-chat` as non-portable in a single 4-line ledger edit (no Rust code), permanently shrinking the remaining-work queue. The brief should call out classification slices as a first-class slice type alongside type-layer and module-port slices.
+- **Generic types need typed-substitution tests too.** Slice 17's `RawMessage<TRaw = serde_json::Value>` shipped with two tests: one with the default, one with a concrete user-defined struct. The second test proves the generic isn't accidentally tied to `Value`. Pattern recommended for every upstream `interface X<T = unknown>`.
+- **Untagged-deserialization rejection is worth testing.** Slice 15's `StreamChunk` is `#[serde(tag = "type", rename_all = "snake_case")]`. The colocated test `stream_chunk_untagged_object_fails_to_deserialize` asserts that a JSON object missing the `type` field fails to parse — mirrors TypeScript's compile-time tag check at runtime. Add this assertion for every tagged-union slice.
+- **The types.rs layered approach has shipped 9 layers and ~42 types without unblocking any module-port work**, because every module still ultimately requires `Message`, `Channel`, `Thread`, `Card`, or `Modal`. Those need either upstream `markdown.ts` (122 tests, external mdast dep) or a deliberate scaffold-first approach. The brief should now name the next architectural slice: **pick a Rust markdown crate**.
+
+**Stale or misleading guidance**
+
+- The brief's "Required Work Order" lists `packages/tests` and `packages/state-memory` as straightforward phase-1 ports. In reality `packages/tests` is almost entirely Vitest mocking helpers — likely a future classification slice (parts `js-only-documented`, parts moved to a `chat-sdk-test-support` crate when phase-1 modules land). `packages/state-memory` cannot start until QueueEntry/StateAdapter/Lock-friendly traits are real (only Lock is real so far). Reorder.
+- The brief still suggests progressing through phase-1 packages roughly in parallel. In practice nine `types.rs` layers + one `chat_singleton` shipped before `packages/adapter-shared` got its second module — the type-layering productivity dominates. The brief should explicitly bless that sequencing.
+
+**Edits applied**
+
+- `scripts/codex-goal-chat/port-chat-sdk.md`:
+  - **Mutex panic rule** added: never call `expect`/`unwrap` while holding a `std::sync::Mutex` guard if the panic could poison the lock for sibling tests. Snapshot then panic.
+  - **Placeholder-trait pattern** documented: large upstream interfaces (>5 methods) ship as empty `pub trait X: Send + Sync + Debug {}` first; per-slice growth as dependency modules land. Sliced upstream interfaces always extend the same trait, never define a new one.
+  - **Classification slices** added to the canonical slice-type list: marking an upstream surface `js-only-documented` (or `verified` with no code, when behavior is intrinsic) counts as a real slice if the ledger and JavaScript-only Exceptions table are both updated and the entry is non-trivially justified.
+  - **Generic-type test pattern** documented: `interface X<T = unknown>` ports as `pub struct X<T = serde_json::Value>` plus a test using a custom concrete type to prove the default is opt-in.
+  - **Tagged-union test pattern** documented: every `#[serde(tag = "type")]` enum gets one negative-path test rejecting an untagged object.
+  - **Next architectural slice flagged**: the dependency wall is now markdown.ts. The next major slice should be the markdown-crate decision (`markdown-rs` recommended) and `chat-sdk-chat::markdown` skeleton.
+- `scripts/codex-goal-chat/goal-condition.md`: stable.
+
+**Open refinements deferred**
+
+- A `cargo test --workspace --all-features --test-threads=1` integration job would catch parallel-test foot-guns like the slice-14 poisoning before they reach `main`. Worth a slice once enough modules are in place that the matrix payoff is clear.
+- The brief still calls out provider-style adapters by name (Slack, Teams, etc.) for the Phase-2 queue, but upstream may have added new adapters since the slice-1 inventory. Re-running `npx opensrc fetch github:vercel/chat` and diffing should be on the slice-25 refinement agenda.
