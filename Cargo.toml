@@ -26,6 +26,7 @@ members = [
     "crates/chat-sdk-chat",
     "crates/chat-sdk-adapter-discord",
     "crates/chat-sdk-adapter-github",
+    "crates/chat-sdk-adapter-linear",
     "crates/chat-sdk-adapter-messenger",
     "crates/chat-sdk-adapter-shared",
     "crates/chat-sdk-adapter-telegram",
