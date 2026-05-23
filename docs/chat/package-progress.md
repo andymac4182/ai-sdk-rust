@@ -3,8 +3,8 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 39.9%
-- Portable package average: 27.9%
+- Average estimated completion: 40.2%
+- Portable package average: 28.3%
 - Closed package rows: 5 / 18
 - Strict portable verified rows: 2 / 15
 - In-progress rows: 13
@@ -32,11 +32,11 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | `@chat-sdk/adapter-linear` | 10% | In progress | adapter package | Crate scaffold (slice 136). 11 tests. HTTP I/O + GraphQL deferred. |
 | `@chat-sdk/adapter-github` | 10% | In progress | adapter package | Crate scaffold (slice 131). 13 tests. HTTP I/O deferred. |
 | `@chat-sdk/adapter-messenger` | 10% | In progress | adapter package | Crate scaffold (slice 132). 11 tests. HTTP I/O deferred. |
-| `@chat-sdk/adapter-telegram` | 10% | In progress | adapter package | Crate scaffold (slice 130). 13 tests. HTTP I/O deferred. |
+| `@chat-sdk/adapter-telegram` | 15% | In progress | adapter package | Slice 130 scaffold + slice 145 post_message HTTP layer via chat-sdk-adapter-shared::runtime::reqwest. 14 colocated... |
 | `@chat-sdk/adapter-whatsapp` | 10% | In progress | adapter package | Crate scaffold (slice 133). 11 tests. HTTP I/O deferred. |
 | `@chat-sdk/state-redis` | 10% | In progress | state backend (Redis) | Crate scaffold (slice 140): RedisStateAdapter impl StateAdapter (NotConnected placeholder). 11 tests. redis-rs wire-up... |
 | `@chat-sdk/state-ioredis` | 10% | In progress | state backend (ioredis) | Crate scaffold (slice 141): IoredisStateAdapter (cluster + Sentinel support) impl StateAdapter. 11 tests. redis-rs... |
-| `@chat-sdk/state-pg` | 10% | In progress | state backend (Postgres) | Crate scaffold (slice 142): PgStateAdapter impl StateAdapter (NotConnected placeholder). PgStateAdapterOptions +... |
+| `@chat-sdk/state-pg` | 10% | In progress | state backend (Postgres) | Crate scaffold (slice 142): PgStateAdapter impl StateAdapter. 10 tests. tokio-postgres/sqlx wire-up deferred. |
 
 ## Not Started
 

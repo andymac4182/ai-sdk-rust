@@ -2,28 +2,23 @@
 //!
 //! 1:1 port (in progress) of `packages/adapter-telegram/src/index.ts`.
 //!
-//! **What this slice ships (slice 130):**
+//! **Surface ported so far:**
 //!
-//! - Crate skeleton + `Cargo.toml` (deps: chat-sdk-chat,
-//!   async-trait, serde + serde_json).
-//! - [`TelegramAdapter`] struct holding bot config (token + base
-//!   URL) and impl-ing the chat-sdk [`chat_sdk_chat::types::Adapter`]
-//!   trait with `name` overridden to `"telegram"`.
-//! - [`TelegramAdapterOptions`] config struct (token + optional
-//!   base URL override for testing).
-//! - [`encode_thread_id`] / [`decode_thread_id`] / [`is_telegram_thread_id`] —
-//!   pure helpers for the upstream `telegram:<chat_id>:<message_thread_id?>`
-//!   wire format (1:1 with upstream's inline helpers).
+//! - [`TelegramAdapter`] + [`TelegramAdapterOptions`] (slice 130:
+//!   skeleton + thread-id codec).
+//! - `adapter.post_message(thread_id, text)` (slice 145, this
+//!   slice): real HTTP POST to Telegram's `/bot<token>/sendMessage`
+//!   via `chat_sdk_adapter_shared::runtime::reqwest`. Decodes the
+//!   chat-sdk thread id, builds the JSON body
+//!   (`{chat_id, text, message_thread_id?}`), and parses the
+//!   `{ok, result: {message_id}}` Telegram envelope.
 //!
-//! **What is deferred:**
+//! **What is still deferred:**
 //!
-//! - HTTP I/O against `api.telegram.org` for the actual
-//!   `post_message`/`post_object`/`fetch_subject`/... methods.
-//!   Requires picking an HTTP client (`reqwest`/`ureq`) and an
-//!   async runtime. Will land alongside the workspace-level
-//!   runtime decision documented in
-//!   `scripts/codex-goal-chat/port-chat-sdk.md`'s "Phase 2 /
-//!   Phase 3 prep" section.
+//! - `post_object` / `fetch_subject` / `edit_message` / other
+//!   Adapter trait methods. Each follows the same recipe as
+//!   `post_message` (POST/GET against the relevant `/bot<token>/
+//!   <method>` endpoint).
 //! - Markdown / card rendering for Telegram's `MarkdownV2` /
 //!   inline-keyboard layout.
 
@@ -77,20 +72,32 @@ impl TelegramAdapterOptions {
 }
 
 /// Telegram adapter. 1:1 port (in progress) of upstream
-/// `class TelegramAdapter implements Adapter`. The HTTP I/O methods
-/// (`post_message`, `post_object`, `fetch_subject`, etc.) will land
-/// once the workspace picks an async HTTP client; for now the
-/// adapter only implements `name` and exposes the bot config so
-/// downstream consumers can construct it.
+/// `class TelegramAdapter implements Adapter`. Holds the bot
+/// config + a shared [`reqwest::Client`] from
+/// [`chat_sdk_adapter_shared::runtime::default_http_client`].
 #[derive(Debug, Clone)]
 pub struct TelegramAdapter {
     options: TelegramAdapterOptions,
+    http: chat_sdk_adapter_shared::runtime::reqwest::Client,
 }
 
 impl TelegramAdapter {
     /// 1:1 port of upstream `new TelegramAdapter({ token, baseUrl? })`.
     pub fn new(options: TelegramAdapterOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            http: chat_sdk_adapter_shared::runtime::default_http_client(),
+        }
+    }
+
+    /// Override the HTTP client (mostly useful for tests that point
+    /// at a wiremock server).
+    pub fn with_http_client(
+        mut self,
+        client: chat_sdk_adapter_shared::runtime::reqwest::Client,
+    ) -> Self {
+        self.http = client;
+        self
     }
 
     /// Read the bot token (e.g. for constructing HTTPS request URIs).
@@ -102,12 +109,85 @@ impl TelegramAdapter {
     pub fn base_url(&self) -> &str {
         self.options.effective_base_url()
     }
+
+    /// Build the absolute URL for a Telegram Bot API method. 1:1
+    /// with upstream's inline `${baseUrl}/bot${token}/${method}`
+    /// template.
+    fn method_url(&self, method: &str) -> String {
+        format!("{}/bot{}/{}", self.base_url(), self.token(), method)
+    }
 }
 
 #[async_trait]
 impl Adapter for TelegramAdapter {
     fn name(&self) -> &str {
         ADAPTER_NAME
+    }
+
+    /// Post a plain-text message via Telegram's `sendMessage` Bot
+    /// API method. 1:1 with upstream's `adapter.postMessage`:
+    ///
+    /// - Decodes the chat-sdk thread id (`telegram:<chat>[:<thread>]`)
+    ///   into `chat_id` + optional `message_thread_id`.
+    /// - POSTs JSON `{chat_id, text, message_thread_id?}` to
+    ///   `<base_url>/bot<token>/sendMessage`.
+    /// - Parses the Telegram envelope `{ok, result: {message_id} }`.
+    /// - Returns the integer message id formatted as a decimal string
+    ///   (chat-sdk's `Adapter::post_message` -> `String`).
+    ///
+    /// Returns [`chat_sdk_chat::types::AdapterError::InvalidPayload`]
+    /// when the `thread_id` isn't Telegram-encoded. Returns
+    /// [`chat_sdk_chat::types::AdapterError::Io`] for network errors,
+    /// non-200 HTTP responses, or unexpected JSON shapes.
+    async fn post_message(
+        &self,
+        thread_id: &str,
+        text: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<String> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Telegram-encoded"))
+        })?;
+
+        let url = self.method_url("sendMessage");
+        let mut body = serde_json::json!({
+            "chat_id": decoded.chat_id,
+            "text": text,
+        });
+        if let Some(message_thread_id) = decoded.message_thread_id {
+            body["message_thread_id"] = serde_json::Value::from(message_thread_id);
+        }
+
+        let response = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() || json["ok"] != serde_json::Value::Bool(true) {
+            let description = json["description"]
+                .as_str()
+                .unwrap_or("Telegram API call failed");
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: {description}"
+            )));
+        }
+
+        let message_id = json["result"]["message_id"].as_i64().ok_or_else(|| {
+            AdapterError::InvalidPayload(
+                "Telegram sendMessage response missing result.message_id".to_string(),
+            )
+        })?;
+        Ok(message_id.to_string())
     }
 }
 
@@ -242,16 +322,31 @@ mod tests {
     }
 
     #[test]
-    fn adapter_default_methods_return_unsupported() {
-        // HTTP-bound methods land in a follow-up slice; for now the
-        // default impls on the Adapter trait propagate.
+    fn adapter_post_message_rejects_non_telegram_thread_ids() {
+        // Slice 145 wired post_message to the HTTP layer; the
+        // pre-HTTP validation rejects mismatched thread ids before
+        // any network call. This test exercises that path without
+        // needing a tokio runtime.
         let adapter = TelegramAdapter::new(TelegramAdapterOptions::new("t"));
         use chat_sdk_chat::types::AdapterError;
-        let err = block_on(adapter.post_message("telegram:123", "hi"));
-        assert!(matches!(
-            err,
-            Err(AdapterError::Unsupported("post_message"))
-        ));
+        let err = block_on(adapter.post_message("slack:C1:1.0", "hi"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Telegram-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_method_url_combines_base_token_and_method() {
+        let adapter = TelegramAdapter::new(
+            TelegramAdapterOptions::new("BOTTOK").with_base_url("https://example.test"),
+        );
+        assert_eq!(
+            adapter.method_url("sendMessage"),
+            "https://example.test/botBOTTOK/sendMessage"
+        );
     }
 
     #[test]
