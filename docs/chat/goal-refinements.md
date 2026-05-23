@@ -142,3 +142,36 @@ Slices reviewed: slice 14 chat_singleton + placeholder traits (`42dac89`), slice
 
 - A `cargo test --workspace --all-features --test-threads=1` integration job would catch parallel-test foot-guns like the slice-14 poisoning before they reach `main`. Worth a slice once enough modules are in place that the matrix payoff is clear.
 - The brief still calls out provider-style adapters by name (Slack, Teams, etc.) for the Phase-2 queue, but upstream may have added new adapters since the slice-1 inventory. Re-running `npx opensrc fetch github:vercel/chat` and diffing should be on the slice-25 refinement agenda.
+
+### 2026-05-23 — slices 20..24
+
+Slices reviewed: slice 20 LockScopeContext/FileUpload/FetchOptions (`7becb09`), slice 21 PostEphemeralOptions (`7c92f99`), slice 22 FormattedContent placeholder + AppendInput + TranscriptEntry (`284700f`), slice 23 Attachment + LinkPreview data shapes (`ce21b14`), slice 24 PostableRaw + PostableMarkdown (`2947103`).
+
+**What the brief got wrong or left out**
+
+- **Placeholder traits actually work.** Slice 20's `LockScopeContext` was the first non-trivial consumer of the slice-14 placeholder `Adapter` trait. Holds an `Arc<dyn Adapter>`, compiles cleanly, future adapter slices grow the trait without changing the storage shape. Confirms the brief's slice-19 priority #5 — promote it from "untested theory" to "validated pattern" in the next brief revision.
+- **Placeholder type aliases extend the pattern to data, not just behavior.** Slice 22 shipped `pub type FormattedContent = serde_json::Value;` so AppendInput / TranscriptEntry could carry opaque mdast through the wire without forcing the markdown-crate decision today. When `chat-sdk-chat::markdown` lands, swapping the alias to a typed AST automatically updates every downstream type that holds a `FormattedContent`. The brief should name this pattern alongside the placeholder-trait pattern.
+- **`#[derive(Hash)]` is incompatible with `HashMap`/`Vec` fields containing non-Hash types.** Slice 23 first shipped `Attachment` with `#[derive(Hash)]`; the build broke on the `Option<HashMap<String, String>> fetch_metadata` field because the default Hash derive requires every field to be `Hash`. Real foot-gun for serde-derived data types with map members. Brief should call this out: data types containing `HashMap`/`BTreeMap` / `serde_json::Map` / `serde_json::Value` / `Vec<NonHash>` must skip the `Hash` derive.
+- **Structurally-similar types deserve a wire-distinction test.** Slice 24's `PostableRaw` and `PostableMarkdown` share `attachments`/`files` and differ only in their body field (`raw` vs `markdown`). The third colocated test asserts `serde_json::to_string` produces JSON whose required key differs between the two — adapters branch on which key is present. Brief priority candidate: when two ported types share most of their shape but distinguish on a single required field, add an explicit assertion that their wire JSON differs.
+- **"Ship data shape + document the callback elision" works for behavior-carrying interfaces.** Slice 23's Attachment and LinkPreview each declared a JS-only async callback (`fetchData`, `fetchMessage`); the Rust port emits the data fields only and documents the callback as a future Adapter trait method. The doc comments cite the upstream member they elide, which keeps the trail honest. Brief should formalize this as a recipe for any upstream interface with `methods: () => Promise<T>` shapes.
+- **Single-field structs still count as proper slices.** Slice 21 was a 9-line `PostEphemeralOptions { fallback_to_dm: bool }` and 1 wire-format test. Documented this in its commit message — small slices that nail down a stable wire contract are valuable. Brief should drop any implicit "slices must port multiple types" expectation.
+
+**Stale or misleading guidance**
+
+- The brief's Phase-1/Phase-2 ordering still implies whole-package fronts. Reality: the types-layer approach has shipped 14 layers covering 54 upstream interfaces while `packages/adapter-shared` is still at 1/4 modules and 11 adapters are 0/0. The brief should re-frame Phase-1 as "core/shared layers ready for adapter consumers" — measured by which dependency modules unblock the most downstream surface, not by package row count.
+- The brief's Next Unported Work Queue section in `docs/chat/upstream-parity.md` is stale — it still names "Slice 2 (planned)" through "Slice 7 (planned)" from the initial inventory. Future refinement passes should keep that queue current (or remove the stale entries entirely and rely on the package-row Evidence cells).
+
+**Edits applied**
+
+- `scripts/codex-goal-chat/port-chat-sdk.md`:
+  - **Placeholder type aliases** added alongside the placeholder-trait pattern (priority 5 → expanded). Cite slice-22 `FormattedContent = serde_json::Value` as the canonical example.
+  - **Hash derive caveat** added as a new priority: data types containing `HashMap`/`BTreeMap`/`serde_json::Map`/`serde_json::Value`/`Vec<NonHash>` must skip the `Hash` derive.
+  - **Wire-distinction test pattern** added: structurally-similar types whose only required difference is a single key must include a colocated assertion that their JSON renders differ.
+  - **Data-shape-plus-elided-callback recipe** added for upstream interfaces with `() => Promise<T>` methods. Doc-comment the elided callback by upstream name; promote to Adapter trait method when adapters land.
+  - **Single-field slice acknowledgement** added: slices may port a single one-field struct if the wire contract is non-trivial and the colocated test exercises the round-trip.
+- `scripts/codex-goal-chat/goal-condition.md`: stable.
+
+**Open refinements deferred**
+
+- The `docs/chat/upstream-parity.md` Next Unported Work Queue is stale and should be replaced (or rewritten as "next types-layer candidates", "next module-port candidates", and "next architectural slice"). Defer to slice 30's refinement so this entry stays focused.
+- An automated upstream-test-inventory diff (`scripts/check-upstream-test-inventory.sh`?) would compute the count of upstream `*.test.ts` files vs colocated `#[cfg(test)] mod tests` blocks per crate and report the gap. Would catch any future regression where the ledger drifts from reality. Worth a dedicated slice when the pattern is more entrenched.
