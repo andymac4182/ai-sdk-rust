@@ -171,6 +171,21 @@ impl Chat {
     pub fn register_singleton(self: &Arc<Self>) {
         set_chat_singleton(self.clone());
     }
+
+    /// Get the registered singleton `Chat` instance. 1:1 port of
+    /// upstream `Chat.getSingleton()` static method. Returns the
+    /// `Arc<dyn ChatSingleton>` from the global slot. Panics
+    /// (via the underlying `get_chat_singleton()`) if no singleton
+    /// has been registered yet.
+    pub fn get_singleton() -> std::sync::Arc<dyn ChatSingleton> {
+        crate::chat_singleton::get_chat_singleton()
+    }
+
+    /// Whether a singleton has been registered. 1:1 port of
+    /// upstream `Chat.hasSingleton()` static method.
+    pub fn has_singleton() -> bool {
+        crate::chat_singleton::has_chat_singleton()
+    }
 }
 
 impl ChatSingleton for Chat {
@@ -342,6 +357,33 @@ mod tests {
         let from_trait = singleton.get_state();
         let from_struct = chat.state().clone();
         assert!(Arc::ptr_eq(&from_trait, &from_struct));
+    }
+
+    // ---------- Chat::has_singleton + Chat::get_singleton ----------
+    // 1:1 port of upstream `Chat.hasSingleton()` + `Chat.getSingleton()`
+    // static class methods.
+
+    #[test]
+    fn chat_has_singleton_reflects_the_global_slot() {
+        let _guard = SINGLETON_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        clear_chat_singleton();
+        assert!(!Chat::has_singleton());
+        let chat = Arc::new(make_chat(&["slack"]));
+        chat.register_singleton();
+        assert!(Chat::has_singleton());
+        clear_chat_singleton();
+        assert!(!Chat::has_singleton());
+    }
+
+    #[test]
+    fn chat_get_singleton_returns_the_registered_instance() {
+        let _guard = SINGLETON_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        clear_chat_singleton();
+        let chat = Arc::new(make_chat(&["slack"]));
+        chat.register_singleton();
+        let fetched = Chat::get_singleton();
+        assert!(fetched.get_adapter("slack").is_some());
+        clear_chat_singleton();
     }
 
     #[test]
