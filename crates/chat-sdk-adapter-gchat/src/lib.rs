@@ -211,6 +211,138 @@ impl Adapter for GchatAdapter {
             )
         })
     }
+
+    /// Edit a Google Chat message via `spaces.messages.update`.
+    /// 1:1 with the text-only path of upstream `adapter.editMessage`
+    /// (the cardsV2 branch is deferred): PATCH
+    /// `<api_base>/<message_id>?updateMask=text,cardsV2` with
+    /// `{text, cardsV2: []}`. `message_id` is the Google resource
+    /// name (e.g. `spaces/AAA/messages/BBB`).
+    async fn edit_message(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<String> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let _decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not GChat-encoded"))
+        })?;
+        let bearer = self.bearer_token.as_deref().ok_or_else(|| {
+            AdapterError::InvalidPayload("GchatAdapter has no bearer_token configured".to_string())
+        })?;
+
+        let url = format!("{}/{message_id}?updateMask=text,cardsV2", self.api_base());
+        let body = serde_json::json!({ "text": text, "cardsV2": [] });
+
+        let response = self
+            .http
+            .patch(&url)
+            .bearer_auth(bearer)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() {
+            let msg = json["error"]["message"]
+                .as_str()
+                .unwrap_or("Google Chat messages.update failed");
+            return Err(AdapterError::InvalidPayload(format!("{status}: {msg}")));
+        }
+
+        json["name"].as_str().map(str::to_owned).ok_or_else(|| {
+            AdapterError::InvalidPayload(
+                "Google Chat messages.update response missing name".to_string(),
+            )
+        })
+    }
+
+    /// Delete a Google Chat message via `spaces.messages.delete`.
+    /// 1:1 with upstream's `adapter.deleteMessage`: DELETE
+    /// `<api_base>/<message_id>`.
+    async fn delete_message(
+        &self,
+        _thread_id: &str,
+        message_id: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+        let bearer = self.bearer_token.as_deref().ok_or_else(|| {
+            AdapterError::InvalidPayload("GchatAdapter has no bearer_token configured".to_string())
+        })?;
+
+        let url = format!("{}/{message_id}", self.api_base());
+        let response = self
+            .http
+            .delete(&url)
+            .bearer_auth(bearer)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: {body_text}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Add an emoji reaction via `spaces.messages.reactions.create`.
+    /// 1:1 with upstream's `adapter.addReaction`: POST
+    /// `<api_base>/<message_id>/reactions` with
+    /// `{emoji: {unicode: <emoji>}}`.
+    async fn add_reaction(
+        &self,
+        _thread_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+        let bearer = self.bearer_token.as_deref().ok_or_else(|| {
+            AdapterError::InvalidPayload("GchatAdapter has no bearer_token configured".to_string())
+        })?;
+
+        let url = format!("{}/{message_id}/reactions", self.api_base());
+        let body = serde_json::json!({ "emoji": { "unicode": emoji } });
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(bearer)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: {body_text}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Google Chat has no typing indicator API for bots. 1:1 with
+    /// upstream's no-op `adapter.startTyping`.
+    async fn start_typing(
+        &self,
+        _thread_id: &str,
+        _status: Option<&str>,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        Ok(())
+    }
 }
 
 /// Encode a Google Chat thread id. 1:1 with upstream's inline format:
@@ -373,6 +505,54 @@ mod tests {
             }
             other => panic!("expected InvalidPayload, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn adapter_edit_message_rejects_non_gchat_thread_ids() {
+        let adapter = GchatAdapter::new(GchatAdapterOptions::new("{}", "bot@example.com"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.edit_message("slack:C1:1.0", "spaces/A/messages/B", "hi"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not GChat-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_delete_message_requires_bearer() {
+        let adapter = GchatAdapter::new(GchatAdapterOptions::new("{}", "bot@example.com"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.delete_message("gchat:AAA:", "spaces/A/messages/B"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("no bearer_token configured"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_add_reaction_requires_bearer() {
+        let adapter = GchatAdapter::new(GchatAdapterOptions::new("{}", "bot@example.com"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.add_reaction("gchat:AAA:", "spaces/A/messages/B", "👍"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("no bearer_token configured"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_start_typing_is_a_noop() {
+        // Google Chat has no typing indicator API for bots -
+        // upstream returns void unconditionally.
+        let adapter = GchatAdapter::new(GchatAdapterOptions::new("{}", "bot@example.com"));
+        assert!(block_on(adapter.start_typing("anything", None)).is_ok());
+        assert!(block_on(adapter.start_typing("anything", Some("s"))).is_ok());
     }
 
     #[test]
