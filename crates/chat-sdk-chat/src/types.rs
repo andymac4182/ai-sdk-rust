@@ -594,6 +594,94 @@ pub struct TranscriptsConfig {
     pub store_formatted: Option<bool>,
 }
 
+/// Media type of an [`Attachment`]. 1:1 port of upstream
+/// `"image" | "file" | "video" | "audio"` literal union on
+/// [`Attachment::kind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AttachmentKind {
+    Image,
+    File,
+    Video,
+    Audio,
+}
+
+/// File/image/video/audio attachment on a chat message. 1:1 port of the
+/// data shape of upstream `interface Attachment`.
+///
+/// **Callback elision.** Upstream also declares an optional
+/// `fetchData?: () => Promise<Buffer>` method. That belongs to the
+/// adapter behavior layer (each adapter knows how to authenticate
+/// fetches to its platform's media endpoint) and will land as a Rust
+/// trait method on the upstream `Adapter` placeholder trait once
+/// adapter modules ship. The `fetch_metadata` field on this struct is
+/// the serializable hint adapters store to reconstruct that callback
+/// after rehydration — see the upstream comment for context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    /// Binary data, when already fetched. Same `Buffer | Blob`-collapse
+    /// as [`FileUpload::data`] — see [`FileBytes`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<FileBytes>,
+    /// Platform-specific metadata an adapter needs to reconstruct
+    /// `fetchData` after the attachment is serialized into the
+    /// outgoing queue (e.g. WhatsApp `mediaId`, Telegram `fileId`).
+    #[serde(
+        rename = "fetchMetadata",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub fetch_metadata: Option<std::collections::HashMap<String, String>>,
+    /// Image/video height when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    /// MIME type.
+    #[serde(rename = "mimeType", default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// Filename.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// File size in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    /// Type discriminator (`image`/`file`/`video`/`audio`).
+    #[serde(rename = "type")]
+    pub kind: AttachmentKind,
+    /// URL to the file (for linking/downloading).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Image/video width when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+}
+
+/// Link unfurl metadata. 1:1 port of the data shape of upstream
+/// `interface LinkPreview`.
+///
+/// **Callback elision.** Upstream also declares an optional
+/// `fetchMessage?: () => Promise<Message>` for links pointing to other
+/// chat messages on the same platform. That lookup belongs to the
+/// adapter behavior layer (per-platform message-by-id fetch) and will
+/// land as a trait method once the `Message` module is ported. The
+/// data fields stand cleanly on their own; only the URL is required.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LinkPreview {
+    /// Description from unfurl metadata when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Preview image URL when available.
+    #[serde(rename = "imageUrl", default, skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
+    /// Site name (e.g. `"Vercel"`).
+    #[serde(rename = "siteName", default, skip_serializing_if = "Option::is_none")]
+    pub site_name: Option<String>,
+    /// Title from unfurl metadata when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The URL itself — always present.
+    pub url: String,
+}
+
 /// Formatted markdown content carried alongside chat messages and stored
 /// transcripts. Upstream this is `Root` from the `mdast` package — the
 /// canonical Markdown AST node — `export type FormattedContent = Root`.
@@ -1566,6 +1654,94 @@ mod tests {
         assert!(json.contains("\"name\":\"general\""));
         let back: ChannelInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(back, info);
+    }
+
+    #[test]
+    fn attachment_kind_uses_upstream_lowercase_strings() {
+        for (kind, wire) in [
+            (AttachmentKind::Image, "image"),
+            (AttachmentKind::File, "file"),
+            (AttachmentKind::Video, "video"),
+            (AttachmentKind::Audio, "audio"),
+        ] {
+            assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{wire}\""));
+        }
+    }
+
+    #[test]
+    fn attachment_minimum_shape_round_trips_with_only_kind() {
+        let att = Attachment {
+            data: None,
+            fetch_metadata: None,
+            height: None,
+            mime_type: None,
+            name: None,
+            size: None,
+            kind: AttachmentKind::File,
+            url: None,
+            width: None,
+        };
+        let json = serde_json::to_string(&att).unwrap();
+        assert_eq!(json, "{\"type\":\"file\"}");
+        let back: Attachment = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, att);
+    }
+
+    #[test]
+    fn attachment_full_shape_round_trips_with_all_fields() {
+        let mut fetch_meta = std::collections::HashMap::new();
+        fetch_meta.insert("mediaId".to_string(), "media_123".to_string());
+        let att = Attachment {
+            data: Some(FileBytes::from(vec![1, 2, 3])),
+            fetch_metadata: Some(fetch_meta),
+            height: Some(720),
+            mime_type: Some("image/png".to_string()),
+            name: Some("screenshot.png".to_string()),
+            size: Some(4096),
+            kind: AttachmentKind::Image,
+            url: Some("https://example.com/x.png".to_string()),
+            width: Some(1280),
+        };
+        let json = serde_json::to_string(&att).unwrap();
+        assert!(json.contains("\"type\":\"image\""));
+        assert!(json.contains("\"data\":[1,2,3]"));
+        assert!(json.contains("\"fetchMetadata\":{\"mediaId\":\"media_123\"}"));
+        assert!(json.contains("\"mimeType\":\"image/png\""));
+        assert!(json.contains("\"height\":720"));
+        assert!(json.contains("\"width\":1280"));
+        let back: Attachment = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, att);
+    }
+
+    #[test]
+    fn link_preview_minimum_shape_round_trips_with_only_url() {
+        let preview = LinkPreview {
+            description: None,
+            image_url: None,
+            site_name: None,
+            title: None,
+            url: "https://example.com".to_string(),
+        };
+        let json = serde_json::to_string(&preview).unwrap();
+        assert_eq!(json, "{\"url\":\"https://example.com\"}");
+        let back: LinkPreview = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, preview);
+    }
+
+    #[test]
+    fn link_preview_full_shape_uses_upstream_camelcase() {
+        let preview = LinkPreview {
+            description: Some("A description".to_string()),
+            image_url: Some("https://example.com/img.png".to_string()),
+            site_name: Some("Vercel".to_string()),
+            title: Some("Some title".to_string()),
+            url: "https://example.com/post".to_string(),
+        };
+        let json = serde_json::to_string(&preview).unwrap();
+        assert!(json.contains("\"imageUrl\":\"https://example.com/img.png\""));
+        assert!(json.contains("\"siteName\":\"Vercel\""));
+        let back: LinkPreview = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, preview);
     }
 
     #[test]
