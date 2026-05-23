@@ -2312,3 +2312,86 @@ cases ported.
   files than currently flagged.** Telegram has a `.tsx` example, but
   WhatsApp / Slack / others might too. Re-audit `examples/*-chat`
   next refinement.
+
+### 2026-05-24 - slices 212..218
+
+Slices reviewed: 212 Slack cards.rs scaffold + WhatsApp explicit Link/Table
+arms; 213 GChat thread_utils.rs port (14 cases); 214 GChat user_info.rs port
+(14 cases using MemoryStateAdapter); 215 GChat workspace_events.rs partial
+port (4 portable Pub/Sub cases); 216 Linear thread_id.rs port (18 cases);
+217 Teams markdown.rs port (39 cases - the last missing adapter markdown
+converter); 218 Teams cards.rs fallback-text wrapper (2 cases).
+
+**What the brief got wrong or left out**
+
+- **Shared `card_to_fallback_text` is the right cross-adapter abstraction.**
+  Slack (slice 212) and Teams (slice 218) both delegate `cardToFallbackText`
+  to `chat_sdk_adapter_shared::card_utils::card_to_fallback_text` with
+  per-platform options. Should be the canonical pattern for the remaining
+  adapters that need fallback rendering (Discord, GitHub, GChat, Linear,
+  Messenger - check whether they need a thin wrapper too). The brief should
+  list this as a "find existing shared helper before porting per-adapter"
+  pattern.
+- **`thread_id` / `thread_utils` ports are easy 1:1 wins.** Slices 213
+  (GChat), 216 (Linear) each ported the canonical wire-format + 14-18
+  tests in a single slice. Discord/Slack/Teams/etc don't expose
+  `encodeThreadId` / `decodeThreadId` as public methods, but the ones
+  that do (GChat, Linear) are quick wins. Check whether the older simpler
+  forms in adapter `lib.rs` should be unified later; for now coexistence
+  is fine.
+- **Teams HTML-to-markdown decoder is non-trivial.** Slice 217 needed
+  case-insensitive byte scanners for 9 tags + a 5-entity decoder + a
+  loop-strip-tags pass. Total ~250 LOC of impl. The walker template
+  matched Discord (slice 206) and Slack (slice 205) but the HTML
+  pre-processing step is unique to Teams. Brief should note: adapters
+  with HTML wire formats need a custom pre-process step before the
+  walker.
+- **`UserInfoCache` Rust port matches upstream interface despite no JS-style
+  vi.fn() mocks.** Slice 214 used the real `chat_sdk_state_memory::
+  MemoryStateAdapter` as test backing. Each `state.cache.set(key, value)`
+  upstream test becomes an explicit `state.set(&key, ...).await.unwrap()`
+  in Rust. Slightly more verbose, but no mock library needed. Brief should
+  note: for upstream tests using simple key/value state spies, prefer
+  `chat-sdk-state-memory` over inventing a mock.
+- **Pub/Sub message decode test fixture is small.** Slice 215's
+  `make_pub_sub_message` is 12 lines of Rust to mirror upstream's vitest
+  `makePubSubMessage`. Base64-encoding `serde_json::to_vec(...)` matches
+  JS `Buffer.from(JSON.stringify(...)).toString("base64")` exactly.
+  Pattern is worth lifting if more adapters need Pub/Sub fixtures.
+
+**Stale or misleading guidance**
+
+- The brief's "Order adapters by contract complexity: smallest first"
+  ordering listed Teams as 8th of 9 (16 src files, 6 test files). After
+  slice 217+218, Teams is at 49%, mid-pack. The ordering should be
+  treated as historical (initial-port-order) rather than a remaining-
+  work prioritization.
+- "Adaptive Cards rendering" was listed as deferred in the prior
+  refinement. It still is — Teams cards.test.ts has 28 cases, of which
+  only 2 (`cardToFallbackText`) are ported. The bulk is the
+  `cardToAdaptiveCard` Adaptive Card JSON renderer, which needs the
+  full Microsoft AdaptiveCard schema modeled in Rust types. Estimate:
+  ~400-500 LOC + 26 test cases. Should be a substantial 2-3 slice
+  effort, not 1 slice.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+
+**Open refinements deferred**
+
+- **Teams `cardToAdaptiveCard` + modal-button + select/radio + CardLink**
+  (26 cases). Largest single deferred chunk for Teams.
+- **`processCardCallbackUrls` + `resolveCallbackUrl` + `postToCallbackUrl`
+  in chat-sdk-chat callback_url.rs** (12 of 17 upstream cases). Needs
+  state-adapter wiring for the first two + reqwest for the last.
+- **All adapter `index.test.ts` integration suites.** GitHub 0% complete
+  (no integration tests at all in Rust port yet). Linear 18/164 cases
+  ported via the slice 216 thread_id port. Largest single chunk of
+  remaining work across all 9 adapters by case count (~3000+ cases
+  cumulatively).
+- **Migrate old simpler `encode_thread_id` / `decode_thread_id` in
+  GChat / Linear `lib.rs`** to the new upstream-matching APIs from
+  slices 213 / 216. Touches adapter HTTP code; deferred.
+- **Slack cards.test.ts Block Kit renderer** (34 of 36 cases remaining
+  after slice 212).
