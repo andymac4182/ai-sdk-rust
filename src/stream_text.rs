@@ -48,7 +48,9 @@ use crate::language_model::{
     LanguageModelUsage,
 };
 use crate::logger::{LogWarningsOptions, log_warnings};
-use crate::prompt::{Prompt, prompt_has_url_files, standardize_prompt};
+use crate::prompt::{
+    Prompt, prompt_has_url_files, standardize_and_convert_to_language_model_prompt,
+};
 use crate::provider::{ApiCallError, InvalidPromptError, ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{
     ExperimentalSandbox, Tool, convert_to_base64, prepare_tools_with_context,
@@ -967,7 +969,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
 
     /// Creates stream options from the high-level upstream prompt shape.
     pub fn from_prompt(model: &'a M, prompt: Prompt) -> Result<Self, InvalidPromptError> {
-        let prompt = standardize_prompt(prompt)?.into_language_model_prompt();
+        let prompt = standardize_and_convert_to_language_model_prompt(prompt)?;
         Ok(Self::new(model, prompt))
     }
 

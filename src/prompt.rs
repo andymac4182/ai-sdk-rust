@@ -5,12 +5,14 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::file_data::{FileData, FileDataContent};
+use crate::generate_text::MissingToolResultsError;
 use crate::headers::Headers;
 use crate::json::JsonValue;
 use crate::language_model::{
-    LanguageModelMessage, LanguageModelPrompt, LanguageModelReasoningEffort,
-    LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelToolChoice,
-    LanguageModelUserContentPart, LanguageModelUserMessage,
+    LanguageModelAssistantContentPart, LanguageModelMessage, LanguageModelPrompt,
+    LanguageModelReasoningEffort, LanguageModelSystemMessage, LanguageModelTextPart,
+    LanguageModelToolChoice, LanguageModelToolContentPart, LanguageModelUserContentPart,
+    LanguageModelUserMessage,
 };
 use crate::provider::InvalidPromptError;
 use crate::provider_utils::{FilePartData, convert_to_base64};
@@ -358,6 +360,217 @@ impl StandardizedPrompt {
         messages.extend(self.messages);
         messages
     }
+
+    /// Converts this standardized prompt into a validated provider-v4 prompt.
+    ///
+    /// This mirrors upstream `convertToLanguageModelPrompt`: approval request
+    /// parts are removed from assistant messages, non-provider-executed approval
+    /// responses are only used for validation, provider-executed tool calls do
+    /// not require local tool results, and unresolved local tool calls raise a
+    /// missing-tool-results error.
+    pub fn try_into_language_model_prompt(
+        self,
+    ) -> Result<LanguageModelPrompt, MissingToolResultsError> {
+        convert_to_language_model_prompt(self)
+    }
+}
+
+/// Converts a standardized prompt into the provider-facing language model
+/// prompt with upstream tool-result validation.
+pub fn convert_to_language_model_prompt(
+    prompt: StandardizedPrompt,
+) -> Result<LanguageModelPrompt, MissingToolResultsError> {
+    let StandardizedPrompt {
+        instructions,
+        messages,
+    } = prompt;
+    let approval_id_to_tool_call_id = collect_approval_request_ids(&messages);
+    let approved_tool_call_ids =
+        collect_approved_tool_call_ids(&messages, &approval_id_to_tool_call_id);
+
+    let mut provider_messages = match instructions {
+        Some(instructions) => instructions_to_system_messages(instructions)
+            .into_iter()
+            .map(LanguageModelMessage::System)
+            .collect::<LanguageModelPrompt>(),
+        None => Vec::new(),
+    };
+    provider_messages.extend(
+        messages
+            .into_iter()
+            .map(convert_message_for_language_model_prompt),
+    );
+
+    let combined_messages = combine_consecutive_tool_messages(provider_messages);
+    validate_tool_results(&combined_messages, &approved_tool_call_ids)?;
+
+    Ok(combined_messages
+        .into_iter()
+        .filter(|message| {
+            !matches!(message, LanguageModelMessage::Tool(tool) if tool.content.is_empty())
+        })
+        .collect())
+}
+
+pub(crate) fn standardize_and_convert_to_language_model_prompt(
+    prompt: Prompt,
+) -> Result<LanguageModelPrompt, InvalidPromptError> {
+    let standardized = standardize_prompt(prompt)?;
+    let prompt_value = serde_json::to_value(&standardized).unwrap_or(JsonValue::Null);
+    convert_to_language_model_prompt(standardized)
+        .map_err(|error| InvalidPromptError::new(prompt_value, error.message()))
+}
+
+fn collect_approval_request_ids(messages: &[LanguageModelMessage]) -> BTreeMap<String, String> {
+    let mut approval_id_to_tool_call_id = BTreeMap::new();
+
+    for message in messages {
+        if let LanguageModelMessage::Assistant(message) = message {
+            for part in &message.content {
+                if let LanguageModelAssistantContentPart::ToolApprovalRequest(request) = part {
+                    approval_id_to_tool_call_id
+                        .insert(request.approval_id.clone(), request.tool_call_id.clone());
+                }
+            }
+        }
+    }
+
+    approval_id_to_tool_call_id
+}
+
+fn collect_approved_tool_call_ids(
+    messages: &[LanguageModelMessage],
+    approval_id_to_tool_call_id: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let mut approved_tool_call_ids = Vec::new();
+
+    for message in messages {
+        if let LanguageModelMessage::Tool(message) = message {
+            for part in &message.content {
+                if let LanguageModelToolContentPart::ToolApprovalResponse(response) = part
+                    && let Some(tool_call_id) =
+                        approval_id_to_tool_call_id.get(&response.approval_id)
+                {
+                    push_unique(&mut approved_tool_call_ids, tool_call_id.clone());
+                }
+            }
+        }
+    }
+
+    approved_tool_call_ids
+}
+
+fn convert_message_for_language_model_prompt(
+    message: LanguageModelMessage,
+) -> LanguageModelMessage {
+    match message {
+        LanguageModelMessage::Assistant(mut message) => {
+            message.content.retain(|part| {
+                !matches!(
+                    part,
+                    LanguageModelAssistantContentPart::ToolApprovalRequest(_)
+                )
+            });
+            LanguageModelMessage::Assistant(message)
+        }
+        LanguageModelMessage::Tool(mut message) => {
+            message.content = message
+                .content
+                .into_iter()
+                .filter_map(|part| match part {
+                    LanguageModelToolContentPart::ToolResult(result) => {
+                        Some(LanguageModelToolContentPart::ToolResult(result))
+                    }
+                    LanguageModelToolContentPart::ToolApprovalResponse(mut response)
+                        if response.provider_executed == Some(true) =>
+                    {
+                        response.provider_executed = None;
+                        response.provider_options = None;
+                        Some(LanguageModelToolContentPart::ToolApprovalResponse(response))
+                    }
+                    LanguageModelToolContentPart::ToolApprovalResponse(_) => None,
+                })
+                .collect();
+            LanguageModelMessage::Tool(message)
+        }
+        message => message,
+    }
+}
+
+fn combine_consecutive_tool_messages(messages: LanguageModelPrompt) -> LanguageModelPrompt {
+    let mut combined_messages = Vec::new();
+
+    for message in messages {
+        match message {
+            LanguageModelMessage::Tool(mut tool_message) => {
+                if let Some(LanguageModelMessage::Tool(last_tool_message)) =
+                    combined_messages.last_mut()
+                {
+                    last_tool_message.content.append(&mut tool_message.content);
+                } else {
+                    combined_messages.push(LanguageModelMessage::Tool(tool_message));
+                }
+            }
+            message => combined_messages.push(message),
+        }
+    }
+
+    combined_messages
+}
+
+fn validate_tool_results(
+    messages: &[LanguageModelMessage],
+    approved_tool_call_ids: &[String],
+) -> Result<(), MissingToolResultsError> {
+    let mut unresolved_tool_call_ids = Vec::new();
+
+    for message in messages {
+        match message {
+            LanguageModelMessage::Assistant(message) => {
+                for part in &message.content {
+                    if let LanguageModelAssistantContentPart::ToolCall(tool_call) = part
+                        && tool_call.provider_executed != Some(true)
+                    {
+                        push_unique(
+                            &mut unresolved_tool_call_ids,
+                            tool_call.tool_call_id.clone(),
+                        );
+                    }
+                }
+            }
+            LanguageModelMessage::Tool(message) => {
+                for part in &message.content {
+                    if let LanguageModelToolContentPart::ToolResult(tool_result) = part {
+                        unresolved_tool_call_ids
+                            .retain(|tool_call_id| tool_call_id != &tool_result.tool_call_id);
+                    }
+                }
+            }
+            LanguageModelMessage::System(_) | LanguageModelMessage::User(_) => {
+                remove_tool_call_ids(&mut unresolved_tool_call_ids, approved_tool_call_ids);
+                if !unresolved_tool_call_ids.is_empty() {
+                    return Err(MissingToolResultsError::new(unresolved_tool_call_ids));
+                }
+            }
+        }
+    }
+
+    remove_tool_call_ids(&mut unresolved_tool_call_ids, approved_tool_call_ids);
+    if unresolved_tool_call_ids.is_empty() {
+        Ok(())
+    } else {
+        Err(MissingToolResultsError::new(unresolved_tool_call_ids))
+    }
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.contains(&value) {
+        values.push(value);
+    }
+}
+
+fn remove_tool_call_ids(tool_call_ids: &mut Vec<String>, removable_ids: &[String]) {
+    tool_call_ids.retain(|tool_call_id| !removable_ids.contains(tool_call_id));
 }
 
 fn instructions_to_system_messages(instructions: Instructions) -> Vec<LanguageModelSystemMessage> {
@@ -988,9 +1201,12 @@ mod tests {
     use crate::file_data::{FileData, FileDataContent, ProviderReference};
     use crate::json::JsonValue;
     use crate::language_model::{
-        LanguageModelMessage, LanguageModelPrompt, LanguageModelReasoningEffort,
-        LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelToolChoice,
-        LanguageModelUserContentPart, LanguageModelUserMessage,
+        LanguageModelAssistantContentPart, LanguageModelAssistantMessage, LanguageModelMessage,
+        LanguageModelPrompt, LanguageModelReasoningEffort, LanguageModelSystemMessage,
+        LanguageModelTextPart, LanguageModelToolApprovalRequestPart,
+        LanguageModelToolApprovalResponsePart, LanguageModelToolCallPart, LanguageModelToolChoice,
+        LanguageModelToolContentPart, LanguageModelToolMessage, LanguageModelUserContentPart,
+        LanguageModelUserMessage,
     };
     use crate::provider_utils::FilePartData;
 
@@ -999,9 +1215,9 @@ mod tests {
         InvalidMessageRoleError, LanguageModelCallSettings, MessageConversionError, Prompt,
         PromptInput, PromptSource, RequestOptions, StandardizedPrompt, TimeoutConfiguration,
         TimeoutConfigurationOptions, convert_data_content_to_base64_string,
-        convert_to_language_model_v4_file_part, get_chunk_timeout_ms, get_step_timeout_ms,
-        get_tool_timeout_ms, get_total_timeout_ms, prepare_language_model_call_options,
-        prepare_tool_choice, standardize_prompt,
+        convert_to_language_model_prompt, convert_to_language_model_v4_file_part,
+        get_chunk_timeout_ms, get_step_timeout_ms, get_tool_timeout_ms, get_total_timeout_ms,
+        prepare_language_model_call_options, prepare_tool_choice, standardize_prompt,
     };
 
     fn user_text_message(text: &str) -> LanguageModelMessage {
@@ -1012,6 +1228,14 @@ mod tests {
 
     fn system_message(text: &str) -> LanguageModelSystemMessage {
         LanguageModelSystemMessage::new(text)
+    }
+
+    fn assistant_message(content: Vec<LanguageModelAssistantContentPart>) -> LanguageModelMessage {
+        LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(content))
+    }
+
+    fn tool_message(content: Vec<LanguageModelToolContentPart>) -> LanguageModelMessage {
+        LanguageModelMessage::Tool(LanguageModelToolMessage::new(content))
     }
 
     fn provider_reference(entries: &[(&str, &str)]) -> ProviderReference {
@@ -1465,6 +1689,168 @@ mod tests {
                 user_text_message("Hello"),
             ]
         );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_validation_should_pass_for_provider_executed_tools_deferred_results()
+     {
+        let result = convert_to_language_model_prompt(StandardizedPrompt::new(
+            None,
+            vec![assistant_message(vec![
+                LanguageModelAssistantContentPart::ToolCall(
+                    LanguageModelToolCallPart::new(
+                        "call_1",
+                        "code_interpreter",
+                        json!({ "code": "print(\"hello\")" }),
+                    )
+                    .with_provider_executed(true),
+                ),
+            ])],
+        ))
+        .expect("provider-executed tool call does not require a local result");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call_1",
+                            "toolName": "code_interpreter",
+                            "input": {
+                                "code": "print(\"hello\")"
+                            },
+                            "providerExecuted": true
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_validation_should_pass_for_tool_approval_response() {
+        let result = convert_to_language_model_prompt(StandardizedPrompt::new(
+            None,
+            vec![
+                assistant_message(vec![
+                    LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                        "call_to_approve",
+                        "dangerous_action",
+                        json!({ "action": "delete_db" }),
+                    )),
+                    LanguageModelAssistantContentPart::ToolApprovalRequest(
+                        LanguageModelToolApprovalRequestPart::new(
+                            "approval_123",
+                            "call_to_approve",
+                        ),
+                    ),
+                ]),
+                tool_message(vec![LanguageModelToolContentPart::ToolApprovalResponse(
+                    LanguageModelToolApprovalResponsePart::new("approval_123", true),
+                )]),
+            ],
+        ))
+        .expect("approval response satisfies missing-result validation");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call_to_approve",
+                            "toolName": "dangerous_action",
+                            "input": {
+                                "action": "delete_db"
+                            }
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_validation_should_preserve_provider_executed_tool_approval_response()
+     {
+        let result = convert_to_language_model_prompt(StandardizedPrompt::new(
+            None,
+            vec![
+                assistant_message(vec![
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "call_provider_executed",
+                            "mcp_tool",
+                            json!({ "action": "execute" }),
+                        )
+                        .with_provider_executed(true),
+                    ),
+                    LanguageModelAssistantContentPart::ToolApprovalRequest(
+                        LanguageModelToolApprovalRequestPart::new(
+                            "approval_provider",
+                            "call_provider_executed",
+                        ),
+                    ),
+                ]),
+                tool_message(vec![LanguageModelToolContentPart::ToolApprovalResponse(
+                    LanguageModelToolApprovalResponsePart::new("approval_provider", true)
+                        .with_provider_executed(true),
+                )]),
+            ],
+        ))
+        .expect("provider-executed approval response is preserved");
+
+        assert_eq!(
+            serde_json::to_value(result).expect("prompt serializes"),
+            json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "call_provider_executed",
+                            "toolName": "mcp_tool",
+                            "input": {
+                                "action": "execute"
+                            },
+                            "providerExecuted": true
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-approval-response",
+                            "approvalId": "approval_provider",
+                            "approved": true
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_validation_should_throw_error_for_actual_missing_results() {
+        let error = convert_to_language_model_prompt(StandardizedPrompt::new(
+            None,
+            vec![assistant_message(vec![
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call_missing_result",
+                    "regular_tool",
+                    json!({}),
+                )),
+            ])],
+        ))
+        .expect_err("missing local tool results are rejected");
+
+        assert_eq!(error.tool_call_ids(), &["call_missing_result".to_string()]);
     }
 
     #[test]

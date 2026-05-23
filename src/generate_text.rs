@@ -29,7 +29,9 @@ use crate::language_model::{
     OutputTokenUsage,
 };
 use crate::logger::{LogWarningsOptions, log_warnings};
-use crate::prompt::{Prompt, prompt_has_url_files, standardize_prompt};
+use crate::prompt::{
+    Prompt, prompt_has_url_files, standardize_and_convert_to_language_model_prompt,
+};
 use crate::provider::{
     ApiCallError, InvalidPromptError, JsonParseError, TypeValidationContext, TypeValidationError,
     get_error_message,
@@ -3479,7 +3481,7 @@ impl<'a, M: LanguageModel + ?Sized> GenerateTextOptions<'a, M> {
     /// This standardizes text prompts and instructions before delegating to
     /// the provider-v4 language model prompt boundary.
     pub fn from_prompt(model: &'a M, prompt: Prompt) -> Result<Self, InvalidPromptError> {
-        let prompt = standardize_prompt(prompt)?.into_language_model_prompt();
+        let prompt = standardize_and_convert_to_language_model_prompt(prompt)?;
         Ok(Self::new(model, prompt))
     }
 
@@ -10458,6 +10460,27 @@ mod tests {
         assert_eq!(
             error.message(),
             "Invalid prompt: messages must not be empty"
+        );
+        assert!(model.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn generate_text_from_prompt_rejects_missing_tool_results_before_model_call() {
+        let model = FakeLanguageModel::new();
+        let prompt = Prompt::from_messages(vec![LanguageModelMessage::Assistant(
+            LanguageModelAssistantMessage::new(vec![LanguageModelAssistantContentPart::ToolCall(
+                LanguageModelToolCallPart::new("call_missing_result", "regular_tool", json!({})),
+            )]),
+        )]);
+
+        let error = match GenerateTextOptions::from_prompt(&model, prompt) {
+            Ok(_) => panic!("missing tool results are rejected"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.message(),
+            "Invalid prompt: Tool result is missing for tool call call_missing_result."
         );
         assert!(model.calls.borrow().is_empty());
     }
