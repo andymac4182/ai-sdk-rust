@@ -3,8 +3,8 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 58.2%
-- Portable package average: 49.8%
+- Average estimated completion: 59.1%
+- Portable package average: 50.9%
 - Closed package rows: 5 / 18
 - Strict portable verified rows: 2 / 15
 - In-progress rows: 13
@@ -28,7 +28,7 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | `@chat-sdk/adapter-slack` | 66% | In progress | adapter package | Slice 139 scaffold + slice 152 post_message + slice 158 fetch_subject + slice 160 edit/delete/react/typing + slice 169... |
 | `@chat-sdk/adapter-teams` | 35% | In progress | adapter package | Slice 138 scaffold + slice 153 post_message + slice 167 edit/delete/react/typing + slice 172 errors module... |
 | `@chat-sdk/adapter-gchat` | 43% | In progress | adapter package | Slice 137 scaffold + slice 154 post_message + slice 168 edit/delete/react/typing + slice 190 markdown converter +... |
-| `@chat-sdk/adapter-discord` | 35% | In progress | adapter package | Slice 134 scaffold + slice 149 post_message + slice 165 edit/delete/react/typing + slice 197 webhook Ed25519 verifyKey... |
+| `@chat-sdk/adapter-discord` | 52% | In progress | adapter package | Slice 134 scaffold + slice 149 post_message + slice 165 edit/delete/react/typing + slice 197 webhook Ed25519 verifyKey... |
 | `@chat-sdk/adapter-linear` | 46% | In progress | adapter package | Slice 136 scaffold + slice 151 post_message + slice 166 edit/delete/react/typing + slice 171 utils + slice 177 cards +... |
 | `@chat-sdk/adapter-github` | 51% | In progress | adapter package | Slice 131 scaffold + slice 146 post_message + slice 156 fetch_subject (additive) + slice 162 edit/delete/react/typing... |
 | `@chat-sdk/adapter-messenger` | 47% | In progress | adapter package | Slice 132 scaffold + slice 147 post_message + slice 163 edit/delete/react/typing + slice 173 wire-format correction +... |
