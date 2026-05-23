@@ -19,6 +19,7 @@ unsafe_code = "forbid"
 all = "warn"
 
 [dependencies]
+base64 = "0.22"
 chat-sdk-chat = { path = "../chat-sdk-chat" }
 serde = { version = "1.0.228", features = ["derive"] }
 
