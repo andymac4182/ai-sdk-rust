@@ -3,8 +3,8 @@
 # Verified and js-only-documented rows are forced to 100% by the generator; not-started rows are forced to 0%.
 # Do not add rows for non-in-progress packages.
 chat	99	Crate + colocated tests across 16 modules: 563 chat tests. Phase 1.5 complete.
-adapter-telegram	15	Slice 130 scaffold + slice 145 post_message HTTP layer via chat-sdk-adapter-shared::runtime::reqwest. 14 colocated tests. Reference impl for the other 8 adapter post_message ports.
-adapter-github	10	Crate scaffold (slice 131). 13 tests. HTTP I/O deferred.
+adapter-telegram	15	Slice 130 scaffold + slice 145 post_message HTTP. 14 tests. Reference impl.
+adapter-github	15	Slice 131 scaffold + slice 146 post_message HTTP (issue/PR comment-create). 14 tests.
 adapter-messenger	10	Crate scaffold (slice 132). 11 tests. HTTP I/O deferred.
 adapter-whatsapp	10	Crate scaffold (slice 133). 11 tests. HTTP I/O deferred.
 adapter-discord	10	Crate scaffold (slice 134) w/ @me DM sentinel. 13 tests. HTTP I/O deferred.
