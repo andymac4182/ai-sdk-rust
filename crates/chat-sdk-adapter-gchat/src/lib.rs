@@ -61,13 +61,46 @@ impl GchatAdapterOptions {
 #[derive(Debug, Clone)]
 pub struct GchatAdapter {
     options: GchatAdapterOptions,
+    http: chat_sdk_adapter_shared::runtime::reqwest::Client,
+    /// Pre-minted OAuth2 access token. Google Chat tokens are
+    /// short-lived (~1h) and minted out-of-band against
+    /// `https://oauth2.googleapis.com/token` from the
+    /// `service_account_json` private key (RS256 JWT assertion +
+    /// optional domain-wide delegation for `subject_email`).
+    /// Until a token-cache helper lands in chat-sdk-adapter-shared,
+    /// adopters pass a pre-minted token via `with_bearer_token`.
+    bearer_token: Option<String>,
 }
 
 impl GchatAdapter {
     /// 1:1 port of upstream
     /// `new GchatAdapter({ serviceAccountJson, subjectEmail, apiBase? })`.
     pub fn new(options: GchatAdapterOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            http: chat_sdk_adapter_shared::runtime::default_http_client(),
+            bearer_token: None,
+        }
+    }
+
+    /// Override the HTTP client.
+    pub fn with_http_client(
+        mut self,
+        client: chat_sdk_adapter_shared::runtime::reqwest::Client,
+    ) -> Self {
+        self.http = client;
+        self
+    }
+
+    /// Provide a pre-minted OAuth2 access token. Required for
+    /// `post_message`; adopters mint it out-of-band against
+    /// `oauth2.googleapis.com/token` with a service-account JWT
+    /// assertion (`urn:ietf:params:oauth:grant-type:jwt-bearer`).
+    /// A token-cache helper for the minting flow will land in
+    /// `chat_sdk_adapter_shared` in a future slice.
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.bearer_token = Some(token.into());
+        self
     }
 
     /// Read the service-account JSON.
@@ -84,12 +117,99 @@ impl GchatAdapter {
     pub fn api_base(&self) -> &str {
         self.options.effective_api_base()
     }
+
+    /// Read the currently-configured bearer token, if any.
+    pub fn bearer_token(&self) -> Option<&str> {
+        self.bearer_token.as_deref()
+    }
+
+    /// Build the Google Chat `messages.create` URL. 1:1 with
+    /// upstream's inline `${apiBase}/spaces/${spaceId}/messages`
+    /// template.
+    fn messages_create_url(&self, space_id: &str) -> String {
+        format!("{}/spaces/{space_id}/messages", self.api_base())
+    }
 }
 
 #[async_trait]
 impl Adapter for GchatAdapter {
     fn name(&self) -> &str {
         ADAPTER_NAME
+    }
+
+    /// Post a text message via Google Chat's `messages.create` API.
+    /// 1:1 with upstream's `adapter.postMessage`:
+    ///
+    /// - Decodes `gchat:<space_id>:<thread_id>`. When `thread_id`
+    ///   is empty (top-level post), no `thread.name` field is
+    ///   sent. Otherwise the body includes
+    ///   `{thread: {name: "spaces/<space>/threads/<thread>"}}` and
+    ///   the request sets `?messageReplyOption=REPLY_MESSAGE_OR_FAIL`
+    ///   so the thread is reused.
+    /// - POSTs to `<api_base>/spaces/<space_id>/messages` with
+    ///   `Authorization: Bearer <bearer_token>`.
+    /// - Returns the response `name` (Google's
+    ///   `spaces/<space>/messages/<message>` resource name).
+    async fn post_message(
+        &self,
+        thread_id: &str,
+        text: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<String> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not GChat-encoded"))
+        })?;
+
+        let bearer = self.bearer_token.as_deref().ok_or_else(|| {
+            AdapterError::InvalidPayload(
+                "GchatAdapter has no bearer_token configured; call \
+                 with_bearer_token() with a pre-minted Google OAuth2 \
+                 access token (see GchatAdapter docs)"
+                    .to_string(),
+            )
+        })?;
+
+        let url = self.messages_create_url(&decoded.space_id);
+        let mut body = serde_json::json!({ "text": text });
+
+        let mut request = self.http.post(&url).bearer_auth(bearer);
+        if !decoded.is_top_level() {
+            body["thread"] = serde_json::json!({
+                "name": format!(
+                    "spaces/{}/threads/{}",
+                    decoded.space_id, decoded.thread_id
+                )
+            });
+            // Google's threading param is a URL query option, not
+            // a body field.
+            request = request.header("X-Goog-Threading-Option", "REPLY_MESSAGE_OR_FAIL");
+        }
+        request = request.json(&body);
+
+        let response = request
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() {
+            let msg = json["error"]["message"]
+                .as_str()
+                .unwrap_or("Google Chat messages.create failed");
+            return Err(AdapterError::InvalidPayload(format!("{status}: {msg}")));
+        }
+
+        json["name"].as_str().map(str::to_owned).ok_or_else(|| {
+            AdapterError::InvalidPayload(
+                "Google Chat messages.create response missing name".to_string(),
+            )
+        })
     }
 }
 
@@ -230,14 +350,48 @@ mod tests {
     }
 
     #[test]
-    fn adapter_default_methods_return_unsupported() {
+    fn adapter_post_message_rejects_non_gchat_thread_ids() {
+        let adapter = GchatAdapter::new(GchatAdapterOptions::new("{}", "bot@example.com"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.post_message("slack:C1:1.0", "hi"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not GChat-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_post_message_requires_a_pre_minted_bearer_token() {
         let adapter = GchatAdapter::new(GchatAdapterOptions::new("{}", "bot@example.com"));
         use chat_sdk_chat::types::AdapterError;
         let err = block_on(adapter.post_message("gchat:AAAA:BBBB", "hi"));
-        assert!(matches!(
-            err,
-            Err(AdapterError::Unsupported("post_message"))
-        ));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("no bearer_token configured"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_messages_create_url_builds_the_upstream_endpoint() {
+        let adapter = GchatAdapter::new(
+            GchatAdapterOptions::new("{}", "bot@example.com")
+                .with_api_base("https://chat.example.test/v1"),
+        );
+        assert_eq!(
+            adapter.messages_create_url("AAAA"),
+            "https://chat.example.test/v1/spaces/AAAA/messages"
+        );
+    }
+
+    #[test]
+    fn adapter_bearer_token_accessor_round_trips_with_setter() {
+        let adapter = GchatAdapter::new(GchatAdapterOptions::new("{}", "bot@example.com"))
+            .with_bearer_token("ya29.tok");
+        assert_eq!(adapter.bearer_token(), Some("ya29.tok"));
     }
 
     #[test]
