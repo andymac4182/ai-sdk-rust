@@ -43,6 +43,7 @@ pub mod provider_utils;
 pub mod registry;
 pub mod rerank;
 pub mod reranking_model;
+pub mod resolve_model;
 pub mod retry;
 pub mod skills;
 pub mod speech_model;
@@ -392,6 +393,11 @@ pub use rerank::{
 pub use reranking_model::{
     RerankingModel, RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
     RerankingModelResponse, RerankingModelResult,
+};
+pub use resolve_model::{
+    ModelSource, ResolvedModel, resolve_embedding_model, resolve_image_model,
+    resolve_language_model, resolve_reranking_model, resolve_speech_model,
+    resolve_transcription_model, resolve_video_model,
 };
 pub use retry::{
     DEFAULT_INITIAL_RETRY_DELAY_MS, DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BACKOFF_FACTOR,
