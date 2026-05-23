@@ -11,11 +11,13 @@
 //! - [`history_key`] helper that derives the state-store key for a
 //!   given thread id (upstream inline `${KEY_PREFIX}${threadId}`).
 //!
-//! **What is deferred:** the [`ThreadHistoryCache`] class itself
-//! (append / get_messages) requires `StateAdapter.append_to_list` /
-//! `StateAdapter.get_list` on the [`crate::types::StateAdapter`]
-//! trait, which is currently the empty placeholder. The class ships
-//! once that trait is extended.
+//! [`ThreadHistoryCache`] — the upstream class, ported in slice 119
+//! after the Phase 1.5 StateAdapter trait extension.
+
+use std::sync::Arc;
+
+use crate::message::Message;
+use crate::types::{StateAdapter, StateResult};
 
 /// Default cap on stored messages per thread. 1:1 port of upstream
 /// `const DEFAULT_MAX_MESSAGES = 100`.
@@ -85,6 +87,76 @@ impl ThreadHistoryConfig {
     /// upstream's inline `this.ttlMs = config.ttlMs ?? DEFAULT_TTL_MS`.
     pub fn ttl_ms_or_default(&self) -> u64 {
         self.ttl_ms.unwrap_or(DEFAULT_TTL_MS)
+    }
+}
+
+/// Per-thread message-history cache. 1:1 port of upstream
+/// `class ThreadHistoryCache`.
+///
+/// Reads/writes flow through the [`StateAdapter`] trait. `append`
+/// calls [`StateAdapter::append_to_list`] with the configured
+/// max-messages cap + TTL; `get_messages` calls
+/// [`StateAdapter::get_list`] and rehydrates each stored
+/// [`crate::message::SerializedMessage`] back into a [`Message`].
+#[derive(Clone)]
+pub struct ThreadHistoryCache {
+    state: Arc<dyn StateAdapter>,
+    config: ThreadHistoryConfig,
+}
+
+impl std::fmt::Debug for ThreadHistoryCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThreadHistoryCache")
+            .field("state", &self.state)
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
+impl ThreadHistoryCache {
+    /// 1:1 port of upstream
+    /// `new ThreadHistoryCache({ state, config? })`.
+    pub fn new(state: Arc<dyn StateAdapter>, config: ThreadHistoryConfig) -> Self {
+        Self { state, config }
+    }
+
+    /// 1:1 port of upstream `async append(threadId, message)`. Writes
+    /// the message's wire representation to the per-thread list,
+    /// applying the configured `max_messages` cap (oldest entries
+    /// drop when exceeded) and `ttl_ms` (refreshed on every append).
+    pub async fn append(&self, thread_id: &str, message: &Message) -> StateResult<()> {
+        let key = history_key(thread_id);
+        let value =
+            serde_json::to_value(message.to_serialized()).expect("Message serializes cleanly");
+        self.state
+            .append_to_list(
+                &key,
+                value,
+                Some(self.config.max_messages_or_default()),
+                Some(self.config.ttl_ms_or_default()),
+            )
+            .await
+    }
+
+    /// 1:1 port of upstream `async getMessages(threadId)`. Reads the
+    /// per-thread list, skipping any value whose shape doesn't parse
+    /// back as a [`Message`] (matching upstream's silent skip of
+    /// malformed entries).
+    pub async fn get_messages(&self, thread_id: &str) -> StateResult<Vec<Message>> {
+        let key = history_key(thread_id);
+        let raw = self.state.get_list(&key, None).await?;
+        Ok(raw
+            .into_iter()
+            .filter_map(|v| serde_json::from_value(v).ok())
+            .map(Message::from_serialized)
+            .collect())
+    }
+
+    /// Total count of cached messages. Convenience helper matching
+    /// upstream's inline `(await getMessages(id)).length` usage at
+    /// adapter callsites.
+    pub async fn count(&self, thread_id: &str) -> StateResult<usize> {
+        Ok(self.get_messages(thread_id).await?.len())
     }
 }
 
@@ -190,5 +262,173 @@ mod tests {
             ttl_ms: Some(60_000),
         };
         assert_eq!(cfg.ttl_ms_or_default(), 60_000);
+    }
+
+    // ---------- slice 119: ThreadHistoryCache class ----------
+
+    use crate::markdown::root;
+    use crate::message::Message;
+    use crate::types::{
+        Author, BotStatus, MessageMetadata, StateAdapter, StateAdapterError, StateResult,
+    };
+    use futures_executor::block_on;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    #[derive(Debug, Default)]
+    struct MockState {
+        lists: Mutex<HashMap<String, Vec<serde_json::Value>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StateAdapter for MockState {
+        async fn get(&self, _key: &str) -> StateResult<Option<serde_json::Value>> {
+            Ok(None)
+        }
+        async fn set(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _ttl_ms: Option<u64>,
+        ) -> StateResult<()> {
+            Ok(())
+        }
+        async fn delete(&self, _key: &str) -> StateResult<()> {
+            Ok(())
+        }
+        async fn append_to_list(
+            &self,
+            key: &str,
+            value: serde_json::Value,
+            max_length: Option<usize>,
+            _ttl_ms: Option<u64>,
+        ) -> StateResult<()> {
+            let mut lists = self
+                .lists
+                .lock()
+                .map_err(|_| StateAdapterError::NotConnected)?;
+            let list = lists.entry(key.to_string()).or_default();
+            list.push(value);
+            if let Some(max) = max_length {
+                if list.len() > max {
+                    let start = list.len() - max;
+                    *list = list.split_off(start);
+                }
+            }
+            Ok(())
+        }
+        async fn get_list(
+            &self,
+            key: &str,
+            _limit: Option<usize>,
+        ) -> StateResult<Vec<serde_json::Value>> {
+            let lists = self
+                .lists
+                .lock()
+                .map_err(|_| StateAdapterError::NotConnected)?;
+            Ok(lists.get(key).cloned().unwrap_or_default())
+        }
+    }
+
+    fn sample_message(id: &str, text: &str) -> Message {
+        Message::new(
+            id,
+            "slack:C123:1.0",
+            text,
+            root(vec![]),
+            serde_json::json!({}),
+            Author {
+                user_id: "U1".to_string(),
+                user_name: "alice".to_string(),
+                full_name: "Alice".to_string(),
+                is_bot: BotStatus::Known(false),
+                is_me: false,
+            },
+            MessageMetadata {
+                date_sent: "2024-01-15T10:30:00.000Z".to_string(),
+                edited: false,
+                edited_at: None,
+            },
+            vec![],
+        )
+    }
+
+    #[test]
+    fn thread_history_cache_append_then_get_returns_the_message() {
+        let state: std::sync::Arc<dyn StateAdapter> = std::sync::Arc::new(MockState::default());
+        let cache = ThreadHistoryCache::new(state, ThreadHistoryConfig::default());
+        let m = sample_message("m1", "hello");
+        block_on(cache.append("slack:C123:1.0", &m)).unwrap();
+        let history = block_on(cache.get_messages("slack:C123:1.0")).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, "m1");
+        assert_eq!(history[0].text, "hello");
+    }
+
+    #[test]
+    fn thread_history_cache_count_reports_number_of_cached_messages() {
+        let state: std::sync::Arc<dyn StateAdapter> = std::sync::Arc::new(MockState::default());
+        let cache = ThreadHistoryCache::new(state, ThreadHistoryConfig::default());
+        assert_eq!(block_on(cache.count("t1")).unwrap(), 0);
+        block_on(cache.append("t1", &sample_message("m1", "a"))).unwrap();
+        block_on(cache.append("t1", &sample_message("m2", "b"))).unwrap();
+        assert_eq!(block_on(cache.count("t1")).unwrap(), 2);
+    }
+
+    #[test]
+    fn thread_history_cache_respects_max_messages_cap_via_state_layer() {
+        let state: std::sync::Arc<dyn StateAdapter> = std::sync::Arc::new(MockState::default());
+        let cache = ThreadHistoryCache::new(
+            state,
+            ThreadHistoryConfig {
+                max_messages: Some(2),
+                ttl_ms: None,
+            },
+        );
+        for i in 0..5 {
+            block_on(cache.append("t1", &sample_message(&format!("m{i}"), "x"))).unwrap();
+        }
+        let history = block_on(cache.get_messages("t1")).unwrap();
+        assert_eq!(history.len(), 2);
+        // Oldest entries drop — last two should remain (m3, m4).
+        assert_eq!(history[0].id, "m3");
+        assert_eq!(history[1].id, "m4");
+    }
+
+    #[test]
+    fn thread_history_cache_isolates_threads_by_id() {
+        let state: std::sync::Arc<dyn StateAdapter> = std::sync::Arc::new(MockState::default());
+        let cache = ThreadHistoryCache::new(state, ThreadHistoryConfig::default());
+        block_on(cache.append("t1", &sample_message("m1", "x"))).unwrap();
+        block_on(cache.append("t2", &sample_message("m2", "y"))).unwrap();
+        block_on(cache.append("t2", &sample_message("m3", "z"))).unwrap();
+        assert_eq!(block_on(cache.count("t1")).unwrap(), 1);
+        assert_eq!(block_on(cache.count("t2")).unwrap(), 2);
+    }
+
+    #[test]
+    fn thread_history_cache_get_messages_returns_empty_for_unknown_thread() {
+        let state: std::sync::Arc<dyn StateAdapter> = std::sync::Arc::new(MockState::default());
+        let cache = ThreadHistoryCache::new(state, ThreadHistoryConfig::default());
+        let history = block_on(cache.get_messages("nonexistent")).unwrap();
+        assert!(history.is_empty());
+    }
+
+    #[test]
+    fn thread_history_cache_skips_malformed_stored_values() {
+        let state: std::sync::Arc<dyn StateAdapter> = std::sync::Arc::new(MockState::default());
+        let cache = ThreadHistoryCache::new(state.clone(), ThreadHistoryConfig::default());
+        // Plant a malformed value plus a good one.
+        block_on(state.append_to_list(
+            &history_key("t1"),
+            serde_json::json!({"garbage": true}),
+            None,
+            None,
+        ))
+        .unwrap();
+        block_on(cache.append("t1", &sample_message("m1", "ok"))).unwrap();
+        let history = block_on(cache.get_messages("t1")).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, "m1");
     }
 }
