@@ -18,4 +18,5 @@ pub mod errors;
 pub mod logger;
 pub mod markdown;
 pub mod modals;
+pub mod plan;
 pub mod types;
