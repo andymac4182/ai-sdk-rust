@@ -1951,6 +1951,114 @@ mod tests {
     }
 
     #[test]
+    fn tool_loop_agent_generate_calls_on_start_from_constructor() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let calls_for_callback = Rc::clone(&calls);
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model).with_on_start(
+            move |_event| {
+                let calls = Rc::clone(&calls_for_callback);
+                async move {
+                    calls.borrow_mut().push("constructor");
+                }
+            },
+        ));
+
+        let result =
+            poll_ready(agent.generate("Hello, world!")).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "reply");
+        assert_eq!(&*calls.borrow(), &["constructor"]);
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_calls_on_start_from_method() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let calls_for_callback = Rc::clone(&calls);
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model));
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("Hello, world!").with_on_start(move |_event| {
+                let calls = Rc::clone(&calls_for_callback);
+                async move {
+                    calls.borrow_mut().push("method");
+                }
+            });
+
+        let result = poll_ready(agent.generate(options)).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "reply");
+        assert_eq!(&*calls.borrow(), &["method"]);
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_on_start_passes_event_information() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let events = Rc::new(RefCell::new(Vec::<GenerateTextStartEvent>::new()));
+        let events_for_callback = Rc::clone(&events);
+        let runtime_context = JsonObject::from_iter([("userId".to_string(), json!("test-user"))]);
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model)
+                .with_instructions("You are a helpful assistant")
+                .with_runtime_context(runtime_context.clone())
+                .with_model_settings(
+                    ToolLoopAgentModelSettings::new()
+                        .with_temperature(0.7)
+                        .with_max_output_tokens(500),
+                ),
+        );
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("Hello, world!").with_on_start(move |event| {
+                let events = Rc::clone(&events_for_callback);
+                async move {
+                    events.borrow_mut().push(event);
+                }
+            });
+
+        let result = poll_ready(agent.generate(options)).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "reply");
+        let events = events.borrow();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.provider, "mock-provider");
+        assert_eq!(event.model_id, "mock-model-id");
+        assert_eq!(event.temperature, Some(0.7));
+        assert_eq!(event.max_output_tokens, Some(500));
+        assert_eq!(event.runtime_context, runtime_context);
+        assert_eq!(
+            event.messages,
+            vec![
+                system_message("You are a helpful assistant"),
+                user_message("Hello, world!")
+            ]
+        );
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_on_start_passes_messages_option() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let events = Rc::new(RefCell::new(Vec::<GenerateTextStartEvent>::new()));
+        let events_for_callback = Rc::clone(&events);
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model));
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_messages(vec![user_message("test-message")])
+                .with_on_start(move |event| {
+                    let events = Rc::clone(&events_for_callback);
+                    async move {
+                        events.borrow_mut().push(event);
+                    }
+                });
+
+        let result = poll_ready(agent.generate(options)).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "reply");
+        let events = events.borrow();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].messages, vec![user_message("test-message")]);
+    }
+
+    #[test]
     fn tool_loop_agent_merges_generate_start_callbacks_in_order() {
         let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
         let calls = Rc::new(RefCell::new(Vec::new()));
@@ -2221,6 +2329,90 @@ mod tests {
             part,
             TextStreamPart::ToolApprovalRequest(request) if request.tool_call_id == "call-1"
         )));
+    }
+
+    #[test]
+    fn tool_loop_agent_stream_calls_on_start_from_constructor() {
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("hello"));
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let calls_for_callback = Rc::clone(&calls);
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model).with_on_start(
+            move |_event| {
+                let calls = Rc::clone(&calls_for_callback);
+                async move {
+                    calls.borrow_mut().push("constructor");
+                }
+            },
+        ));
+
+        let result = poll_ready(agent.stream("Hello, world!")).expect("agent stream succeeds");
+
+        assert_eq!(result.text, "hello");
+        assert_eq!(&*calls.borrow(), &["constructor"]);
+    }
+
+    #[test]
+    fn tool_loop_agent_stream_calls_on_start_from_method() {
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("hello"));
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let calls_for_callback = Rc::clone(&calls);
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model));
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("Hello, world!").with_on_start(move |_event| {
+                let calls = Rc::clone(&calls_for_callback);
+                async move {
+                    calls.borrow_mut().push("method");
+                }
+            });
+
+        let result = poll_ready(agent.stream(options)).expect("agent stream succeeds");
+
+        assert_eq!(result.text, "hello");
+        assert_eq!(&*calls.borrow(), &["method"]);
+    }
+
+    #[test]
+    fn tool_loop_agent_stream_on_start_passes_event_information() {
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("hello"));
+        let events = Rc::new(RefCell::new(Vec::<GenerateTextStartEvent>::new()));
+        let events_for_callback = Rc::clone(&events);
+        let runtime_context = JsonObject::from_iter([("userId".to_string(), json!("test-user"))]);
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model)
+                .with_instructions("You are a helpful assistant")
+                .with_runtime_context(runtime_context.clone())
+                .with_model_settings(
+                    ToolLoopAgentModelSettings::new()
+                        .with_temperature(0.7)
+                        .with_max_output_tokens(500),
+                ),
+        );
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("Hello, world!").with_on_start(move |event| {
+                let events = Rc::clone(&events_for_callback);
+                async move {
+                    events.borrow_mut().push(event);
+                }
+            });
+
+        let result = poll_ready(agent.stream(options)).expect("agent stream succeeds");
+
+        assert_eq!(result.text, "hello");
+        let events = events.borrow();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.provider, "mock-provider");
+        assert_eq!(event.model_id, "mock-model-id");
+        assert_eq!(event.temperature, Some(0.7));
+        assert_eq!(event.max_output_tokens, Some(500));
+        assert_eq!(event.runtime_context, runtime_context);
+        assert_eq!(
+            event.messages,
+            vec![
+                system_message("You are a helpful assistant"),
+                user_message("Hello, world!")
+            ]
+        );
     }
 
     #[test]
