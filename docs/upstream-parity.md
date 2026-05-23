@@ -604,6 +604,13 @@ focused tests for each portable behavior before changing rows to `verified`.
 
 ### Recent First-Phase Proof Slices
 
+- 2026-05-23: `packages/ai` `toResponseMessages` parity added 27 named Rust
+  counterparts for upstream `generate-text/to-response-messages.test.ts`,
+  covering assistant text/custom/reasoning/file parts, provider metadata, tool
+  calls, client tool results and errors, `toModelOutput`, provider-executed
+  tool call/result placement, tool approval requests/responses, denied approval
+  execution-denied results, invalid tool-call input sanitization, and empty
+  assistant-message suppression.
 - 2026-05-23: `packages/ai` token metric utility parity documented the
   existing named Rust counterparts for upstream
   `generate-text/sum-token-counts.test.ts` and
@@ -3366,6 +3373,11 @@ focused tests for each portable behavior before changing rows to `verified`.
    named Rust counterparts in `calculate_tokens_per_second_should_*`; its
    non-finite `Number.POSITIVE_INFINITY`/`Number.NaN` token-count case is
    JavaScript-number-only at Rust's `Option<u64>` token-count boundary.
+   The upstream `generate-text/to-response-messages.test.ts` cases now have 27
+   named Rust counterparts in `to_response_messages_should_*`, covering all
+   portable assistant, tool-message, provider-executed, approval, metadata,
+   file/reasoning/custom, empty-text, empty-content, and invalid tool-input
+   cases.
    The upstream `generate-text/prune-messages.test.ts` cases now have named
    Rust counterparts in `prune_messages_should_*`, including all reasoning
    removal, before-last-message reasoning removal, all tool-call/result/error

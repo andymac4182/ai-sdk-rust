@@ -7695,28 +7695,29 @@ mod tests {
         PruneReasoning, PruneToolCallRule, PruneToolCallRuleMode, PruneToolCalls,
         ReasoningFileOutput, ReasoningOutput, ResolveToolApprovalOptions,
         SingleToolApprovalOptions, StaticToolCall, StaticToolError, StaticToolOutputDenied,
-        StaticToolResult, ToolApprovalConfiguration, ToolApprovalRequestOutput,
-        ToolApprovalResponseOutput, ToolApprovalStatus, ToolApprovalStatusKind,
-        ToolCallNotFoundForApprovalError, ToolCallRepairError, ToolCallRepairOptions,
-        ToolCallRepairOriginalError, ToolExecutionEndEvent, ToolExecutionStartEvent,
-        ToolInputRefinementError, ToolModelOutputErrorMode, TypedToolCall, TypedToolError,
-        TypedToolOutputDenied, TypedToolResult, UiMessageStreamError, UnsupportedModelVersionError,
-        calculate_tokens_per_second, collect_tool_approvals, create_tool_model_output,
-        experimental_filter_active_tools, filter_active_tools, generate_text, has_tool_call,
-        is_loop_finished, is_step_count, is_stop_condition_met, normalize_tool_approval_status,
-        prune_messages, resolve_tool_approval, step_count_is, sum_token_counts,
-        validate_tool_context,
+        StaticToolResult, StepToolApprovalResponse, StepToolApprovals, ToolApprovalConfiguration,
+        ToolApprovalRequestOutput, ToolApprovalResponseOutput, ToolApprovalStatus,
+        ToolApprovalStatusKind, ToolCallNotFoundForApprovalError, ToolCallRepairError,
+        ToolCallRepairOptions, ToolCallRepairOriginalError, ToolExecutionEndEvent,
+        ToolExecutionStartEvent, ToolInputRefinementError, ToolModelOutputErrorMode, TypedToolCall,
+        TypedToolError, TypedToolOutputDenied, TypedToolResult, UiMessageStreamError,
+        UnsupportedModelVersionError, calculate_tokens_per_second, collect_tool_approvals,
+        create_tool_model_output, experimental_filter_active_tools, filter_active_tools,
+        generate_text, has_tool_call, is_loop_finished, is_step_count, is_stop_condition_met,
+        normalize_tool_approval_status, prune_messages, resolve_tool_approval,
+        response_messages_for_step, step_count_is, sum_token_counts, validate_tool_context,
     };
     use crate::file_data::{FileData, FileDataContent};
     use crate::headers::Headers;
-    use crate::json::{JsonObject, JsonValue};
+    use crate::json::{JsonObject, JsonValue, NonNullJsonValue};
     use crate::language_model::{
         FinishReason, InputTokenUsage, LanguageModel, LanguageModelAssistantContentPart,
         LanguageModelAssistantMessage, LanguageModelCallOptions, LanguageModelContent,
-        LanguageModelFile, LanguageModelFileData, LanguageModelFilePart, LanguageModelFinishReason,
-        LanguageModelFunctionTool, LanguageModelGenerateResult, LanguageModelMessage,
-        LanguageModelPrompt, LanguageModelProviderTool, LanguageModelReasoning,
-        LanguageModelReasoningFile, LanguageModelReasoningPart, LanguageModelRequest,
+        LanguageModelCustomContent, LanguageModelFile, LanguageModelFileData,
+        LanguageModelFilePart, LanguageModelFinishReason, LanguageModelFunctionTool,
+        LanguageModelGenerateResult, LanguageModelMessage, LanguageModelPrompt,
+        LanguageModelProviderTool, LanguageModelReasoning, LanguageModelReasoningFile,
+        LanguageModelReasoningFilePart, LanguageModelReasoningPart, LanguageModelRequest,
         LanguageModelResponse, LanguageModelResponseFormat, LanguageModelSource,
         LanguageModelStreamPart, LanguageModelStreamResult, LanguageModelSupportedUrls,
         LanguageModelSystemMessage, LanguageModelText, LanguageModelTextDelta,
@@ -9707,6 +9708,1122 @@ mod tests {
             unified: FinishReason::ToolCalls,
             raw: Some("tool_calls".to_string()),
         }
+    }
+
+    fn response_message_step(provider_content: Vec<LanguageModelContent>) -> GenerateTextStep {
+        GenerateTextStep::from_language_model_result(
+            "call-response-messages",
+            0,
+            GenerateTextModelInfo::new("test-provider", "test-model"),
+            LanguageModelGenerateResult::new(
+                provider_content,
+                stop_finish_reason(),
+                LanguageModelUsage::default(),
+            ),
+        )
+    }
+
+    fn response_messages_for_test(
+        step: &GenerateTextStep,
+        provider_content: &[LanguageModelContent],
+        approvals: &StepToolApprovals,
+        tools: &[Tool],
+    ) -> Vec<LanguageModelMessage> {
+        poll_ready(response_messages_for_step(
+            step,
+            provider_content,
+            approvals,
+            tools,
+        ))
+        .unwrap_or_default()
+    }
+
+    fn test_provider_metadata(provider: &str, metadata: JsonValue) -> ProviderMetadata {
+        let mut provider_metadata = ProviderMetadata::new();
+        provider_metadata.insert(
+            provider.to_string(),
+            metadata
+                .as_object()
+                .expect("provider metadata is an object")
+                .clone(),
+        );
+        provider_metadata
+    }
+
+    fn model_tool_call(
+        tool_call_id: &str,
+        tool_name: &str,
+        input: JsonValue,
+    ) -> LanguageModelToolCall {
+        LanguageModelToolCall::new(
+            tool_call_id,
+            tool_name,
+            serde_json::to_string(&input).expect("tool input serializes"),
+        )
+    }
+
+    fn provider_tool_result(
+        tool_call_id: &str,
+        tool_name: &str,
+        result: JsonValue,
+    ) -> LanguageModelToolResult {
+        LanguageModelToolResult::new(
+            tool_call_id,
+            tool_name,
+            NonNullJsonValue::new(result).expect("provider tool result is non-null"),
+        )
+    }
+
+    #[test]
+    fn to_response_messages_should_return_an_assistant_message_with_text_when_no_tool_calls_or_results()
+     {
+        let provider_content = vec![LanguageModelContent::Text(LanguageModelText::new(
+            "Hello, world!",
+        ))];
+        let step = response_message_step(provider_content.clone());
+
+        assert_eq!(
+            response_messages_for_test(
+                &step,
+                &provider_content,
+                &StepToolApprovals::default(),
+                &[]
+            ),
+            vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![LanguageModelAssistantContentPart::Text(
+                    LanguageModelTextPart::new("Hello, world!")
+                )])
+            )]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_include_tool_calls_in_the_assistant_message() {
+        let provider_content = vec![
+            LanguageModelContent::Text(LanguageModelText::new("Using a tool")),
+            LanguageModelContent::ToolCall(model_tool_call("123", "testTool", json!({}))),
+        ];
+        let step = response_message_step(provider_content.clone());
+
+        assert_eq!(
+            response_messages_for_test(
+                &step,
+                &provider_content,
+                &StepToolApprovals::default(),
+                &[]
+            ),
+            vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "Using a tool"
+                    )),
+                    LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                        "123",
+                        "testTool",
+                        json!({})
+                    )),
+                ])
+            )]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_include_tool_calls_with_metadata_in_the_assistant_message() {
+        let metadata = test_provider_metadata("testProvider", json!({ "signature": "sig" }));
+        let provider_content = vec![
+            LanguageModelContent::Text(LanguageModelText::new("Using a tool")),
+            LanguageModelContent::ToolCall(
+                model_tool_call("123", "testTool", json!({}))
+                    .with_provider_metadata(metadata.clone()),
+            ),
+        ];
+        let step = response_message_step(provider_content.clone());
+
+        assert_eq!(
+            response_messages_for_test(
+                &step,
+                &provider_content,
+                &StepToolApprovals::default(),
+                &[]
+            ),
+            vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "Using a tool"
+                    )),
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new("123", "testTool", json!({}))
+                            .with_provider_options(metadata)
+                    ),
+                ])
+            )]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_include_custom_parts_in_the_assistant_message() {
+        let metadata = test_provider_metadata("openai", json!({ "itemId": "cmp_123" }));
+        let provider_content = vec![LanguageModelContent::Custom(
+            LanguageModelCustomContent::new("mock-provider.compaction")
+                .with_provider_metadata(metadata.clone()),
+        )];
+        let step = response_message_step(provider_content.clone());
+
+        assert_eq!(
+            response_messages_for_test(
+                &step,
+                &provider_content,
+                &StepToolApprovals::default(),
+                &[]
+            ),
+            vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Custom(
+                        crate::language_model::LanguageModelCustomPart::new(
+                            "mock-provider.compaction"
+                        )
+                        .with_provider_options(metadata)
+                    )
+                ])
+            )]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_include_tool_results_as_a_separate_message() {
+        let provider_content = vec![
+            LanguageModelContent::Text(LanguageModelText::new("Tool used")),
+            LanguageModelContent::ToolCall(model_tool_call("123", "testTool", json!({}))),
+        ];
+        let mut step = response_message_step(provider_content.clone());
+        let tool_call = step.tool_calls[0].clone();
+        step.tool_results.push(GenerateTextToolResult::success(
+            &tool_call,
+            json!("Tool result"),
+        ));
+
+        assert_eq!(
+            response_messages_for_test(
+                &step,
+                &provider_content,
+                &StepToolApprovals::default(),
+                &[]
+            ),
+            vec![
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "Tool used"
+                    )),
+                    LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                        "123",
+                        "testTool",
+                        json!({})
+                    )),
+                ])),
+                LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                        "123",
+                        "testTool",
+                        LanguageModelToolResultOutput::text("Tool result")
+                    ))
+                ])),
+            ]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_include_tool_errors_as_a_separate_message() {
+        let provider_content = vec![
+            LanguageModelContent::Text(LanguageModelText::new("Tool used")),
+            LanguageModelContent::ToolCall(model_tool_call("123", "testTool", json!({}))),
+        ];
+        let mut step = response_message_step(provider_content.clone());
+        let tool_call = step.tool_calls[0].clone();
+        step.tool_results.push(GenerateTextToolResult::error(
+            &tool_call,
+            "Tool error".to_string(),
+        ));
+
+        assert_eq!(
+            response_messages_for_test(
+                &step,
+                &provider_content,
+                &StepToolApprovals::default(),
+                &[]
+            ),
+            vec![
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "Tool used"
+                    )),
+                    LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                        "123",
+                        "testTool",
+                        json!({})
+                    )),
+                ])),
+                LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                        "123",
+                        "testTool",
+                        LanguageModelToolResultOutput::error_text("Tool error")
+                    ))
+                ])),
+            ]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_handle_undefined_text() {
+        let metadata = test_provider_metadata("testProvider", json!({ "signature": "sig" }));
+        let provider_content = vec![LanguageModelContent::Reasoning(
+            LanguageModelReasoning::new("Thinking text").with_provider_metadata(metadata.clone()),
+        )];
+        let step = response_message_step(provider_content.clone());
+
+        assert_eq!(
+            response_messages_for_test(
+                &step,
+                &provider_content,
+                &StepToolApprovals::default(),
+                &[]
+            ),
+            vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Reasoning(
+                        LanguageModelReasoningPart::new("Thinking text")
+                            .with_provider_options(metadata)
+                    )
+                ])
+            )]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_include_reasoning_array_with_redacted_reasoning_in_the_assistant_message()
+     {
+        let redacted = test_provider_metadata("testProvider", json!({ "isRedacted": true }));
+        let signed = test_provider_metadata("testProvider", json!({ "signature": "sig" }));
+        let provider_content = vec![
+            LanguageModelContent::Reasoning(
+                LanguageModelReasoning::new("redacted-data")
+                    .with_provider_metadata(redacted.clone()),
+            ),
+            LanguageModelContent::Reasoning(
+                LanguageModelReasoning::new("Thinking text").with_provider_metadata(signed.clone()),
+            ),
+            LanguageModelContent::Text(LanguageModelText::new("Final text")),
+        ];
+        let step = response_message_step(provider_content.clone());
+
+        assert_eq!(
+            response_messages_for_test(
+                &step,
+                &provider_content,
+                &StepToolApprovals::default(),
+                &[]
+            ),
+            vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Reasoning(
+                        LanguageModelReasoningPart::new("redacted-data")
+                            .with_provider_options(redacted)
+                    ),
+                    LanguageModelAssistantContentPart::Reasoning(
+                        LanguageModelReasoningPart::new("Thinking text")
+                            .with_provider_options(signed)
+                    ),
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "Final text"
+                    )),
+                ])
+            )]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_handle_multipart_tool_results() {
+        let provider_content = vec![
+            LanguageModelContent::Text(LanguageModelText::new("multipart tool result")),
+            LanguageModelContent::ToolCall(model_tool_call("123", "testTool", json!({}))),
+        ];
+        let mut step = response_message_step(provider_content.clone());
+        let tool_call = step.tool_calls[0].clone();
+        step.tool_results.push(GenerateTextToolResult::success(
+            &tool_call,
+            json!("image-base64"),
+        ));
+        let tools = vec![
+            Tool::new("testTool", approval_tool_schema()).with_to_model_output(|_| async {
+                LanguageModelToolResultOutput::json(json!({
+                    "proof": "that toModelOutput is called"
+                }))
+            }),
+        ];
+
+        assert_eq!(
+            response_messages_for_test(
+                &step,
+                &provider_content,
+                &StepToolApprovals::default(),
+                &tools
+            ),
+            vec![
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "multipart tool result"
+                    )),
+                    LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                        "123",
+                        "testTool",
+                        json!({})
+                    )),
+                ])),
+                LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                        "123",
+                        "testTool",
+                        LanguageModelToolResultOutput::json(json!({
+                            "proof": "that toModelOutput is called"
+                        }))
+                    ))
+                ])),
+            ]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_include_reasoning_file_parts_in_the_assistant_message() {
+        let metadata = test_provider_metadata("testProvider", json!({ "signature": "sig" }));
+        let file_data = LanguageModelFileData::Data {
+            data: FileDataContent::Base64("iVBORw0KGgo=".to_string()),
+        };
+        let provider_content = vec![
+            LanguageModelContent::ReasoningFile(
+                LanguageModelReasoningFile::new("image/png", file_data.clone())
+                    .with_provider_metadata(metadata.clone()),
+            ),
+            LanguageModelContent::Text(LanguageModelText::new("Here is my analysis")),
+        ];
+        let step = response_message_step(provider_content.clone());
+
+        assert_eq!(
+            response_messages_for_test(
+                &step,
+                &provider_content,
+                &StepToolApprovals::default(),
+                &[]
+            ),
+            vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ReasoningFile(
+                        LanguageModelReasoningFilePart::new(file_data, "image/png")
+                            .with_provider_options(metadata)
+                    ),
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "Here is my analysis"
+                    )),
+                ])
+            )]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_include_images_in_the_assistant_message() {
+        let provider_content = vec![
+            LanguageModelContent::Text(LanguageModelText::new("Here is an image")),
+            LanguageModelContent::File(LanguageModelFile::new(
+                "image/png",
+                LanguageModelFileData::Data {
+                    data: FileDataContent::Base64("iVBORw0KGgo=".to_string()),
+                },
+            )),
+        ];
+        let step = response_message_step(provider_content.clone());
+
+        assert_eq!(
+            response_messages_for_test(
+                &step,
+                &provider_content,
+                &StepToolApprovals::default(),
+                &[]
+            ),
+            vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "Here is an image"
+                    )),
+                    LanguageModelAssistantContentPart::File(LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("iVBORw0KGgo=".to_string())
+                        },
+                        "image/png"
+                    )),
+                ])
+            )]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_handle_multiple_images_in_the_assistant_message() {
+        let provider_content = vec![
+            LanguageModelContent::Text(LanguageModelText::new("Here are multiple images")),
+            LanguageModelContent::File(LanguageModelFile::new(
+                "image/png",
+                LanguageModelFileData::Data {
+                    data: FileDataContent::Base64("iVBORw0KGgo=".to_string()),
+                },
+            )),
+            LanguageModelContent::File(LanguageModelFile::new(
+                "image/jpeg",
+                LanguageModelFileData::Data {
+                    data: FileDataContent::Base64("/9j/".to_string()),
+                },
+            )),
+        ];
+        let step = response_message_step(provider_content.clone());
+
+        assert_eq!(
+            response_messages_for_test(
+                &step,
+                &provider_content,
+                &StepToolApprovals::default(),
+                &[]
+            ),
+            vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "Here are multiple images"
+                    )),
+                    LanguageModelAssistantContentPart::File(LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("iVBORw0KGgo=".to_string())
+                        },
+                        "image/png"
+                    )),
+                    LanguageModelAssistantContentPart::File(LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("/9j/".to_string())
+                        },
+                        "image/jpeg"
+                    )),
+                ])
+            )]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_handle_uint8_array_images() {
+        let provider_content = vec![
+            LanguageModelContent::Text(LanguageModelText::new("Here is a binary image")),
+            LanguageModelContent::File(LanguageModelFile::new(
+                "image/png",
+                LanguageModelFileData::Data {
+                    data: FileDataContent::Bytes(vec![137, 80, 78, 71, 13, 10, 26, 10]),
+                },
+            )),
+        ];
+        let step = response_message_step(provider_content.clone());
+
+        assert_eq!(
+            response_messages_for_test(
+                &step,
+                &provider_content,
+                &StepToolApprovals::default(),
+                &[]
+            ),
+            vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "Here is a binary image"
+                    )),
+                    LanguageModelAssistantContentPart::File(LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Bytes(vec![137, 80, 78, 71, 13, 10, 26, 10])
+                        },
+                        "image/png"
+                    )),
+                ])
+            )]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_include_images_reasoning_and_tool_calls_in_the_correct_order() {
+        let metadata = test_provider_metadata("testProvider", json!({ "signature": "sig" }));
+        let provider_content = vec![
+            LanguageModelContent::Reasoning(
+                LanguageModelReasoning::new("Thinking text")
+                    .with_provider_metadata(metadata.clone()),
+            ),
+            LanguageModelContent::File(LanguageModelFile::new(
+                "image/png",
+                LanguageModelFileData::Data {
+                    data: FileDataContent::Base64("iVBORw0KGgo=".to_string()),
+                },
+            )),
+            LanguageModelContent::Text(LanguageModelText::new("Combined response")),
+            LanguageModelContent::ToolCall(model_tool_call("123", "testTool", json!({}))),
+        ];
+        let step = response_message_step(provider_content.clone());
+
+        assert_eq!(
+            response_messages_for_test(
+                &step,
+                &provider_content,
+                &StepToolApprovals::default(),
+                &[]
+            ),
+            vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Reasoning(
+                        LanguageModelReasoningPart::new("Thinking text")
+                            .with_provider_options(metadata)
+                    ),
+                    LanguageModelAssistantContentPart::File(LanguageModelFilePart::new(
+                        FileData::Data {
+                            data: FileDataContent::Base64("iVBORw0KGgo=".to_string())
+                        },
+                        "image/png"
+                    )),
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "Combined response"
+                    )),
+                    LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                        "123",
+                        "testTool",
+                        json!({})
+                    )),
+                ])
+            )]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_not_append_text_parts_if_text_is_empty_string() {
+        let provider_content = vec![
+            LanguageModelContent::Text(LanguageModelText::new("")),
+            LanguageModelContent::ToolCall(model_tool_call("123", "testTool", json!({}))),
+        ];
+        let step = response_message_step(provider_content.clone());
+
+        assert_eq!(
+            response_messages_for_test(
+                &step,
+                &provider_content,
+                &StepToolApprovals::default(),
+                &[]
+            ),
+            vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                        "123",
+                        "testTool",
+                        json!({})
+                    ))
+                ])
+            )]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_not_append_assistant_message_if_there_is_no_content() {
+        let provider_content = Vec::new();
+        let step = response_message_step(provider_content.clone());
+
+        assert_eq!(
+            response_messages_for_test(
+                &step,
+                &provider_content,
+                &StepToolApprovals::default(),
+                &[]
+            ),
+            Vec::<LanguageModelMessage>::new()
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_include_provider_executed_tool_calls_and_results() {
+        let provider_content = vec![
+            LanguageModelContent::Text(LanguageModelText::new(
+                "Let me search for recent news from San Francisco.",
+            )),
+            LanguageModelContent::ToolCall(
+                model_tool_call(
+                    "srvtoolu_011cNtbtzFARKPcAcp7w4nh9",
+                    "web_search",
+                    json!({
+                        "query": "San Francisco major news events June 22 2025"
+                    }),
+                )
+                .with_provider_executed(true),
+            ),
+            LanguageModelContent::ToolResult(provider_tool_result(
+                "srvtoolu_011cNtbtzFARKPcAcp7w4nh9",
+                "web_search",
+                json!([{ "url": "https://patch.com/california/san-francisco/calendar" }]),
+            )),
+            LanguageModelContent::Text(LanguageModelText::new(
+                "Based on the search results, several significant events took place.",
+            )),
+        ];
+        let step = response_message_step(provider_content.clone());
+
+        assert_eq!(
+            response_messages_for_test(
+                &step,
+                &provider_content,
+                &StepToolApprovals::default(),
+                &[]
+            ),
+            vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "Let me search for recent news from San Francisco."
+                    )),
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "srvtoolu_011cNtbtzFARKPcAcp7w4nh9",
+                            "web_search",
+                            json!({
+                                "query": "San Francisco major news events June 22 2025"
+                            })
+                        )
+                        .with_provider_executed(true)
+                    ),
+                    LanguageModelAssistantContentPart::ToolResult(
+                        LanguageModelToolResultPart::new(
+                            "srvtoolu_011cNtbtzFARKPcAcp7w4nh9",
+                            "web_search",
+                            LanguageModelToolResultOutput::json(json!([
+                                { "url": "https://patch.com/california/san-francisco/calendar" }
+                            ]))
+                        )
+                    ),
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "Based on the search results, several significant events took place."
+                    )),
+                ])
+            )]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_include_tool_approval_request_in_the_assistant_message() {
+        let provider_content = vec![
+            LanguageModelContent::Text(LanguageModelText::new("Let me check the weather")),
+            LanguageModelContent::ToolCall(model_tool_call(
+                "123",
+                "weather",
+                json!({ "city": "Tokyo" }),
+            )),
+        ];
+        let step = response_message_step(provider_content.clone());
+        let mut approvals = StepToolApprovals::default();
+        approvals
+            .requests
+            .push(LanguageModelToolApprovalRequestPart::new(
+                "approval-1",
+                "123",
+            ));
+
+        assert_eq!(
+            response_messages_for_test(&step, &provider_content, &approvals, &[]),
+            vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(LanguageModelTextPart::new(
+                        "Let me check the weather"
+                    )),
+                    LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                        "123",
+                        "weather",
+                        json!({ "city": "Tokyo" })
+                    )),
+                    LanguageModelAssistantContentPart::ToolApprovalRequest(
+                        LanguageModelToolApprovalRequestPart::new("approval-1", "123")
+                    ),
+                ])
+            )]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_include_tool_approval_request_for_provider_executed_tools() {
+        let provider_content = vec![LanguageModelContent::ToolCall(
+            model_tool_call("mcp-call-1", "mcp_tool", json!({ "query": "test" }))
+                .with_provider_executed(true)
+                .with_dynamic(true),
+        )];
+        let step = response_message_step(provider_content.clone());
+        let mut approvals = StepToolApprovals::default();
+        approvals
+            .requests
+            .push(LanguageModelToolApprovalRequestPart::new(
+                "mcp-approval-1",
+                "mcp-call-1",
+            ));
+
+        assert_eq!(
+            response_messages_for_test(&step, &provider_content, &approvals, &[]),
+            vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "mcp-call-1",
+                            "mcp_tool",
+                            json!({ "query": "test" })
+                        )
+                        .with_provider_executed(true)
+                    ),
+                    LanguageModelAssistantContentPart::ToolApprovalRequest(
+                        LanguageModelToolApprovalRequestPart::new("mcp-approval-1", "mcp-call-1")
+                    ),
+                ])
+            )]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_preserve_automatic_approval_request_stage_in_the_assistant_message()
+     {
+        let provider_content = vec![LanguageModelContent::ToolCall(model_tool_call(
+            "call-1",
+            "weather",
+            json!({ "city": "Tokyo" }),
+        ))];
+        let step = response_message_step(provider_content.clone());
+        let mut approvals = StepToolApprovals::default();
+        approvals.requests.push(
+            LanguageModelToolApprovalRequestPart::new("approval-1", "call-1").with_automatic(true),
+        );
+
+        assert_eq!(
+            response_messages_for_test(&step, &provider_content, &approvals, &[]),
+            vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                        "call-1",
+                        "weather",
+                        json!({ "city": "Tokyo" })
+                    )),
+                    LanguageModelAssistantContentPart::ToolApprovalRequest(
+                        LanguageModelToolApprovalRequestPart::new("approval-1", "call-1")
+                            .with_automatic(true)
+                    ),
+                ])
+            )]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_include_approval_response_and_tool_result_stages_in_the_tool_message()
+     {
+        let provider_content = vec![LanguageModelContent::ToolCall(model_tool_call(
+            "call-1",
+            "weather",
+            json!({ "city": "Tokyo" }),
+        ))];
+        let mut step = response_message_step(provider_content.clone());
+        let tool_call = step.tool_calls[0].clone();
+        step.tool_results.push(GenerateTextToolResult::success(
+            &tool_call,
+            json!("72F and sunny"),
+        ));
+        let mut approvals = StepToolApprovals::default();
+        approvals.requests.push(
+            LanguageModelToolApprovalRequestPart::new("approval-1", "call-1").with_automatic(true),
+        );
+        approvals.responses.push(StepToolApprovalResponse {
+            response: LanguageModelToolApprovalResponsePart::new("approval-1", true),
+            tool_call,
+        });
+
+        assert_eq!(
+            response_messages_for_test(&step, &provider_content, &approvals, &[]),
+            vec![
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                        "call-1",
+                        "weather",
+                        json!({ "city": "Tokyo" })
+                    )),
+                    LanguageModelAssistantContentPart::ToolApprovalRequest(
+                        LanguageModelToolApprovalRequestPart::new("approval-1", "call-1")
+                            .with_automatic(true)
+                    ),
+                ])),
+                LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolApprovalResponse(
+                        LanguageModelToolApprovalResponsePart::new("approval-1", true)
+                    ),
+                    LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                        "call-1",
+                        "weather",
+                        LanguageModelToolResultOutput::text("72F and sunny")
+                    )),
+                ])),
+            ]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_add_an_execution_denied_tool_result_when_tool_approval_is_denied()
+     {
+        let provider_content = vec![LanguageModelContent::ToolCall(model_tool_call(
+            "call-1",
+            "weather",
+            json!({ "city": "Tokyo" }),
+        ))];
+        let step = response_message_step(provider_content.clone());
+        let tool_call = step.tool_calls[0].clone();
+        let mut approvals = StepToolApprovals::default();
+        approvals
+            .requests
+            .push(LanguageModelToolApprovalRequestPart::new(
+                "approval-1",
+                "call-1",
+            ));
+        approvals.responses.push(StepToolApprovalResponse {
+            response: LanguageModelToolApprovalResponsePart::new("approval-1", false)
+                .with_reason("User denied access"),
+            tool_call,
+        });
+
+        assert_eq!(
+            response_messages_for_test(&step, &provider_content, &approvals, &[]),
+            vec![
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                        "call-1",
+                        "weather",
+                        json!({ "city": "Tokyo" })
+                    )),
+                    LanguageModelAssistantContentPart::ToolApprovalRequest(
+                        LanguageModelToolApprovalRequestPart::new("approval-1", "call-1")
+                    ),
+                ])),
+                LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolApprovalResponse(
+                        LanguageModelToolApprovalResponsePart::new("approval-1", false)
+                            .with_reason("User denied access")
+                    ),
+                    LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                        "call-1",
+                        "weather",
+                        LanguageModelToolResultOutput::execution_denied()
+                            .with_reason("User denied access")
+                    )),
+                ])),
+            ]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_include_provider_executed_approval_response_stages_in_the_tool_message()
+     {
+        let provider_content = vec![LanguageModelContent::ToolCall(
+            model_tool_call("mcp-call-1", "mcp_tool", json!({ "query": "test" }))
+                .with_provider_executed(true)
+                .with_dynamic(true),
+        )];
+        let step = response_message_step(provider_content.clone());
+        let tool_call = step.tool_calls[0].clone();
+        let mut approvals = StepToolApprovals::default();
+        approvals
+            .requests
+            .push(LanguageModelToolApprovalRequestPart::new(
+                "mcp-approval-1",
+                "mcp-call-1",
+            ));
+        approvals.responses.push(StepToolApprovalResponse {
+            response: LanguageModelToolApprovalResponsePart::new("mcp-approval-1", true)
+                .with_provider_executed(true),
+            tool_call,
+        });
+
+        assert_eq!(
+            response_messages_for_test(&step, &provider_content, &approvals, &[]),
+            vec![
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "mcp-call-1",
+                            "mcp_tool",
+                            json!({ "query": "test" })
+                        )
+                        .with_provider_executed(true)
+                    ),
+                    LanguageModelAssistantContentPart::ToolApprovalRequest(
+                        LanguageModelToolApprovalRequestPart::new("mcp-approval-1", "mcp-call-1")
+                    ),
+                ])),
+                LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolApprovalResponse(
+                        LanguageModelToolApprovalResponsePart::new("mcp-approval-1", true)
+                            .with_provider_executed(true)
+                    )
+                ])),
+            ]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_keep_provider_executed_tool_result_stages_in_the_assistant_message_only()
+     {
+        let provider_content = vec![
+            LanguageModelContent::ToolCall(
+                model_tool_call("mcp-call-1", "mcp_tool", json!({ "query": "test" }))
+                    .with_provider_executed(true)
+                    .with_dynamic(true),
+            ),
+            LanguageModelContent::ToolResult(
+                provider_tool_result(
+                    "mcp-call-1",
+                    "mcp_tool",
+                    json!({ "value": "provider result" }),
+                )
+                .with_dynamic(true),
+            ),
+        ];
+        let step = response_message_step(provider_content.clone());
+
+        assert_eq!(
+            response_messages_for_test(
+                &step,
+                &provider_content,
+                &StepToolApprovals::default(),
+                &[]
+            ),
+            vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "mcp-call-1",
+                            "mcp_tool",
+                            json!({ "query": "test" })
+                        )
+                        .with_provider_executed(true)
+                    ),
+                    LanguageModelAssistantContentPart::ToolResult(
+                        LanguageModelToolResultPart::new(
+                            "mcp-call-1",
+                            "mcp_tool",
+                            LanguageModelToolResultOutput::json(json!({
+                                "value": "provider result"
+                            }))
+                        )
+                    ),
+                ])
+            )]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_sanitize_invalid_tool_call_with_non_object_input_to_empty_object()
+     {
+        let provider_content = vec![LanguageModelContent::ToolCall(
+            LanguageModelToolCall::new("call-1", "weather", "{ city: San Francisco, }")
+                .with_dynamic(true),
+        )];
+        let mut step = response_message_step(provider_content.clone());
+        let tool_call = step.tool_calls[0].clone();
+        step.tool_results.push(GenerateTextToolResult::error(
+            &tool_call,
+            "Invalid input for tool weather: JSON parsing failed".to_string(),
+        ));
+
+        assert_eq!(
+            response_messages_for_test(
+                &step,
+                &provider_content,
+                &StepToolApprovals::default(),
+                &[]
+            ),
+            vec![
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                        "call-1",
+                        "weather",
+                        json!({})
+                    ))
+                ])),
+                LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                        "call-1",
+                        "weather",
+                        LanguageModelToolResultOutput::error_text(
+                            "Invalid input for tool weather: JSON parsing failed"
+                        )
+                    ))
+                ])),
+            ]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_preserve_valid_object_input_on_invalid_tool_call() {
+        let provider_content = vec![LanguageModelContent::ToolCall(model_tool_call(
+            "call-1",
+            "weather",
+            json!({ "cities": "San Francisco" }),
+        ))];
+        let mut step = response_message_step(provider_content.clone());
+        step.tool_calls[0].invalid = Some(true);
+        let tool_call = step.tool_calls[0].clone();
+        step.tool_results.push(GenerateTextToolResult::error(
+            &tool_call,
+            "Invalid input for tool weather: Type validation failed".to_string(),
+        ));
+
+        assert_eq!(
+            response_messages_for_test(
+                &step,
+                &provider_content,
+                &StepToolApprovals::default(),
+                &[]
+            ),
+            vec![
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                        "call-1",
+                        "weather",
+                        json!({ "cities": "San Francisco" })
+                    ))
+                ])),
+                LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                        "call-1",
+                        "weather",
+                        LanguageModelToolResultOutput::error_text(
+                            "Invalid input for tool weather: Type validation failed"
+                        )
+                    ))
+                ])),
+            ]
+        );
+    }
+
+    #[test]
+    fn to_response_messages_should_include_provider_metadata_in_the_text_parts() {
+        let metadata = test_provider_metadata("testProvider", json!({ "signature": "sig" }));
+        let provider_content = vec![LanguageModelContent::Text(
+            LanguageModelText::new("Here is a text").with_provider_metadata(metadata.clone()),
+        )];
+        let step = response_message_step(provider_content.clone());
+
+        assert_eq!(
+            response_messages_for_test(
+                &step,
+                &provider_content,
+                &StepToolApprovals::default(),
+                &[]
+            ),
+            vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![LanguageModelAssistantContentPart::Text(
+                    LanguageModelTextPart::new("Here is a text").with_provider_options(metadata)
+                )])
+            )]
+        );
     }
 
     fn warning_logger_text_result(
