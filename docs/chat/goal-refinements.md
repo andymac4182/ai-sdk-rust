@@ -1106,3 +1106,124 @@ at not-started.**
 - **State-backend client wire-up**: parallel to the adapter
   HTTP layer. Start with state-redis::set/get/delete using
   the `redis` crate via tokio.
+
+### 2026-05-24 - slices 144..149
+
+**Slices covered**
+
+144 (workspace runtime commitment: tokio + reqwest as direct
+deps on chat-sdk-adapter-shared; `runtime` module re-exports +
+`default_http_client()` with 30s timeout + chat-sdk-rust
+User-Agent; 3 mapped tests, 117 -> 120).
+145 (Telegram post_message HTTP: POST `/bot<token>/sendMessage`
+with JSON body, parse `{ok, result: {message_id}}`. 13 -> 14
+tests. 10% -> 15%).
+146 (GitHub post_message HTTP: POST issue/PR comments-create
+with `Authorization: Bearer` + `application/vnd.github+json`
+Accept header. 13 -> 14 tests. 10% -> 15%).
+147 (Messenger post_message HTTP: POST Graph v22.0 Send API
+with URL-query-param `access_token`. 11 -> 12 tests. 10% ->
+15%).
+148 (WhatsApp post_message HTTP: POST Cloud API v22.0 with
+`messaging_product: "whatsapp"` envelope + bearer auth;
+phone_number_id match validation. 11 -> 13 tests. 10% -> 15%).
+149 (Discord post_message HTTP: POST channels/<channel_id>/
+messages with non-standard `Authorization: Bot <token>` header.
+13 -> 14 tests. 10% -> 15%).
+
+**What the brief got right (validated)**
+
+- The slice 145 reference recipe ported cleanly to 4 more
+  adapters in slices 146-149. Each landed in one slice,
+  ~80-130 LOC of source + 2 new tests + drop of the old
+  `Unsupported` test. Variance per-adapter is:
+  - Endpoint URL template (per-platform path).
+  - Auth scheme: Telegram uses path-token (`/bot<token>/`),
+    GitHub uses bearer, Messenger uses URL query param,
+    WhatsApp uses bearer, Discord uses non-standard `Bot `
+    auth-scheme prefix.
+  - Request body shape (per-platform envelope).
+  - Response shape (per-platform `id` location: `result.message_id`,
+    top-level `id`, `messages[0].id`, etc).
+- The pre-HTTP validation pattern (decode thread id +
+  return AdapterError::InvalidPayload before any network call)
+  works cleanly across all 5 adapters. Lets us test the
+  validation path without needing a tokio runtime.
+- The workspace runtime commitment (tokio 1 + reqwest 0.13
+  with rustls feature; default-features=false to avoid
+  native-tls/openssl) compiled without issues. The transitive
+  `chat-sdk-adapter-shared::runtime::reqwest::Client` access
+  works smoothly from per-adapter crates.
+
+**What the brief got wrong or left out**
+
+- **`reqwest` feature name confusion.** The first attempt used
+  `rustls-tls`; reqwest 0.13 calls it `rustls`. Open
+  refinement: the Session 2 kickoff checklist now reads
+  `rustls` (corrected in slice 144). Verify with `cargo
+  features` before pinning a feature name.
+- **Discord auth-scheme is non-standard.** Discord uses
+  `Authorization: Bot <token>` rather than `Authorization:
+  Bearer <token>`. `reqwest::RequestBuilder::bearer_auth`
+  hardcodes "Bearer ", so we set the header manually for
+  Discord. Open refinement: a future
+  `chat_sdk_adapter_shared::auth::auth_header(scheme, token)`
+  helper would centralize this; defer until a 3rd non-standard
+  scheme lands.
+- **Messenger URL-query auth is the outlier.** Most adapters
+  use headers; Messenger puts `access_token` in the URL query
+  string. We append it manually to the URL rather than using
+  `reqwest::RequestBuilder::query` (which has feature gating).
+  Acceptable; matches upstream's `URL` construction.
+- **WhatsApp phone-number-id match validation is per-adapter
+  specific.** The bot is keyed by phone number on the Meta
+  side, so the thread id MUST match the adapter's configured
+  phone_number_id. Other adapters route by channel/user id
+  alone. Open refinement: when more validation-style checks
+  appear, factor into a `chat_sdk_adapter_shared::route`
+  helper module.
+
+**Stale or misleading guidance**
+
+- The slice 143 prediction "~50-100 slices for HTTP wire-up
+  across 9 adapters + 3 state backends" was for the FULL
+  Adapter trait surface (post_message + post_object +
+  fetch_subject + edit_message + delete_message + add_reaction
+  + remove_reaction + start_typing). The Session 2 commitment
+  has shipped post_message on 5/9 adapters in 5 slices, which
+  is on-track for a ~45-slice budget for the post_message
+  layer alone. The other 8 Adapter methods follow.
+- The "rebaseline percent scale once one of the in-progress
+  packages reaches full HTTP coverage" deferred refinement
+  from slice 143 hasn't triggered yet. The +5% per adapter
+  for post_message (10% scaffold -> 15% with HTTP) is rough;
+  once all 9 adapters ship post_message, re-baseline so
+  fully-shipped HTTP adapters are at ~25-30% (post_message is
+  ~1 of 8 Adapter methods).
+
+**Edits applied**
+
+- `scripts/codex-goal-chat/port-chat-sdk.md`: pending — add
+  "Adapter-HTTP-method port pattern" section codifying the
+  slice 145-149 recipe.
+- `scripts/codex-goal-chat/goal-condition.md`: stable.
+
+**Open refinements deferred**
+
+- **Adapter-HTTP-method port pattern**: factor the slice 145
+  reference into a documented 5-step template (auth-scheme
+  variance + URL template variance + body shape variance +
+  response-id location variance + pre-HTTP validation).
+  Should land in the next refinement-pass slice.
+- **State-backend HTTP wire-up**: state-redis / state-ioredis /
+  state-pg still at NotConnected placeholders. Need the
+  `redis = { features = ["tokio-comp"] }` + `tokio-postgres`
+  pick to land. Each is a 3-5 slice port for the 5 required
+  StateAdapter methods.
+- **Remaining 4 adapter post_message ports**: Linear (GraphQL
+  `commentCreate` mutation), GChat (REST `messages.create`
+  with OAuth2-minted bearer), Teams (Bot Framework
+  POST-back-channel with `serviceUrl` from incoming activity),
+  Slack (`chat.postMessage` with `application/json` body +
+  bearer auth). Each follows the slice 145 recipe with
+  per-platform variance.
