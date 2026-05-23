@@ -8,6 +8,7 @@
 
 pub mod cards;
 pub mod markdown;
+pub mod webhook;
 
 use async_trait::async_trait;
 use chat_sdk_chat::types::Adapter;
