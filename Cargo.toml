@@ -30,6 +30,7 @@ members = [
     "crates/chat-sdk-adapter-linear",
     "crates/chat-sdk-adapter-messenger",
     "crates/chat-sdk-adapter-shared",
+    "crates/chat-sdk-adapter-teams",
     "crates/chat-sdk-adapter-telegram",
     "crates/chat-sdk-adapter-whatsapp",
     "crates/chat-sdk-state-memory",
