@@ -678,6 +678,122 @@ mod tests {
         assert!(!output.contains("<b>"), "got: {output}");
     }
 
+    // ---------- corpus validity invariants (2 upstream cases) ----------
+
+    const LLM_CORPUS: &str = "# Trip Summary: Morocco\n\nHere's your **personalized** 7-day itinerary. Price: $2,450 per person (all-inclusive)!\n\n## Day 1 — Arrival in Marrakech\n\n- Airport pickup at 14:30\n- Check-in at *Riad El Fenn* (4-star)\n- Welcome dinner: [La Mamounia](https://www.mamounia.com/restaurants)\n\n> Tip: bring cash — not every souk accepts cards.\n\n## Day 2 — Atlas Mountains\n\n1. 08:00 breakfast\n2. 09:00 departure (2h drive)\n3. Hike to Toubkal base camp\n\nPack: `sunscreen`, `hiking boots`, *layers* (temperatures drop ~10°C).\n\n```bash\n# Exchange rate check\ncurl 'https://api.rates.io/MAD' | jq '.rate'\n```\n\n| Day | Activity | Cost |\n|-----|----------|------|\n| 1 | Arrival | $200 |\n| 2 | Atlas | $350 |\n\n---\n\n~~Previous version priced at $2,800~~. New total: **$2,450**.";
+
+    #[test]
+    fn corpus_produces_non_empty_output_covering_every_structural_element() {
+        let output = rt(LLM_CORPUS);
+        assert!(output.contains("*Trip Summary"), "got: {output}");
+        assert!(output.contains("\\- Airport pickup"), "got: {output}");
+        assert!(output.contains("1\\. 08:00 breakfast"), "got: {output}");
+        assert!(output.contains("_Riad El Fenn_"), "got: {output}");
+        assert!(
+            output.contains("[La Mamounia](https://www.mamounia.com/restaurants)"),
+            "got: {output}"
+        );
+        assert!(output.contains(">Tip:"), "got: {output}");
+        assert!(output.contains("```"), "got: {output}");
+        assert!(output.contains("~Previous version"), "got: {output}");
+        assert!(output.contains("———"), "got: {output}");
+    }
+
+    #[test]
+    fn corpus_escapes_every_in_text_markdown_v2_special_outside_code_and_link_urls() {
+        let output = rt(LLM_CORPUS);
+        // Strip code blocks (```...```), inline code (`...`), and link URLs
+        // (the content between `](` and `)`).
+        let stripped = strip_code_blocks_inline_and_link_urls(&output);
+
+        // For each text-only special char, any occurrence in stripped text
+        // must be preceded by a backslash. 1:1 with upstream's regex sweep.
+        for ch in ['+', '=', '{', '}', '.', '!', '|'] {
+            let chars: Vec<char> = stripped.chars().collect();
+            for (i, &c) in chars.iter().enumerate() {
+                if c != ch {
+                    continue;
+                }
+                let prev = if i == 0 { '\0' } else { chars[i - 1] };
+                assert_eq!(
+                    prev, '\\',
+                    "found unescaped {ch:?} at position {i} in {stripped:?}"
+                );
+            }
+        }
+    }
+
+    /// Test helper: strip ```…``` fenced blocks, `…` inline-code, and
+    /// link-URL bodies (`](…)` -> `]()`) from MarkdownV2 output. 1:1
+    /// with the upstream regex stripping in the corpus test.
+    fn strip_code_blocks_inline_and_link_urls(text: &str) -> String {
+        // 1. Strip fenced code blocks.
+        let mut out = String::new();
+        let mut rest = text;
+        loop {
+            match rest.find("```") {
+                None => {
+                    out.push_str(rest);
+                    break;
+                }
+                Some(i) => {
+                    out.push_str(&rest[..i]);
+                    let after_open = &rest[i + 3..];
+                    match after_open.find("```") {
+                        None => {
+                            // Unterminated - keep rest as-is.
+                            out.push_str(&rest[i..]);
+                            break;
+                        }
+                        Some(j) => {
+                            rest = &after_open[j + 3..];
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Strip inline code `…`.
+        let mut tmp = String::new();
+        let bytes = out.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'`' {
+                if let Some(rel) = out[i + 1..].find('`') {
+                    i = i + 1 + rel + 1;
+                    continue;
+                }
+            }
+            tmp.push(bytes[i] as char);
+            i += 1;
+        }
+
+        // 3. Replace link-url bodies: `](…)` -> `]()`. Scan for `](`
+        // sequences and skip to matching `)`.
+        let mut out2 = String::new();
+        let chars: Vec<char> = tmp.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if i + 1 < chars.len() && chars[i] == ']' && chars[i + 1] == '(' {
+                out2.push_str("](");
+                // Skip until matching close paren (non-escaped).
+                let mut j = i + 2;
+                while j < chars.len() {
+                    if chars[j] == ')' && (j == 0 || chars[j - 1] != '\\') {
+                        break;
+                    }
+                    j += 1;
+                }
+                out2.push(')');
+                i = j + 1;
+                continue;
+            }
+            out2.push(chars[i]);
+            i += 1;
+        }
+        out2
+    }
+
     // ---------- escape helpers ----------
 
     #[test]
