@@ -3,8 +3,8 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 42.2%
-- Portable package average: 30.6%
+- Average estimated completion: 42.4%
+- Portable package average: 30.9%
 - Closed package rows: 5 / 18
 - Strict portable verified rows: 2 / 15
 - In-progress rows: 13
@@ -27,7 +27,7 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | `@chat-sdk/chat` | 99% | In progress | core SDK package | Crate + colocated tests across 16 modules: 563 chat tests. Phase 1.5 complete. |
 | `@chat-sdk/adapter-slack` | 15% | In progress | adapter package | Slice 139 scaffold + slice 152 post_message HTTP (chat.postMessage Web API). 15 tests. |
 | `@chat-sdk/adapter-teams` | 15% | In progress | adapter package | Slice 138 scaffold + slice 153 post_message HTTP (Bot Framework activities + pre-minted bearer). 15 tests. |
-| `@chat-sdk/adapter-gchat` | 10% | In progress | adapter package | Crate scaffold (slice 137) w/ empty-thread top-level sentinel. 14 tests. OAuth2 + HTTP I/O deferred. |
+| `@chat-sdk/adapter-gchat` | 15% | In progress | adapter package | Slice 137 scaffold + slice 154 post_message HTTP (messages.create + pre-minted bearer + thread-reply option). 17 tests. |
 | `@chat-sdk/adapter-discord` | 15% | In progress | adapter package | Slice 134 scaffold + slice 149 post_message HTTP (Bot auth). 14 tests. |
 | `@chat-sdk/adapter-linear` | 15% | In progress | adapter package | Slice 136 scaffold + slice 151 post_message HTTP (GraphQL commentCreate). 12 tests. |
 | `@chat-sdk/adapter-github` | 15% | In progress | adapter package | Slice 131 scaffold + slice 146 post_message HTTP (issue/PR comment-create). 14 tests. |
