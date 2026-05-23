@@ -1939,4 +1939,72 @@ mod tests {
         let plain = to_plain_text(&node);
         assert!(plain.contains("Q&A: how to?"));
     }
+
+    // ---------- slice 85: 4 more 1:1 markdown.test.ts cases ----------
+
+    #[test]
+    fn parse_markdown_inline_code_with_doubled_backticks_holds_single_backtick() {
+        let node = parse_markdown("use `` ` `` carefully").expect("parses");
+        fn find_inline_code(n: &Node) -> Option<String> {
+            if let Node::InlineCode(c) = n {
+                return Some(c.value.clone());
+            }
+            for c in get_node_children(n).iter() {
+                if let Some(v) = find_inline_code(c) {
+                    return Some(v);
+                }
+            }
+            None
+        }
+        let value = find_inline_code(&node).expect("inline code parses");
+        assert_eq!(value, "`");
+    }
+
+    #[test]
+    fn parse_markdown_pure_text_followed_by_thematic_break_then_text() {
+        let node = parse_markdown("first\n\n***\n\nsecond").expect("parses");
+        let root = match &node {
+            Node::Root(r) => r,
+            _ => unreachable!(),
+        };
+        let kinds: Vec<&str> = root
+            .children
+            .iter()
+            .map(|c| match c {
+                Node::Paragraph(_) => "p",
+                Node::ThematicBreak(_) => "hr",
+                _ => "?",
+            })
+            .collect();
+        assert_eq!(kinds, vec!["p", "hr", "p"]);
+    }
+
+    #[test]
+    fn parse_markdown_table_row_count_matches_input_rows() {
+        let input = "| A | B |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n| 5 | 6 |";
+        let node = parse_markdown(input).expect("parses");
+        fn count_table_rows(n: &Node) -> usize {
+            if let Node::Table(t) = n {
+                return t.children.len();
+            }
+            get_node_children(n).iter().map(count_table_rows).sum()
+        }
+        // Headers row + 3 body rows = 4 TableRow children of Table.
+        assert_eq!(count_table_rows(&node), 4);
+    }
+
+    #[test]
+    fn parse_markdown_image_inside_link_extracts_both() {
+        let node =
+            parse_markdown("[![alt](https://example.com/img.png)](https://example.com/page)")
+                .expect("parses");
+        fn has_image(n: &Node) -> bool {
+            matches!(n, Node::Image(_)) || get_node_children(n).iter().any(has_image)
+        }
+        fn has_link(n: &Node) -> bool {
+            matches!(n, Node::Link(_)) || get_node_children(n).iter().any(has_link)
+        }
+        assert!(has_link(&node));
+        assert!(has_image(&node));
+    }
 }
