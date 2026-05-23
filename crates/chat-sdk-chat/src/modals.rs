@@ -284,6 +284,61 @@ pub fn is_modal_element(value: &serde_json::Value) -> bool {
         .is_some_and(|s| s == "modal")
 }
 
+/// Read the `type` discriminator off any JSON object. Returns `None`
+/// when the input isn't an object or carries no `type` field. Mirrors
+/// upstream's inline `value.type` access used by the renderer's
+/// `switch (child.type)` dispatch on modal children.
+pub fn modal_child_kind(value: &serde_json::Value) -> Option<&str> {
+    value.get("type").and_then(serde_json::Value::as_str)
+}
+
+/// Predicate: does the JSON value look like a [`TextInputElement`]?
+/// 1:1 with upstream's inline `child.type === "text_input"` check.
+pub fn is_text_input_element(value: &serde_json::Value) -> bool {
+    modal_child_kind(value) == Some("text_input")
+}
+
+/// Predicate: does the JSON value look like a [`SelectElement`]? 1:1
+/// with upstream's inline `child.type === "select"` check.
+pub fn is_select_element(value: &serde_json::Value) -> bool {
+    modal_child_kind(value) == Some("select")
+}
+
+/// Predicate: does the JSON value look like an
+/// [`ExternalSelectElement`]? 1:1 with upstream's inline
+/// `child.type === "external_select"` check.
+pub fn is_external_select_element(value: &serde_json::Value) -> bool {
+    modal_child_kind(value) == Some("external_select")
+}
+
+/// Predicate: does the JSON value look like a [`RadioSelectElement`]?
+/// 1:1 with upstream's inline `child.type === "radio_select"` check.
+pub fn is_radio_select_element(value: &serde_json::Value) -> bool {
+    modal_child_kind(value) == Some("radio_select")
+}
+
+/// Predicate: does the JSON value look like a modal-level
+/// [`TextElement`]? 1:1 with upstream's inline `child.type === "text"`
+/// check used by the modal renderer.
+pub fn is_modal_text_element(value: &serde_json::Value) -> bool {
+    modal_child_kind(value) == Some("text")
+}
+
+/// Predicate: does the JSON value look like a [`FieldsElement`]? 1:1
+/// with upstream's inline `child.type === "fields"` check.
+pub fn is_modal_fields_element(value: &serde_json::Value) -> bool {
+    modal_child_kind(value) == Some("fields")
+}
+
+/// Predicate: does the JSON value have one of
+/// [`VALID_MODAL_CHILD_TYPES`]? 1:1 with the upstream inline
+/// `VALID_MODAL_CHILD_TYPES.includes(child.type)` filter inside
+/// [`filter_modal_children`]; exposed so adapter callsites can apply
+/// the same check without going through the JSON->struct path.
+pub fn is_valid_modal_child(value: &serde_json::Value) -> bool {
+    modal_child_kind(value).is_some_and(|s| VALID_MODAL_CHILD_TYPES.contains(&s))
+}
+
 /// Filter a heterogeneous array of JSON values down to the subset that
 /// parse as [`ModalChild`] (i.e. their `type` field is in
 /// [`VALID_MODAL_CHILD_TYPES`]). 1:1 port of upstream
@@ -958,5 +1013,97 @@ mod tests {
         let (kept, dropped) = filter_modal_children(&input);
         assert_eq!(kept.len(), 1);
         assert_eq!(dropped, 3);
+    }
+
+    // ---------- slice 115: modal_child_kind + per-element predicates ----------
+
+    #[test]
+    fn modal_child_kind_reads_the_type_field() {
+        assert_eq!(
+            modal_child_kind(&serde_json::json!({"type": "text_input"})),
+            Some("text_input")
+        );
+        assert_eq!(
+            modal_child_kind(&serde_json::json!({"type": "fields"})),
+            Some("fields")
+        );
+        assert!(modal_child_kind(&serde_json::json!({})).is_none());
+        assert!(modal_child_kind(&serde_json::json!(null)).is_none());
+        assert!(modal_child_kind(&serde_json::json!("text")).is_none());
+    }
+
+    #[test]
+    fn is_text_input_element_matches_only_text_input_types() {
+        assert!(is_text_input_element(
+            &serde_json::json!({"type": "text_input"})
+        ));
+        assert!(!is_text_input_element(&serde_json::json!({"type": "text"})));
+        assert!(!is_text_input_element(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn is_select_element_matches_only_select_types() {
+        assert!(is_select_element(&serde_json::json!({"type": "select"})));
+        assert!(!is_select_element(
+            &serde_json::json!({"type": "external_select"})
+        ));
+        assert!(!is_select_element(
+            &serde_json::json!({"type": "radio_select"})
+        ));
+    }
+
+    #[test]
+    fn is_external_select_element_only_matches_external_select() {
+        assert!(is_external_select_element(
+            &serde_json::json!({"type": "external_select"})
+        ));
+        assert!(!is_external_select_element(
+            &serde_json::json!({"type": "select"})
+        ));
+    }
+
+    #[test]
+    fn is_radio_select_element_only_matches_radio_select() {
+        assert!(is_radio_select_element(
+            &serde_json::json!({"type": "radio_select"})
+        ));
+        assert!(!is_radio_select_element(
+            &serde_json::json!({"type": "select"})
+        ));
+    }
+
+    #[test]
+    fn is_modal_text_element_only_matches_text_type() {
+        assert!(is_modal_text_element(&serde_json::json!({"type": "text"})));
+        // The card-level text is a SEPARATE element kind in cards.rs;
+        // here we only care about the modal-children list.
+        assert!(!is_modal_text_element(
+            &serde_json::json!({"type": "text_input"})
+        ));
+    }
+
+    #[test]
+    fn is_modal_fields_element_only_matches_fields_type() {
+        assert!(is_modal_fields_element(
+            &serde_json::json!({"type": "fields"})
+        ));
+        assert!(!is_modal_fields_element(
+            &serde_json::json!({"type": "field"})
+        ));
+    }
+
+    #[test]
+    fn is_valid_modal_child_accepts_every_type_in_the_constant() {
+        for t in VALID_MODAL_CHILD_TYPES {
+            assert!(is_valid_modal_child(&serde_json::json!({"type": t})));
+        }
+    }
+
+    #[test]
+    fn is_valid_modal_child_rejects_unknown_types_and_non_objects() {
+        assert!(!is_valid_modal_child(&serde_json::json!({"type": "card"})));
+        assert!(!is_valid_modal_child(&serde_json::json!({})));
+        assert!(!is_valid_modal_child(&serde_json::json!(null)));
+        assert!(!is_valid_modal_child(&serde_json::json!("text")));
     }
 }
