@@ -149,6 +149,14 @@ impl MessengerAdapter {
     pub fn render_formatted(&self, ast: &chat_sdk_chat::markdown::Node) -> String {
         crate::markdown::MessengerFormatConverter::new().from_ast(ast)
     }
+
+    /// Open a Direct Message with `user_id`. 1:1 with upstream
+    /// `adapter.openDM(userId)` which returns
+    /// `encodeThreadId({recipientId: userId})`. No HTTP call —
+    /// Messenger conversations are addressed by recipient id.
+    pub fn open_dm(&self, user_id: &str) -> String {
+        encode_thread_id(user_id)
+    }
 }
 
 #[async_trait]
@@ -437,6 +445,15 @@ mod tests {
     // helpers ignore the thread id structure.
 
     #[test]
+    // ---------- openDM (1 upstream case) ----------
+    #[test]
+    fn open_dm_encodes_the_thread_id_for_the_recipient() {
+        // 1:1 with upstream's `openDM(userId)` which is the same
+        // as `encodeThreadId({recipientId: userId})`.
+        let adapter = MessengerAdapter::new(MessengerAdapterOptions::new("p", "v"));
+        assert_eq!(adapter.open_dm("USER_123"), "messenger:USER_123");
+    }
+
     // ---------- renderFormatted (1 upstream case) ----------
     #[test]
     fn render_formatted_should_render_markdown_from_ast() {

@@ -146,6 +146,19 @@ impl TelegramAdapter {
     pub fn render_formatted(&self, ast: &chat_sdk_chat::markdown::Node) -> String {
         crate::markdown::TelegramFormatConverter::new().from_ast(ast)
     }
+
+    /// Open a Direct Message with `user_id`. 1:1 with upstream
+    /// `adapter.openDM(userId)` which returns
+    /// `encodeThreadId({chatId: userId})`. Upstream passes the
+    /// `userId` string into the encoder; the Rust encoder requires
+    /// a numeric `chat_id`, so this parses `user_id` as `i64` and
+    /// returns `None` if non-numeric. Returns the encoded thread
+    /// id (no HTTP call — Telegram conversations are addressed by
+    /// numeric chat id).
+    pub fn open_dm(&self, user_id: &str) -> Option<String> {
+        let chat_id: i64 = user_id.parse().ok()?;
+        Some(encode_thread_id(chat_id, None))
+    }
 }
 
 #[async_trait]
@@ -726,6 +739,23 @@ mod tests {
     // chat ids) and groups/supergroups/channels (negative chat ids).
 
     #[test]
+    // ---------- openDM (2 cases) ----------
+    #[test]
+    fn open_dm_encodes_a_numeric_chat_id_from_a_string_user_id() {
+        // 1:1 with upstream's `openDM(userId)` which calls
+        // `encodeThreadId({chatId: userId})`. Rust's encoder
+        // requires `i64`, so the string-to-int parse layer is
+        // explicit here.
+        let adapter = TelegramAdapter::new(TelegramAdapterOptions::new("tok"));
+        assert_eq!(adapter.open_dm("42").as_deref(), Some("telegram:42"));
+    }
+
+    #[test]
+    fn open_dm_returns_none_for_non_numeric_user_ids() {
+        let adapter = TelegramAdapter::new(TelegramAdapterOptions::new("tok"));
+        assert_eq!(adapter.open_dm("not-a-number"), None);
+    }
+
     // ---------- renderFormatted (1 upstream case) ----------
     #[test]
     fn render_formatted_should_render_markdown_from_ast() {

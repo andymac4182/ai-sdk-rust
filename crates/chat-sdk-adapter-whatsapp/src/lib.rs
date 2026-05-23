@@ -139,6 +139,16 @@ impl WhatsappAdapter {
     pub fn render_formatted(&self, ast: &chat_sdk_chat::markdown::Node) -> String {
         crate::markdown::WhatsAppFormatConverter::new().from_ast(ast)
     }
+
+    /// Open a Direct Message with `user_id` (E.164 customer phone).
+    /// 1:1 with upstream `adapter.openDM(userId)` which returns
+    /// `encodeThreadId({phoneNumberId: this.phoneNumberId, userWaId:
+    /// userId})`. No HTTP call — WhatsApp Cloud API conversations
+    /// are addressed by the business phone-number id + customer
+    /// phone number.
+    pub fn open_dm(&self, user_id: &str) -> String {
+        encode_thread_id(&self.options.phone_number_id, user_id)
+    }
 }
 
 #[async_trait]
@@ -595,6 +605,15 @@ mod tests {
         let text = "x".repeat(10000);
         let result = split_message(&text);
         assert_eq!(result.join(""), text);
+    }
+
+    // ---------- openDM (1 upstream case) ----------
+    #[test]
+    fn open_dm_builds_the_thread_id_from_phone_number_id_and_user_wa_id() {
+        // 1:1 with upstream's `openDM(userId)` which calls
+        // `encodeThreadId({phoneNumberId, userWaId: userId})`.
+        let adapter = WhatsappAdapter::new(WhatsappAdapterOptions::new("PNID", "a", "v"));
+        assert_eq!(adapter.open_dm("15551234567"), "whatsapp:PNID:15551234567");
     }
 
     // ---------- renderFormatted (1 upstream case) ----------
