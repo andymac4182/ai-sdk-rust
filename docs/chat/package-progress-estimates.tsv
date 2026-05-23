@@ -2,5 +2,5 @@
 # Conservative completion estimates for `in-progress` rows in docs/chat/upstream-parity.md.
 # Verified and js-only-documented rows are forced to 100% by the generator; not-started rows are forced to 0%.
 # Do not add rows for non-in-progress packages.
-chat	50	Crate + colocated 1:1 tests for errors (17) + logger (13) + chat_singleton (5). markdown subset (33 of 122) and cards subset (16 of 28 - leaf elements only, Section/Actions/Table/Card/union deferred). Fourteen types layers + FormattedContent placeholder + placeholder Adapter/StateAdapter traits (73 additive serde tests). 5/23 upstream test files mapped, 157 Rust tests total.
+chat	52	Crate + colocated 1:1 tests for errors (17) + logger (13) + chat_singleton (5). Module subsets: markdown 33/122, cards 16/28, modals 7/29. Fourteen types layers + FormattedContent placeholder + placeholder Adapter/StateAdapter traits (73 additive serde tests). 6/23 upstream test files mapped, 164 Rust tests total. cards ActionsElement + SectionElement now unblocked.
 adapter-shared	25	Crate + idiomatic colocated tests for errors (24 cases 1:1 with packages/adapter-shared/src/errors.test.ts). 1/4 upstream test files mapped. Remaining: adapter-utils, buffer-utils, card-utils modules.
