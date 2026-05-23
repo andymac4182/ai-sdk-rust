@@ -623,6 +623,107 @@ pub struct PostableMarkdown {
     pub markdown: String,
 }
 
+/// AST postable. 1:1 port of upstream `interface PostableAst`. The
+/// `ast` field carries an mdast `Root` node which the adapter renders
+/// into platform-specific markup.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PostableAst {
+    /// mdast root node, converted to platform format.
+    pub ast: crate::markdown::Root,
+    /// File/image attachments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<Attachment>>,
+    /// Files to upload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<FileUpload>>,
+}
+
+/// Card postable. 1:1 port of upstream `interface PostableCard`.
+/// Wraps a [`CardElement`] with optional fallback text and files for
+/// platforms that can't render rich cards.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PostableCard {
+    /// Rich card element.
+    pub card: crate::cards::CardElement,
+    /// Fallback text for platforms/clients that can't render cards.
+    #[serde(
+        rename = "fallbackText",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub fallback_text: Option<String>,
+    /// Files to upload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<FileUpload>>,
+}
+
+/// Input type for adapter postMessage/editMessage methods. 1:1 port of
+/// upstream `type AdapterPostableMessage = string | PostableRaw |
+/// PostableMarkdown | PostableAst | PostableCard | CardElement`.
+///
+/// The variants are ordered so serde untagged matching picks the most
+/// specific shape first: structs whose tag fields disambiguate
+/// (`raw`/`markdown`/`ast`/`card`/`type:"card"`) come before the
+/// catch-all `String`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AdapterPostableMessage {
+    /// `{ raw: string, ... }` — raw text passed through to the platform.
+    Raw(PostableRaw),
+    /// `{ markdown: string, ... }` — markdown converted by the adapter.
+    Markdown(PostableMarkdown),
+    /// `{ ast: Root, ... }` — pre-built mdast AST.
+    Ast(PostableAst),
+    /// `{ card: CardElement, ... }` — card with optional fallback.
+    Card(PostableCard),
+    /// Direct [`CardElement`] (carries `type: "card"` itself).
+    CardElement(crate::cards::CardElement),
+    /// Plain string — passed through as raw text.
+    Text(String),
+}
+
+impl From<PostableRaw> for AdapterPostableMessage {
+    fn from(value: PostableRaw) -> Self {
+        Self::Raw(value)
+    }
+}
+
+impl From<PostableMarkdown> for AdapterPostableMessage {
+    fn from(value: PostableMarkdown) -> Self {
+        Self::Markdown(value)
+    }
+}
+
+impl From<PostableAst> for AdapterPostableMessage {
+    fn from(value: PostableAst) -> Self {
+        Self::Ast(value)
+    }
+}
+
+impl From<PostableCard> for AdapterPostableMessage {
+    fn from(value: PostableCard) -> Self {
+        Self::Card(value)
+    }
+}
+
+impl From<crate::cards::CardElement> for AdapterPostableMessage {
+    fn from(value: crate::cards::CardElement) -> Self {
+        Self::CardElement(value)
+    }
+}
+
+impl From<String> for AdapterPostableMessage {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+
+impl From<&str> for AdapterPostableMessage {
+    fn from(value: &str) -> Self {
+        Self::Text(value.to_string())
+    }
+}
+
 /// Media type of an [`Attachment`]. 1:1 port of upstream
 /// `"image" | "file" | "video" | "audio"` literal union on
 /// [`Attachment::kind`].
@@ -2380,5 +2481,69 @@ mod tests {
         assert!(json.contains("\"email\":\"ada@example.com\""));
         let back: UserInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(back, user);
+    }
+
+    #[test]
+    fn postable_ast_round_trips_through_serde() {
+        let ast = PostableAst {
+            ast: crate::markdown::root(vec![crate::markdown::Node::Paragraph(
+                crate::markdown::paragraph(vec![crate::markdown::Node::Text(
+                    crate::markdown::text("hello"),
+                )]),
+            )]),
+            attachments: None,
+            files: None,
+        };
+        let json = serde_json::to_string(&ast).unwrap();
+        let back: PostableAst = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ast);
+    }
+
+    #[test]
+    fn postable_card_round_trips_through_serde() {
+        let card = crate::cards::card(crate::cards::CardOptions {
+            title: Some("Test".to_string()),
+            ..Default::default()
+        });
+        let pc = PostableCard {
+            card,
+            fallback_text: Some("plain".to_string()),
+            files: None,
+        };
+        let json = serde_json::to_string(&pc).unwrap();
+        assert!(json.contains("\"fallbackText\":\"plain\""));
+        let back: PostableCard = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, pc);
+    }
+
+    #[test]
+    fn adapter_postable_message_dispatches_each_variant_through_untagged_serde() {
+        // Raw
+        let raw_json = r#"{"raw":"hi"}"#;
+        let raw: AdapterPostableMessage = serde_json::from_str(raw_json).unwrap();
+        assert!(matches!(raw, AdapterPostableMessage::Raw(_)));
+
+        // Markdown
+        let md_json = r#"{"markdown":"**hi**"}"#;
+        let md: AdapterPostableMessage = serde_json::from_str(md_json).unwrap();
+        assert!(matches!(md, AdapterPostableMessage::Markdown(_)));
+
+        // Card (PostableCard wrapper)
+        let card = crate::cards::card(crate::cards::CardOptions {
+            title: Some("t".to_string()),
+            ..Default::default()
+        });
+        let pc = PostableCard {
+            card,
+            fallback_text: None,
+            files: None,
+        };
+        let wrapper_json = serde_json::to_string(&pc).unwrap();
+        let wrap: AdapterPostableMessage = serde_json::from_str(&wrapper_json).unwrap();
+        assert!(matches!(wrap, AdapterPostableMessage::Card(_)));
+
+        // Plain string text
+        let s: AdapterPostableMessage = AdapterPostableMessage::from("plain");
+        assert!(matches!(s, AdapterPostableMessage::Text(_)));
     }
 }

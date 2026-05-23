@@ -10,6 +10,7 @@
 //! naming-conventions exception in
 //! [`scripts/check-naming-conventions.sh`](../../scripts/check-naming-conventions.sh).
 
+pub mod adapter_utils;
 pub mod buffer_utils;
 pub mod card_utils;
 pub mod errors;
