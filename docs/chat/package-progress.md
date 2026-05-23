@@ -3,7 +3,7 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 20.4%
+- Average estimated completion: 20.5%
 - Portable package average: 15.8%
 - Closed package rows: 3 / 18
 - Strict portable verified rows: 2 / 17
@@ -22,7 +22,7 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
-| `@chat-sdk/chat` | 68% | In progress | core SDK package | Crate + colocated 1:1 tests for errors (17) + logger (13) + chat_singleton (5) + emoji (42 of 42, 1:1 complete).... |
+| `@chat-sdk/chat` | 69% | In progress | core SDK package | Crate + colocated 1:1 tests for errors (17) + logger (13) + chat_singleton (5) + emoji (42 of 42, 1:1 complete) +... |
 
 ## Not Started
 
