@@ -6337,7 +6337,15 @@ fn validate_tool_execution_context(
     tool: &Tool,
     context: Option<&JsonValue>,
 ) -> Result<Option<JsonValue>, TypeValidationError> {
-    let Some(context_schema) = tool.context_schema() else {
+    validate_tool_context(&tool.name, context, tool.context_schema())
+}
+
+fn validate_tool_context(
+    tool_name: &str,
+    context: Option<&JsonValue>,
+    context_schema: Option<&crate::provider_utils::FlexibleSchema<JsonValue>>,
+) -> Result<Option<JsonValue>, TypeValidationError> {
+    let Some(context_schema) = context_schema else {
         return Ok(context.cloned());
     };
 
@@ -6349,7 +6357,7 @@ fn validate_tool_execution_context(
         Some(
             TypeValidationContext::new()
                 .with_field("tool context")
-                .with_entity_name(tool.name.clone()),
+                .with_entity_name(tool_name.to_string()),
         ),
     )
     .map(Some)
@@ -7695,6 +7703,7 @@ mod tests {
         experimental_filter_active_tools, filter_active_tools, generate_text, has_tool_call,
         is_loop_finished, is_step_count, is_stop_condition_met, normalize_tool_approval_status,
         prune_messages, resolve_tool_approval, step_count_is, sum_token_counts,
+        validate_tool_context,
     };
     use crate::file_data::{FileData, FileDataContent};
     use crate::headers::Headers;
@@ -7724,8 +7733,8 @@ mod tests {
         JsonParseError, ProviderMetadata, ProviderOptions, SpecificationVersion,
     };
     use crate::provider_utils::{
-        ExperimentalSandbox, SandboxCommandOptions, SandboxCommandResult, SandboxRunCommandFuture,
-        Schema, Tool, ToolExecutionError, ValidationResult, dynamic_tool,
+        ExperimentalSandbox, FlexibleSchema, SandboxCommandOptions, SandboxCommandResult,
+        SandboxRunCommandFuture, Schema, Tool, ToolExecutionError, ValidationResult, dynamic_tool,
     };
     use crate::retry::DEFAULT_MAX_RETRIES;
     use crate::telemetry::{
@@ -8542,10 +8551,94 @@ mod tests {
     }
 
     #[test]
-    fn collect_tool_approvals_returns_empty_when_latest_message_is_not_tool() {
+    fn validate_tool_context_returns_the_tool_context_as_is_when_no_context_schema_is_defined() {
+        let tool_context = json!({ "apiKey": 123 });
+
+        let result =
+            validate_tool_context("weather", Some(&tool_context), None).expect("context validates");
+
+        assert_eq!(result, Some(tool_context));
+    }
+
+    #[test]
+    fn validate_tool_context_returns_the_validated_tool_context_when_the_context_schema_matches() {
+        let context_schema = FlexibleSchema::from(
+            Schema::new(
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "apiKey": { "type": "string" }
+                    },
+                    "required": ["apiKey"]
+                })
+                .as_object()
+                .expect("schema is an object")
+                .clone(),
+            )
+            .with_validator(|value| {
+                if value.get("apiKey").and_then(JsonValue::as_str).is_some() {
+                    ValidationResult::success(value.clone())
+                } else {
+                    ValidationResult::failure("expected apiKey string")
+                }
+            }),
+        );
+        let tool_context = json!({ "apiKey": "secret" });
+
+        let result = validate_tool_context("weather", Some(&tool_context), Some(&context_schema))
+            .expect("context validates");
+
+        assert_eq!(result, Some(json!({ "apiKey": "secret" })));
+    }
+
+    #[test]
+    fn validate_tool_context_throws_type_validation_error_when_the_context_schema_validation_fails()
+    {
+        let context_schema = FlexibleSchema::from(
+            Schema::new(
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "apiKey": { "type": "string" }
+                    },
+                    "required": ["apiKey"]
+                })
+                .as_object()
+                .expect("schema is an object")
+                .clone(),
+            )
+            .with_validator(|value| {
+                if value.get("apiKey").and_then(JsonValue::as_str).is_some() {
+                    ValidationResult::success(value.clone())
+                } else {
+                    ValidationResult::failure("expected apiKey string")
+                }
+            }),
+        );
+        let tool_context = json!({ "apiKey": 123 });
+
+        let error = validate_tool_context("weather", Some(&tool_context), Some(&context_schema))
+            .expect_err("context validation fails");
+
+        assert_eq!(error.value(), &tool_context);
+        assert_eq!(
+            error.context().and_then(|context| context.field.as_deref()),
+            Some("tool context")
+        );
+        assert_eq!(
+            error
+                .context()
+                .and_then(|context| context.entity_name.as_deref()),
+            Some("weather")
+        );
+    }
+
+    #[test]
+    fn collect_tool_approvals_should_not_return_any_tool_approvals_when_the_last_message_is_not_a_tool_message()
+     {
         let messages = vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
             vec![LanguageModelUserContentPart::Text(
-                LanguageModelTextPart::new("Hello"),
+                LanguageModelTextPart::new("Hello, world!"),
             )],
         ))];
 
@@ -8563,42 +8656,49 @@ mod tests {
     }
 
     #[test]
-    fn collect_tool_approvals_splits_approved_and_denied_responses() {
+    fn collect_tool_approvals_should_ignore_approval_request_without_response() {
         let messages = vec![
             LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
                 LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
-                    "call-approved",
-                    "weather",
-                    json!({ "city": "Brisbane" }),
+                    "call-1",
+                    "tool1",
+                    json!({ "value": "test-input" }),
                 )),
                 LanguageModelAssistantContentPart::ToolApprovalRequest(
-                    LanguageModelToolApprovalRequestPart::new("approval-approved", "call-approved")
-                        .with_automatic(true),
+                    LanguageModelToolApprovalRequestPart::new("approval-id-1", "call-1"),
                 ),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(Vec::new())),
+        ];
+
+        let approvals = collect_tool_approvals(&messages).expect("approvals collect");
+
+        assert!(approvals.approved_tool_approvals.is_empty());
+        assert!(approvals.denied_tool_approvals.is_empty());
+    }
+
+    #[test]
+    fn collect_tool_approvals_should_return_approved_approval_with_approved_response() {
+        let messages = vec![
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
                 LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
-                    "call-denied",
-                    "search",
-                    json!({ "query": "forecast" }),
+                    "call-1",
+                    "tool1",
+                    json!({ "value": "test-input" }),
                 )),
                 LanguageModelAssistantContentPart::ToolApprovalRequest(
-                    LanguageModelToolApprovalRequestPart::new("approval-denied", "call-denied"),
+                    LanguageModelToolApprovalRequestPart::new("approval-id-1", "call-1"),
                 ),
             ])),
             LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
                 LanguageModelToolContentPart::ToolApprovalResponse(
-                    LanguageModelToolApprovalResponsePart::new("approval-approved", true),
-                ),
-                LanguageModelToolContentPart::ToolApprovalResponse(
-                    LanguageModelToolApprovalResponsePart::new("approval-denied", false)
-                        .with_reason("manual denial"),
+                    LanguageModelToolApprovalResponsePart::new("approval-id-1", true),
                 ),
             ])),
         ];
 
         let approvals = collect_tool_approvals(&messages).expect("approvals collect");
 
-        assert_eq!(approvals.approved_tool_approvals.len(), 1);
-        assert_eq!(approvals.denied_tool_approvals.len(), 1);
         assert_eq!(
             serde_json::to_value(&approvals).expect("approvals serialize"),
             json!({
@@ -8606,44 +8706,23 @@ mod tests {
                     {
                         "approvalRequest": {
                             "type": "tool-approval-request",
-                            "approvalId": "approval-approved",
-                            "toolCallId": "call-approved",
-                            "isAutomatic": true
+                            "approvalId": "approval-id-1",
+                            "toolCallId": "call-1"
                         },
                         "approvalResponse": {
                             "type": "tool-approval-response",
-                            "approvalId": "approval-approved",
+                            "approvalId": "approval-id-1",
                             "approved": true
                         },
                         "toolCall": {
                             "type": "tool-call",
-                            "toolCallId": "call-approved",
-                            "toolName": "weather",
-                            "input": { "city": "Brisbane" }
+                            "toolCallId": "call-1",
+                            "toolName": "tool1",
+                            "input": { "value": "test-input" }
                         }
                     }
                 ],
-                "deniedToolApprovals": [
-                    {
-                        "approvalRequest": {
-                            "type": "tool-approval-request",
-                            "approvalId": "approval-denied",
-                            "toolCallId": "call-denied"
-                        },
-                        "approvalResponse": {
-                            "type": "tool-approval-response",
-                            "approvalId": "approval-denied",
-                            "approved": false,
-                            "reason": "manual denial"
-                        },
-                        "toolCall": {
-                            "type": "tool-call",
-                            "toolCallId": "call-denied",
-                            "toolName": "search",
-                            "input": { "query": "forecast" }
-                        }
-                    }
-                ]
+                "deniedToolApprovals": []
             })
         );
 
@@ -8654,26 +8733,27 @@ mod tests {
     }
 
     #[test]
-    fn collect_tool_approvals_ignores_processed_approval_responses() {
+    fn collect_tool_approvals_should_return_processed_approval_with_approved_response_and_tool_result()
+     {
         let messages = vec![
             LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
                 LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
                     "call-1",
-                    "weather",
-                    json!({ "city": "Brisbane" }),
+                    "tool1",
+                    json!({ "value": "test-input" }),
                 )),
                 LanguageModelAssistantContentPart::ToolApprovalRequest(
-                    LanguageModelToolApprovalRequestPart::new("approval-1", "call-1"),
+                    LanguageModelToolApprovalRequestPart::new("approval-id-1", "call-1"),
                 ),
             ])),
             LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
                 LanguageModelToolContentPart::ToolApprovalResponse(
-                    LanguageModelToolApprovalResponsePart::new("approval-1", true),
+                    LanguageModelToolApprovalResponsePart::new("approval-id-1", true),
                 ),
                 LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
                     "call-1",
-                    "weather",
-                    LanguageModelToolResultOutput::text("sunny"),
+                    "tool1",
+                    LanguageModelToolResultOutput::text("test-output"),
                 )),
             ])),
         ];
@@ -8682,6 +8762,58 @@ mod tests {
 
         assert!(approvals.approved_tool_approvals.is_empty());
         assert!(approvals.denied_tool_approvals.is_empty());
+    }
+
+    #[test]
+    fn collect_tool_approvals_should_return_denied_approval_with_denied_response() {
+        let messages = vec![
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call-1",
+                    "tool1",
+                    json!({ "value": "test-input" }),
+                )),
+                LanguageModelAssistantContentPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequestPart::new("approval-id-1", "call-1"),
+                ),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolApprovalResponse(
+                    LanguageModelToolApprovalResponsePart::new("approval-id-1", false)
+                        .with_reason("test-reason"),
+                ),
+            ])),
+        ];
+
+        let approvals = collect_tool_approvals(&messages).expect("approvals collect");
+
+        assert_eq!(
+            serde_json::to_value(&approvals).expect("approvals serialize"),
+            json!({
+                "approvedToolApprovals": [],
+                "deniedToolApprovals": [
+                    {
+                        "approvalRequest": {
+                            "type": "tool-approval-request",
+                            "approvalId": "approval-id-1",
+                            "toolCallId": "call-1"
+                        },
+                        "approvalResponse": {
+                            "type": "tool-approval-response",
+                            "approvalId": "approval-id-1",
+                            "approved": false,
+                            "reason": "test-reason"
+                        },
+                        "toolCall": {
+                            "type": "tool-call",
+                            "toolCallId": "call-1",
+                            "toolName": "tool1",
+                            "input": { "value": "test-input" }
+                        }
+                    }
+                ]
+            })
+        );
     }
 
     #[test]
