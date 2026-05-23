@@ -297,6 +297,131 @@ mod tests {
         assert!(result.contains("**[Approve]**"));
     }
 
+    #[test]
+    fn should_render_card_with_image() {
+        use chat_sdk_chat::cards::{ImageElement, ImageKind};
+        let mut card = empty_card("Image Card");
+        card.children = vec![CardChild::Image(ImageElement {
+            url: "https://example.com/image.png".to_string(),
+            alt: Some("Example image".to_string()),
+            kind: ImageKind::Image,
+        })];
+        let result = card_to_github_markdown(&card);
+        assert!(result.contains("![Example image](https://example.com/image.png)"));
+    }
+
+    #[test]
+    fn should_render_card_with_divider() {
+        use chat_sdk_chat::cards::{DividerElement, DividerKind};
+        let card = CardElement {
+            title: None,
+            subtitle: None,
+            image_url: None,
+            kind: CardKind::Card,
+            children: vec![
+                text("Before"),
+                CardChild::Divider(DividerElement {
+                    kind: DividerKind::Divider,
+                }),
+                text("After"),
+            ],
+        };
+        let result = card_to_github_markdown(&card);
+        assert!(result.contains("---"));
+        assert!(result.contains("Before"));
+        assert!(result.contains("After"));
+    }
+
+    #[test]
+    fn should_render_card_with_section() {
+        use chat_sdk_chat::cards::{SectionElement, SectionKind};
+        let card = CardElement {
+            title: None,
+            subtitle: None,
+            image_url: None,
+            kind: CardKind::Card,
+            children: vec![CardChild::Section(SectionElement {
+                kind: SectionKind::Section,
+                children: vec![text("Section content")],
+            })],
+        };
+        let result = card_to_github_markdown(&card);
+        assert!(result.contains("Section content"));
+    }
+
+    #[test]
+    fn should_handle_text_with_different_styles() {
+        let card = CardElement {
+            title: None,
+            subtitle: None,
+            image_url: None,
+            kind: CardKind::Card,
+            children: vec![
+                CardChild::Text(TextElement {
+                    content: "Normal text".to_string(),
+                    style: None,
+                    kind: TextKind::Text,
+                }),
+                CardChild::Text(TextElement {
+                    content: "Bold text".to_string(),
+                    style: Some(TextStyle::Bold),
+                    kind: TextKind::Text,
+                }),
+                CardChild::Text(TextElement {
+                    content: "Muted text".to_string(),
+                    style: Some(TextStyle::Muted),
+                    kind: TextKind::Text,
+                }),
+            ],
+        };
+        let result = card_to_github_markdown(&card);
+        assert!(result.contains("Normal text"));
+        assert!(result.contains("**Bold text**"));
+        assert!(result.contains("_Muted text_"));
+    }
+
+    // ---------- cardToPlainText (1 upstream case + ported in additive) ----------
+
+    #[test]
+    fn should_generate_plain_text_from_card() {
+        let mut card = empty_card("Hello");
+        card.subtitle = Some("World".to_string());
+        card.children = vec![
+            text("Some content"),
+            CardChild::Fields(FieldsElement {
+                children: vec![field("Key", "Value")],
+                kind: FieldsKind::Fields,
+            }),
+        ];
+        let result = card_to_plain_text(&card);
+        assert!(result.contains("Hello"));
+        assert!(result.contains("World"));
+        assert!(result.contains("Some content"));
+        assert!(result.contains("Key: Value"));
+    }
+
+    // ---------- CardLink (1 upstream case) ----------
+    // Upstream uses `Card({ children: [CardLink({...})] })`. The Rust
+    // port models CardLink as `CardChild::Link(LinkElement)`.
+
+    #[test]
+    fn renders_card_link_as_markdown_link() {
+        use chat_sdk_chat::cards::{LinkElement, LinkKind};
+        let card = CardElement {
+            title: None,
+            subtitle: None,
+            image_url: None,
+            kind: CardKind::Card,
+            children: vec![CardChild::Link(LinkElement {
+                url: "https://example.com".to_string(),
+                label: "Click here".to_string(),
+                kind: LinkKind::Link,
+            })],
+        };
+        let markdown = card_to_github_markdown(&card);
+        assert_eq!(markdown, "[Click here](https://example.com)");
+    }
+
     // ---------- additive Rust-side coverage ----------
 
     #[test]
