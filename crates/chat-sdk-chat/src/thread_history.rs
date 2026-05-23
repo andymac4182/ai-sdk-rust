@@ -54,6 +54,40 @@ pub fn history_key(thread_id: &str) -> String {
     format!("{KEY_PREFIX}{thread_id}")
 }
 
+/// Predicate — does this state-store key carry the thread-history
+/// [`KEY_PREFIX`]? Matches upstream's inline
+/// `key.startsWith(KEY_PREFIX)` checks at iteration sites and the
+/// implicit "is this our key namespace" filter inside
+/// `ThreadHistoryCache.getMessages`.
+pub fn is_history_key(key: &str) -> bool {
+    key.starts_with(KEY_PREFIX)
+}
+
+/// Inverse of [`history_key`]: extract the thread id from a stored
+/// thread-history key. Returns `None` for inputs that don't carry the
+/// [`KEY_PREFIX`].
+///
+/// Mirrors the inline `key.slice(KEY_PREFIX.length)` upstream uses
+/// when iterating cross-thread history keys.
+pub fn thread_id_from_history_key(key: &str) -> Option<&str> {
+    key.strip_prefix(KEY_PREFIX)
+}
+
+impl ThreadHistoryConfig {
+    /// Effective max-messages cap with the upstream default applied.
+    /// 1:1 with upstream's inline
+    /// `this.maxMessages = config.maxMessages ?? DEFAULT_MAX_MESSAGES`.
+    pub fn max_messages_or_default(&self) -> usize {
+        self.max_messages.unwrap_or(DEFAULT_MAX_MESSAGES)
+    }
+
+    /// Effective TTL with the upstream default applied. 1:1 with
+    /// upstream's inline `this.ttlMs = config.ttlMs ?? DEFAULT_TTL_MS`.
+    pub fn ttl_ms_or_default(&self) -> u64 {
+        self.ttl_ms.unwrap_or(DEFAULT_TTL_MS)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Coverage notes for `packages/chat/src/thread-history.test.ts`:
@@ -87,5 +121,74 @@ mod tests {
             "msg-history:slack:C123:1234.5678"
         );
         assert_eq!(history_key(""), "msg-history:");
+    }
+
+    // ---------- slice 111: predicate + inverse + default-applied getters ----------
+
+    #[test]
+    fn is_history_key_detects_the_prefix() {
+        assert!(is_history_key("msg-history:thread-1"));
+        assert!(is_history_key("msg-history:"));
+    }
+
+    #[test]
+    fn is_history_key_rejects_unrelated_keys() {
+        assert!(!is_history_key("transcripts:user:U123"));
+        assert!(!is_history_key("plain-key"));
+        assert!(!is_history_key(""));
+    }
+
+    #[test]
+    fn thread_id_from_history_key_strips_the_prefix() {
+        assert_eq!(
+            thread_id_from_history_key("msg-history:slack:C123:1234.5678"),
+            Some("slack:C123:1234.5678")
+        );
+        assert_eq!(thread_id_from_history_key("msg-history:"), Some(""));
+    }
+
+    #[test]
+    fn thread_id_from_history_key_returns_none_for_non_history_keys() {
+        assert!(thread_id_from_history_key("transcripts:user:U123").is_none());
+        assert!(thread_id_from_history_key("plain").is_none());
+        assert!(thread_id_from_history_key("").is_none());
+    }
+
+    #[test]
+    fn history_key_and_inverse_round_trip() {
+        for tid in ["t1", "slack:C:1.2", "", "with:colons:and:more"] {
+            let key = history_key(tid);
+            assert_eq!(thread_id_from_history_key(&key), Some(tid));
+        }
+    }
+
+    #[test]
+    fn thread_history_config_max_messages_defaults_to_upstream_constant() {
+        let cfg = ThreadHistoryConfig::default();
+        assert_eq!(cfg.max_messages_or_default(), DEFAULT_MAX_MESSAGES);
+    }
+
+    #[test]
+    fn thread_history_config_max_messages_returns_explicit_value_when_set() {
+        let cfg = ThreadHistoryConfig {
+            max_messages: Some(25),
+            ttl_ms: None,
+        };
+        assert_eq!(cfg.max_messages_or_default(), 25);
+    }
+
+    #[test]
+    fn thread_history_config_ttl_defaults_to_upstream_seven_days() {
+        let cfg = ThreadHistoryConfig::default();
+        assert_eq!(cfg.ttl_ms_or_default(), DEFAULT_TTL_MS);
+    }
+
+    #[test]
+    fn thread_history_config_ttl_returns_explicit_value_when_set() {
+        let cfg = ThreadHistoryConfig {
+            max_messages: None,
+            ttl_ms: Some(60_000),
+        };
+        assert_eq!(cfg.ttl_ms_or_default(), 60_000);
     }
 }
