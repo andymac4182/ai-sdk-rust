@@ -2914,3 +2914,66 @@ module-aliasing test).
   vs deadpool + …).
 - **postToCallbackUrl HTTP** (3 cases) — needs a mock-fetch trait
   abstraction.
+
+### 2026-05-24 - slices 252..259
+
+**Slices covered**
+
+- 252 Messenger `MAX_BUTTONS`/`MAX_BUTTON_TITLE_LENGTH`/`MAX_SUBTITLE_LENGTH`/
+  `MAX_BUTTON_TEMPLATE_TEXT_LENGTH`/`MAX_TITLE_LENGTH` consts (1 case).
+- 253 Teams `ADAPTIVE_CARD_SCHEMA` + `ADAPTIVE_CARD_VERSION` consts (1 case).
+- 254 chat `DEFAULT_LOCK_TTL_MS` + `DEDUPE_TTL_MS` + `MODAL_CONTEXT_TTL_MS` consts (1 case).
+- 255 chat `is_slack_user_id` + `is_discord_snowflake` + `is_linear_uuid` +
+  `is_numeric_user_id` user-id pattern predicates (4 cases).
+- 256 Telegram `TELEGRAM_SECRET_TOKEN_HEADER` + `TELEGRAM_DEFAULT_POLLING_TIMEOUT_SECONDS` consts (1 case).
+- 257 WhatsApp `DEFAULT_API_VERSION = "v21.0"` const + corrected send_url
+  from hardcoded `v22.0` to match upstream (1 case).
+- 258 Messenger `GRAPH_API_VERSION` aligned to `"v21.0"` (was `"v22.0"`),
+  matching upstream (no new test; behavior change).
+- 259 Discord `DISCORD_MAX_CONTENT_LENGTH = 2000` const (1 case).
+
+**What the brief got wrong or left out**
+
+- The Rust port had drifted from upstream on the Meta Graph API
+  version: WhatsApp and Messenger both used `v22.0` while upstream
+  pinned `v21.0`. Slices 257-258 corrected this. Future ports
+  should grep upstream `const DEFAULT_API_VERSION` against the Rust
+  send-URL helper before claiming parity for that adapter.
+- Several adapter modules expose constants as `private`/non-`export`
+  upstream. The Rust port has been exposing them at module scope
+  (`pub const`) for testability + downstream-caller use. This is a
+  deliberate divergence — document it once in the brief rather than
+  case-by-case in each slice entry.
+- The `chat::adapterFor(userId)` regex predicates (`SLACK_USER_ID_REGEX`,
+  `DISCORD_SNOWFLAKE_REGEX`, `LINEAR_UUID_REGEX`, `NUMERIC_REGEX`)
+  upstream are `RegExp` objects with `.test()`. The Rust port
+  uses pure-byte predicates (`is_slack_user_id` etc.) without
+  pulling in the `regex` crate. Trade-off: more LOC per predicate
+  but no runtime regex compilation + zero crate dep.
+
+**Stale or misleading guidance**
+
+- The brief's "use upstream's existing test suite as the parity
+  bar" doesn't cover private consts — they're never tested
+  upstream. The Rust port adds 1-case shape-match tests for each
+  private const it exposes; these are additive coverage rather
+  than mapped to upstream `it()` blocks.
+- The brief still doesn't have a structured way to surface API
+  version drift between Rust and upstream. Slice 257 found one
+  (WhatsApp `v22` vs upstream `v21`) by accident — future
+  refinement cycles should check for similar drift at every URL
+  template.
+
+**Edits applied**
+
+- `docs/chat/goal-refinements.md`: this entry.
+
+**Open refinements deferred**
+
+- **Slack Block Kit** (34 cases), **Discord embeds** (31),
+  **Messenger templates** (~50), **Teams Adaptive Cards** (26),
+  **chat-sdk-chat ChannelImpl/ThreadImpl/ChatImpl** (~470), all
+  adapter `index.test.ts` integration suites — all still blocked.
+- **state backend client wire-up** still blocked on workspace
+  runtime decision.
+- **postToCallbackUrl HTTP** (3 cases) — still blocked.
