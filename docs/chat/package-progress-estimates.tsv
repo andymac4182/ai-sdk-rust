@@ -11,3 +11,4 @@ adapter-discord	10	Crate scaffold (slice 134): DiscordAdapter + thread-id codec 
 adapter-linear	10	Crate scaffold (slice 136): LinearAdapter + thread-id codec. 11 tests. HTTP I/O + GraphQL deferred.
 adapter-gchat	10	Crate scaffold (slice 137): GchatAdapter + thread-id codec (incl. empty-thread top-level sentinel). 14 tests. OAuth2 + HTTP I/O deferred.
 adapter-teams	10	Crate scaffold (slice 138): TeamsAdapter + thread-id codec (rsplit on last colon for Bot Framework conversation ids). 12 tests. HTTP I/O + Bot Framework auth deferred.
+adapter-slack	10	Crate scaffold (slice 139): SlackAdapter + thread-id codec (is_dm/is_group channel-id prefix predicates). 14 tests. Web API + Socket Mode deferred.
