@@ -1414,3 +1414,106 @@ reply option + pre-minted bearer, 14 -> 17 tests, 10% -> 15%).
   `parseMessage(raw): Message` shapes more faithfully. The
   current `serde_json::Value` shim is portable but loses
   type information.
+
+### 2026-05-24 — slices 160..168
+
+**What the brief got wrong or left out**
+
+- **Per-adapter universal-method support varies wildly**, but is
+  documentable upstream. The 4-method rollout (slices 160-168)
+  surfaced these per-platform deviations from "all platforms
+  support edit/delete/react/typing":
+  - **Messenger**: edit/delete/reactions all `throw
+    ValidationError`. Only `typing_on` via Send API works.
+  - **WhatsApp**: edit/delete `throw Error`. Reactions work via
+    the Cloud API (type: "reaction" payload). startTyping is a
+    no-op (Cloud API has no typing indicator).
+  - **GitHub**: startTyping is a no-op (REST API has no typing
+    surface).
+  - **Teams**: addReaction `throws NotImplementedError`
+    ("not yet supported by the Teams SDK"). edit/delete via
+    Bot Framework PUT/DELETE work.
+  - **Linear**: startTyping is a no-op for comment threads;
+    only the agent-session path has Thought-activity typing.
+  - **GChat**: startTyping is a no-op ("Google Chat doesn't
+    have a typing indicator API for bots").
+  - **Slack**: addReaction must swallow `already_reacted`
+    errors as Ok(()) (idempotent semantics upstream).
+  - **Discord**: full support, but `Authorization: Bot <token>`
+    instead of `Bearer`.
+  - **Telegram**: composite message ids `<chat_id>:<msg_id>`
+    are accepted by upstream; the Rust port adds explicit
+    `decode_composite_message_id` to mirror that exactly.
+
+- **upstream verification turned up a parity violation in
+  slices 155/156/158** (fetch_subject ports on Telegram /
+  GitHub / Slack): upstream only Linear implements
+  `fetchSubject`. The three earlier slices are documented in
+  this log as Rust-port additive HTTP wiring (returning
+  Some(title/channel-name/issue-title) for adapters whose
+  platforms expose that lookup). Future work: revert OR
+  reframe in the parity ledger.
+
+**Stale or misleading guidance**
+
+- The brief's adapter-method matrix lists 8 methods × 9 adapters
+  = 72 cells. The accurate count is:
+  - 5 universal upstream methods (postMessage + the 4 added in
+    slice 159) × 9 adapters = 45 cells; **all 45 are now
+    wired** (counting NotImplemented/no-op cells that are 1:1
+    with upstream).
+  - 1 Linear-only method (fetchSubject).
+  - 2 Rust-port-only methods (post_object, parse_message)
+    that don't 1:1 map to any single upstream method —
+    post_object generalises Block Kit/Adaptive Cards/cards
+    v2; parse_message is the inverse of postMessage for
+    webhook payloads. These are reasonable Rust shapes but
+    will not show up under that exact name in upstream.
+
+**Edits applied**
+
+- `docs/chat/upstream-parity.md`: refreshed all 9 Phase-2 adapter
+  rows with slice-160..168 work + updated test counts.
+- `docs/chat/package-progress-estimates.tsv`: bumped 9 adapter
+  estimates from 15-18% to 28-30%.
+- `crates/chat-sdk-adapter-*/src/lib.rs`: 9 adapters × ~4 new
+  methods = ~36 new HTTP / no-op / unsupported impls + matching
+  4 new tests each (~36 new tests). Total adapter tests across
+  the 9 crates: 192 (was 132 before slice 158).
+- `crates/chat-sdk-chat/src/types.rs`: trait extended (slice 159)
+  with edit_message + delete_message + add_reaction +
+  start_typing defaults returning Unsupported + 4 new chat
+  tests (slice 159 entry above).
+
+**Open refinements deferred**
+
+- **post_object rollout** (9 adapters): biggest remaining
+  surface area. Per-platform rendering of cards/modals/plans:
+  Slack Block Kit, Teams Adaptive Cards, GChat cards v2,
+  Discord embeds, Linear graphql, Telegram inline keyboards,
+  WhatsApp interactive messages. ~3-5 slices per adapter.
+
+- **parse_message rollout** (9 adapters): inverse of
+  post_message — parse webhook payloads into the cross-platform
+  Message shape. Smaller scope (per-platform raw-event ->
+  thread_id + text + author + metadata) but cross-cuts the
+  message + author + timestamp types.
+
+- **Real Linear fetchSubject** (1 adapter): port the rich
+  MessageSubject shape (issue id/title/status/url/assignee/
+  labels/raw) via the Linear GraphQL `issue(id)` + state +
+  assignee + labels query.
+
+- **State-backend client wire-up**: state-redis +
+  state-ioredis + state-pg are still at 10% (NotConnected
+  placeholder). Need redis = { features = ["tokio-comp"] }
+  for the two redis crates and sqlx or tokio-postgres for pg.
+
+- **Token-mint helpers** in chat-sdk-adapter-shared:
+  login.microsoftonline.com (Teams Bot Framework) +
+  oauth2.googleapis.com (GChat service-account JWT) — both
+  needed before Teams/GChat can claim "verified".
+
+- **Slack Socket Mode + signature verification**: a sizeable
+  chunk of slack adapter's TS source. Maps to a websocket
+  client + HMAC-SHA256 verifier.
