@@ -234,6 +234,237 @@ impl Adapter for TelegramAdapter {
         // do. Both are valid outcomes.
         Ok(json["result"]["title"].as_str().map(str::to_owned))
     }
+
+    /// Edit a Telegram message via `editMessageText`. 1:1 with the
+    /// text-only path of upstream `adapter.editMessage` (card/inline
+    /// keyboard branches deferred). Decodes message_id as either a
+    /// composite `<chat_id>:<msg_id>` or a bare `<msg_id>`. Returns
+    /// the (unchanged) telegram message id as the chat-sdk id.
+    async fn edit_message(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<String> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Telegram-encoded"))
+        })?;
+        let telegram_message_id = decode_composite_message_id(message_id, decoded.chat_id)?;
+
+        let url = self.method_url("editMessageText");
+        let body = serde_json::json!({
+            "chat_id": decoded.chat_id,
+            "message_id": telegram_message_id,
+            "text": text,
+        });
+
+        let response = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() || json["ok"] != serde_json::Value::Bool(true) {
+            let description = json["description"]
+                .as_str()
+                .unwrap_or("Telegram editMessageText call failed");
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: {description}"
+            )));
+        }
+
+        Ok(format!("{}:{telegram_message_id}", decoded.chat_id))
+    }
+
+    /// Delete a Telegram message via `deleteMessage`. 1:1 with
+    /// upstream `adapter.deleteMessage`.
+    async fn delete_message(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Telegram-encoded"))
+        })?;
+        let telegram_message_id = decode_composite_message_id(message_id, decoded.chat_id)?;
+
+        let url = self.method_url("deleteMessage");
+        let body = serde_json::json!({
+            "chat_id": decoded.chat_id,
+            "message_id": telegram_message_id,
+        });
+
+        let response = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() || json["ok"] != serde_json::Value::Bool(true) {
+            let description = json["description"]
+                .as_str()
+                .unwrap_or("Telegram deleteMessage call failed");
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: {description}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Add an emoji reaction via `setMessageReaction`. 1:1 with
+    /// upstream `adapter.addReaction`. Wraps the emoji as
+    /// `[{type: "emoji", emoji}]`.
+    async fn add_reaction(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Telegram-encoded"))
+        })?;
+        let telegram_message_id = decode_composite_message_id(message_id, decoded.chat_id)?;
+
+        let url = self.method_url("setMessageReaction");
+        let body = serde_json::json!({
+            "chat_id": decoded.chat_id,
+            "message_id": telegram_message_id,
+            "reaction": [{ "type": "emoji", "emoji": emoji }],
+        });
+
+        let response = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() || json["ok"] != serde_json::Value::Bool(true) {
+            let description = json["description"]
+                .as_str()
+                .unwrap_or("Telegram setMessageReaction call failed");
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: {description}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Send a "typing…" chat action via `sendChatAction`. 1:1 with
+    /// upstream `adapter.startTyping`. The optional `status`
+    /// parameter is ignored (Telegram has no per-action status
+    /// text; upstream's signature omits it too).
+    async fn start_typing(
+        &self,
+        thread_id: &str,
+        _status: Option<&str>,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Telegram-encoded"))
+        })?;
+
+        let url = self.method_url("sendChatAction");
+        let mut body = serde_json::json!({
+            "chat_id": decoded.chat_id,
+            "action": "typing",
+        });
+        if let Some(thread_id) = decoded.message_thread_id {
+            body["message_thread_id"] = serde_json::Value::from(thread_id);
+        }
+
+        let response = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() || json["ok"] != serde_json::Value::Bool(true) {
+            let description = json["description"]
+                .as_str()
+                .unwrap_or("Telegram sendChatAction call failed");
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: {description}"
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+/// Decode a Telegram message id (composite `<chat_id>:<msg_id>` or
+/// bare `<msg_id>`). 1:1 port of upstream
+/// `decodeCompositeMessageId(messageId, expectedChatId)`. Returns
+/// an `AdapterError::InvalidPayload` for malformed input or a
+/// chat-id mismatch against the thread.
+fn decode_composite_message_id(
+    message_id: &str,
+    expected_chat_id: i64,
+) -> chat_sdk_chat::types::AdapterResult<i64> {
+    use chat_sdk_chat::types::AdapterError;
+    if let Some((chat_part, msg_part)) = message_id.split_once(':') {
+        let chat = chat_part.parse::<i64>().map_err(|_| {
+            AdapterError::InvalidPayload(format!(
+                "Telegram composite message id {message_id:?}: chat id is not numeric"
+            ))
+        })?;
+        if chat != expected_chat_id {
+            return Err(AdapterError::InvalidPayload(format!(
+                "Telegram composite message id {message_id:?}: chat id {chat} does not match thread chat id {expected_chat_id}"
+            )));
+        }
+        msg_part.parse::<i64>().map_err(|_| {
+            AdapterError::InvalidPayload(format!(
+                "Telegram composite message id {message_id:?}: message id is not numeric"
+            ))
+        })
+    } else {
+        message_id.parse::<i64>().map_err(|_| {
+            AdapterError::InvalidPayload(format!(
+                "Telegram message id {message_id:?} must be numeric or <chat_id>:<msg_id>"
+            ))
+        })
+    }
 }
 
 /// Encode a Telegram thread id. 1:1 with upstream's inline format:
@@ -397,6 +628,90 @@ mod tests {
             }
             other => panic!("expected InvalidPayload, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn adapter_edit_message_rejects_non_telegram_thread_ids() {
+        let adapter = TelegramAdapter::new(TelegramAdapterOptions::new("t"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.edit_message("slack:C1:1.0", "42", "hi"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Telegram-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_delete_message_rejects_non_telegram_thread_ids() {
+        let adapter = TelegramAdapter::new(TelegramAdapterOptions::new("t"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.delete_message("slack:C1:1.0", "42"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Telegram-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_add_reaction_rejects_non_telegram_thread_ids() {
+        let adapter = TelegramAdapter::new(TelegramAdapterOptions::new("t"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.add_reaction("slack:C1:1.0", "42", "👍"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Telegram-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_start_typing_rejects_non_telegram_thread_ids() {
+        let adapter = TelegramAdapter::new(TelegramAdapterOptions::new("t"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.start_typing("slack:C1:1.0", None));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Telegram-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_composite_message_id_parses_composite_and_bare() {
+        // Composite form
+        assert_eq!(decode_composite_message_id("123:42", 123).unwrap(), 42);
+        // Bare numeric form (chat from thread)
+        assert_eq!(decode_composite_message_id("42", 123).unwrap(), 42);
+    }
+
+    #[test]
+    fn decode_composite_message_id_rejects_chat_id_mismatch() {
+        use chat_sdk_chat::types::AdapterError;
+        match decode_composite_message_id("999:42", 123) {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("does not match thread chat id"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_composite_message_id_rejects_non_numeric() {
+        use chat_sdk_chat::types::AdapterError;
+        assert!(matches!(
+            decode_composite_message_id("abc", 1),
+            Err(AdapterError::InvalidPayload(_))
+        ));
+        assert!(matches!(
+            decode_composite_message_id("1:abc", 1),
+            Err(AdapterError::InvalidPayload(_))
+        ));
     }
 
     #[test]

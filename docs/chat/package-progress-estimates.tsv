@@ -3,7 +3,7 @@
 # Verified and js-only-documented rows are forced to 100% by the generator; not-started rows are forced to 0%.
 # Do not add rows for non-in-progress packages.
 chat	99	Crate + colocated tests across 16 modules: 567 chat tests. Phase 1.5 complete. Slice 159 extended Adapter trait with edit_message + delete_message + add_reaction + start_typing (Unsupported defaults) - unblocks 1:1 rollout of 4 universal upstream methods across 9 adapters.
-adapter-telegram	18	Slice 130 scaffold + slice 145 post_message (sendMessage) + slice 155 fetch_subject (getChat). 15 tests. 2 of 8 Adapter methods.
+adapter-telegram	30	Slice 130 scaffold + slice 145 post_message + slice 155 fetch_subject (additive) + slice 161 edit_message + delete_message + add_reaction + start_typing. 22 tests. 6 of 8 Adapter methods.
 adapter-github	18	Slice 131 scaffold + slice 146 post_message + slice 156 fetch_subject (GET issues/<n>). 16 tests.
 adapter-messenger	15	Slice 132 scaffold + slice 147 post_message HTTP (Send API). 12 tests.
 adapter-whatsapp	15	Slice 133 scaffold + slice 148 post_message HTTP (Cloud API). 13 tests.
