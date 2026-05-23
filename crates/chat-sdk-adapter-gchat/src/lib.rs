@@ -11,6 +11,7 @@
 pub mod markdown;
 pub mod thread_utils;
 pub mod user_info;
+pub mod workspace_events;
 
 use async_trait::async_trait;
 use chat_sdk_chat::types::Adapter;
