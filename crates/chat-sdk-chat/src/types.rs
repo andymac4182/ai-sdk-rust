@@ -1328,11 +1328,7 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
     /// `deleteMessage(threadId, messageId): Promise<void>`. Returns
     /// `()` on success; the platform's "already deleted" / "not found"
     /// responses surface as `AdapterError::InvalidPayload`.
-    async fn delete_message(
-        &self,
-        _thread_id: &str,
-        _message_id: &str,
-    ) -> AdapterResult<()> {
+    async fn delete_message(&self, _thread_id: &str, _message_id: &str) -> AdapterResult<()> {
         Err(AdapterError::Unsupported("delete_message"))
     }
 

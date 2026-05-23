@@ -296,6 +296,107 @@ mod tests {
         assert_eq!(finalize_markdown("**bold** @U12345"), "*bold* <@U12345>");
     }
 
+    // ---------- toSlackPayload (routing), 5 upstream cases ----------
+
+    use chat_sdk_chat::markdown::{
+        AlignKind, Node, Paragraph, Root, Strong, Table, TableCell, TableRow, Text, paragraph,
+        root, strong, text,
+    };
+    use chat_sdk_chat::types::PostableAst;
+
+    #[test]
+    fn to_slack_payload_routes_plain_strings_to_text_preserves_literal_markdown_chars() {
+        let msg: AdapterPostableMessage = "Use *foo* literally".into();
+        let p = converter().to_slack_payload(&msg);
+        assert_eq!(p, SlackTextPayload::Text("Use *foo* literally".into()));
+    }
+
+    #[test]
+    fn to_slack_payload_routes_raw_strings_to_text() {
+        let msg = AdapterPostableMessage::Raw(PostableRaw {
+            raw: "*already mrkdwn*".into(),
+            attachments: None,
+            files: None,
+        });
+        let p = converter().to_slack_payload(&msg);
+        assert_eq!(p, SlackTextPayload::Text("*already mrkdwn*".into()));
+    }
+
+    #[test]
+    fn to_slack_payload_routes_markdown_to_markdown_text() {
+        let msg = AdapterPostableMessage::Markdown(PostableMarkdown {
+            markdown: "## Heading\n\n- a\n- b".into(),
+            attachments: None,
+            files: None,
+        });
+        let p = converter().to_slack_payload(&msg);
+        assert_eq!(
+            p,
+            SlackTextPayload::MarkdownText("## Heading\n\n- a\n- b".into())
+        );
+    }
+
+    #[test]
+    fn to_slack_payload_routes_ast_to_markdown_text_via_stringify_markdown() {
+        // Upstream: root({ paragraph([strong([text("bold")])] )}).
+        let ast: Root = root(vec![Node::Paragraph(paragraph(vec![Node::Strong(
+            strong(vec![Node::Text(text("bold"))]),
+        )]))]);
+        let msg = AdapterPostableMessage::Ast(PostableAst {
+            ast,
+            attachments: None,
+            files: None,
+        });
+        let p = converter().to_slack_payload(&msg);
+        match p {
+            SlackTextPayload::MarkdownText(s) => {
+                assert!(s.contains("**bold**"), "got: {s}");
+            }
+            other => panic!("expected MarkdownText, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_slack_payload_preserves_tables_when_rendering_ast_to_markdown_text() {
+        // Upstream: root with one table { rows of [cell(A), cell(B)] and [cell(1), cell(2)] }.
+        let make_cell = |v: &str| -> Node {
+            Node::TableCell(TableCell {
+                children: vec![Node::Text(text(v))],
+                position: None,
+            })
+        };
+        let make_row = |a: &str, b: &str| -> Node {
+            Node::TableRow(TableRow {
+                children: vec![make_cell(a), make_cell(b)],
+                position: None,
+            })
+        };
+        let ast: Root = root(vec![Node::Table(Table {
+            children: vec![make_row("A", "B"), make_row("1", "2")],
+            align: vec![AlignKind::None, AlignKind::None],
+            position: None,
+        })]);
+        let msg = AdapterPostableMessage::Ast(PostableAst {
+            ast,
+            attachments: None,
+            files: None,
+        });
+        let p = converter().to_slack_payload(&msg);
+        match p {
+            SlackTextPayload::MarkdownText(s) => {
+                assert!(s.contains("| A | B |"), "got: {s}");
+                assert!(s.contains("| 1 | 2 |"), "got: {s}");
+            }
+            other => panic!("expected MarkdownText, got {other:?}"),
+        }
+    }
+
+    // Silence "unused import" warnings if any constructor isn't referenced.
+    #[allow(dead_code)]
+    fn _ast_helper_refs() -> (Paragraph, Strong, Text) {
+        (paragraph(vec![]), strong(vec![]), text(""))
+    }
+
     // ---------- mentions / toSlackPayload, 7 upstream cases ----------
 
     use chat_sdk_chat::types::{PostableMarkdown, PostableRaw};

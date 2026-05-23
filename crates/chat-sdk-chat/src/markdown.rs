@@ -48,8 +48,8 @@
 //!   recompiles against the typed AST automatically.
 
 pub use markdown::mdast::{
-    Blockquote, Code, Delete, Emphasis, InlineCode, Link, List, ListItem, Node, Paragraph, Root,
-    Strong, Table, TableCell, TableRow, Text,
+    AlignKind, Blockquote, Code, Delete, Emphasis, InlineCode, Link, List, ListItem, Node,
+    Paragraph, Root, Strong, Table, TableCell, TableRow, Text,
 };
 
 /// Error returned by [`parse_markdown`] when the upstream `markdown` crate
@@ -130,7 +130,12 @@ pub fn stringify_markdown_with(node: &Node, options: &StringifyMarkdownOptions) 
     out
 }
 
-fn write_node(out: &mut String, node: &Node, options: &StringifyMarkdownOptions, list_depth: usize) {
+fn write_node(
+    out: &mut String,
+    node: &Node,
+    options: &StringifyMarkdownOptions,
+    list_depth: usize,
+) {
     match node {
         Node::Root(root) => {
             write_block_children(out, &root.children, options, list_depth);
@@ -193,8 +198,7 @@ fn write_node(out: &mut String, node: &Node, options: &StringifyMarkdownOptions,
                     format!("{} ", options.bullet)
                 };
                 out.push_str(&prefix);
-                let indent: String =
-                    std::iter::repeat_n(' ', prefix.chars().count()).collect();
+                let indent: String = std::iter::repeat_n(' ', prefix.chars().count()).collect();
                 let mut item_buf = String::new();
                 write_node(&mut item_buf, child, options, list_depth + 1);
                 // Indent every line after the first.
@@ -671,7 +675,12 @@ pub fn render_list(
         let mut is_first_content = true;
         for child in get_node_children(item) {
             if let Node::List(nested) = &child {
-                lines.push(render_list(nested, depth + 1, node_converter, unordered_bullet));
+                lines.push(render_list(
+                    nested,
+                    depth + 1,
+                    node_converter,
+                    unordered_bullet,
+                ));
                 continue;
             }
             let text = node_converter(&child);
@@ -2737,16 +2746,22 @@ mod tests {
     fn render_list_unordered_with_dash_bullet() {
         let ast = parse_markdown("- one\n- two\n- three").unwrap();
         let list_node = match &ast {
-            Node::Root(r) => r.children.iter().find_map(|c| {
-                if let Node::List(l) = c { Some(l) } else { None }
-            }),
+            Node::Root(r) => r
+                .children
+                .iter()
+                .find_map(|c| if let Node::List(l) = c { Some(l) } else { None }),
             _ => None,
         }
         .expect("list");
-        let rendered = render_list(list_node, 0, &|n| match n {
-            Node::Text(t) => t.value.clone(),
-            other => to_plain_text(other),
-        }, "-");
+        let rendered = render_list(
+            list_node,
+            0,
+            &|n| match n {
+                Node::Text(t) => t.value.clone(),
+                other => to_plain_text(other),
+            },
+            "-",
+        );
         assert!(rendered.contains("- one"));
         assert!(rendered.contains("- two"));
         assert!(rendered.contains("- three"));
@@ -2756,16 +2771,22 @@ mod tests {
     fn render_list_ordered_uses_start_index() {
         let ast = parse_markdown("1. first\n2. second\n3. third").unwrap();
         let list_node = match &ast {
-            Node::Root(r) => r.children.iter().find_map(|c| {
-                if let Node::List(l) = c { Some(l) } else { None }
-            }),
+            Node::Root(r) => r
+                .children
+                .iter()
+                .find_map(|c| if let Node::List(l) = c { Some(l) } else { None }),
             _ => None,
         }
         .expect("list");
-        let rendered = render_list(list_node, 0, &|n| match n {
-            Node::Text(t) => t.value.clone(),
-            other => to_plain_text(other),
-        }, "-");
+        let rendered = render_list(
+            list_node,
+            0,
+            &|n| match n {
+                Node::Text(t) => t.value.clone(),
+                other => to_plain_text(other),
+            },
+            "-",
+        );
         assert!(rendered.contains("1. first"));
         assert!(rendered.contains("2. second"));
         assert!(rendered.contains("3. third"));
@@ -2775,16 +2796,22 @@ mod tests {
     fn render_list_indents_nested_lists_by_two_spaces_per_depth() {
         let ast = parse_markdown("- top\n  - nested\n  - nested2").unwrap();
         let list_node = match &ast {
-            Node::Root(r) => r.children.iter().find_map(|c| {
-                if let Node::List(l) = c { Some(l) } else { None }
-            }),
+            Node::Root(r) => r
+                .children
+                .iter()
+                .find_map(|c| if let Node::List(l) = c { Some(l) } else { None }),
             _ => None,
         }
         .expect("list");
-        let rendered = render_list(list_node, 0, &|n| match n {
-            Node::Text(t) => t.value.clone(),
-            other => to_plain_text(other),
-        }, "-");
+        let rendered = render_list(
+            list_node,
+            0,
+            &|n| match n {
+                Node::Text(t) => t.value.clone(),
+                other => to_plain_text(other),
+            },
+            "-",
+        );
         assert!(rendered.contains("- top"));
         // Nested items should be indented (2 spaces per depth level).
         assert!(
@@ -2800,8 +2827,7 @@ mod tests {
         // Strong contains a Text child. defaultNodeToText returns the
         // concatenated child output via the supplied converter.
         let strong_node = Node::Strong(super::strong(vec![Node::Text(super::text("bold"))]));
-        let result =
-            default_node_to_text(&strong_node, &|n| to_plain_text(n));
+        let result = default_node_to_text(&strong_node, &|n| to_plain_text(n));
         assert_eq!(result, "bold");
     }
 
@@ -2809,8 +2835,7 @@ mod tests {
     fn default_node_to_text_returns_value_for_leaf() {
         // Text node has no children; defaultNodeToText returns getNodeValue.
         let leaf = Node::Text(super::text("hello"));
-        let result =
-            default_node_to_text(&leaf, &|n| to_plain_text(n));
+        let result = default_node_to_text(&leaf, &|n| to_plain_text(n));
         assert_eq!(result, "hello");
     }
 
