@@ -1237,8 +1237,9 @@ mod tests {
         FinishReason, LanguageModelAbortController, LanguageModelAbortSignal,
         LanguageModelCallOptions, LanguageModelContent, LanguageModelFinishReason,
         LanguageModelGenerateResult, LanguageModelStreamFinish, LanguageModelStreamPart,
-        LanguageModelStreamResult, LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd,
-        LanguageModelTextPart, LanguageModelTextStart, LanguageModelToolCall, LanguageModelUsage,
+        LanguageModelStreamResult, LanguageModelSystemMessage, LanguageModelText,
+        LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextPart,
+        LanguageModelTextStart, LanguageModelToolCall, LanguageModelUsage,
         LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::mock_models::MockLanguageModel;
@@ -1360,6 +1361,26 @@ mod tests {
         ]))
     }
 
+    fn system_message(text: &str) -> crate::language_model::LanguageModelMessage {
+        crate::language_model::LanguageModelMessage::System(LanguageModelSystemMessage::new(text))
+    }
+
+    fn system_message_with_provider_options(
+        text: &str,
+        provider_options: ProviderOptions,
+    ) -> crate::language_model::LanguageModelMessage {
+        crate::language_model::LanguageModelMessage::System(
+            LanguageModelSystemMessage::new(text).with_provider_options(provider_options),
+        )
+    }
+
+    fn provider_options_value(value: &str) -> ProviderOptions {
+        serde_json::from_value(json!({
+            "test": { "value": value }
+        }))
+        .expect("provider options")
+    }
+
     fn generate_call_with_model_settings(
         model_settings: ToolLoopAgentModelSettings,
     ) -> LanguageModelCallOptions {
@@ -1442,6 +1463,76 @@ mod tests {
             crate::language_model::LanguageModelMessage::System(message)
                 if message.content == "Use concise answers."
         ));
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_passes_string_instructions() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model).with_instructions("INSTRUCTIONS"),
+        );
+
+        let result =
+            poll_ready(agent.generate("Hello, world!")).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "reply");
+        assert_eq!(
+            model.generate_calls()[0].prompt,
+            vec![
+                system_message("INSTRUCTIONS"),
+                user_message("Hello, world!")
+            ]
+        );
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_passes_system_message_instructions() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let provider_options = provider_options_value("test");
+        let instructions = LanguageModelSystemMessage::new("INSTRUCTIONS")
+            .with_provider_options(provider_options.clone());
+        let agent =
+            ToolLoopAgent::new(ToolLoopAgentSettings::new(&model).with_instructions(instructions));
+
+        let result =
+            poll_ready(agent.generate("Hello, world!")).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "reply");
+        assert_eq!(
+            model.generate_calls()[0].prompt,
+            vec![
+                system_message_with_provider_options("INSTRUCTIONS", provider_options),
+                user_message("Hello, world!")
+            ]
+        );
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_passes_array_of_system_message_instructions() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let first_options = provider_options_value("test");
+        let second_options = provider_options_value("test 2");
+        let instructions = vec![
+            LanguageModelSystemMessage::new("INSTRUCTIONS")
+                .with_provider_options(first_options.clone()),
+            LanguageModelSystemMessage::new("INSTRUCTIONS 2")
+                .with_provider_options(second_options.clone()),
+        ];
+        let agent =
+            ToolLoopAgent::new(ToolLoopAgentSettings::new(&model).with_instructions(instructions));
+
+        let result =
+            poll_ready(agent.generate("Hello, world!")).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "reply");
+        assert_eq!(
+            model.generate_calls()[0].prompt,
+            vec![
+                system_message_with_provider_options("INSTRUCTIONS", first_options),
+                system_message_with_provider_options("INSTRUCTIONS 2", second_options),
+                user_message("Hello, world!")
+            ]
+        );
     }
 
     #[test]
@@ -1873,6 +1964,46 @@ mod tests {
         assert_eq!(result.text, "hello");
         assert_eq!(model.stream_calls().len(), 1);
         assert_eq!(model.stream_calls()[0].temperature, Some(0.4));
+    }
+
+    #[test]
+    fn tool_loop_agent_stream_passes_string_instructions() {
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("hello"));
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model).with_instructions("INSTRUCTIONS"),
+        );
+
+        let result = poll_ready(agent.stream("Hello, world!")).expect("agent stream succeeds");
+
+        assert_eq!(result.text, "hello");
+        assert_eq!(
+            model.stream_calls()[0].prompt,
+            vec![
+                system_message("INSTRUCTIONS"),
+                user_message("Hello, world!")
+            ]
+        );
+    }
+
+    #[test]
+    fn tool_loop_agent_stream_passes_system_message_instructions() {
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("hello"));
+        let provider_options = provider_options_value("test");
+        let instructions = LanguageModelSystemMessage::new("INSTRUCTIONS")
+            .with_provider_options(provider_options.clone());
+        let agent =
+            ToolLoopAgent::new(ToolLoopAgentSettings::new(&model).with_instructions(instructions));
+
+        let result = poll_ready(agent.stream("Hello, world!")).expect("agent stream succeeds");
+
+        assert_eq!(result.text, "hello");
+        assert_eq!(
+            model.stream_calls()[0].prompt,
+            vec![
+                system_message_with_provider_options("INSTRUCTIONS", provider_options),
+                user_message("Hello, world!")
+            ]
+        );
     }
 
     #[test]
