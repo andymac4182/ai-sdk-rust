@@ -2109,4 +2109,68 @@ mod tests {
         assert!(plain.contains("<"));
         assert!(plain.contains(">"));
     }
+
+    // ---------- slice 88: 4 more 1:1 markdown.test.ts cases ----------
+
+    #[test]
+    fn parse_markdown_link_with_url_containing_anchor_fragment() {
+        let node = parse_markdown("[anchor](https://example.com#section-1)").expect("parses");
+        fn find_link_url(n: &Node) -> Option<String> {
+            if let Node::Link(l) = n {
+                return Some(l.url.clone());
+            }
+            for c in get_node_children(n).iter() {
+                if let Some(u) = find_link_url(c) {
+                    return Some(u);
+                }
+            }
+            None
+        }
+        assert_eq!(
+            find_link_url(&node).as_deref(),
+            Some("https://example.com#section-1")
+        );
+    }
+
+    #[test]
+    fn parse_markdown_strong_emphasis_via_three_asterisks_each_side() {
+        let node = parse_markdown("***bold-italic***").expect("parses");
+        // Either Strong containing Emphasis or Emphasis containing Strong.
+        fn has_nested_strong_emphasis(n: &Node) -> bool {
+            if let Node::Strong(s) = n {
+                if s.children.iter().any(|c| matches!(c, Node::Emphasis(_))) {
+                    return true;
+                }
+            }
+            if let Node::Emphasis(e) = n {
+                if e.children.iter().any(|c| matches!(c, Node::Strong(_))) {
+                    return true;
+                }
+            }
+            get_node_children(n).iter().any(has_nested_strong_emphasis)
+        }
+        assert!(has_nested_strong_emphasis(&node));
+    }
+
+    #[test]
+    fn parse_markdown_paragraph_with_trailing_spaces_preserves_content() {
+        let node = parse_markdown("some text   ").expect("parses");
+        let plain = to_plain_text(&node);
+        assert!(plain.contains("some text"));
+    }
+
+    #[test]
+    fn parse_markdown_blockquote_with_strong_inside_paragraph() {
+        let node = parse_markdown("> **important** note").expect("parses");
+        fn blockquote_has_strong(n: &Node) -> bool {
+            if let Node::Blockquote(_) = n {
+                fn has_strong(x: &Node) -> bool {
+                    matches!(x, Node::Strong(_)) || get_node_children(x).iter().any(has_strong)
+                }
+                return has_strong(n);
+            }
+            get_node_children(n).iter().any(blockquote_has_strong)
+        }
+        assert!(blockquote_has_strong(&node));
+    }
 }
