@@ -377,3 +377,46 @@ the gate stops the push (regression test for this incident).
   merge to main, so even if the local shell script has a logic
   flaw, the bad commit can't ship to origin. The current protocol
   relies entirely on the developer's local validation succeeding.
+
+### 2026-05-23 - slice 89 second validation-bypass incident
+
+Slice 89 added a markdown test asserting `plain.len() >= 2500` on
+a 500-repetition "word " input. markdown-rs collapses inline
+whitespace runs so the actual rendered text was shorter; the
+assertion failed locally. Slice 90 fixed it (count tokens, not
+bytes) and shipped — but the BROKEN slice 89 commit ALSO reached
+main as `b67acd7`.
+
+Root cause: the slice-80 refinement said "use straight-line && chains
+without wrapped if-blocks", but the current protocol still has each
+gate command piped through `tail -3` to trim output. `command | tail -3`
+returns 0 whenever `tail` reads any bytes — masking `command`'s
+exit code. The `&&` chain sees `tail -3` succeed and proceeds to
+`git push`.
+
+**Concrete protocol fix.** The merge-back validation gate must invoke
+each gate command WITHOUT a trailing pipe. Compare:
+
+```bash
+# BROKEN (hides exit code via tail's exit 0):
+cargo test --workspace 2>&1 | tail -3 && git push origin main
+
+# CORRECT (preserves exit code; output goes to stderr/stdout as-is):
+cargo test --workspace && git push origin main
+```
+
+Captured-output is for monitoring, not gates. If you need to trim
+output, pipe to `tail` OUTSIDE the &&-chain inside a subshell whose
+exit code you don't care about, or use `set -o pipefail` so the
+pipe inherits the failed command's exit code.
+
+**Updated brief rule (apply on next non-refinement slice):** all
+validation gates in the merge-back protocol must be plain commands
+with their raw exit codes propagated through `&&`. No trailing
+`| tail`, `| head`, `| grep` in the chain. If output trimming is
+needed for readability, `set -o pipefail` MUST be active in the
+shell so the pipe inherits the failing command's exit code.
+
+**Open refinement:** add a `make merge-back` target (or shell
+function) that codifies this protocol so individual slice commits
+can't accidentally re-introduce a pipe-in-the-chain regression.
