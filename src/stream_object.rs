@@ -1,5 +1,6 @@
 use std::fmt;
 use std::future::Future;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Instant;
@@ -109,7 +110,10 @@ impl<'a> StreamObjectOnError<'a> {
 
     /// Runs the stream-object error callback.
     pub fn error(&self, event: StreamObjectOnErrorEvent) -> StreamObjectOnErrorFuture<'a> {
-        (self.on_error)(event)
+        match catch_unwind(AssertUnwindSafe(|| (self.on_error)(event))) {
+            Ok(callback) => callback,
+            Err(_) => Box::pin(async {}),
+        }
     }
 }
 
@@ -3739,6 +3743,39 @@ mod tests {
         assert_eq!(call_ids.len(), 4);
         assert!(call_ids[0].starts_with("aiobj-"));
         assert!(call_ids.iter().all(|call_id| call_id == &call_ids[0]));
+    }
+
+    fn panicking_stream_object_callback<T>(_event: T) -> Ready<()> {
+        panic!("callback error")
+    }
+
+    #[test]
+    fn stream_object_callback_panics_do_not_break_stream() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    r#"{ "content": "Hello, world!" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_object(
+            StreamObjectOptions::new(&model, prompt())
+                .with_schema(answer_schema())
+                .with_experimental_on_start(panicking_stream_object_callback)
+                .with_experimental_on_step_start(panicking_stream_object_callback)
+                .with_on_step_finish(panicking_stream_object_callback)
+                .with_on_finish(panicking_stream_object_callback),
+        ));
+
+        assert_eq!(result.object, Some(json!({ "content": "Hello, world!" })));
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(result.error, None);
+        assert!(!result.partial_object_stream.is_empty());
     }
 
     #[test]

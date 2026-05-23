@@ -1,5 +1,6 @@
 use std::fmt;
 use std::future::Future;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::rc::Rc;
 
@@ -525,7 +526,10 @@ impl<'a> GenerateObjectOnStart<'a> {
 
     /// Runs the generate-object start callback.
     pub fn start(&self, event: GenerateObjectStartEvent) -> GenerateObjectOnStartFuture<'a> {
-        (self.on_start)(event)
+        match catch_unwind(AssertUnwindSafe(|| (self.on_start)(event))) {
+            Ok(callback) => callback,
+            Err(_) => Box::pin(async {}),
+        }
     }
 }
 
@@ -569,7 +573,10 @@ impl<'a> GenerateObjectOnStepStart<'a> {
         &self,
         event: GenerateObjectStepStartEvent,
     ) -> GenerateObjectOnStepStartFuture<'a> {
-        (self.on_step_start)(event)
+        match catch_unwind(AssertUnwindSafe(|| (self.on_step_start)(event))) {
+            Ok(callback) => callback,
+            Err(_) => Box::pin(async {}),
+        }
     }
 }
 
@@ -613,7 +620,10 @@ impl<'a> GenerateObjectOnStepFinish<'a> {
         &self,
         event: GenerateObjectStepEndEvent,
     ) -> GenerateObjectOnStepFinishFuture<'a> {
-        (self.on_step_finish)(event)
+        match catch_unwind(AssertUnwindSafe(|| (self.on_step_finish)(event))) {
+            Ok(callback) => callback,
+            Err(_) => Box::pin(async {}),
+        }
     }
 }
 
@@ -654,7 +664,10 @@ impl<'a> GenerateObjectOnFinish<'a> {
 
     /// Runs the generate-object finish callback.
     pub fn finish(&self, event: GenerateObjectEndEvent) -> GenerateObjectOnFinishFuture<'a> {
-        (self.on_finish)(event)
+        match catch_unwind(AssertUnwindSafe(|| (self.on_finish)(event))) {
+            Ok(callback) => callback,
+            Err(_) => Box::pin(async {}),
+        }
     }
 }
 
