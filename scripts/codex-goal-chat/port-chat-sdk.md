@@ -797,3 +797,50 @@ decision. Recommended:
 The first not-started adapter port should be the smallest one
 (Telegram: 7 src files, 3 test files) so the adapter scaffolding
 is small enough to review per-slice.
+
+## Adapter-scaffold template (added slice 135)
+
+Slices 130-134 ported 5 adapters using a near-identical
+template. Each adapter scaffold ships:
+
+1. **`crates/chat-sdk-adapter-<name>/Cargo.toml`** with deps:
+   `async-trait`, `chat-sdk-chat = { path = "../chat-sdk-chat" }`,
+   `serde`, `serde_json`. Dev-dep: `futures-executor` (for
+   block_on in tests).
+2. **`crates/chat-sdk-adapter-<name>/src/lib.rs`** with:
+   - `ADAPTER_NAME` / `THREAD_ID_PREFIX` / `DEFAULT_API_BASE`
+     (or `DEFAULT_GRAPH_BASE`) constants.
+   - `<Name>AdapterOptions` struct: required credentials +
+     optional API base. `.new(...)` constructor + `.with_*`
+     builders + `.effective_*` getters with default applied.
+   - `<Name>Adapter` struct holding the options, impl-ing
+     `chat_sdk_chat::types::Adapter` with `name()` overridden.
+     All other Adapter methods take the trait defaults
+     (return `AdapterError::Unsupported`).
+   - `encode_thread_id(...)` / `decode_thread_id(...)` /
+     `is_<name>_thread_id(...)` for the upstream thread-id
+     wire format (per-adapter shape: numeric pair, owner/repo,
+     opaque IDs, etc).
+3. **Workspace `Cargo.toml`** members entry (alphabetized
+   between `chat-sdk-adapter-*` siblings).
+4. **`docs/chat/upstream-parity.md`** row flipped from
+   `not-started` to `in-progress` with the crate path and a
+   one-line basis.
+5. **`docs/chat/package-progress-estimates.tsv`** row added at
+   `10%` with the one-line basis.
+6. **`docs/chat/package-progress.md`** regenerated via the
+   table script.
+7. **11-13 colocated tests** covering: adapter name, options
+   construction + defaults + overrides, encode/decode happy +
+   miss paths, encode/decode round-trip, inherited
+   `post_message` returning `Unsupported`, credential
+   accessor sanity.
+
+Variance is exclusively in the thread-id wire format and
+required credentials. Total per scaffold: ~250 LOC of source
++ tests, ~5-15 min to draft.
+
+When the workspace commits to an async HTTP client (per "Phase
+2 / Phase 3 prep" above), the adapter scaffolds become the
+landing points for the real I/O methods — each adapter then
+needs ~30-50 additional slices for full upstream parity.

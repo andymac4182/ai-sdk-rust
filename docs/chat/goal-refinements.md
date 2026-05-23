@@ -888,3 +888,105 @@ Arc<dyn Adapter>; 7 mapped tests; chat stays at 99%).
   `chat.channelFor(id)` factories. Should be ported alongside
   the first Phase-2 adapter so we have a concrete consumer
   for it.
+
+### 2026-05-24 - slices 129..134
+
+**Slices covered**
+
+129 (Chat top-level class skeleton: register_adapter +
+get_adapter + thread_for/channel_for factories + impl
+ChatSingleton; 11 mapped tests; chat stays 99%).
+130 (chat-sdk-adapter-telegram crate scaffold: TelegramAdapter
++ thread-id codec; 13 tests; row moved 0% -> 10%).
+131 (chat-sdk-adapter-github crate scaffold: GithubAdapter +
+thread-id codec; 13 tests; row 0% -> 10%).
+132 (chat-sdk-adapter-messenger crate scaffold: MessengerAdapter
++ thread-id codec; 11 tests; row 0% -> 10%).
+133 (chat-sdk-adapter-whatsapp crate scaffold: WhatsappAdapter
++ thread-id codec; 11 tests; row 0% -> 10%).
+134 (chat-sdk-adapter-discord crate scaffold: DiscordAdapter
++ thread-id codec with @me DM sentinel; 13 tests; row
+0% -> 10%).
+
+**What the brief got right (validated)**
+
+- The "scaffold = adapter struct + options + thread-id codec
+  + 11-13 mapped tests" template generalized perfectly. Each
+  of slices 130-134 took ~250 LOC of source + tests and
+  followed the same `(crate Cargo.toml + lib.rs + ledger
+  flip + tsv row)` recipe. The only variance per-adapter is
+  the thread-id wire format (Telegram: numeric chat_id +
+  optional message_thread_id; GitHub: owner/repo:number;
+  Messenger/WhatsApp: opaque page_id:user_id;
+  Discord: guild_id:channel_id with @me sentinel).
+- The slice 128 priority order ("smallest first") held: of
+  the 7 src + 3 test upstream adapters (Telegram, GitHub,
+  Messenger, WhatsApp), four are now scaffolded — exactly
+  what the prediction said. Discord (8 src + 4 test) was
+  the natural next step.
+- The Chat class skeleton (slice 129) needed exactly one
+  slice to ship the full register/factory surface +
+  ChatSingleton impl. Smaller than the slice-121 refinement
+  predicted ("~2700 LOC upstream" was true of the FULL chat.ts;
+  the registration core is closer to ~300 LOC).
+
+**What the brief got wrong or left out**
+
+- **Adapter-package scaffolds bump the row to 10% in the tsv,
+  but that's still "in-progress" — the Done condition requires
+  100% verified or js-only-documented.** Each scaffold needs
+  HTTP I/O + event handler + per-platform card/markdown
+  rendering before the row can be marked verified. Realistic
+  size: ~30-50 slices per adapter to reach verified. Open
+  refinement: re-baseline the 10% mark to something like 12-15%
+  once one adapter ships HTTP — the codec helpers alone are
+  worth less than 10% of the full adapter port.
+- **Per-adapter thread-id codecs share structural patterns**
+  but not implementation. The Messenger / WhatsApp adapters
+  both use `<id>:<id>` two-part keys with empty-component
+  rejection. A shared `chat-sdk-adapter-shared::thread_id`
+  helper could host a `Decoded2PartKey { a, b }` + parser.
+  Open refinement: factor when a third 2-part codec lands
+  (Linear is similar — likely `<team_id>:<issue_id>`); don't
+  pre-extract while still scaffolding.
+- **The tsv basis text length keeps growing.** Slice 132
+  shortened the chat row to a one-line summary; slices
+  133/134 added new adapter rows with the same one-line
+  convention. The format is now stable; readers go to the
+  ledger for full per-package detail.
+
+**Stale or misleading guidance**
+
+- The slice 128 "Phase 2 / Phase 3 prep" recommended `tokio +
+  reqwest` for the workspace runtime. Slices 130-134 have
+  ALL skipped HTTP, so the runtime decision is still
+  outstanding. Open refinement: commit to `tokio` + `reqwest`
+  in the chat-sdk-adapter-shared crate (as `[dependencies]`)
+  once the first adapter ships an HTTP path. The rest can
+  inherit through re-exports.
+- Slice 121's "consumer-class port pattern" template applies
+  cleanly to Chat (slice 129). The 6-step recipe is now
+  stable practice across 6 slices (118-120, 123-124, 129).
+
+**Edits applied**
+
+- `scripts/codex-goal-chat/port-chat-sdk.md`: pending — the
+  "adapter scaffold pattern" added in slice 130 needs
+  documenting alongside the existing Consumer-class /
+  Phase 1.5 closed / Phase 2/3 prep sections.
+- `scripts/codex-goal-chat/goal-condition.md`: stable.
+
+**Open refinements deferred**
+
+- **Adapter scaffold -> verified ramp**: each adapter needs
+  ~30-50 slices for the HTTP layer + card rendering. Hundreds
+  of slices total across 9 adapters. Realistic for a fresh
+  multi-session sequence.
+- **State backends (Phase 3)**: state-redis / state-ioredis /
+  state-pg still at 0%. Each needs the same scaffold pattern
+  (lib.rs with `impl StateAdapter`) + the workspace runtime
+  decision.
+- **HTTP client + async runtime commitment**: the workspace
+  needs `tokio` + `reqwest` as a direct dep before any
+  adapter ships real HTTP. Defer to the first adapter that
+  needs it (Telegram is simplest API; probably first).
