@@ -1227,7 +1227,10 @@ mod tests {
     use std::future::{Future, ready};
     use std::pin::Pin;
     use std::rc::Rc;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
     use std::task::{Context, Poll, Waker};
 
     use serde_json::json;
@@ -1235,10 +1238,10 @@ mod tests {
     use super::*;
     use crate::language_model::{
         FinishReason, LanguageModelAbortController, LanguageModelAbortSignal,
-        LanguageModelCallOptions, LanguageModelContent, LanguageModelFinishReason,
-        LanguageModelGenerateResult, LanguageModelStreamFinish, LanguageModelStreamPart,
-        LanguageModelStreamResult, LanguageModelSystemMessage, LanguageModelText,
-        LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextPart,
+        LanguageModelAssistantContentPart, LanguageModelCallOptions, LanguageModelContent,
+        LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelStreamFinish,
+        LanguageModelStreamPart, LanguageModelStreamResult, LanguageModelSystemMessage,
+        LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextPart,
         LanguageModelTextStart, LanguageModelToolCall, LanguageModelUsage,
         LanguageModelUserContentPart, LanguageModelUserMessage,
     };
@@ -1247,6 +1250,7 @@ mod tests {
     use crate::provider_utils::{
         SandboxCommandOptions, SandboxCommandResult, SandboxRunCommandFuture, Tool,
     };
+    use crate::stream_text::TextStreamPart;
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
         let waker = Waker::noop();
@@ -1266,6 +1270,19 @@ mod tests {
                 "city": { "type": "string" }
             },
             "required": ["city"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone()
+    }
+
+    fn value_schema() -> crate::json::JsonSchema {
+        json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string" }
+            },
+            "required": ["value"]
         })
         .as_object()
         .expect("schema is an object")
@@ -1298,6 +1315,21 @@ mod tests {
         )
     }
 
+    fn test_tool_call_result() -> LanguageModelGenerateResult {
+        LanguageModelGenerateResult::new(
+            vec![LanguageModelContent::ToolCall(LanguageModelToolCall::new(
+                "call-1",
+                "testTool",
+                r#"{ "value": "test" }"#,
+            ))],
+            LanguageModelFinishReason {
+                unified: FinishReason::ToolCalls,
+                raw: None,
+            },
+            LanguageModelUsage::default(),
+        )
+    }
+
     fn stream_text_result(text: &str) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
         LanguageModelStreamResult::new(vec![
             LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("text-1")),
@@ -1319,6 +1351,23 @@ mod tests {
                 "call-weather",
                 "weather",
                 r#"{"city":"Brisbane"}"#,
+            )),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                LanguageModelUsage::default(),
+                LanguageModelFinishReason {
+                    unified: FinishReason::ToolCalls,
+                    raw: Some("tool-calls".to_string()),
+                },
+            )),
+        ])
+    }
+
+    fn stream_test_tool_call_result() -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
+        LanguageModelStreamResult::new(vec![
+            LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                "call-1",
+                "testTool",
+                r#"{ "value": "test" }"#,
             )),
             LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
                 LanguageModelUsage::default(),
@@ -1854,6 +1903,54 @@ mod tests {
     }
 
     #[test]
+    fn tool_loop_agent_generate_honors_tool_approval() {
+        let model = MockLanguageModel::new().with_generate_result(test_tool_call_result());
+        let executed = Arc::new(AtomicBool::new(false));
+        let executed_for_tool = Arc::clone(&executed);
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model)
+                .with_tool(Tool::new("testTool", value_schema()).with_execute(
+                    move |_input, _options| {
+                        let executed = Arc::clone(&executed_for_tool);
+                        async move {
+                            executed.store(true, Ordering::SeqCst);
+                            Ok(json!("tool-result"))
+                        }
+                    },
+                ))
+                .with_tool_approval(ToolApprovalConfiguration::new().with_tool_status(
+                    "testTool",
+                    crate::generate_text::ToolApprovalStatusKind::UserApproval,
+                )),
+        );
+
+        let result = poll_ready(agent.generate("test")).expect("agent generation succeeds");
+
+        assert_eq!(model.generate_calls().len(), 1);
+        assert!(!executed.load(Ordering::SeqCst));
+        assert_eq!(result.finish_reason, FinishReason::ToolCalls);
+        assert!(result.tool_results.is_empty());
+        assert_eq!(result.response_messages.len(), 1);
+
+        let crate::language_model::LanguageModelMessage::Assistant(assistant_message) =
+            &result.response_messages[0]
+        else {
+            panic!("response messages include assistant approval request");
+        };
+        assert_eq!(assistant_message.content.len(), 2);
+        assert!(matches!(
+            &assistant_message.content[0],
+            LanguageModelAssistantContentPart::ToolCall(call)
+                if call.tool_call_id == "call-1" && call.tool_name == "testTool"
+        ));
+        assert!(matches!(
+            &assistant_message.content[1],
+            LanguageModelAssistantContentPart::ToolApprovalRequest(request)
+                if request.tool_call_id == "call-1" && request.is_automatic.is_none()
+        ));
+    }
+
+    #[test]
     fn tool_loop_agent_merges_generate_start_callbacks_in_order() {
         let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
         let calls = Rc::new(RefCell::new(Vec::new()));
@@ -2087,6 +2184,43 @@ mod tests {
                 .expect("tool execution receives sandbox"),
             &sandbox
         ));
+    }
+
+    #[test]
+    fn tool_loop_agent_stream_honors_tool_approval() {
+        let model = MockLanguageModel::new().with_stream_result(stream_test_tool_call_result());
+        let executed = Arc::new(AtomicBool::new(false));
+        let executed_for_tool = Arc::clone(&executed);
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model)
+                .with_tool(Tool::new("testTool", value_schema()).with_execute(
+                    move |_input, _options| {
+                        let executed = Arc::clone(&executed_for_tool);
+                        async move {
+                            executed.store(true, Ordering::SeqCst);
+                            Ok(json!("tool-result"))
+                        }
+                    },
+                ))
+                .with_tool_approval(ToolApprovalConfiguration::new().with_tool_status(
+                    "testTool",
+                    crate::generate_text::ToolApprovalStatusKind::UserApproval,
+                )),
+        );
+
+        let result = poll_ready(agent.stream("test")).expect("agent stream succeeds");
+
+        assert_eq!(model.stream_calls().len(), 1);
+        assert!(!executed.load(Ordering::SeqCst));
+        assert_eq!(result.finish_reason, FinishReason::ToolCalls);
+        assert!(result.tool_results.is_empty());
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool_call_id, "call-1");
+        assert_eq!(result.tool_calls[0].tool_name, "testTool");
+        assert!(result.parts.iter().any(|part| matches!(
+            part,
+            TextStreamPart::ToolApprovalRequest(request) if request.tool_call_id == "call-1"
+        )));
     }
 
     #[test]
