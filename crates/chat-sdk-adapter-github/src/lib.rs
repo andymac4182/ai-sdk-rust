@@ -149,6 +149,21 @@ impl GithubAdapter {
             self.api_base()
         )
     }
+
+    /// Derive channel id from a GitHub thread id. 1:1 with upstream
+    /// `adapter.channelIdFromThreadId(threadId)` which collapses any
+    /// `github:<owner>/<repo>:<number>...` to `github:<owner>/<repo>`.
+    /// Returns `None` when `thread_id` isn't GitHub-encoded.
+    pub fn channel_id_from_thread_id(&self, thread_id: &str) -> Option<String> {
+        let decoded = decode_thread_id(thread_id)?;
+        Some(format!("{THREAD_ID_PREFIX}{}/{}", decoded.owner, decoded.repo))
+    }
+
+    /// All GitHub conversations are issue/PR threads, not DMs. 1:1
+    /// with upstream's `isDM: false` on every parsed message.
+    pub fn is_dm(&self, _thread_id: &str) -> bool {
+        false
+    }
 }
 
 #[async_trait]
@@ -536,6 +551,42 @@ mod tests {
         assert!(decode_thread_id("github:vercel/chat:abc").is_none());
         // GitHub numbers are positive integers; negative parses as error.
         assert!(decode_thread_id("github:vercel/chat:-1").is_none());
+    }
+
+    // ---------- channel_id_from_thread_id + is_dm ----------
+    // 1:1 with upstream `adapter.channelIdFromThreadId(threadId)`
+    // (collapses to `github:<owner>/<repo>`) and `adapter.isDM(_) ->
+    // false` (GitHub conversations are always issue/PR threads).
+
+    #[test]
+    fn channel_id_from_thread_id_strips_the_number_suffix() {
+        let adapter = GithubAdapter::new(GithubAdapterOptions::new("test-token"));
+        assert_eq!(
+            adapter
+                .channel_id_from_thread_id("github:vercel/chat:42")
+                .as_deref(),
+            Some("github:vercel/chat")
+        );
+        assert_eq!(
+            adapter
+                .channel_id_from_thread_id("github:a/b:1")
+                .as_deref(),
+            Some("github:a/b")
+        );
+    }
+
+    #[test]
+    fn channel_id_from_thread_id_returns_none_for_non_github_ids() {
+        let adapter = GithubAdapter::new(GithubAdapterOptions::new("t"));
+        assert!(adapter.channel_id_from_thread_id("gitlab:foo/bar:1").is_none());
+        assert!(adapter.channel_id_from_thread_id("").is_none());
+    }
+
+    #[test]
+    fn is_dm_always_returns_false() {
+        let adapter = GithubAdapter::new(GithubAdapterOptions::new("t"));
+        assert!(!adapter.is_dm("github:vercel/chat:42"));
+        assert!(!adapter.is_dm(""));
     }
 
     #[test]
