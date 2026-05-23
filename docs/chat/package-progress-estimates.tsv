@@ -9,7 +9,7 @@ adapter-messenger	15	Slice 132 scaffold + slice 147 post_message HTTP (Send API)
 adapter-whatsapp	15	Slice 133 scaffold + slice 148 post_message HTTP (Cloud API). 13 tests.
 adapter-discord	15	Slice 134 scaffold + slice 149 post_message HTTP (Bot auth). 14 tests.
 adapter-linear	15	Slice 136 scaffold + slice 151 post_message HTTP (GraphQL commentCreate). 12 tests.
-adapter-slack	18	Slice 139 scaffold + slice 152 post_message + slice 158 fetch_subject HTTP (conversations.info). 16 tests. 2 of 8 Adapter methods.
+adapter-slack	30	Slice 139 scaffold + slice 152 post_message + slice 158 fetch_subject (additive) + slice 160 edit_message + delete_message + add_reaction + start_typing. 20 tests. 6 of 8 Adapter methods (post_object + parse_message deferred).
 adapter-teams	15	Slice 138 scaffold + slice 153 post_message HTTP (Bot Framework activities + pre-minted bearer). 15 tests.
 adapter-gchat	15	Slice 137 scaffold + slice 154 post_message HTTP (messages.create + pre-minted bearer + thread-reply option). 17 tests.
 state-redis	10	Crate scaffold (slice 140): RedisStateAdapter impl StateAdapter (NotConnected placeholder). 11 tests. redis-rs wire-up deferred.

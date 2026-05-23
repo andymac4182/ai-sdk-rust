@@ -246,6 +246,225 @@ impl Adapter for SlackAdapter {
         // DM channels carry no `name`; everything else does.
         Ok(json["channel"]["name"].as_str().map(str::to_owned))
     }
+
+    /// Edit an existing Slack message via `chat.update`. 1:1 with
+    /// upstream's text-path `adapter.editMessage` (the card/ephemeral
+    /// branches are deferred). POSTs `{channel, ts: message_id, text}`
+    /// to `<api_base>/chat.update` with bearer auth, returns the
+    /// updated message `ts`.
+    async fn edit_message(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<String> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Slack-encoded"))
+        })?;
+
+        let url = self.method_url("chat.update");
+        let body = serde_json::json!({
+            "channel": decoded.channel_id,
+            "ts": message_id,
+            "text": text,
+        });
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(self.bot_token())
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() {
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: Slack API request failed"
+            )));
+        }
+
+        if !json["ok"].as_bool().unwrap_or(false) {
+            let error_code = json["error"].as_str().unwrap_or("Slack API call failed");
+            return Err(AdapterError::InvalidPayload(format!(
+                "Slack chat.update: {error_code}"
+            )));
+        }
+
+        json["ts"].as_str().map(str::to_owned).ok_or_else(|| {
+            AdapterError::InvalidPayload("Slack chat.update response missing ts".to_string())
+        })
+    }
+
+    /// Delete an existing Slack message via `chat.delete`. 1:1 with
+    /// upstream's `adapter.deleteMessage`. POSTs `{channel, ts:
+    /// message_id}` to `<api_base>/chat.delete` with bearer auth.
+    async fn delete_message(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Slack-encoded"))
+        })?;
+
+        let url = self.method_url("chat.delete");
+        let body = serde_json::json!({
+            "channel": decoded.channel_id,
+            "ts": message_id,
+        });
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(self.bot_token())
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() {
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: Slack API request failed"
+            )));
+        }
+
+        if !json["ok"].as_bool().unwrap_or(false) {
+            let error_code = json["error"].as_str().unwrap_or("Slack API call failed");
+            return Err(AdapterError::InvalidPayload(format!(
+                "Slack chat.delete: {error_code}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Add an emoji reaction to a Slack message via `reactions.add`.
+    /// 1:1 with upstream's `adapter.addReaction`. POSTs `{channel,
+    /// timestamp: message_id, name: emoji}` with bearer auth.
+    async fn add_reaction(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Slack-encoded"))
+        })?;
+
+        let url = self.method_url("reactions.add");
+        let body = serde_json::json!({
+            "channel": decoded.channel_id,
+            "timestamp": message_id,
+            "name": emoji,
+        });
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(self.bot_token())
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() {
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: Slack API request failed"
+            )));
+        }
+
+        // Slack treats `already_reacted` as a benign idempotent
+        // outcome upstream — adapter.addReaction swallows it.
+        if !json["ok"].as_bool().unwrap_or(false) {
+            let error_code = json["error"].as_str().unwrap_or("Slack API call failed");
+            if error_code == "already_reacted" {
+                return Ok(());
+            }
+            return Err(AdapterError::InvalidPayload(format!(
+                "Slack reactions.add: {error_code}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Set a Slack AI Assistant "Typing…" status via
+    /// `assistant.threads.setStatus`. 1:1 with upstream's
+    /// `adapter.startTyping`:
+    ///
+    /// - Returns Ok(()) silently when the thread has no `thread_ts`
+    ///   context (upstream logs "startTyping skipped").
+    /// - POSTs `{channel_id, thread_ts, status, loading_messages}`.
+    ///   `status` defaults to `"Typing..."`.
+    /// - All API failures are swallowed silently (upstream warns
+    ///   then proceeds — never throws). InvalidPayload only fires
+    ///   for thread-id decode failure.
+    async fn start_typing(
+        &self,
+        thread_id: &str,
+        status: Option<&str>,
+    ) -> chat_sdk_chat::types::AdapterResult<()> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Slack-encoded"))
+        })?;
+
+        // Top-level (non-threaded) messages have thread_ts == ts
+        // for the parent of the same message; the upstream check
+        // is purely "no threadTs at all" which our encoding never
+        // emits, so we always proceed.
+
+        let url = self.method_url("assistant.threads.setStatus");
+        let display_status = status.unwrap_or("Typing...");
+        let body = serde_json::json!({
+            "channel_id": decoded.channel_id,
+            "thread_ts": decoded.thread_ts,
+            "status": display_status,
+            "loading_messages": [display_status],
+        });
+
+        // Swallow all HTTP / API errors — upstream warns and
+        // returns void unconditionally.
+        let _ = self
+            .http
+            .post(&url)
+            .bearer_auth(self.bot_token())
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await;
+
+        Ok(())
+    }
 }
 
 /// Encode a Slack thread id. 1:1 with upstream's inline format:
@@ -402,6 +621,58 @@ mod tests {
         let adapter = SlackAdapter::new(SlackAdapterOptions::new("xoxb", "s"));
         use chat_sdk_chat::types::AdapterError;
         let err = block_on(adapter.post_message("teams:CONV:MSG", "hi"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Slack-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_edit_message_rejects_non_slack_thread_ids() {
+        let adapter = SlackAdapter::new(SlackAdapterOptions::new("xoxb", "s"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.edit_message("teams:CONV:MSG", "1234.5", "hi"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Slack-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_delete_message_rejects_non_slack_thread_ids() {
+        let adapter = SlackAdapter::new(SlackAdapterOptions::new("xoxb", "s"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.delete_message("teams:CONV:MSG", "1234.5"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Slack-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_add_reaction_rejects_non_slack_thread_ids() {
+        let adapter = SlackAdapter::new(SlackAdapterOptions::new("xoxb", "s"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.add_reaction("teams:CONV:MSG", "1234.5", "thumbsup"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Slack-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_start_typing_rejects_non_slack_thread_ids() {
+        let adapter = SlackAdapter::new(SlackAdapterOptions::new("xoxb", "s"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.start_typing("teams:CONV:MSG", None));
         match err {
             Err(AdapterError::InvalidPayload(msg)) => {
                 assert!(msg.contains("not Slack-encoded"));
