@@ -63,13 +63,46 @@ impl TeamsAdapterOptions {
 #[derive(Debug, Clone)]
 pub struct TeamsAdapter {
     options: TeamsAdapterOptions,
+    http: chat_sdk_adapter_shared::runtime::reqwest::Client,
+    /// Pre-minted bearer token. Bot Framework's OAuth2 flow mints
+    /// short-lived tokens (`POST login.microsoftonline.com/.../oauth2/v2.0/token`
+    /// with the `client_credentials` grant + `https://api.botframework.com/.default`
+    /// scope) which adopters refresh out-of-band. Until a token-cache
+    /// helper lands in chat-sdk-adapter-shared, the adapter accepts
+    /// a pre-minted token via `with_bearer_token` and falls back to
+    /// `AdapterError::InvalidPayload` when none is configured.
+    bearer_token: Option<String>,
 }
 
 impl TeamsAdapter {
     /// 1:1 port of upstream
     /// `new TeamsAdapter({ appId, appPassword, tenantId, apiBase? })`.
     pub fn new(options: TeamsAdapterOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            http: chat_sdk_adapter_shared::runtime::default_http_client(),
+            bearer_token: None,
+        }
+    }
+
+    /// Override the HTTP client.
+    pub fn with_http_client(
+        mut self,
+        client: chat_sdk_adapter_shared::runtime::reqwest::Client,
+    ) -> Self {
+        self.http = client;
+        self
+    }
+
+    /// Provide a pre-minted Bot Framework bearer token. Required
+    /// for `post_message`; adopters mint it out-of-band against
+    /// `login.microsoftonline.com/<tenant>/oauth2/v2.0/token` and
+    /// refresh as needed (Bot Framework tokens are ~1 hour TTL).
+    /// A token-cache helper for the minting flow will land in
+    /// `chat_sdk_adapter_shared` in a future slice.
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.bearer_token = Some(token.into());
+        self
     }
 
     /// Read the bot app id.
@@ -91,12 +124,95 @@ impl TeamsAdapter {
     pub fn api_base(&self) -> &str {
         self.options.effective_api_base()
     }
+
+    /// Read the currently-configured bearer token, if any.
+    pub fn bearer_token(&self) -> Option<&str> {
+        self.bearer_token.as_deref()
+    }
+
+    /// Build the Bot Framework activity-create URL. 1:1 with
+    /// upstream's inline `${apiBase}/v3/conversations/${conversationId}/activities`
+    /// template.
+    fn activities_url(&self, conversation_id: &str) -> String {
+        format!(
+            "{}/v3/conversations/{conversation_id}/activities",
+            self.api_base()
+        )
+    }
 }
 
 #[async_trait]
 impl Adapter for TeamsAdapter {
     fn name(&self) -> &str {
         ADAPTER_NAME
+    }
+
+    /// Post a text message via the Bot Framework `activities` API.
+    /// 1:1 with upstream's `adapter.postMessage`:
+    ///
+    /// - Decodes `teams:<conversation_id>:<message_id>` (we use
+    ///   `conversation_id`; `message_id` becomes `replyToId` only
+    ///   when the bot supports threading, which is a follow-up).
+    /// - POSTs the activity `{type: "message", text}` to
+    ///   `<api_base>/v3/conversations/<conversation_id>/activities`.
+    /// - Auth via `Authorization: Bearer <bearer_token>` (the
+    ///   pre-minted token from `with_bearer_token`; OAuth2
+    ///   token-mint helper deferred).
+    /// - Returns the Bot Framework response's `id` field (the
+    ///   activity id).
+    async fn post_message(
+        &self,
+        thread_id: &str,
+        text: &str,
+    ) -> chat_sdk_chat::types::AdapterResult<String> {
+        use chat_sdk_chat::types::AdapterError;
+
+        let decoded = decode_thread_id(thread_id).ok_or_else(|| {
+            AdapterError::InvalidPayload(format!("thread_id {thread_id:?} is not Teams-encoded"))
+        })?;
+
+        let bearer = self.bearer_token.as_deref().ok_or_else(|| {
+            AdapterError::InvalidPayload(
+                "TeamsAdapter has no bearer_token configured; call \
+                 with_bearer_token() with a pre-minted Bot Framework \
+                 OAuth2 access token (see TeamsAdapter docs)"
+                    .to_string(),
+            )
+        })?;
+
+        let url = self.activities_url(&decoded.conversation_id);
+        let body = serde_json::json!({
+            "type": "message",
+            "text": text,
+        });
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(bearer)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        let status = response.status();
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| AdapterError::Io(Box::new(err)))?;
+
+        if !status.is_success() {
+            let error_msg = json["error"]["message"]
+                .as_str()
+                .unwrap_or("Bot Framework activity-create failed");
+            return Err(AdapterError::InvalidPayload(format!(
+                "{status}: {error_msg}"
+            )));
+        }
+
+        json["id"].as_str().map(str::to_owned).ok_or_else(|| {
+            AdapterError::InvalidPayload("Bot Framework activity response missing id".to_string())
+        })
     }
 }
 
@@ -220,14 +336,47 @@ mod tests {
     }
 
     #[test]
-    fn adapter_default_methods_return_unsupported() {
+    fn adapter_post_message_rejects_non_teams_thread_ids() {
+        let adapter = TeamsAdapter::new(TeamsAdapterOptions::new("a", "p", "t"));
+        use chat_sdk_chat::types::AdapterError;
+        let err = block_on(adapter.post_message("slack:C1:1.0", "hi"));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("not Teams-encoded"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_post_message_requires_a_pre_minted_bearer_token() {
         let adapter = TeamsAdapter::new(TeamsAdapterOptions::new("a", "p", "t"));
         use chat_sdk_chat::types::AdapterError;
         let err = block_on(adapter.post_message("teams:CONV:MSG", "hi"));
-        assert!(matches!(
-            err,
-            Err(AdapterError::Unsupported("post_message"))
-        ));
+        match err {
+            Err(AdapterError::InvalidPayload(msg)) => {
+                assert!(msg.contains("no bearer_token configured"));
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_activities_url_builds_the_upstream_endpoint() {
+        let adapter = TeamsAdapter::new(
+            TeamsAdapterOptions::new("a", "p", "t").with_api_base("https://example.test/v3"),
+        );
+        assert_eq!(
+            adapter.activities_url("19:abc;tenant=def"),
+            "https://example.test/v3/v3/conversations/19:abc;tenant=def/activities"
+        );
+    }
+
+    #[test]
+    fn adapter_bearer_token_accessor_round_trips_with_setter() {
+        let adapter = TeamsAdapter::new(TeamsAdapterOptions::new("a", "p", "t"))
+            .with_bearer_token("ya29.tok");
+        assert_eq!(adapter.bearer_token(), Some("ya29.tok"));
     }
 
     #[test]
