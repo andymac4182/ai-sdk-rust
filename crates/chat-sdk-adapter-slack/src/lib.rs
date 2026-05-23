@@ -10,6 +10,7 @@
 //! timestamp, so the encoding is symmetric.
 
 pub mod api;
+pub mod cards;
 pub mod crypto;
 pub mod format;
 pub mod markdown;
