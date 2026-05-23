@@ -2,8 +2,9 @@
 # Conservative completion estimates for `in-progress` rows in docs/chat/upstream-parity.md.
 # Verified and js-only-documented rows are forced to 100% by the generator; not-started rows are forced to 0%.
 # Do not add rows for non-in-progress packages.
-chat	99	Crate + colocated tests across 16 modules: 563 chat tests. Phase 1.5 complete. Remaining: handler/event registration, postToCallbackUrl HTTP, 5 Phase 2 adapters, 3 Phase 3 state backends.
+chat	99	Crate + colocated tests across 16 modules: 563 chat tests. Phase 1.5 complete. Remaining: handler/event registration, postToCallbackUrl HTTP, 4 Phase 2 adapters, 3 Phase 3 state backends.
 adapter-telegram	10	Crate scaffold (slice 130): TelegramAdapter + thread-id codec. 13 tests. HTTP I/O deferred.
 adapter-github	10	Crate scaffold (slice 131): GithubAdapter + thread-id codec. 13 tests. HTTP I/O deferred.
 adapter-messenger	10	Crate scaffold (slice 132): MessengerAdapter + thread-id codec. 11 tests. HTTP I/O deferred.
 adapter-whatsapp	10	Crate scaffold (slice 133): WhatsappAdapter + thread-id codec. 11 tests. HTTP I/O deferred.
+adapter-discord	10	Crate scaffold (slice 134): DiscordAdapter + thread-id codec (incl. @me DM sentinel). 13 tests. HTTP I/O deferred.

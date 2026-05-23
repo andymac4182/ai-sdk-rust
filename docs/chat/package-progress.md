@@ -3,12 +3,12 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 35.5%
-- Portable package average: 22.6%
+- Average estimated completion: 36.1%
+- Portable package average: 23.3%
 - Closed package rows: 5 / 18
 - Strict portable verified rows: 2 / 15
-- In-progress rows: 5
-- Not-started rows: 8
+- In-progress rows: 6
+- Not-started rows: 7
 
 ## 100% Closed
 
@@ -25,6 +25,7 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
 | `@chat-sdk/chat` | 99% | In progress | core SDK package | Crate + colocated tests across 16 modules: 563 chat tests. Phase 1.5 complete. Remaining: handler/event registration,... |
+| `@chat-sdk/adapter-discord` | 10% | In progress | adapter package | Crate scaffold (slice 134): DiscordAdapter + thread-id codec (incl. @me DM sentinel). 13 tests. HTTP I/O deferred. |
 | `@chat-sdk/adapter-github` | 10% | In progress | adapter package | Crate scaffold (slice 131): GithubAdapter + thread-id codec. 13 tests. HTTP I/O deferred. |
 | `@chat-sdk/adapter-messenger` | 10% | In progress | adapter package | Crate scaffold (slice 132): MessengerAdapter + thread-id codec. 11 tests. HTTP I/O deferred. |
 | `@chat-sdk/adapter-telegram` | 10% | In progress | adapter package | Crate scaffold (slice 130): TelegramAdapter + thread-id codec. 13 tests. HTTP I/O deferred. |
@@ -37,7 +38,6 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | `@chat-sdk/adapter-slack` | 0% | Not started | adapter package |
 | `@chat-sdk/adapter-teams` | 0% | Not started | adapter package |
 | `@chat-sdk/adapter-gchat` | 0% | Not started | adapter package |
-| `@chat-sdk/adapter-discord` | 0% | Not started | adapter package |
 | `@chat-sdk/adapter-linear` | 0% | Not started | adapter package |
 | `@chat-sdk/state-redis` | 0% | Not started | state backend (Redis) |
 | `@chat-sdk/state-ioredis` | 0% | Not started | state backend (ioredis) |
