@@ -32,7 +32,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
-| `ai` | 93% | In progress | core package | Core surface is broad; abort and callback utility parity are now mapped, with remaining stream/UI/agent edge cases and... |
+| `ai` | 94% | In progress | core package | Core surface is broad; abort, callback, and serial job utility parity are now mapped, with remaining stream/UI/agent... |
 | `@ai-sdk/provider` | 75% | In progress | provider contracts | Provider-v4 contracts are largely represented; v2/v3 compatibility and exact stream abstractions remain. |
 | `@ai-sdk/provider-utils` | 82% | In progress | provider support library | Most runtime helpers and many type-contract cases are mapped; browser stream/fetch parity and remaining type-level/Zod... |
 | `@ai-sdk/openai` | 65% | In progress | provider package | OpenAI/Open Responses foundations exist; broader Responses, files, speech, transcription, and provider surfaces remain. |

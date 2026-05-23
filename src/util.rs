@@ -5,7 +5,9 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::task::{Context, Poll};
+use std::thread;
 use std::time::Duration;
 
 use crate::headers::Headers;
@@ -372,6 +374,136 @@ where
 
     NotifyFuture {
         inner: CallbackSettleFuture::new(futures),
+    }
+}
+
+/// Error returned by a serial job.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SerialJobError {
+    message: String,
+}
+
+impl SerialJobError {
+    /// Creates a serial job error.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    /// Returns the error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for SerialJobError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for SerialJobError {}
+
+/// Result returned by [`SerialJobExecutor`] jobs.
+pub type SerialJobResult = Result<(), SerialJobError>;
+
+struct SerialJob {
+    job: Box<dyn FnOnce() -> SerialJobResult + Send + 'static>,
+    completion: mpsc::Sender<SerialJobResult>,
+}
+
+/// Handle returned by [`SerialJobExecutor::run`].
+pub struct SerialJobHandle {
+    completion: mpsc::Receiver<SerialJobResult>,
+}
+
+impl SerialJobHandle {
+    /// Waits until the queued job has completed.
+    pub fn wait(self) -> SerialJobResult {
+        self.completion
+            .recv()
+            .unwrap_or_else(|_| Err(SerialJobError::new("serial job executor stopped")))
+    }
+}
+
+impl fmt::Debug for SerialJobHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SerialJobHandle")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Executes submitted jobs one at a time in submission order.
+///
+/// Upstream uses promises and a queue. Rust uses one worker thread per
+/// executor, preserving the same serialized ordering and per-job error result.
+pub struct SerialJobExecutor {
+    sender: Option<mpsc::Sender<SerialJob>>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl SerialJobExecutor {
+    /// Creates a serial job executor.
+    pub fn new() -> Self {
+        let (sender, receiver) = mpsc::channel::<SerialJob>();
+        let worker = thread::spawn(move || {
+            for queued_job in receiver {
+                let result = (queued_job.job)();
+                let _ = queued_job.completion.send(result);
+            }
+        });
+
+        Self {
+            sender: Some(sender),
+            worker: Some(worker),
+        }
+    }
+
+    /// Queues a job for serialized execution.
+    pub fn run<F>(&self, job: F) -> SerialJobHandle
+    where
+        F: FnOnce() -> SerialJobResult + Send + 'static,
+    {
+        let (completion, receiver) = mpsc::channel();
+        let queued_job = SerialJob {
+            job: Box::new(job),
+            completion: completion.clone(),
+        };
+
+        let send_result = self.sender.as_ref().map(|sender| sender.send(queued_job));
+
+        if !matches!(send_result, Some(Ok(()))) {
+            let _ = completion.send(Err(SerialJobError::new("serial job executor stopped")));
+        }
+
+        SerialJobHandle {
+            completion: receiver,
+        }
+    }
+}
+
+impl Default for SerialJobExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for SerialJobExecutor {
+    fn drop(&mut self) {
+        drop(self.sender.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl fmt::Debug for SerialJobExecutor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SerialJobExecutor")
+            .finish_non_exhaustive()
     }
 }
 
@@ -1171,16 +1303,16 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
     use std::rc::Rc;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex, mpsc};
     use std::task::{Context, Poll, Wake, Waker};
     use std::time::{Duration, Instant};
 
     use super::{
         AbortSignalSource, AbortTimeoutOptions, Callback, CallbackResult, DataUrlTextError,
-        InvalidArgumentError, NotifyCallbacks, cosine_similarity, fix_json,
-        get_potential_start_index, get_text_from_data_url, is_deep_equal_data, merge_abort_signals,
-        merge_callbacks, merge_objects, notify, parse_partial_json, prepare_headers,
-        set_abort_timeout, split_array,
+        InvalidArgumentError, NotifyCallbacks, SerialJobError, SerialJobExecutor,
+        cosine_similarity, fix_json, get_potential_start_index, get_text_from_data_url,
+        is_deep_equal_data, merge_abort_signals, merge_callbacks, merge_objects, notify,
+        parse_partial_json, prepare_headers, set_abort_timeout, split_array,
     };
     use crate::headers::Headers;
     use crate::json::JsonValue;
@@ -1731,6 +1863,246 @@ mod tests {
         poll_unit_ready(third.as_mut());
 
         assert_eq!(events.borrow().as_slice(), ["first", "second", "third"]);
+    }
+
+    #[test]
+    fn serial_job_executor_should_execute_a_single_job_successfully() {
+        let executor = SerialJobExecutor::new();
+        let result = Arc::new(Mutex::new(None::<String>));
+        let job_result = Arc::clone(&result);
+
+        let handle = executor.run(move || {
+            *job_result.lock().expect("result lock") = Some("done".to_string());
+            Ok(())
+        });
+
+        handle.wait().expect("job succeeds");
+        assert_eq!(result.lock().expect("result lock").as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn serial_job_executor_should_execute_multiple_jobs_in_serial_order() {
+        let executor = SerialJobExecutor::new();
+        let execution_order = Arc::new(Mutex::new(Vec::<usize>::new()));
+
+        let handles = (1..=3)
+            .map(|job_number| {
+                let execution_order = Arc::clone(&execution_order);
+                executor.run(move || {
+                    execution_order
+                        .lock()
+                        .expect("execution order lock")
+                        .push(job_number);
+                    Ok(())
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            handle.wait().expect("job succeeds");
+        }
+
+        assert_eq!(
+            execution_order
+                .lock()
+                .expect("execution order lock")
+                .as_slice(),
+            [1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn serial_job_executor_should_handle_job_errors_correctly() {
+        let executor = SerialJobExecutor::new();
+
+        let handle = executor.run(|| Err(SerialJobError::new("test error")));
+
+        let error = handle.wait().expect_err("job fails");
+        assert_eq!(error.message(), "test error");
+    }
+
+    #[test]
+    fn serial_job_executor_should_execute_jobs_one_at_a_time() {
+        let executor = SerialJobExecutor::new();
+        let concurrent_jobs = Arc::new(Mutex::new(0usize));
+        let max_concurrent_jobs = Arc::new(Mutex::new(0usize));
+        let (job1_started_tx, job1_started_rx) = mpsc::channel::<()>();
+        let (job2_started_tx, job2_started_rx) = mpsc::channel::<()>();
+        let (job1_release_tx, job1_release_rx) = mpsc::channel::<()>();
+        let (job2_release_tx, job2_release_rx) = mpsc::channel::<()>();
+
+        let handle1 = {
+            let concurrent_jobs = Arc::clone(&concurrent_jobs);
+            let max_concurrent_jobs = Arc::clone(&max_concurrent_jobs);
+            executor.run(move || {
+                {
+                    let mut concurrent = concurrent_jobs.lock().expect("concurrent jobs lock");
+                    *concurrent += 1;
+                    let mut max = max_concurrent_jobs
+                        .lock()
+                        .expect("max concurrent jobs lock");
+                    *max = (*max).max(*concurrent);
+                }
+                job1_started_tx.send(()).expect("job1 started");
+                job1_release_rx.recv().expect("job1 release");
+                *concurrent_jobs.lock().expect("concurrent jobs lock") -= 1;
+                Ok(())
+            })
+        };
+
+        let handle2 = {
+            let concurrent_jobs = Arc::clone(&concurrent_jobs);
+            let max_concurrent_jobs = Arc::clone(&max_concurrent_jobs);
+            executor.run(move || {
+                {
+                    let mut concurrent = concurrent_jobs.lock().expect("concurrent jobs lock");
+                    *concurrent += 1;
+                    let mut max = max_concurrent_jobs
+                        .lock()
+                        .expect("max concurrent jobs lock");
+                    *max = (*max).max(*concurrent);
+                }
+                job2_started_tx.send(()).expect("job2 started");
+                job2_release_rx.recv().expect("job2 release");
+                *concurrent_jobs.lock().expect("concurrent jobs lock") -= 1;
+                Ok(())
+            })
+        };
+
+        job1_started_rx
+            .recv_timeout(Duration::from_millis(500))
+            .expect("job1 starts");
+        assert!(
+            job2_started_rx
+                .recv_timeout(Duration::from_millis(20))
+                .is_err(),
+            "job2 should not start while job1 is still running"
+        );
+
+        job2_release_tx.send(()).expect("job2 release sent");
+        job1_release_tx.send(()).expect("job1 release sent");
+        handle1.wait().expect("job1 succeeds");
+        job2_started_rx
+            .recv_timeout(Duration::from_millis(500))
+            .expect("job2 starts after job1");
+        handle2.wait().expect("job2 succeeds");
+
+        assert_eq!(*max_concurrent_jobs.lock().expect("max lock"), 1);
+    }
+
+    #[test]
+    fn serial_job_executor_should_handle_mixed_success_and_failure_jobs() {
+        let executor = SerialJobExecutor::new();
+        let results = Arc::new(Mutex::new(Vec::<String>::new()));
+        let (fail_job_release_tx, fail_job_release_rx) = mpsc::channel::<()>();
+
+        let handle1 = {
+            let results = Arc::clone(&results);
+            executor.run(move || {
+                results
+                    .lock()
+                    .expect("results lock")
+                    .push("job1".to_string());
+                Ok(())
+            })
+        };
+        let handle2 = executor.run(move || {
+            fail_job_release_rx.recv().expect("fail job release");
+            Err(SerialJobError::new("test error"))
+        });
+        let handle3 = {
+            let results = Arc::clone(&results);
+            executor.run(move || {
+                results
+                    .lock()
+                    .expect("results lock")
+                    .push("job3".to_string());
+                Ok(())
+            })
+        };
+
+        handle1.wait().expect("job1 succeeds");
+        assert_eq!(results.lock().expect("results lock").as_slice(), ["job1"]);
+
+        fail_job_release_tx.send(()).expect("fail job release sent");
+        let error = handle2.wait().expect_err("job2 fails");
+        assert_eq!(error.message(), "test error");
+
+        handle3.wait().expect("job3 succeeds");
+        assert_eq!(
+            results.lock().expect("results lock").as_slice(),
+            ["job1", "job3"]
+        );
+    }
+
+    #[test]
+    fn serial_job_executor_should_handle_concurrent_calls_to_run() {
+        let executor = SerialJobExecutor::new();
+        let start_order = Arc::new(Mutex::new(Vec::<usize>::new()));
+        let execution_order = Arc::new(Mutex::new(Vec::<usize>::new()));
+        let (job1_release_tx, job1_release_rx) = mpsc::channel::<()>();
+        let (job2_release_tx, job2_release_rx) = mpsc::channel::<()>();
+        let (job3_release_tx, job3_release_rx) = mpsc::channel::<()>();
+
+        let handle1 = {
+            let start_order = Arc::clone(&start_order);
+            let execution_order = Arc::clone(&execution_order);
+            executor.run(move || {
+                start_order.lock().expect("start order lock").push(1);
+                job1_release_rx.recv().expect("job1 release");
+                execution_order
+                    .lock()
+                    .expect("execution order lock")
+                    .push(1);
+                Ok(())
+            })
+        };
+        let handle2 = {
+            let start_order = Arc::clone(&start_order);
+            let execution_order = Arc::clone(&execution_order);
+            executor.run(move || {
+                start_order.lock().expect("start order lock").push(2);
+                job2_release_rx.recv().expect("job2 release");
+                execution_order
+                    .lock()
+                    .expect("execution order lock")
+                    .push(2);
+                Ok(())
+            })
+        };
+        let handle3 = {
+            let start_order = Arc::clone(&start_order);
+            let execution_order = Arc::clone(&execution_order);
+            executor.run(move || {
+                start_order.lock().expect("start order lock").push(3);
+                job3_release_rx.recv().expect("job3 release");
+                execution_order
+                    .lock()
+                    .expect("execution order lock")
+                    .push(3);
+                Ok(())
+            })
+        };
+
+        job3_release_tx.send(()).expect("job3 release sent");
+        job2_release_tx.send(()).expect("job2 release sent");
+        job1_release_tx.send(()).expect("job1 release sent");
+
+        handle1.wait().expect("job1 succeeds");
+        handle2.wait().expect("job2 succeeds");
+        handle3.wait().expect("job3 succeeds");
+
+        assert_eq!(
+            start_order.lock().expect("start order lock").as_slice(),
+            [1, 2, 3]
+        );
+        assert_eq!(
+            execution_order
+                .lock()
+                .expect("execution order lock")
+                .as_slice(),
+            [1, 2, 3]
+        );
     }
 
     #[test]
