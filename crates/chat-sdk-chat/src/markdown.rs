@@ -1200,4 +1200,65 @@ mod tests {
         assert!(value.contains("let x = 1;"));
         assert!(value.contains("let y = 2;"));
     }
+
+    // ---------- slice 70: 4 more 1:1 markdown.test.ts cases ----------
+
+    #[test]
+    fn parse_markdown_extracts_autolink_url_inside_angle_brackets() {
+        let node = parse_markdown("<https://example.com>").expect("parses");
+        fn find_link_url(n: &Node) -> Option<String> {
+            if let Node::Link(l) = n {
+                return Some(l.url.clone());
+            }
+            for c in get_node_children(n).iter() {
+                if let Some(u) = find_link_url(c) {
+                    return Some(u);
+                }
+            }
+            None
+        }
+        assert_eq!(find_link_url(&node).as_deref(), Some("https://example.com"));
+    }
+
+    #[test]
+    fn parse_markdown_handles_reference_style_links() {
+        let input = "[foo][1]\n\n[1]: https://example.com";
+        let node = parse_markdown(input).expect("parses");
+        // markdown-rs resolves reference-style links into Link nodes
+        // during parsing (the Definition node remains as a separate
+        // sibling child of Root).
+        let plain = to_plain_text(&node);
+        assert!(plain.contains("foo"), "missing label: {plain:?}");
+    }
+
+    #[test]
+    fn parse_markdown_extracts_text_node_with_correct_value() {
+        let node = parse_markdown("just plain text here").expect("parses");
+        fn find_text_value(n: &Node) -> Option<String> {
+            if let Node::Text(t) = n {
+                return Some(t.value.clone());
+            }
+            for c in get_node_children(n).iter() {
+                if let Some(v) = find_text_value(c) {
+                    return Some(v);
+                }
+            }
+            None
+        }
+        assert_eq!(
+            find_text_value(&node).as_deref(),
+            Some("just plain text here")
+        );
+    }
+
+    #[test]
+    fn parse_markdown_handles_empty_paragraphs_without_panicking() {
+        // Multiple blank lines collapse to zero paragraphs in CommonMark.
+        let node = parse_markdown("\n\n\n").expect("parses");
+        let root = match node {
+            Node::Root(r) => r,
+            _ => unreachable!(),
+        };
+        assert!(root.children.is_empty());
+    }
 }
