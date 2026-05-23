@@ -23,6 +23,7 @@ members = [
     "crates/ai-sdk-moonshotai",
     "crates/ai-sdk-perplexity",
     "crates/ai-sdk-revai",
+    "crates/chat-sdk-chat",
 ]
 resolver = "3"
 

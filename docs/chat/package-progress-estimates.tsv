@@ -1,4 +1,5 @@
-# package_dir<TAB>percent<TAB>basis
+# package_dir	percent	basis
 # Conservative completion estimates for `in-progress` rows in docs/chat/upstream-parity.md.
 # Verified and js-only-documented rows are forced to 100% by the generator; not-started rows are forced to 0%.
 # Do not add rows for non-in-progress packages — the generator will reject stale entries.
+chat	5	Crate skeleton + errors module ported (1/23 upstream test files, 17 test cases). Remaining: types, channel, message, thread, plan, cards, modals, markdown, emoji, streaming, AI subpath, history, callback-url, mock-adapter, postable-object, reviver, jsx-runtime (JS-only).

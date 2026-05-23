@@ -43,7 +43,7 @@ Two-phase gate, enforced strictly:
 
 | Item | Kind | Status | Rust path | Evidence | Notes |
 | --- | --- | --- | --- | --- | --- |
-| `packages/chat` (`@chat-sdk/chat`) | core SDK package | not-started | none | none | 54 src files, 23 test files. Unified `Chat` abstraction with adapters, AI tools integration, markdown rendering, modals/cards, JSX runtime, plan execution, streaming. Phase-1. |
+| `packages/chat` (`@chat-sdk/chat`) | core SDK package | in-progress | `crates/chat-sdk-chat` | `crates/chat-sdk-chat/tests/errors.rs` (17 ports of `packages/chat/src/errors.test.ts`) | 54 src files, 23 test files upstream. Crate skeleton + `errors` module ported (1/23 test files). Phase-1. |
 | `packages/adapter-shared` (`@chat-sdk/adapter-shared`) | shared adapter utilities | not-started | none | none | 10 src files, 4 test files. Adapter utility, buffer utility, card utility, crypto, errors. Phase-1. Name uses upstream-mirroring "shared" exception; document in `scripts/check-naming-conventions.sh`. |
 | `packages/tests` (`@chat-sdk/tests`) | test support library | not-started | none | none | 6 src files, 2 test files. Vitest factories, matchers, setup utilities for testing adapters and bots. Phase-1. |
 | `packages/state-memory` (`@chat-sdk/state-memory`) | state backend (in-memory) | not-started | none | none | 2 src files, 1 test file. Dev/testing in-memory state adapter. Phase-1. |
@@ -99,7 +99,23 @@ Populated as each upstream test file is mapped to Rust. Format: one row per upst
 
 | Upstream file:case | Rust crate::test | Status | Notes |
 | --- | --- | --- | --- |
-| _none yet_ | | | First mappings will land in slice 3 alongside the `chat-sdk-chat` deterministic-module port. |
+| `packages/chat/src/errors.test.ts`:`ChatError > should set message, code, and name` | `chat-sdk-chat::tests::errors::chat_error_should_set_message_code_and_name` | mapped | |
+| `packages/chat/src/errors.test.ts`:`ChatError > should be instanceof Error` | `chat-sdk-chat::tests::errors::chat_error_should_be_instanceof_error` | mapped | Adapted: Rust uses `dyn std::error::Error` + enum-variant `matches!` rather than JS prototype chain. |
+| `packages/chat/src/errors.test.ts`:`ChatError > should propagate cause` | `chat-sdk-chat::tests::errors::chat_error_should_propagate_cause` | mapped | |
+| `packages/chat/src/errors.test.ts`:`ChatError > should allow undefined cause` | `chat-sdk-chat::tests::errors::chat_error_should_allow_undefined_cause` | mapped | |
+| `packages/chat/src/errors.test.ts`:`RateLimitError > should set code to RATE_LIMITED` | `chat-sdk-chat::tests::errors::rate_limit_error_should_set_code_to_rate_limited` | mapped | |
+| `packages/chat/src/errors.test.ts`:`RateLimitError > should store retryAfterMs` | `chat-sdk-chat::tests::errors::rate_limit_error_should_store_retry_after_ms` | mapped | |
+| `packages/chat/src/errors.test.ts`:`RateLimitError > should allow undefined retryAfterMs` | `chat-sdk-chat::tests::errors::rate_limit_error_should_allow_undefined_retry_after_ms` | mapped | |
+| `packages/chat/src/errors.test.ts`:`RateLimitError > should be instanceof ChatError and Error` | `chat-sdk-chat::tests::errors::rate_limit_error_should_be_instanceof_chat_error_and_error` | mapped | Adapted (see above). |
+| `packages/chat/src/errors.test.ts`:`RateLimitError > should propagate cause` | `chat-sdk-chat::tests::errors::rate_limit_error_should_propagate_cause` | mapped | |
+| `packages/chat/src/errors.test.ts`:`LockError > should set code to LOCK_FAILED` | `chat-sdk-chat::tests::errors::lock_error_should_set_code_to_lock_failed` | mapped | |
+| `packages/chat/src/errors.test.ts`:`LockError > should be instanceof ChatError` | `chat-sdk-chat::tests::errors::lock_error_should_be_instanceof_chat_error` | mapped | Adapted. |
+| `packages/chat/src/errors.test.ts`:`LockError > should propagate cause` | `chat-sdk-chat::tests::errors::lock_error_should_propagate_cause` | mapped | |
+| `packages/chat/src/errors.test.ts`:`NotImplementedError > should set code to NOT_IMPLEMENTED` | `chat-sdk-chat::tests::errors::not_implemented_error_should_set_code_to_not_implemented` | mapped | |
+| `packages/chat/src/errors.test.ts`:`NotImplementedError > should store feature field` | `chat-sdk-chat::tests::errors::not_implemented_error_should_store_feature_field` | mapped | |
+| `packages/chat/src/errors.test.ts`:`NotImplementedError > should allow undefined feature` | `chat-sdk-chat::tests::errors::not_implemented_error_should_allow_undefined_feature` | mapped | |
+| `packages/chat/src/errors.test.ts`:`NotImplementedError > should be instanceof ChatError` | `chat-sdk-chat::tests::errors::not_implemented_error_should_be_instanceof_chat_error` | mapped | Adapted. |
+| `packages/chat/src/errors.test.ts`:`NotImplementedError > should propagate cause` | `chat-sdk-chat::tests::errors::not_implemented_error_should_propagate_cause` | mapped | |
 
 ## Adapter Live Validation Log
 
