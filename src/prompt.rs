@@ -13,7 +13,7 @@ use crate::language_model::{
     LanguageModelUserContentPart, LanguageModelUserMessage,
 };
 use crate::provider::InvalidPromptError;
-use crate::provider_utils::convert_to_base64;
+use crate::provider_utils::{FilePartData, convert_to_base64};
 use crate::util::InvalidArgumentError;
 
 /// Timeout configuration for high-level model and tool requests.
@@ -710,6 +710,116 @@ pub fn convert_data_content_to_base64_string(content: &FileDataContent) -> Strin
     convert_to_base64(content)
 }
 
+/// Result returned by [`convert_to_language_model_v4_file_part`].
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConvertedLanguageModelV4FilePart {
+    /// Tagged provider-v4 file data.
+    pub data: FileData,
+
+    /// Media type extracted from a data URL, when one is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+}
+
+impl ConvertedLanguageModelV4FilePart {
+    fn new(data: FileData, media_type: Option<String>) -> Self {
+        Self { data, media_type }
+    }
+}
+
+/// Converts legacy or tagged file-part data into the provider-v4 prompt shape.
+///
+/// Bare string shorthand is treated like upstream JavaScript: valid URL strings
+/// become URL file data, `data:` URLs are split into inline base64 data and a
+/// media type, and non-URL strings remain base64 data. Explicit tagged
+/// `type: "data"` values reject `data:` URL strings, matching upstream.
+pub fn convert_to_language_model_v4_file_part(
+    content: impl Into<FilePartData>,
+) -> Result<ConvertedLanguageModelV4FilePart, InvalidDataContentError> {
+    match content.into() {
+        FilePartData::Tagged(data) => convert_tagged_file_part_data(data),
+        FilePartData::Data(FileDataContent::Base64(base64)) => match url::Url::parse(&base64) {
+            Ok(url) => convert_url_to_language_model_v4_file_part(url),
+            Err(_) => Ok(convert_inline_data_to_language_model_v4_file_part(
+                FileDataContent::Base64(base64),
+            )),
+        },
+        FilePartData::Data(data) => Ok(convert_inline_data_to_language_model_v4_file_part(data)),
+        FilePartData::Url(url) => convert_url_to_language_model_v4_file_part(url),
+        FilePartData::Reference(reference) => Ok(ConvertedLanguageModelV4FilePart::new(
+            FileData::Reference { reference },
+            None,
+        )),
+    }
+}
+
+fn convert_tagged_file_part_data(
+    data: FileData,
+) -> Result<ConvertedLanguageModelV4FilePart, InvalidDataContentError> {
+    match data {
+        FileData::Data { data } => {
+            if let FileDataContent::Base64(base64) = &data
+                && base64.starts_with("data:")
+            {
+                return Err(InvalidDataContentError::with_message(
+                    base64.clone(),
+                    "Data URLs are not valid inline data. Pass them as { type: \"url\", url } instead.",
+                ));
+            }
+
+            Ok(convert_inline_data_to_language_model_v4_file_part(data))
+        }
+        FileData::Url { url } => convert_url_to_language_model_v4_file_part(url),
+        FileData::Reference { reference } => Ok(ConvertedLanguageModelV4FilePart::new(
+            FileData::Reference { reference },
+            None,
+        )),
+        FileData::Text { text } => Ok(ConvertedLanguageModelV4FilePart::new(
+            FileData::Text { text },
+            None,
+        )),
+    }
+}
+
+fn convert_url_to_language_model_v4_file_part(
+    url: url::Url,
+) -> Result<ConvertedLanguageModelV4FilePart, InvalidDataContentError> {
+    if url.scheme() == "data" {
+        let url_text = url.to_string();
+        let Some((media_type, base64_content)) = split_data_url_for_file_part(&url_text) else {
+            return Err(InvalidDataContentError::with_message(
+                url_text.clone(),
+                format!("Invalid data URL format in content {url_text}"),
+            ));
+        };
+
+        return Ok(ConvertedLanguageModelV4FilePart::new(
+            FileData::Data {
+                data: FileDataContent::Base64(base64_content),
+            },
+            Some(media_type),
+        ));
+    }
+
+    Ok(ConvertedLanguageModelV4FilePart::new(
+        FileData::Url { url },
+        None,
+    ))
+}
+
+fn convert_inline_data_to_language_model_v4_file_part(
+    data: FileDataContent,
+) -> ConvertedLanguageModelV4FilePart {
+    ConvertedLanguageModelV4FilePart::new(FileData::Data { data }, None)
+}
+
+fn split_data_url_for_file_part(data_url: &str) -> Option<(String, String)> {
+    let (header, base64_content) = data_url.split_once(',')?;
+    let media_type = header.split(';').next()?.split_once(':')?.1;
+    Some((media_type.to_string(), base64_content.to_string()))
+}
+
 /// Error returned when prompt data content is not a supported media-data value.
 #[derive(Clone, Debug, PartialEq)]
 pub struct InvalidDataContentError {
@@ -873,20 +983,23 @@ mod tests {
     use std::collections::BTreeMap;
 
     use serde_json::json;
+    use url::Url;
 
-    use crate::file_data::FileDataContent;
+    use crate::file_data::{FileData, FileDataContent, ProviderReference};
     use crate::json::JsonValue;
     use crate::language_model::{
         LanguageModelMessage, LanguageModelPrompt, LanguageModelReasoningEffort,
         LanguageModelSystemMessage, LanguageModelTextPart, LanguageModelToolChoice,
         LanguageModelUserContentPart, LanguageModelUserMessage,
     };
+    use crate::provider_utils::FilePartData;
 
     use super::{
-        Instructions, InvalidDataContentError, InvalidMessageRoleError, LanguageModelCallSettings,
-        MessageConversionError, Prompt, PromptInput, PromptSource, RequestOptions,
-        StandardizedPrompt, TimeoutConfiguration, TimeoutConfigurationOptions,
-        convert_data_content_to_base64_string, get_chunk_timeout_ms, get_step_timeout_ms,
+        ConvertedLanguageModelV4FilePart, Instructions, InvalidDataContentError,
+        InvalidMessageRoleError, LanguageModelCallSettings, MessageConversionError, Prompt,
+        PromptInput, PromptSource, RequestOptions, StandardizedPrompt, TimeoutConfiguration,
+        TimeoutConfigurationOptions, convert_data_content_to_base64_string,
+        convert_to_language_model_v4_file_part, get_chunk_timeout_ms, get_step_timeout_ms,
         get_tool_timeout_ms, get_total_timeout_ms, prepare_language_model_call_options,
         prepare_tool_choice, standardize_prompt,
     };
@@ -899,6 +1012,25 @@ mod tests {
 
     fn system_message(text: &str) -> LanguageModelSystemMessage {
         LanguageModelSystemMessage::new(text)
+    }
+
+    fn provider_reference(entries: &[(&str, &str)]) -> ProviderReference {
+        ProviderReference::from_map(BTreeMap::from_iter(
+            entries
+                .iter()
+                .map(|(provider, id)| ((*provider).to_string(), (*id).to_string())),
+        ))
+        .expect("provider reference is valid")
+    }
+
+    fn converted_file_part(
+        data: FileData,
+        media_type: Option<&str>,
+    ) -> ConvertedLanguageModelV4FilePart {
+        ConvertedLanguageModelV4FilePart {
+            data,
+            media_type: media_type.map(str::to_string),
+        }
     }
 
     fn assert_call_settings_type_boundary_rejects(settings: JsonValue) {
@@ -1696,6 +1828,256 @@ mod tests {
         assert_eq!(
             convert_data_content_to_base64_string(&FileDataContent::Bytes(b"Hello".to_vec())),
             "SGVsbG8="
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_v4_file_part_should_wrap_a_uint8_array_as_type_data_data() {
+        let bytes = vec![1, 2, 3];
+
+        assert_eq!(
+            convert_to_language_model_v4_file_part(bytes).expect("file part converts"),
+            converted_file_part(
+                FileData::Data {
+                    data: FileDataContent::Bytes(vec![1, 2, 3])
+                },
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_v4_file_part_should_wrap_an_array_buffer_converted_to_uint8_array_as_type_data_data()
+     {
+        let bytes: &[u8] = &[4, 5, 6];
+
+        assert_eq!(
+            convert_to_language_model_v4_file_part(bytes).expect("file part converts"),
+            converted_file_part(
+                FileData::Data {
+                    data: FileDataContent::Bytes(vec![4, 5, 6])
+                },
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_v4_file_part_should_wrap_a_base64_string_that_is_not_a_url_as_type_data_data()
+     {
+        assert_eq!(
+            convert_to_language_model_v4_file_part("aGVsbG8=").expect("file part converts"),
+            converted_file_part(
+                FileData::Data {
+                    data: FileDataContent::Base64("aGVsbG8=".to_string())
+                },
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_v4_file_part_should_convert_a_url_string_into_type_url_url() {
+        let url = Url::parse("https://example.com/file.pdf").expect("valid URL");
+
+        assert_eq!(
+            convert_to_language_model_v4_file_part("https://example.com/file.pdf")
+                .expect("file part converts"),
+            converted_file_part(FileData::Url { url }, None)
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_v4_file_part_should_pass_through_a_url_instance_as_type_url_url() {
+        let url = Url::parse("https://example.com/file.pdf").expect("valid URL");
+
+        assert_eq!(
+            convert_to_language_model_v4_file_part(url.clone()).expect("file part converts"),
+            converted_file_part(FileData::Url { url }, None)
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_v4_file_part_should_extract_base64_and_media_type_from_a_data_url_into_type_data_data()
+     {
+        assert_eq!(
+            convert_to_language_model_v4_file_part("data:text/plain;base64,aGVsbG8=")
+                .expect("file part converts"),
+            converted_file_part(
+                FileData::Data {
+                    data: FileDataContent::Base64("aGVsbG8=".to_string())
+                },
+                Some("text/plain")
+            )
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_v4_file_part_should_wrap_a_provider_reference_as_type_reference_reference()
+     {
+        let reference = provider_reference(&[("openai", "file-123"), ("anthropic", "file-abc")]);
+
+        assert_eq!(
+            convert_to_language_model_v4_file_part(reference.clone()).expect("file part converts"),
+            converted_file_part(FileData::Reference { reference }, None)
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_v4_file_part_should_unwrap_type_data_data_uint8_array() {
+        assert_eq!(
+            convert_to_language_model_v4_file_part(FileData::Data {
+                data: FileDataContent::Bytes(vec![1, 2, 3])
+            })
+            .expect("file part converts"),
+            converted_file_part(
+                FileData::Data {
+                    data: FileDataContent::Bytes(vec![1, 2, 3])
+                },
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_v4_file_part_should_unwrap_type_data_data_array_buffer() {
+        assert_eq!(
+            convert_to_language_model_v4_file_part(FileData::Data {
+                data: FileDataContent::Bytes(vec![4, 5, 6])
+            })
+            .expect("file part converts"),
+            converted_file_part(
+                FileData::Data {
+                    data: FileDataContent::Bytes(vec![4, 5, 6])
+                },
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_v4_file_part_should_unwrap_type_data_data_base64_string_that_is_not_a_url()
+     {
+        assert_eq!(
+            convert_to_language_model_v4_file_part(FileData::Data {
+                data: FileDataContent::Base64("aGVsbG8=".to_string())
+            })
+            .expect("file part converts"),
+            converted_file_part(
+                FileData::Data {
+                    data: FileDataContent::Base64("aGVsbG8=".to_string())
+                },
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_v4_file_part_should_reject_type_data_data_data_url_string_because_data_urls_are_not_inline_data()
+     {
+        let error = convert_to_language_model_v4_file_part(FilePartData::Tagged(FileData::Data {
+            data: FileDataContent::Base64("data:text/plain;base64,aGVsbG8=".to_string()),
+        }))
+        .expect_err("tagged inline data URL is rejected");
+
+        assert_eq!(
+            error.message(),
+            "Data URLs are not valid inline data. Pass them as { type: \"url\", url } instead."
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_v4_file_part_should_unwrap_type_url_url_into_type_url_url() {
+        let url = Url::parse("https://example.com/file.pdf").expect("valid URL");
+
+        assert_eq!(
+            convert_to_language_model_v4_file_part(FileData::Url { url: url.clone() })
+                .expect("file part converts"),
+            converted_file_part(FileData::Url { url }, None)
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_v4_file_part_should_unwrap_type_url_url_with_data_url_into_base64_and_media_type()
+     {
+        let url = Url::parse("data:text/plain;base64,aGVsbG8=").expect("valid data URL");
+
+        assert_eq!(
+            convert_to_language_model_v4_file_part(FileData::Url { url })
+                .expect("file part converts"),
+            converted_file_part(
+                FileData::Data {
+                    data: FileDataContent::Base64("aGVsbG8=".to_string())
+                },
+                Some("text/plain")
+            )
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_v4_file_part_should_pass_through_type_reference_reference() {
+        let reference = provider_reference(&[("openai", "file-123"), ("anthropic", "file-abc")]);
+
+        assert_eq!(
+            convert_to_language_model_v4_file_part(FileData::Reference {
+                reference: reference.clone()
+            })
+            .expect("file part converts"),
+            converted_file_part(FileData::Reference { reference }, None)
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_v4_file_part_should_pass_through_type_text_text() {
+        assert_eq!(
+            convert_to_language_model_v4_file_part(FileData::Text {
+                text: "hello".to_string()
+            })
+            .expect("file part converts"),
+            converted_file_part(
+                FileData::Text {
+                    text: "hello".to_string()
+                },
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_v4_file_part_should_make_type_data_data_bytes_equal_bare_bytes() {
+        let bytes = vec![7, 8, 9];
+
+        assert_eq!(
+            convert_to_language_model_v4_file_part(FileData::Data {
+                data: FileDataContent::Bytes(bytes.clone())
+            })
+            .expect("tagged file part converts"),
+            convert_to_language_model_v4_file_part(bytes).expect("bare file part converts")
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_v4_file_part_should_make_type_url_url_equal_bare_url() {
+        let url = Url::parse("https://example.com/file.pdf").expect("valid URL");
+
+        assert_eq!(
+            convert_to_language_model_v4_file_part(FileData::Url { url: url.clone() })
+                .expect("tagged file part converts"),
+            convert_to_language_model_v4_file_part(url).expect("bare file part converts")
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_v4_file_part_should_make_type_reference_reference_equal_bare_reference()
+     {
+        let reference = provider_reference(&[("openai", "file-123")]);
+
+        assert_eq!(
+            convert_to_language_model_v4_file_part(FileData::Reference {
+                reference: reference.clone()
+            })
+            .expect("tagged file part converts"),
+            convert_to_language_model_v4_file_part(reference).expect("bare file part converts")
         );
     }
 
