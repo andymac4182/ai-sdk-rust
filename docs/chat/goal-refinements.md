@@ -420,3 +420,71 @@ shell so the pipe inherits the failing command's exit code.
 **Open refinement:** add a `make merge-back` target (or shell
 function) that codifies this protocol so individual slice commits
 can't accidentally re-introduce a pipe-in-the-chain regression.
+
+### 2026-05-23 - slices 90..97
+
+Slices reviewed: 90 (slice-89 fix for very-long-paragraph
+assertion), 91 (second validation-bypass post-mortem), 92 (chat
+row bumped to 80% reflecting markdown 1:1 complete), 93 (Plan
+data struct + getters + fallback text + post_data), 94 (Plan
+model-update helpers add_task/update_task_in_model/complete_in_model),
+95 (StreamingPlan + StreamingPlanOptions + GroupTasksMode), 96
+(transcripts is_tombstone + tombstone factory +
+user_transcript_key), 97 (chat row bumped to 82%).
+
+**What the brief got wrong or left out**
+
+- **Avoid asserting byte length on parser output.** Slice 89's
+  failing test asserted `plain.len() >= 2500` on a 500-token
+  "word " input, expecting whitespace preservation. markdown-rs
+  collapses inline whitespace runs (which is also CommonMark
+  behavior for the rendered text payload). Brief should canonize:
+  asserting raw byte/length on a parser's output is brittle;
+  count meaningful tokens via `matches("token").count()` instead.
+- **Class-with-adapter-binding ports split cleanly into "model"
+  and "adapter" surfaces.** Slices 93-94 ported the in-memory
+  model portion of upstream class Plan (constructor, getters,
+  fallback text, add_task, update_task_in_model, complete_in_model)
+  without touching the Adapter trait. Brief should canonize: when
+  porting a class that mixes in-memory state with adapter-bound
+  dispatch, split the surface — ship the in-memory portion now,
+  defer the dispatch portion until the Adapter trait lands. The
+  in-memory portion is usually 60-80% of the class's footprint.
+- **AsyncIterable -> `Vec<Value>` for non-stream-consuming code
+  paths.** Slice 95's StreamingPlan stores its event stream as
+  `Vec<serde_json::Value>` rather than picking an async-runtime
+  Stream type. Adapters consume the values via from_full_stream's
+  sync iterator. Brief should canonize: until an async-runtime
+  decision lands, `AsyncIterable<T>` -> `Vec<T>` is the conservative
+  port. Document a TODO in the struct header to swap to
+  `futures::Stream` in a future slice.
+
+**Stale or misleading guidance**
+
+- The slice 80/91 refinements documented that the merge-back &&
+  chain must not contain trailing pipes (`| tail`, `| head`,
+  `| grep`). Slice 97's commit used a `2>&1 | grep "test result"`
+  fragment in the chain — the gate happened to pass, but the pipe
+  still masks exit codes. The remaining application of this rule
+  is to switch the per-slice protocol to use `grep test result`
+  AFTER the && validation succeeds, or to use `cargo test ...; echo
+  RESULT=$?` patterns. Open refinement: codify a `make merge-back`
+  target so individual slices can't accidentally re-introduce
+  pipe-in-chain.
+
+**Edits applied**
+
+- `scripts/codex-goal-chat/port-chat-sdk.md`: pending (apply on next
+  non-refinement slice).
+- `scripts/codex-goal-chat/goal-condition.md`: stable.
+
+**Open refinements deferred**
+
+- `chat::callback_url`, `chat::message::subject`,
+  `chat::postable_object::post_postable_object`,
+  `chat::transcripts::TranscriptsApiImpl`, and most chat-bound
+  reviver branches all sit behind a `chat::types::Adapter` and/or
+  `chat::types::StateAdapter` trait extension. A dedicated
+  trait-extension slice with `async-trait` for dyn safety would
+  unblock 5+ chat modules at once and accelerate progress
+  measurably.
