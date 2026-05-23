@@ -909,3 +909,66 @@ Estimated session 2 budget: ~50-100 slices for HTTP wire-up
 across 9 adapters + 3 state backends. Subsequent sessions
 ship verified marks per package as full upstream test parity
 lands.
+
+## Adapter-HTTP-method port pattern (added slice 150)
+
+Slices 145-149 ported `post_message` on 5 adapters using a
+near-identical template. Each adapter port ships:
+
+1. Add `chat-sdk-adapter-shared` as a direct `[dependencies]`
+   entry in the adapter's `Cargo.toml`.
+2. Add an `http: chat_sdk_adapter_shared::runtime::reqwest::Client`
+   field to the adapter struct. Default to
+   `chat_sdk_adapter_shared::runtime::default_http_client()` in
+   `::new(...)`. Add `.with_http_client(client)` builder for
+   tests pointing at a wiremock server.
+3. Add a private URL-template helper method on the adapter
+   struct (`channel_messages_url`, `comments_url`,
+   `send_url`, etc.) matching upstream's inline endpoint
+   construction.
+4. Override `async fn post_message(&self, thread_id, text)` on
+   the `Adapter` trait impl:
+   - **Pre-HTTP validation**: call `decode_thread_id` and
+     return `AdapterError::InvalidPayload` for ids that don't
+     belong to this adapter. Cheap and tested without a
+     tokio runtime.
+   - **Build the request**: `self.http.post(&url)` + per-platform
+     auth (`bearer_auth`, manual `Authorization` header, URL
+     query param, etc.) + `.json(&body)` for the per-platform
+     request envelope.
+   - **Send + parse**: `.send().await.map_err(|e|
+     AdapterError::Io(Box::new(e)))?`, then parse the
+     response JSON. Surface non-200 / `ok:false` responses as
+     `AdapterError::InvalidPayload` with the platform's error
+     message field.
+   - **Extract the id**: per-platform location (`result.message_id`,
+     top-level `id`, `messages[0].id`, etc.). Return as a
+     `String`.
+5. Drop the slice 130's `adapter_default_methods_return_unsupported`
+   test (no longer applicable — post_message is overridden).
+   Add two new tests:
+   - `adapter_post_message_rejects_non_<platform>_thread_ids`:
+     hits the pre-HTTP validation path.
+   - `adapter_<url-template>_builds_the_upstream_endpoint`:
+     covers the URL template helper.
+6. Update `docs/chat/upstream-parity.md` row text to reflect
+   the post_message landing.
+7. Bump the per-adapter row in
+   `docs/chat/package-progress-estimates.tsv` from 10% to 15%
+   (post_message is roughly 1 of 8 Adapter trait methods).
+
+**Auth-scheme variants observed so far:**
+
+- Telegram: path-token (`/bot<token>/<method>`).
+- GitHub: `Authorization: Bearer <token>` + per-API headers
+  (`Accept: application/vnd.github+json`,
+  `X-GitHub-Api-Version: 2022-11-28`).
+- Messenger: URL query param `access_token=<page_token>`.
+- WhatsApp: `Authorization: Bearer <access_token>`.
+- Discord: non-standard `Authorization: Bot <bot_token>` —
+  set manually since `reqwest::RequestBuilder::bearer_auth`
+  hardcodes `Bearer `.
+
+The remaining 4 adapters (Linear/GChat/Teams/Slack) each
+follow the same recipe with their own auth + endpoint +
+response-shape variances.
