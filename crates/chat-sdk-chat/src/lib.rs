@@ -21,5 +21,6 @@ pub mod message;
 pub mod modals;
 pub mod plan;
 pub mod postable_object;
+pub mod reviver;
 pub mod transcripts;
 pub mod types;
