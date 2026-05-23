@@ -2436,6 +2436,8 @@ where
             &tool_approvals.blocked_tool_call_ids,
             (
                 experimental_sandbox.as_ref(),
+                step_call_options.abort_signal.as_ref(),
+                None,
                 on_tool_execution_start.as_ref(),
                 on_tool_execution_end.as_ref(),
                 Some(&telemetry_dispatcher),
