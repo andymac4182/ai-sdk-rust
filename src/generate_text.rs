@@ -7877,9 +7877,10 @@ mod tests {
         UnsupportedModelVersionError, calculate_tokens_per_second, collect_tool_approvals,
         create_tool_model_output, experimental_filter_active_tools, filter_active_tools,
         generate_text, has_tool_call, is_loop_finished, is_step_count, is_stop_condition_met,
-        mark_invalid_tool_inputs, normalize_tool_approval_status, prune_messages,
-        resolve_tool_approval, response_messages_for_step, step_count_is, sum_token_counts,
-        validate_tool_context,
+        mark_invalid_tool_inputs, mark_runtime_dynamic_tool_calls, mark_tool_call_metadata,
+        mark_tool_call_titles, mark_unavailable_tool_calls, normalize_tool_approval_status,
+        prune_messages, resolve_tool_approval, response_messages_for_step, step_count_is,
+        sum_token_counts, validate_tool_context,
     };
     use crate::file_data::{FileData, FileDataContent};
     use crate::headers::Headers;
@@ -11045,6 +11046,158 @@ mod tests {
     }
 
     #[test]
+    fn parse_tool_call_should_successfully_parse_a_valid_provider_executed_dynamic_tool_call() {
+        let provider_metadata =
+            test_provider_metadata("testProvider", json!({ "signature": "sig" }));
+        let mut tool_calls = vec![GenerateTextToolCall::from_language_model_tool_call(
+            &model_tool_call(
+                "123",
+                "testTool",
+                json!({
+                    "param1": "test",
+                    "param2": 42
+                }),
+            )
+            .with_provider_executed(true)
+            .with_dynamic(true)
+            .with_provider_metadata(provider_metadata.clone()),
+        )];
+
+        mark_unavailable_tool_calls(&mut tool_calls, None);
+        mark_invalid_tool_inputs(&mut tool_calls, None);
+
+        assert_eq!(tool_calls[0].dynamic, Some(true));
+        assert_eq!(tool_calls[0].provider_executed, Some(true));
+        assert_eq!(tool_calls[0].provider_metadata, Some(provider_metadata));
+        assert_eq!(tool_calls[0].invalid, None);
+        assert_eq!(
+            tool_calls[0].input,
+            json!({
+                "param1": "test",
+                "param2": 42
+            })
+        );
+    }
+
+    #[test]
+    fn parse_tool_call_should_successfully_parse_a_valid_tool_call_with_provider_metadata() {
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "param1": { "type": "string" },
+                "param2": { "type": "number" }
+            },
+            "required": ["param1", "param2"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let provider_metadata =
+            test_provider_metadata("testProvider", json!({ "signature": "sig" }));
+        let mut tool_calls = vec![GenerateTextToolCall::from_language_model_tool_call(
+            &model_tool_call(
+                "123",
+                "testTool",
+                json!({
+                    "param1": "test",
+                    "param2": 42
+                }),
+            )
+            .with_provider_metadata(provider_metadata.clone()),
+        )];
+        let available_tools = vec![LanguageModelTool::Function(LanguageModelFunctionTool::new(
+            "testTool",
+            input_schema,
+        ))];
+
+        mark_invalid_tool_inputs(&mut tool_calls, Some(&available_tools));
+
+        assert_eq!(tool_calls[0].provider_metadata, Some(provider_metadata));
+        assert_eq!(tool_calls[0].invalid, None);
+        assert_eq!(tool_calls[0].error, None);
+    }
+
+    #[test]
+    fn parse_tool_call_should_successfully_process_empty_tool_calls_for_tools_that_have_no_input_schema()
+     {
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let mut tool_calls = vec![GenerateTextToolCall::from_language_model_tool_call(
+            &LanguageModelToolCall::new("123", "testTool", ""),
+        )];
+        let available_tools = vec![LanguageModelTool::Function(LanguageModelFunctionTool::new(
+            "testTool",
+            input_schema,
+        ))];
+
+        mark_invalid_tool_inputs(&mut tool_calls, Some(&available_tools));
+
+        assert_eq!(tool_calls[0].input, json!({}));
+        assert_eq!(tool_calls[0].invalid, None);
+    }
+
+    #[test]
+    fn parse_tool_call_should_successfully_process_empty_object_tool_calls_for_tools_that_have_no_input_schema()
+     {
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let mut tool_calls = vec![GenerateTextToolCall::from_language_model_tool_call(
+            &LanguageModelToolCall::new("123", "testTool", "{}"),
+        )];
+        let available_tools = vec![LanguageModelTool::Function(LanguageModelFunctionTool::new(
+            "testTool",
+            input_schema,
+        ))];
+
+        mark_invalid_tool_inputs(&mut tool_calls, Some(&available_tools));
+
+        assert_eq!(tool_calls[0].input, json!({}));
+        assert_eq!(tool_calls[0].invalid, None);
+    }
+
+    #[test]
+    fn parse_tool_call_should_throw_no_such_tool_error_when_tools_is_null() {
+        let mut tool_calls = vec![GenerateTextToolCall::from_language_model_tool_call(
+            &LanguageModelToolCall::new("123", "testTool", "{}"),
+        )];
+
+        mark_unavailable_tool_calls(&mut tool_calls, None);
+
+        assert_eq!(tool_calls[0].dynamic, Some(true));
+        assert_eq!(tool_calls[0].invalid, Some(true));
+        let error = tool_calls[0].error.as_deref().expect("error is present");
+        assert!(error.contains("Model tried to call unavailable tool 'testTool'"));
+        assert!(error.contains("No tools are available"));
+    }
+
+    #[test]
+    fn parse_tool_call_should_throw_no_such_tool_error_when_tool_is_not_found() {
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let mut tool_calls = vec![GenerateTextToolCall::from_language_model_tool_call(
+            &LanguageModelToolCall::new("123", "nonExistentTool", "{}"),
+        )];
+        let available_tools = vec![LanguageModelTool::Function(LanguageModelFunctionTool::new(
+            "testTool",
+            input_schema,
+        ))];
+
+        mark_unavailable_tool_calls(&mut tool_calls, Some(&available_tools));
+
+        assert_eq!(tool_calls[0].dynamic, Some(true));
+        assert_eq!(tool_calls[0].invalid, Some(true));
+        let error = tool_calls[0].error.as_deref().expect("error is present");
+        assert!(error.contains("Model tried to call unavailable tool 'nonExistentTool'"));
+        assert!(error.contains("Available tools: testTool"));
+    }
+
+    #[test]
     fn parse_tool_call_should_throw_invalid_tool_input_error_when_args_are_invalid() {
         let input_schema = json!({
             "type": "object",
@@ -11073,6 +11226,192 @@ mod tests {
         let error = tool_calls[0].error.as_deref().expect("error is present");
         assert!(error.contains("Invalid input for tool testTool"));
         assert!(error.contains("param2"));
+    }
+
+    #[test]
+    fn parse_tool_call_should_set_dynamic_to_true_for_dynamic_tools() {
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "param1": { "type": "string" },
+                "param2": { "type": "number" }
+            }
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let mut tool_calls = vec![GenerateTextToolCall::from_language_model_tool_call(
+            &model_tool_call(
+                "123",
+                "testTool",
+                json!({
+                    "param1": "test",
+                    "param2": 42
+                }),
+            ),
+        )];
+        let tools = vec![dynamic_tool("testTool", input_schema)];
+
+        mark_runtime_dynamic_tool_calls(&mut tool_calls, &tools);
+
+        assert_eq!(tool_calls[0].dynamic, Some(true));
+        assert_eq!(tool_calls[0].invalid, None);
+    }
+
+    #[test]
+    fn parse_tool_call_should_include_title_in_parsed_dynamic_tool_call() {
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let mut tool_calls = vec![GenerateTextToolCall::from_language_model_tool_call(
+            &model_tool_call("call-1", "weather", json!({ "location": "Paris" })),
+        )];
+        let tools = vec![dynamic_tool("weather", input_schema).with_title("Weather Information")];
+
+        mark_runtime_dynamic_tool_calls(&mut tool_calls, &tools);
+        mark_tool_call_titles(&mut tool_calls, &tools);
+
+        assert_eq!(tool_calls[0].title.as_deref(), Some("Weather Information"));
+        assert_eq!(tool_calls[0].dynamic, Some(true));
+    }
+
+    #[test]
+    fn parse_tool_call_should_include_title_in_parsed_static_tool_call() {
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let mut tool_calls = vec![GenerateTextToolCall::from_language_model_tool_call(
+            &model_tool_call("call-2", "calculator", json!({ "a": 5, "b": 3 })),
+        )];
+        let tools = vec![Tool::new("calculator", input_schema).with_title("Calculator")];
+
+        mark_runtime_dynamic_tool_calls(&mut tool_calls, &tools);
+        mark_tool_call_titles(&mut tool_calls, &tools);
+
+        assert_eq!(tool_calls[0].title.as_deref(), Some("Calculator"));
+        assert_eq!(tool_calls[0].dynamic, None);
+    }
+
+    #[test]
+    fn parse_tool_call_should_include_title_in_invalid_tool_call() {
+        let input_schema = json!({
+            "type": "object",
+            "properties": {
+                "required": { "type": "string" }
+            },
+            "required": ["required"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let mut tool_calls = vec![GenerateTextToolCall::from_language_model_tool_call(
+            &LanguageModelToolCall::new("call-4", "invalidTool", "invalid json"),
+        )];
+        let tools = vec![Tool::new("invalidTool", input_schema).with_title("Invalid Tool")];
+
+        mark_tool_call_titles(&mut tool_calls, &tools);
+
+        assert_eq!(tool_calls[0].invalid, Some(true));
+        assert_eq!(tool_calls[0].title.as_deref(), Some("Invalid Tool"));
+    }
+
+    #[test]
+    fn parse_tool_call_should_propagate_tool_metadata_onto_a_parsed_dynamic_tool_call() {
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let tool_metadata = json!({ "clientName": "MyMCPClient" })
+            .as_object()
+            .expect("metadata is an object")
+            .clone();
+        let mut tool_calls = vec![GenerateTextToolCall::from_language_model_tool_call(
+            &model_tool_call("call-1", "weather", json!({ "location": "Paris" })),
+        )];
+        let tools =
+            vec![dynamic_tool("weather", input_schema).with_metadata(tool_metadata.clone())];
+
+        mark_runtime_dynamic_tool_calls(&mut tool_calls, &tools);
+        mark_tool_call_metadata(&mut tool_calls, &tools);
+
+        assert_eq!(tool_calls[0].dynamic, Some(true));
+        assert_eq!(tool_calls[0].tool_metadata, Some(tool_metadata));
+    }
+
+    #[test]
+    fn parse_tool_call_should_propagate_tool_metadata_onto_a_parsed_static_tool_call() {
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let tool_metadata = json!({ "clientName": "MyMCPClient" })
+            .as_object()
+            .expect("metadata is an object")
+            .clone();
+        let mut tool_calls = vec![GenerateTextToolCall::from_language_model_tool_call(
+            &model_tool_call("call-2", "calculator", json!({ "a": 5, "b": 3 })),
+        )];
+        let tools =
+            vec![Tool::new("calculator", input_schema).with_metadata(tool_metadata.clone())];
+
+        mark_runtime_dynamic_tool_calls(&mut tool_calls, &tools);
+        mark_tool_call_metadata(&mut tool_calls, &tools);
+
+        assert_eq!(tool_calls[0].dynamic, None);
+        assert_eq!(tool_calls[0].tool_metadata, Some(tool_metadata));
+    }
+
+    #[test]
+    fn parse_tool_call_should_keep_tool_metadata_separate_from_model_supplied_provider_metadata() {
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let provider_metadata = test_provider_metadata(
+            "anthropic",
+            json!({ "cacheControl": { "type": "ephemeral" } }),
+        );
+        let tool_metadata = json!({ "clientName": "MyMCPClient" })
+            .as_object()
+            .expect("metadata is an object")
+            .clone();
+        let mut tool_calls = vec![GenerateTextToolCall::from_language_model_tool_call(
+            &model_tool_call("call-3", "weather", json!({ "location": "Paris" }))
+                .with_provider_metadata(provider_metadata.clone()),
+        )];
+        let tools =
+            vec![dynamic_tool("weather", input_schema).with_metadata(tool_metadata.clone())];
+
+        mark_runtime_dynamic_tool_calls(&mut tool_calls, &tools);
+        mark_tool_call_metadata(&mut tool_calls, &tools);
+
+        assert_eq!(tool_calls[0].provider_metadata, Some(provider_metadata));
+        assert_eq!(tool_calls[0].tool_metadata, Some(tool_metadata));
+    }
+
+    #[test]
+    fn parse_tool_call_should_propagate_tool_metadata_onto_an_invalid_tool_call() {
+        let input_schema = json!({ "type": "object" })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        let tool_metadata = json!({ "clientName": "MyMCPClient" })
+            .as_object()
+            .expect("metadata is an object")
+            .clone();
+        let mut tool_calls = vec![GenerateTextToolCall::from_language_model_tool_call(
+            &LanguageModelToolCall::new("call-4", "weather", "invalid json"),
+        )];
+        let tools =
+            vec![dynamic_tool("weather", input_schema).with_metadata(tool_metadata.clone())];
+
+        mark_runtime_dynamic_tool_calls(&mut tool_calls, &tools);
+        mark_tool_call_metadata(&mut tool_calls, &tools);
+
+        assert_eq!(tool_calls[0].invalid, Some(true));
+        assert_eq!(tool_calls[0].tool_metadata, Some(tool_metadata));
     }
 
     #[test]
