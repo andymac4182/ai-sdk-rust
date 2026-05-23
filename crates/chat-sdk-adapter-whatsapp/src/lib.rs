@@ -118,6 +118,20 @@ impl WhatsappAdapter {
             self.options.phone_number_id
         )
     }
+
+    /// Derive channel id from a WhatsApp thread id. 1:1 with
+    /// upstream `adapter.channelIdFromThreadId(threadId) -> threadId`.
+    /// On WhatsApp every conversation is a 1:1 DM, so channel ===
+    /// thread.
+    pub fn channel_id_from_thread_id(&self, thread_id: &str) -> String {
+        thread_id.to_string()
+    }
+
+    /// All WhatsApp conversations are DMs. 1:1 with upstream's
+    /// `adapter.isDM(_) -> true`.
+    pub fn is_dm(&self, _thread_id: &str) -> bool {
+        true
+    }
 }
 
 #[async_trait]
@@ -389,6 +403,27 @@ mod tests {
         assert!(decode_thread_id("whatsapp:onlyone").is_none());
         assert!(decode_thread_id("whatsapp::15551234567").is_none());
         assert!(decode_thread_id("whatsapp:PNID:").is_none());
+    }
+
+    // ---------- channel_id_from_thread_id + is_dm ----------
+    // 1:1 with upstream `adapter.channelIdFromThreadId(_) -> threadId`
+    // and `adapter.isDM(_) -> true`. WhatsApp is DM-only.
+
+    #[test]
+    fn channel_id_from_thread_id_returns_the_thread_id_unchanged() {
+        let adapter = WhatsappAdapter::new(WhatsappAdapterOptions::new("PNID", "a", "v"));
+        assert_eq!(
+            adapter.channel_id_from_thread_id("whatsapp:PNID:15551234567"),
+            "whatsapp:PNID:15551234567"
+        );
+        assert_eq!(adapter.channel_id_from_thread_id("raw"), "raw");
+    }
+
+    #[test]
+    fn is_dm_always_returns_true() {
+        let adapter = WhatsappAdapter::new(WhatsappAdapterOptions::new("PNID", "a", "v"));
+        assert!(adapter.is_dm("whatsapp:PNID:15551234567"));
+        assert!(adapter.is_dm(""));
     }
 
     #[test]

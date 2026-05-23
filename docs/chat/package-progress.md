@@ -3,8 +3,8 @@
 _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-estimates.tsv`._
 
 - Displayed package rows: 18
-- Average estimated completion: 63.5%
-- Portable package average: 56.2%
+- Average estimated completion: 63.7%
+- Portable package average: 56.4%
 - Closed package rows: 5 / 18
 - Strict portable verified rows: 2 / 15
 - In-progress rows: 13
@@ -31,9 +31,9 @@ _Generated from `docs/chat/upstream-parity.md` and `docs/chat/package-progress-e
 | `@chat-sdk/adapter-discord` | 57% | In progress | adapter package | Slice 134 scaffold + slice 149 post_message + slice 165 edit/delete/react/typing + slice 197 webhook Ed25519 + slice... |
 | `@chat-sdk/adapter-linear` | 51% | In progress | adapter package | Slice 136 scaffold + slice 151 post_message + slice 166 edit/delete/react/typing + slice 171 utils + slice 177 cards +... |
 | `@chat-sdk/adapter-github` | 51% | In progress | adapter package | Slice 131 scaffold + slice 146 post_message + slice 156 fetch_subject (additive) + slice 162 edit/delete/react/typing... |
-| `@chat-sdk/adapter-messenger` | 53% | In progress | adapter package | Slice 132 scaffold + slice 147 post_message + slice 163 edit/delete/react/typing + slice 173 wire-format correction +... |
-| `@chat-sdk/adapter-telegram` | 62% | In progress | adapter package | Slice 130 scaffold + slice 145 post_message + slice 155 fetch_subject + slice 161 edit/delete/react/typing + slice 178... |
-| `@chat-sdk/adapter-whatsapp` | 63% | In progress | adapter package | Slice 133 scaffold + slice 148 post_message + slice 164 edit/delete/react/typing + slice 179 cards + slice 189... |
+| `@chat-sdk/adapter-messenger` | 54% | In progress | adapter package | Slice 132 scaffold + slice 147 post_message + slice 163 edit/delete/react/typing + slice 173 wire-format correction +... |
+| `@chat-sdk/adapter-telegram` | 63% | In progress | adapter package | Slice 130 scaffold + slice 145 post_message + slice 155 fetch_subject + slice 161 edit/delete/react/typing + slice 178... |
+| `@chat-sdk/adapter-whatsapp` | 64% | In progress | adapter package | Slice 133 scaffold + slice 148 post_message + slice 164 edit/delete/react/typing + slice 179 cards + slice 189... |
 | `@chat-sdk/state-redis` | 10% | In progress | state backend (Redis) | Crate scaffold (slice 140): RedisStateAdapter impl StateAdapter (NotConnected placeholder). 11 tests. redis-rs wire-up... |
 | `@chat-sdk/state-ioredis` | 10% | In progress | state backend (ioredis) | Crate scaffold (slice 141): IoredisStateAdapter (cluster + Sentinel support) impl StateAdapter. 11 tests. redis-rs... |
 | `@chat-sdk/state-pg` | 10% | In progress | state backend (Postgres) | Crate scaffold (slice 142): PgStateAdapter impl StateAdapter. 10 tests. tokio-postgres/sqlx wire-up deferred. |
