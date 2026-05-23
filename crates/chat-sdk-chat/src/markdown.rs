@@ -2007,4 +2007,67 @@ mod tests {
         assert!(has_link(&node));
         assert!(has_image(&node));
     }
+
+    // ---------- slice 86: 4 more 1:1 markdown.test.ts cases ----------
+
+    #[test]
+    fn parse_markdown_underscore_word_boundary_does_not_emphasize_mid_word() {
+        let node = parse_markdown("snake_case_word stays one token").expect("parses");
+        let plain = to_plain_text(&node);
+        assert!(plain.contains("snake_case_word"));
+        fn has_emphasis(n: &Node) -> bool {
+            matches!(n, Node::Emphasis(_)) || get_node_children(n).iter().any(has_emphasis)
+        }
+        assert!(!has_emphasis(&node));
+    }
+
+    #[test]
+    fn parse_markdown_consecutive_blockquotes_separated_by_blank_line() {
+        let node = parse_markdown("> first\n\n> second").expect("parses");
+        let root = match &node {
+            Node::Root(r) => r,
+            _ => unreachable!(),
+        };
+        let bq_count = root
+            .children
+            .iter()
+            .filter(|c| matches!(c, Node::Blockquote(_)))
+            .count();
+        assert_eq!(bq_count, 2);
+    }
+
+    #[test]
+    fn parse_markdown_link_with_no_url_passes_empty_string_through() {
+        let node = parse_markdown("[label]()").expect("parses");
+        fn find_link_url(n: &Node) -> Option<String> {
+            if let Node::Link(l) = n {
+                return Some(l.url.clone());
+            }
+            for c in get_node_children(n).iter() {
+                if let Some(u) = find_link_url(c) {
+                    return Some(u);
+                }
+            }
+            None
+        }
+        assert_eq!(find_link_url(&node).as_deref(), Some(""));
+    }
+
+    #[test]
+    fn parse_markdown_consecutive_inline_code_segments() {
+        let node = parse_markdown("`a` and `b` and `c`").expect("parses");
+        fn count_inline_code(n: &Node) -> usize {
+            let self_count = if matches!(n, Node::InlineCode(_)) {
+                1
+            } else {
+                0
+            };
+            self_count
+                + get_node_children(n)
+                    .iter()
+                    .map(count_inline_code)
+                    .sum::<usize>()
+        }
+        assert_eq!(count_inline_code(&node), 3);
+    }
 }
