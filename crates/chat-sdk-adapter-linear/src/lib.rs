@@ -8,6 +8,7 @@
 //! to address comments through Linear's API.
 
 pub mod cards;
+pub mod markdown;
 pub mod utils;
 
 use async_trait::async_trait;
